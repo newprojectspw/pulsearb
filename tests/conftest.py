@@ -40,6 +40,12 @@ def gamma_hourly() -> dict[str, Any]:
 
 
 @pytest.fixture
+def gamma_stale_slug() -> dict[str, Any]:
+    """Slug pedido resolve com 200 numa janela homônima de 2025 (12.12b)."""
+    return load_fixture("gamma_market_stale_slug_resolution.json")
+
+
+@pytest.fixture
 def clob_a2() -> dict[str, Any]:
     """Anexo A2: resposta íntegra do CLOB compacto."""
     return load_fixture("clob_market_compact.json")

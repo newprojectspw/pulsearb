@@ -737,6 +737,32 @@ ainda com `closed=false`. Regra obrigatória em `markets/discovery.py`:
 Um mercado-zumbi real está em `tests/fixtures/gamma_market_zombie.json` como
 teste negativo.
 
+### 12.12b. A Gamma resolve slug de mercado antigo com 200, sem sinalizar `[VERIFICADO ao vivo]`
+
+Pior que o zumbi da listagem: **buscar um slug por nome pode devolver a janela
+homônima de outro ano**. Caso observado —
+`GET /markets/slug/bitcoin-up-or-down-august-16-2pm-et` respondeu **HTTP 200**
+com `endDate` de **2025** e `feesEnabled: false`. Nada na resposta indica que
+não é a janela pedida: o slug devolvido é idêntico ao pedido.
+
+Isso derruba a suposição implícita de que "slug resolveu ⇒ é a janela que eu
+pedi". É especialmente perigoso no padrão horário (12.2), que é **nominal** —
+`august-16-2pm` se repete todo ano; o padrão por epoch (12.1) é imune por
+construção, mas a validação vale para os dois.
+
+**Regra obrigatória:** depois de resolver qualquer slug, validar que o
+`endDate` corresponde à janela **pedida** (dentro de uma tolerância de
+segundos) **e** está no futuro. Fora disso: descartar e logar.
+
+Implementado em `markets/discovery.py::validate_window_match`, com tolerância
+de 60s — bem abaixo dos 300s da menor janela, para não aceitar a vizinha por
+engano. Fixture do caso real:
+`tests/fixtures/gamma_market_stale_slug_resolution.json`.
+
+Observação registrada mas **não** usada como gate: o mercado antigo veio com
+`feesEnabled: false`. É um correlato do problema, não um critério confiável —
+gatear por ele poderia recusar mercado legítimo no futuro.
+
 ### 12.13. M1.T — o que o SDK oficial diz sobre os campos pendentes
 
 Investigação executada em 2026-08-16 sobre o código-fonte de

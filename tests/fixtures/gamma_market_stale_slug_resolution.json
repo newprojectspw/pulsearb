@@ -1,0 +1,19 @@
+{
+  "_comentario": "Caso REAL observado ao vivo em 2026-08-16 (API_NOTES 12.12b): pedir o slug bitcoin-up-or-down-august-16-2pm-et devolveu HTTP 200 — mas com a janela HOMÔNIMA de 2025, e feesEnabled=false. Nada na resposta sinaliza que não é a janela pedida. Teste negativo do validate_window_match.",
+  "slug": "bitcoin-up-or-down-august-16-2pm-et",
+  "conditionId": "0x3333333333333333333333333333333333333333333333333333333333333333",
+  "resolutionSource": "",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"1\", \"0\"]",
+  "clobTokenIds": "[\"555000000000000000000000000000000000000000000000000000000000000000000000001\", \"555000000000000000000000000000000000000000000000000000000000000000000000002\"]",
+  "orderPriceMinTickSize": 0.01,
+  "orderMinSize": 5,
+  "feesEnabled": false,
+  "restricted": true,
+  "active": true,
+  "closed": false,
+  "acceptingOrders": false,
+  "startDate": "2025-08-16T17:00:00Z",
+  "endDate": "2025-08-16T18:00:00Z",
+  "description": "This market will resolve to \"Up\" if the Binance 1 hour candle for BTCUSDT closes higher than or equal to its open. Otherwise, this market will resolve to \"Down\"."
+}

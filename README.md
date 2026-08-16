@@ -159,6 +159,13 @@ ainda abertas. O filtro é triplo — `end_date` na query, `acceptingOrders=true
 concordando nas duas fontes, e `endDate` no futuro checado localmente
 ([API_NOTES 12.12](docs/API_NOTES.md)).
 
+**Não confia em "o slug resolveu".** A Gamma responde HTTP 200 para slug de
+janela antiga, devolvendo o mercado do ano passado sem sinalizar nada — e o
+slug horário é nominal (`august-16-2pm` se repete todo ano). Todo slug
+resolvido é validado contra a janela que foi **pedida**: `endDate` tem que
+bater, dentro de 60s, e estar no futuro
+([API_NOTES 12.12b](docs/API_NOTES.md)).
+
 ---
 
 ## Fee: a distinção que muda a estratégia
