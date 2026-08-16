@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 
 try:
-    from pulsearb.markets.discovery import MarketDiscovery
+    from pulsearb.markets.discovery import HOURLY_DURATION_SECONDS, MarketDiscovery
 except ImportError as exc:  # mensagem acionável, não stack trace
     raise SystemExit(
         "pulsearb não está instalado neste ambiente.\n"
@@ -54,7 +54,9 @@ async def main_async(args: argparse.Namespace) -> int:
             gamma_url=GAMMA,
             clob_url=CLOB,
             assets=args.asset or ["btc", "eth"],
-            probe_durations_seconds=[300, 900, 14400],
+            # Os DOIS jogos: 5m/15m/4h (TWAP) e 3600 (horário, resolvido por
+            # candle da Binance e com padrão de slug próprio, API_NOTES 12.2b).
+            probe_durations_seconds=[300, 900, HOURLY_DURATION_SECONDS, 14400],
         )
         markets = await discovery.discover(keyset_fallback=not args.no_keyset)
 
@@ -74,9 +76,13 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"{'':<32} gates: {', '.join(market.gate_failures)}")
 
     operable = sum(1 for m in markets if m.operable)
-    print(f"\n{len(markets)} janelas, {operable} operáveis")
-    print("Confira: fonte deve ser twap60 nas 5m/15m/4h (API_NOTES 12.3);")
-    print("qualquer 'desconhecido' novo merece leitura manual da description.")
+    horarias = sum(1 for m in markets if "-up-or-down-" in m.slug)
+    print(f"\n{len(markets)} janelas, {operable} operáveis, {horarias} do jogo horário")
+    print("Confira:")
+    print("  - 5m/15m/4h devem sair como twap60 (API_NOTES 12.3)")
+    print("  - as horárias devem sair como binance_candle (API_NOTES 12.2b)")
+    print("  - 0 janelas horárias = o padrão de slug mudou; olhe o log de descarte")
+    print("  - qualquer 'desconhecido' novo merece leitura manual da description")
     return 0
 
 

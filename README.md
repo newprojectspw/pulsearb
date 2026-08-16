@@ -20,6 +20,7 @@ src/pulsearb/
 ├── feeds/
 │   ├── base.py          # reconexão backoff+jitter, watchdog, timestamps
 │   ├── rtds.py          # RTDS: spot Binance + TWAP 60s Chainlink
+│   ├── binance_ws.py    # Binance direto: bookTicker + kline_1h
 │   └── poly_ws.py       # book do CLOB + heartbeat PING/PONG
 ├── markets/discovery.py # janelas ativas, fonte de resolução, gates
 ├── engine/fees.py       # curva de taker fee (as duas unidades)
@@ -90,10 +91,16 @@ coberto pelo `.gitignore`). Cada linha:
 - `ts_wall_ns`: relógio de parede — só para registro
 - `payload`: o payload **cru**, sem interpretação nossa
 
-O que é gravado: RTDS (spot Binance + TWAP 60s) para **todos** os ativos do
-`config.yaml` (`assets` + `extra_price_assets`), e o book de cada janela
-descoberta. A descoberta roda a cada 60s, então janelas novas de 5m entram
-sozinhas.
+O que é gravado:
+
+- **RTDS** — spot Binance repassado + TWAP 60s da Chainlink, para **todos** os
+  ativos (`assets` + `extra_price_assets`)
+- **Binance direto** — `bookTicker` + `kline_1h` dos ativos operáveis; é o
+  preço-verdade das janelas horárias
+- **CLOB** — book de cada janela descoberta, incluindo as horárias, com
+  `custom_feature_enabled=true` (traz best bid/ask e os eventos de resolução)
+
+A descoberta roda a cada 60s, então janelas novas de 5m entram sozinhas.
 
 **Rode fora do ambiente de desenvolvimento** (VPS/Colab): a Polymarket é
 inalcançável de dentro dele.
@@ -189,15 +196,26 @@ propósito.
 
 ---
 
-## Preço-verdade por duração
+## São dois jogos, não um
 
-| Janela | Resolve por | Feed |
+Confundir os dois é o erro mais caro possível aqui — daria para operar a janela
+horária com o preço errado e nunca perceber.
+
+| | 5m / 15m / 4h | 1h (horária) |
 |---|---|---|
-| 5m, 15m, 4h | TWAP 60s da Chainlink | RTDS `crypto_prices_twap_sixty` |
-| 1h | candle 1h da Binance, fechamento ≥ abertura | RTDS `crypto_prices` |
+| Slug | `btc-updown-5m-{epoch}` | `bitcoin-up-or-down-august-16-2026-2pm-et` |
+| Resolve por | TWAP 60s da Chainlink | candle 1h da Binance (`close ≥ open`) |
+| Feed | RTDS `crypto_prices_twap_sixty` | **Binance `kline_1h`** + RTDS `crypto_prices` |
+| Fees, tick, mínimo | idênticos nos dois | idênticos nos dois |
 
-Os dois são de primeira classe e chegam pelo **mesmo** WebSocket. A descoberta
-classifica cada janela individualmente; janela com fonte não reconhecida é
+Empate resolve Up nos dois.
+
+O feed da Binance é de primeira classe, não conveniência: o RTDS repassa o
+*spot*, mas a janela horária resolve por **candle** — e candle tem `open`, que
+tick nenhum reconstrói depois do fato. Se não estiver gravando enquanto a hora
+acontece, o `open` se perde.
+
+A descoberta classifica cada janela individualmente; fonte não reconhecida é
 ignorada, nunca operada por suposição.
 
 ---

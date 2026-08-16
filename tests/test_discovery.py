@@ -262,6 +262,46 @@ def test_sem_end_date_e_recusado():
     ) == "end_date_ausente_ou_ilegivel"
 
 
+def test_slug_com_data_certa_mas_fechado_e_recusado(gamma_hourly_current):
+    """endDate confere, mas acceptingOrders=false: não serve (M1.1 item 3)."""
+    fechado = dict(gamma_hourly_current)
+    fechado["acceptingOrders"] = False
+    assert validate_window_match(
+        fechado, expected_end_epoch=1786906800.0, now_epoch=NOW_EPOCH_TESTES
+    ) == "slug_resolveu_janela_que_nao_aceita_ordens"
+
+
+def test_par_de_slugs_horarios_do_mesmo_nome(gamma_hourly_current, gamma_stale_slug):
+    """O caso completo da colisão de ano, lado a lado.
+
+    Os dois têm a MESMA question ("Bitcoin Up or Down - August 16, 2PM ET") e
+    o mesmo horário nominal. Só o ano no slug — e o endDate — distinguem.
+    """
+    assert gamma_hourly_current["question"] == gamma_stale_slug["question"]
+    esperado = 1786906800.0  # 2026-08-16T19:00:00Z
+
+    assert validate_window_match(
+        gamma_hourly_current, expected_end_epoch=esperado, now_epoch=NOW_EPOCH_TESTES
+    ) is None
+    assert validate_window_match(
+        gamma_stale_slug, expected_end_epoch=esperado, now_epoch=NOW_EPOCH_TESTES
+    ) == "slug_resolveu_janela_no_passado"
+
+
+def test_horaria_atual_e_operavel(gamma_hourly_current, clob_a2):
+    market = extract_market(
+        gamma_hourly_current, clob_a2, now_epoch=NOW_EPOCH_TESTES
+    )
+    assert market.operable, market.gate_failures
+    assert market.resolution is ResolutionKind.BINANCE_CANDLE
+    assert market.tick_size == 0.01
+    assert market.min_order_size == 5
+    # Fees do horário são IDÊNTICAS às das janelas TWAP (API_NOTES 12.2b)
+    assert (market.fee_rate, market.fee_exponent) == (0.07, 1)
+    assert market.fee_taker_only is True
+    assert market.fee_rebate_rate == 0.2
+
+
 # ------------------------------------------------------ MarketDiscovery (fake)
 class FakeHttp:
     """Cliente HTTP falso: dicionário url→resposta. 404 vira None."""
@@ -277,13 +317,14 @@ class FakeHttp:
 
 def _discovery(routes: dict[str, Any], **kwargs: Any) -> tuple[MarketDiscovery, FakeHttp]:
     http = FakeHttp(routes)
+    now = kwargs.pop("now", float(NOW_EPOCH_TESTES))
     discovery = MarketDiscovery(
         http_get_json=http,
         gamma_url="https://gamma.test",
         clob_url="https://clob.test",
         assets=kwargs.pop("assets", ["btc"]),
         probe_durations_seconds=kwargs.pop("durations", [300]),
-        clock=lambda: float(NOW_EPOCH_TESTES),
+        clock=lambda: now,
     )
     return discovery, http
 
@@ -392,6 +433,33 @@ async def test_discover_aceita_janela_que_confere(gamma_hourly, clob_a2):
     markets = await discovery.discover(ahead=0, keyset_fallback=False)
     assert len(markets) == 1
     assert markets[0].slug == gamma_hourly["slug"]
+
+
+async def test_colisao_de_ano_no_discover(gamma_hourly_current, gamma_stale_slug, clob_a2):
+    """A variante COM ano é tentada primeiro e é a que vale.
+
+    Se a ordem invertesse, a descoberta pegaria o mercado de 2025 — que
+    responde 200 no slug sem ano.
+    """
+    routes = {
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2026-2pm-et": (
+            gamma_hourly_current
+        ),
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2pm-et": (
+            gamma_stale_slug
+        ),
+        f"https://clob.test/clob-markets/{gamma_hourly_current['conditionId']}": clob_a2,
+    }
+    # "agora" dentro da janela das 14h ET (18:00-19:00Z de 2026-08-16)
+    discovery, http = _discovery(
+        routes, durations=[HOURLY_DURATION_SECONDS], now=1786905000.0
+    )
+    markets = await discovery.discover(ahead=0, keyset_fallback=False)
+    assert len(markets) == 1
+    assert markets[0].slug == "bitcoin-up-or-down-august-16-2026-2pm-et"
+    assert markets[0].resolution is ResolutionKind.BINANCE_CANDLE
+    # a variante sem ano (a de 2025) nem chegou a ser consultada
+    assert not any(url.endswith("august-16-2pm-et") for url in http.calls)
 
 
 async def test_discover_slug_404_nao_quebra():

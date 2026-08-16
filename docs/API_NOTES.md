@@ -625,21 +625,48 @@ ex.: bitcoin-up-or-down-august-16-2026-10am-et
 
 - calculado em **America/New_York com horário de verão** — usar `zoneinfo`,
   **nunca offset fixo**;
-- existem as duas variantes, **com e sem o ano** — a descoberta gera ambas;
-- ativo por extenso: `bitcoin`, `ethereum` (não `btc`/`eth`).
+- ativo por extenso: `bitcoin`, `ethereum` (não `btc`/`eth`);
+- existem as duas variantes, com e sem o ano. **A variante COM ano é a
+  atual e tem prioridade**; a sem ano **colide com anos anteriores** e pode
+  devolver o mercado de 2025 (12.12b). A descoberta tenta a com ano primeiro
+  e só cai para a sem ano se a primeira der 404.
 
 **Consequência de projeto mantida: durações NUNCA hardcoded** — a grade de
 sondagem é config e o fallback por keyset pega qualquer padrão novo.
 
-### 12.2b. Mapa de verdade final por duração `[VERIFICADO ao vivo — adendo 2]`
+### 12.2b. Mapa consolidado dos DOIS jogos `[VERIFICADO ao vivo]`
 
-| Duração | Fonte de resolução | Feed correspondente |
+Não é "uma família de mercados com durações diferentes": são **dois produtos
+distintos**, com slug, oráculo e feed próprios. Confundir os dois é o erro
+mais caro possível aqui — daria para operar a janela horária com o preço
+errado e nunca perceber.
+
+| | Janelas **5m / 15m / 4h** | Janela **1h** (horária) |
 |---|---|---|
-| 5m, 15m, 4h | TWAP 60s Chainlink | RTDS `crypto_prices_twap_sixty` |
-| 1h | **candle 1h BTC/USDT (ETH/USDT) da Binance**, fechamento ≥ abertura | RTDS `crypto_prices` (spot Binance) |
+| Slug | `{ativo}-updown-{dur}-{epoch_do_INÍCIO}` | `bitcoin-up-or-down-{mês}-{dia}-{ANO}-{hora}{am\|pm}-et` (America/New_York) |
+| Fonte de resolução | Stream **TWAP 60s da Chainlink**, um por ativo | **Candle 1h BTC/USDT da Binance** (`close ≥ open`) |
+| Feed correspondente | RTDS `crypto_prices_twap_sixty` | **Binance direto (`kline_1h`)** + RTDS `crypto_prices` |
+| Fees | `crypto_fees_v2`: r=0.07, e=1, takerOnly, rebateRate=0.2 | **Idênticas** |
+| Tick / mínimo | 0.01 / 5 shares | 0.01 / 5 shares |
+| Resolução | Automatizada (Chainlink) | Indício de **UMA** (`umaReward: "0.6"`) |
 
-**Os dois feeds são de primeira classe** — o spot Binance não é mais
-"secundário": é o preço-verdade das janelas de 1h.
+**Empate resolve Up nos dois jogos.**
+
+Três consequências de projeto:
+
+1. **`feeds/binance_ws.py` é de primeira classe**, não conveniência. O RTDS
+   repassa o *spot* da Binance, mas a janela horária resolve por **candle** —
+   e candle tem `open`, que tick nenhum reconstrói depois do fato. O `open`
+   da hora corrente só existe se estiver sendo gravado enquanto acontece.
+   Stream: `<symbol>@kline_1h` (abre e fecha em UTC+0).
+2. **Alinhamento de fuso não é problema.** O offset de America/New_York é
+   sempre um número inteiro de horas, então as fronteiras de hora de NY
+   coincidem com as de UTC. `kline_1h` em UTC é o candle certo.
+3. **O atraso de liquidação precisa ser medido por jogo, separadamente**
+   (M2). O `umaReward` só aparece no horário: hipótese de que a resolução
+   passa por UMA, o que implicaria latência de liquidação bem maior que a do
+   caminho automatizado da Chainlink. **Hipótese, não fato** — o número sai
+   da medição, não daqui.
 
 ### 12.3. Fonte de resolução das janelas TWAP `[VERIFICADO ao vivo]` — corrige a seção 7
 
@@ -752,12 +779,21 @@ construção, mas a validação vale para os dois.
 
 **Regra obrigatória:** depois de resolver qualquer slug, validar que o
 `endDate` corresponde à janela **pedida** (dentro de uma tolerância de
-segundos) **e** está no futuro. Fora disso: descartar e logar.
+segundos), está no **futuro**, e que `acceptingOrders = true`. Fora disso:
+descartar e logar.
 
 Implementado em `markets/discovery.py::validate_window_match`, com tolerância
 de 60s — bem abaixo dos 300s da menor janela, para não aceitar a vizinha por
-engano. Fixture do caso real:
-`tests/fixtures/gamma_market_stale_slug_resolution.json`.
+engano.
+
+O par de fixtures mostra o problema inteiro, lado a lado — mesma `question`
+("Bitcoin Up or Down - August 16, 2PM ET"), mesmo horário nominal, só o ano
+distingue:
+
+| Fixture | Slug | `endDate` | Veredito |
+|---|---|---|---|
+| `gamma_market_hourly_current.json` | `...-august-16-2026-2pm-et` | 2026-08-16T19:00Z | aceita |
+| `gamma_market_stale_slug_resolution.json` | `...-august-16-2pm-et` | **2025**-08-16T19:00Z | **descarta** |
 
 Observação registrada mas **não** usada como gate: o mercado antigo veio com
 `feesEnabled: false`. É um correlato do problema, não um critério confiável —

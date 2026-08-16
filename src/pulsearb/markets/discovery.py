@@ -207,6 +207,10 @@ def validate_window_match(
             f"slug_resolveu_janela_errada (esperado fim ~{int(expected_end_epoch)}, "
             f"veio {int(end_epoch)})"
         )
+    if not gamma.get("acceptingOrders", False):
+        # Janela com a data certa mas fechada para ordens não serve para
+        # nada aqui — e é outro sintoma de mercado obsoleto (12.12b).
+        return "slug_resolveu_janela_que_nao_aceita_ordens"
     return None
 
 
