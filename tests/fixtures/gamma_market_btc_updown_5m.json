@@ -1,0 +1,23 @@
+{
+  "slug": "btc-updown-5m-1786891500",
+  "conditionId": "0xbdfb9dff79ec91114eb130653e24355c650f427a53933d001014ee17433958d4",
+  "resolutionSource": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"0.965\", \"0.035\"]",
+  "clobTokenIds": "[\"21056204617320619790507310184838699800916735386833950222166309975544833454987\", \"66006791123001989720324211976721761900470787884896827488254231096693145488665\"]",
+  "orderPriceMinTickSize": 0.01,
+  "orderMinSize": 5,
+  "makerBaseFee": 1000,
+  "takerBaseFee": 1000,
+  "spread": 0.01,
+  "bestBid": 0.64,
+  "lastTradePrice": 0.65,
+  "acceptingOrdersTimestamp": "2026-08-15T14:52:52Z",
+  "startDate": "2026-08-16T14:45:00Z",
+  "endDate": "2026-08-16T14:50:00Z",
+  "restricted": true,
+  "active": true,
+  "closed": false,
+  "acceptingOrders": true,
+  "description": "This market will resolve to \"Up\" if the Chainlink TWAP for BTC/USD at the end of the interval in the title is greater than or equal to the price at the beginning of the interval. Otherwise, this market will resolve to \"Down\". In the case the TWAP at the end of the interval is equal to the price at the beginning of the interval, this market will resolve to \"Up\". The resolution source is the Chainlink 60-second TWAP data stream: https://data.chain.link/streams/btc-usd-twap-60s-streams"
+}

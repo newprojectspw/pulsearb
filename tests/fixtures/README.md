@@ -1,0 +1,21 @@
+# Fixtures
+
+Dados **reais** colhidos da produção em 2026-08-16 (verificação ao vivo do
+Paulo, via Colab/IP dos EUA) — ver `docs/API_NOTES.md` seção 12.
+
+| Arquivo | Origem | Integridade |
+|---|---|---|
+| `clob_market_compact.json` | `GET https://clob.polymarket.com/clob-markets/{conditionId}` | **Íntegro** (anexo A2, verbatim) |
+| `gamma_market_btc_updown_5m.json` | `GET https://gamma-api.polymarket.com/markets/slug/btc-updown-5m-1786891500` | **Reconstruído** do anexo A1: a resposta original foi truncada; os campos aqui presentes são os capturados, com os nomes camelCase da Gamma. `description` é representativa da regra TWAP capturada, não verbatim. Este mercado **não tem `feeSchedule`** — o que exercita o gate de fee da descoberta. |
+| `gamma_market_with_feeschedule.json` | Segundo mercado do mesmo tipo citado no anexo A1 | **Parcial**: só os campos de fee/rewards capturados, mais o mínimo estrutural para parsear. |
+| `gamma_market_zombie.json` | Padrão de mercado-zumbi observado ao vivo (API_NOTES 12.12) | **Sintético estrutural** fiel ao padrão real: janela de dez/2025 com `closed=false`. Teste negativo obrigatório do filtro anti-zumbi. |
+
+Nota: `startDate`/`endDate` das duas fixtures Gamma positivas são o mínimo
+estrutural derivado do epoch do slug (grade alinhada, 12.1) — a captura
+original foi truncada antes desses campos.
+| `rtds_*.json` | Formato dos eventos do RTDS conforme o protocolo verificado no SDK oficial (API_NOTES seções 6.2 e 12.3) | **Sintético estrutural** — payloads montados a partir do protocolo verificado, não capturas de rede. Substituir por capturas reais na primeira rodada do recorder. |
+| `clob_ws_book.json` | Formato dos eventos do WS de mercado do CLOB | **Sintético estrutural** — idem. |
+
+Regra: fixture sintética nunca vira "prova" de comportamento do servidor.
+Elas provam apenas que o NOSSO parser aceita o formato documentado. A prova
+real vem das capturas do recorder (M1.C) e dos smokes (M1.E).

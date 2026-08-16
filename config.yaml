@@ -1,0 +1,69 @@
+# PULSEARB — parâmetros de estratégia e infraestrutura.
+# Segredos NUNCA entram aqui: vão no .env (ver .env.example).
+
+# Ativos que o bot vai OPERAR (execução futura, M4+).
+assets:
+  - btc
+  - eth
+
+# Ativos extras cujo PREÇO é gravado (recorder), sem operação.
+# Dado barato hoje é backtest possível amanhã.
+extra_price_assets:
+  - sol
+  - xrp
+  - doge
+  - bnb
+  - hype
+
+# Durações das janelas: "auto" = descobertas por dados, nunca fixas.
+# A verificação ao vivo de 2026-08-16 mostrou que a duração 1h existe na UI
+# mas não segue o padrão de slug conhecido — durações hardcoded quebrariam
+# silenciosamente (docs/API_NOTES.md seção 12.2).
+durations: auto
+
+# Grade de sondagem da descoberta quando durations=auto: durações em segundos
+# usadas para GERAR slugs candidatos. É dado de configuração, não constante de
+# código; o fallback por keyset pega qualquer duração fora desta lista.
+# 3600 (1h) usa padrão de slug próprio, nominal em America/New_York
+# (API_NOTES 12.2) — o discovery trata automaticamente.
+probe_durations_seconds:
+  - 300
+  - 900
+  - 3600
+  - 14400
+
+# Cloudflare devolve 403 (error 1010) para requests sem User-Agent de
+# navegador — verificado ao vivo (API_NOTES seção 12.10). Todo cliente
+# HTTP/WS do projeto usa este valor.
+user_agent: "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"
+
+# Endpoints de produção (verificados — API_NOTES seção 2).
+endpoints:
+  gamma: "https://gamma-api.polymarket.com"
+  clob: "https://clob.polymarket.com"
+  clob_market_ws: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  rtds_ws: "wss://ws-live-data.polymarket.com"
+
+feeds:
+  # Watchdog: feed sem mensagem por mais de N segundos = parado
+  # (zera posição-alvo e pausa entradas — regra do hot path).
+  stale_after_seconds: 2.0
+  # Reconexão: backoff exponencial com jitter.
+  reconnect_initial_seconds: 0.5
+  reconnect_max_seconds: 30.0
+  # Heartbeat do WS do CLOB (verificado: PING/PONG texto, API_NOTES 6.1).
+  clob_ping_interval_seconds: 10.0
+  clob_stale_seconds: 30.0
+
+recorder:
+  # Diretório de saída dos JSONL comprimidos (coberto pelo .gitignore).
+  output_dir: "data/recordings"
+  # Rotação de arquivo por hora.
+  rotate_seconds: 3600
+
+ui:
+  host: "127.0.0.1"
+  port: 8080
+
+# Modo de execução: SIM é o default absoluto. LIVE exige a trava tripla (M4).
+mode: SIM

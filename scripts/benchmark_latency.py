@@ -437,7 +437,7 @@ def bench_rest(base_url: str, path: str, samples: int) -> dict[str, Any]:
                 conn.close()
         result["warm_keepalive"] = summarize(warm)
         result["errors"] = errors
-    except Exception as exc:  # noqa: BLE001 — o benchmark reporta, não trata
+    except Exception as exc:
         result["erro"] = f"{type(exc).__name__}: {exc}"
     finally:
         conn.close()
@@ -462,7 +462,7 @@ def bench_ws_first_message(
         result["first_message_total_ms"] = round(ms_since(t0), 3)
         result["first_message_bytes"] = len(payload)
         result["first_message_preview"] = payload[:220].decode(errors="replace")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         result["erro"] = f"{type(exc).__name__}: {exc}"
     finally:
         ws.close()
@@ -521,7 +521,7 @@ def bench_clob_ping_pong(
                 "nenhum PONG recebido — o servidor pode exigir assinatura ativa "
                 "antes de responder ao heartbeat; tente com --token-id"
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         result["erro"] = f"{type(exc).__name__}: {exc}"
     finally:
         ws.close()
