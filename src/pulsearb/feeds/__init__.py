@@ -6,7 +6,16 @@ overhead de validação pydantic por evento não cabe no caminho tick→decisão
 """
 
 from pulsearb.feeds.base import FeedEvent, ReconnectingFeed
+from pulsearb.feeds.binance_ws import BinanceWsFeed, BookTicker, Kline
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
 
-__all__ = ["FeedEvent", "PolyMarketWsFeed", "ReconnectingFeed", "RtdsFeed"]
+__all__ = [
+    "BinanceWsFeed",
+    "BookTicker",
+    "FeedEvent",
+    "Kline",
+    "PolyMarketWsFeed",
+    "ReconnectingFeed",
+    "RtdsFeed",
+]

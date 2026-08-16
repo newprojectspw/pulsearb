@@ -1,7 +1,15 @@
 """python -m pulsearb.recorder --hours N
 
-Grava os feeds crus (RTDS: binance + twap60 de todos os ativos; books CLOB
-das janelas descobertas) em JSONL gzip com rotação horária.
+Grava os feeds crus em JSONL gzip com rotação horária:
+
+- RTDS: spot Binance repassado + TWAP 60s Chainlink, de TODOS os ativos
+  (`assets` + `extra_price_assets`) — preço-verdade das janelas 5m/15m/4h
+- Binance direto: `bookTicker` + `kline_1h` dos ativos operáveis — preço-verdade
+  das janelas HORÁRIAS, que resolvem por candle (API_NOTES 12.2b). O RTDS não
+  entrega candles, então o `open` da hora só vem daqui.
+- CLOB: book de TODAS as janelas descobertas, incluindo as horárias, com
+  `custom_feature_enabled=true` para receber best bid/ask e os eventos de
+  resolução.
 
 RODA FORA DO SANDBOX (Colab/VPS): este processo precisa de rede real.
 No sandbox de desenvolvimento os endpoints estão bloqueados — o que se testa
@@ -18,6 +26,7 @@ import time
 import httpx
 
 from pulsearb.feeds.base import FeedEvent
+from pulsearb.feeds.binance_ws import BinanceWsFeed
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
 from pulsearb.markets.discovery import MarketDiscovery
@@ -57,6 +66,16 @@ async def run(settings: Settings, hours: float) -> None:
         reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
         reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
     )
+    # Candle 1h direto da Binance: é o preço-verdade da janela horária, e o
+    # RTDS não entrega candles (só ticks). Sem isto, o `open` da hora se perde.
+    binance = BinanceWsFeed(
+        assets=settings.assets,
+        user_agent=settings.user_agent,
+        on_event=on_event,
+        stale_after_seconds=settings.feeds.stale_after_seconds,
+        reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
+        reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+    )
     poly = PolyMarketWsFeed(
         url=settings.endpoints.clob_market_ws,
         user_agent=settings.user_agent,
@@ -88,6 +107,7 @@ async def run(settings: Settings, hours: float) -> None:
         )
 
         await rtds.start()
+        await binance.start()
         await poly.start()
         deadline = time.monotonic() + hours * 3600
 
@@ -108,6 +128,7 @@ async def run(settings: Settings, hours: float) -> None:
                         operaveis=sum(1 for m in markets if m.operable),
                         tokens_assinados=len(poly.token_ids),
                         msgs_rtds=rtds.message_count,
+                        msgs_binance=binance.message_count,
                         msgs_poly=poly.message_count,
                         gravadas=writer.written,
                         descartadas=writer.dropped,
@@ -117,6 +138,7 @@ async def run(settings: Settings, hours: float) -> None:
                 await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
         finally:
             await rtds.stop()
+            await binance.stop()
             await poly.stop()
             await writer.stop()
             log.info("recorder encerrado", gravadas=writer.written, descartadas=writer.dropped)

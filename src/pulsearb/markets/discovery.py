@@ -15,6 +15,9 @@ Fatos que dirigem este módulo (docs/API_NOTES.md seção 12):
   confiar em closed=false isolado — filtro triplo: end_date_min/max na query
   (agora até +2h), acceptingOrders=true e endDate no futuro checado
   localmente. (12.12)
+- SLUG RESOLVE MERCADO ANTIGO: a Gamma devolve HTTP 200 para slug de janela
+  antiga sem sinalizar. Todo slug resolvido é validado contra a janela que foi
+  PEDIDA (endDate bate, dentro da tolerância, e está no futuro). (12.12b)
 """
 
 from __future__ import annotations
@@ -171,6 +174,44 @@ def parse_end_date_epoch(gamma: dict[str, Any]) -> float | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+# Tolerância ao comparar o endDate com a janela pedida. Precisa ser bem menor
+# que a menor duração (300s) para não aceitar a janela vizinha por engano.
+WINDOW_MATCH_TOLERANCE_SECONDS = 60.0
+
+
+def validate_window_match(
+    gamma: dict[str, Any],
+    *,
+    expected_end_epoch: float,
+    now_epoch: float,
+    tolerance_seconds: float = WINDOW_MATCH_TOLERANCE_SECONDS,
+) -> str | None:
+    """Confere se o mercado devolvido é MESMO a janela que foi pedida.
+
+    Existe porque a Gamma resolve slugs de mercados antigos com HTTP 200 e sem
+    sinalizar (API_NOTES 12.12b): pedir `bitcoin-up-or-down-august-16-2pm-et`
+    pode devolver a janela homônima de 2025. Sem esta checagem, a descoberta
+    aceitaria um mercado morto como se fosse a janela corrente.
+
+    Devolve o motivo da recusa, ou None se o mercado confere.
+    """
+    end_epoch = parse_end_date_epoch(gamma)
+    if end_epoch is None:
+        return "end_date_ausente_ou_ilegivel"
+    if end_epoch <= now_epoch:
+        return "slug_resolveu_janela_no_passado"
+    if abs(end_epoch - expected_end_epoch) > tolerance_seconds:
+        return (
+            f"slug_resolveu_janela_errada (esperado fim ~{int(expected_end_epoch)}, "
+            f"veio {int(end_epoch)})"
+        )
+    if not gamma.get("acceptingOrders", False):
+        # Janela com a data certa mas fechada para ordens não serve para
+        # nada aqui — e é outro sintoma de mercado obsoleto (12.12b).
+        return "slug_resolveu_janela_que_nao_aceita_ordens"
+    return None
 
 
 def extract_market(
@@ -353,10 +394,25 @@ class MarketDiscovery:
                         if duration == HOURLY_DURATION_SECONDS
                         else [build_slug(asset, duration, start)]
                     )
+                    expected_end = float(start + duration)
                     for slug in candidates:
                         gamma = await self._get_gamma_by_slug(slug)
                         if gamma is None:
                             continue
+                        # A Gamma devolve 200 para slug de mercado antigo sem
+                        # sinalizar (12.12b): confere se é MESMO esta janela.
+                        motivo = validate_window_match(
+                            gamma, expected_end_epoch=expected_end, now_epoch=float(now)
+                        )
+                        if motivo is not None:
+                            self.log.info(
+                                "slug descartado: não é a janela pedida",
+                                slug_pedido=slug,
+                                slug_devolvido=gamma.get("slug"),
+                                end_date=gamma.get("endDate"),
+                                motivo=motivo,
+                            )
+                            break  # a variante existe, mas está morta: não insista
                         market = await self._assemble(gamma)
                         if market.condition_id:
                             found[market.condition_id] = market

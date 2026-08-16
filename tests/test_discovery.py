@@ -18,6 +18,7 @@ from pulsearb.markets.discovery import (
     extract_market,
     grid_slots,
     parse_end_date_epoch,
+    validate_window_match,
 )
 
 
@@ -214,6 +215,93 @@ def test_gate_end_date_ausente(gamma_fee, clob_a2):
     assert "end_date_ausente_ou_ilegivel" in market.gate_failures
 
 
+# -------------------------- slug resolvendo mercado antigo (12.12b, adendo 3)
+def test_janela_correta_passa(gamma_fee):
+    """endDate 2026-08-16T15:00Z bate com a janela 15m que começou em ...14:45."""
+    assert validate_window_match(
+        gamma_fee, expected_end_epoch=1786892400.0, now_epoch=NOW_EPOCH_TESTES
+    ) is None
+
+
+def test_slug_resolvendo_janela_de_2025_e_recusado(gamma_stale_slug):
+    """O caso real: 200 OK, mas é a janela homônima do ano passado."""
+    motivo = validate_window_match(
+        gamma_stale_slug,
+        expected_end_epoch=1786896000.0,  # 2026-08-16T16:00Z
+        now_epoch=NOW_EPOCH_TESTES,
+    )
+    assert motivo == "slug_resolveu_janela_no_passado"
+
+
+def test_janela_futura_mas_errada_e_recusada(gamma_fee):
+    """Fim no futuro, porém de OUTRA janela: também não serve."""
+    motivo = validate_window_match(
+        gamma_fee,
+        expected_end_epoch=1786892400.0 + 3600,  # uma hora depois do real
+        now_epoch=NOW_EPOCH_TESTES,
+    )
+    assert motivo is not None
+    assert motivo.startswith("slug_resolveu_janela_errada")
+
+
+def test_tolerancia_aceita_desvio_pequeno_e_recusa_janela_vizinha(gamma_fee):
+    real = 1786892400.0
+    # 30s de desvio: dentro da tolerância de 60s
+    assert validate_window_match(
+        gamma_fee, expected_end_epoch=real + 30, now_epoch=NOW_EPOCH_TESTES
+    ) is None
+    # 300s = a janela de 5m vizinha. A tolerância NÃO pode aceitar isso.
+    assert validate_window_match(
+        gamma_fee, expected_end_epoch=real + 300, now_epoch=NOW_EPOCH_TESTES
+    ) is not None
+
+
+def test_sem_end_date_e_recusado():
+    assert validate_window_match(
+        {}, expected_end_epoch=1786892400.0, now_epoch=NOW_EPOCH_TESTES
+    ) == "end_date_ausente_ou_ilegivel"
+
+
+def test_slug_com_data_certa_mas_fechado_e_recusado(gamma_hourly_current):
+    """endDate confere, mas acceptingOrders=false: não serve (M1.1 item 3)."""
+    fechado = dict(gamma_hourly_current)
+    fechado["acceptingOrders"] = False
+    assert validate_window_match(
+        fechado, expected_end_epoch=1786906800.0, now_epoch=NOW_EPOCH_TESTES
+    ) == "slug_resolveu_janela_que_nao_aceita_ordens"
+
+
+def test_par_de_slugs_horarios_do_mesmo_nome(gamma_hourly_current, gamma_stale_slug):
+    """O caso completo da colisão de ano, lado a lado.
+
+    Os dois têm a MESMA question ("Bitcoin Up or Down - August 16, 2PM ET") e
+    o mesmo horário nominal. Só o ano no slug — e o endDate — distinguem.
+    """
+    assert gamma_hourly_current["question"] == gamma_stale_slug["question"]
+    esperado = 1786906800.0  # 2026-08-16T19:00:00Z
+
+    assert validate_window_match(
+        gamma_hourly_current, expected_end_epoch=esperado, now_epoch=NOW_EPOCH_TESTES
+    ) is None
+    assert validate_window_match(
+        gamma_stale_slug, expected_end_epoch=esperado, now_epoch=NOW_EPOCH_TESTES
+    ) == "slug_resolveu_janela_no_passado"
+
+
+def test_horaria_atual_e_operavel(gamma_hourly_current, clob_a2):
+    market = extract_market(
+        gamma_hourly_current, clob_a2, now_epoch=NOW_EPOCH_TESTES
+    )
+    assert market.operable, market.gate_failures
+    assert market.resolution is ResolutionKind.BINANCE_CANDLE
+    assert market.tick_size == 0.01
+    assert market.min_order_size == 5
+    # Fees do horário são IDÊNTICAS às das janelas TWAP (API_NOTES 12.2b)
+    assert (market.fee_rate, market.fee_exponent) == (0.07, 1)
+    assert market.fee_taker_only is True
+    assert market.fee_rebate_rate == 0.2
+
+
 # ------------------------------------------------------ MarketDiscovery (fake)
 class FakeHttp:
     """Cliente HTTP falso: dicionário url→resposta. 404 vira None."""
@@ -229,27 +317,43 @@ class FakeHttp:
 
 def _discovery(routes: dict[str, Any], **kwargs: Any) -> tuple[MarketDiscovery, FakeHttp]:
     http = FakeHttp(routes)
+    now = kwargs.pop("now", float(NOW_EPOCH_TESTES))
     discovery = MarketDiscovery(
         http_get_json=http,
         gamma_url="https://gamma.test",
         clob_url="https://clob.test",
         assets=kwargs.pop("assets", ["btc"]),
         probe_durations_seconds=kwargs.pop("durations", [300]),
-        clock=lambda: float(NOW_EPOCH_TESTES),
+        clock=lambda: now,
     )
     return discovery, http
 
 
 async def test_discover_acha_pela_grade(gamma_fee, clob_a2):
+    # gamma_fee é a janela de 15m que começa em 1786891500 e fecha em ...892400.
     routes = {
-        "https://gamma.test/markets/slug/btc-updown-5m-1786891500": gamma_fee,
+        f"https://gamma.test/markets/slug/{gamma_fee['slug']}": gamma_fee,
         f"https://clob.test/clob-markets/{gamma_fee['conditionId']}": clob_a2,
     }
-    discovery, _ = _discovery(routes)
+    discovery, _ = _discovery(routes, durations=[900])
     markets = await discovery.discover(ahead=0, keyset_fallback=False)
     assert len(markets) == 1
     assert markets[0].operable
     assert discovery.cache[gamma_fee["conditionId"]].slug == gamma_fee["slug"]
+
+
+async def test_grade_recusa_mercado_de_outra_duracao(gamma_fee, clob_a2):
+    """Slug de 5m devolvendo a janela de 15m: a duração não confere, recusa.
+
+    Este caso apareceu sozinho, num teste que mapeava a fixture errada — e é
+    exatamente a classe de erro que o adendo 3 pede para pegar.
+    """
+    routes = {
+        "https://gamma.test/markets/slug/btc-updown-5m-1786891500": gamma_fee,
+        f"https://clob.test/clob-markets/{gamma_fee['conditionId']}": clob_a2,
+    }
+    discovery, _ = _discovery(routes, durations=[300])
+    assert await discovery.discover(ahead=0, keyset_fallback=False) == []
 
 
 async def test_discover_tenta_as_duas_variantes_do_slug_horario(gamma_hourly, clob_a2):
@@ -278,6 +382,84 @@ async def test_discover_cai_para_variante_sem_ano(gamma_hourly, clob_a2):
     assert len(markets) == 1
     # a variante com ano foi tentada e deu 404
     assert any("2026-10am" in url for url in http.calls)
+
+
+async def test_discover_descarta_slug_que_resolveu_mercado_antigo(
+    gamma_stale_slug, clob_a2
+):
+    """O caso do adendo 3: a Gamma responde 200 com a janela de 2025.
+
+    Sem validação, este mercado morto entraria na lista como se fosse a janela
+    corrente — com preço 1.00/0.00 e acceptingOrders=false.
+    """
+    routes = {
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2026-2pm-et": (
+            gamma_stale_slug
+        ),
+        f"https://clob.test/clob-markets/{gamma_stale_slug['conditionId']}": clob_a2,
+    }
+    discovery, http = _discovery(routes, durations=[HOURLY_DURATION_SECONDS])
+    markets = await discovery.discover(ahead=0, keyset_fallback=False)
+    assert markets == []
+    # e não gastou request no CLOB para um mercado que já sabia estar morto
+    assert not any("clob-markets" in url for url in http.calls)
+
+
+async def test_slug_morto_nao_faz_tentar_a_outra_variante(gamma_stale_slug):
+    """Se a variante com ano existe mas está morta, não adianta tentar a sem ano
+    — é o mesmo mercado antigo. Uma resposta ruim não vira duas requisições."""
+    routes = {
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2026-2pm-et": (
+            gamma_stale_slug
+        ),
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2pm-et": (
+            gamma_stale_slug
+        ),
+    }
+    discovery, http = _discovery(routes, durations=[HOURLY_DURATION_SECONDS])
+    await discovery.discover(ahead=0, keyset_fallback=False)
+    assert not any(url.endswith("august-16-2pm-et") for url in http.calls)
+
+
+async def test_discover_aceita_janela_que_confere(gamma_hourly, clob_a2):
+    """Contraprova: com endDate batendo com a janela pedida, entra normalmente."""
+    routes = {
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2026-10am-et": (
+            gamma_hourly
+        ),
+        f"https://clob.test/clob-markets/{gamma_hourly['conditionId']}": clob_a2,
+    }
+    discovery, _ = _discovery(routes, durations=[HOURLY_DURATION_SECONDS])
+    markets = await discovery.discover(ahead=0, keyset_fallback=False)
+    assert len(markets) == 1
+    assert markets[0].slug == gamma_hourly["slug"]
+
+
+async def test_colisao_de_ano_no_discover(gamma_hourly_current, gamma_stale_slug, clob_a2):
+    """A variante COM ano é tentada primeiro e é a que vale.
+
+    Se a ordem invertesse, a descoberta pegaria o mercado de 2025 — que
+    responde 200 no slug sem ano.
+    """
+    routes = {
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2026-2pm-et": (
+            gamma_hourly_current
+        ),
+        "https://gamma.test/markets/slug/bitcoin-up-or-down-august-16-2pm-et": (
+            gamma_stale_slug
+        ),
+        f"https://clob.test/clob-markets/{gamma_hourly_current['conditionId']}": clob_a2,
+    }
+    # "agora" dentro da janela das 14h ET (18:00-19:00Z de 2026-08-16)
+    discovery, http = _discovery(
+        routes, durations=[HOURLY_DURATION_SECONDS], now=1786905000.0
+    )
+    markets = await discovery.discover(ahead=0, keyset_fallback=False)
+    assert len(markets) == 1
+    assert markets[0].slug == "bitcoin-up-or-down-august-16-2026-2pm-et"
+    assert markets[0].resolution is ResolutionKind.BINANCE_CANDLE
+    # a variante sem ano (a de 2025) nem chegou a ser consultada
+    assert not any(url.endswith("august-16-2pm-et") for url in http.calls)
 
 
 async def test_discover_slug_404_nao_quebra():

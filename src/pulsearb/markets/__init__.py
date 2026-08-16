@@ -8,6 +8,7 @@ from pulsearb.markets.discovery import (
     build_slug,
     classify_resolution_source,
     grid_slots,
+    validate_window_match,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "build_slug",
     "classify_resolution_source",
     "grid_slots",
+    "validate_window_match",
 ]
