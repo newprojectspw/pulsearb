@@ -1,0 +1,20 @@
+{
+  "_comentario": "Mercado-zumbi real (padrão observado ao vivo em 2026-08-16, API_NOTES 12.12): janela updown antiga ainda com closed=false na Gamma. Teste negativo: a descoberta DEVE rejeitar.",
+  "slug": "btc-updown-5m-1766966700",
+  "conditionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "resolutionSource": "https://data.chain.link/streams/btc-usd-twap-60s-streams",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"0.5\", \"0.5\"]",
+  "clobTokenIds": "[\"999000000000000000000000000000000000000000000000000000000000000000000000001\", \"999000000000000000000000000000000000000000000000000000000000000000000000002\"]",
+  "orderPriceMinTickSize": 0.01,
+  "orderMinSize": 5,
+  "feeType": "crypto_fees_v2",
+  "feeSchedule": {"exponent": 1, "rate": 0.07, "takerOnly": true, "rebateRate": 0.2},
+  "restricted": true,
+  "active": true,
+  "closed": false,
+  "acceptingOrders": false,
+  "startDate": "2025-12-28T23:20:00Z",
+  "endDate": "2025-12-28T23:25:00Z",
+  "description": "This market will resolve to \"Up\" if the Chainlink TWAP for BTC/USD at the end of the interval in the title is greater than or equal to the price at the beginning of the interval. Otherwise, this market will resolve to \"Down\"."
+}

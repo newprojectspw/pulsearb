@@ -1,0 +1,29 @@
+{
+  "_comentario": "Sintético estrutural — formato dos eventos do WS de mercado do CLOB conforme modelos do SDK (models/clob/market_events.py). Substituir por capturas reais do recorder.",
+  "book_snapshot": {
+    "event_type": "book",
+    "asset_id": "115543018378895345799767279703129188075410082315278422945791152216841808006857",
+    "market": "0x60e799125ca417c522860867508cec737bfd8ddb41d766a78dbca24d8657ae9d",
+    "timestamp": "1786891561000",
+    "hash": "abc123",
+    "bids": [{"price": "0.64", "size": "120"}, {"price": "0.63", "size": "300"}],
+    "asks": [{"price": "0.66", "size": "80"}, {"price": "0.67", "size": "250"}]
+  },
+  "price_change": {
+    "event_type": "price_change",
+    "asset_id": "115543018378895345799767279703129188075410082315278422945791152216841808006857",
+    "market": "0x60e799125ca417c522860867508cec737bfd8ddb41d766a78dbca24d8657ae9d",
+    "timestamp": "1786891561500",
+    "changes": [{"price": "0.65", "side": "BUY", "size": "50"}]
+  },
+  "last_trade_price": {
+    "event_type": "last_trade_price",
+    "asset_id": "115543018378895345799767279703129188075410082315278422945791152216841808006857",
+    "market": "0x60e799125ca417c522860867508cec737bfd8ddb41d766a78dbca24d8657ae9d",
+    "timestamp": "1786891562000",
+    "price": "0.65",
+    "side": "BUY",
+    "size": "25",
+    "fee_rate_bps": "0"
+  }
+}

@@ -1,0 +1,64 @@
+[project]
+name = "pulsearb"
+version = "0.1.0"
+description = "Bot de arbitragem de latência/mispricing para os mercados Up/Down de cripto da Polymarket"
+requires-python = ">=3.12"
+# Versões pinadas de propósito: o hot path não pode mudar de comportamento
+# porque um deploy resolveu dependências diferentes. Subir versão é decisão
+# consciente, com changelog lido.
+dependencies = [
+    "uvloop==0.22.1",
+    "orjson==3.12.0",
+    "websockets==17.0.1",
+    "httpx==0.28.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "fastapi==0.141.1",
+    "uvicorn==0.52.3",
+    "aiosqlite==0.22.1",
+    "pyyaml==6.0.3",
+]
+# NOTA: polymarket-client (SDK oficial) NÃO é dependência de runtime no M1.
+# Só entra no M4, exclusivamente para assinatura de ordens (EIP-712/HMAC).
+# Decisão registrada em docs/API_NOTES.md seção 1.4.
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.3",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Nenhum teste depende de rede externa — regra do M1 (sandbox sem egress).
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "RUF"]
+# RUF002: docstrings em português usam notação matemática (−, ×, ≥) de
+# propósito. Trocar por ASCII pioraria a leitura das fórmulas de fee.
+ignore = ["RUF002"]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts standalone: rodam FORA do projeto (Colab/VPS recém-criada), com
+# stdlib pura e Python antigo. UP017 (datetime.UTC) exige 3.11+ e UP035/UP006
+# modernizam para sintaxe que 3.9/3.10 não aceitam — ignorar aqui é o que
+# mantém a portabilidade que esses scripts prometem.
+"scripts/*" = ["E501", "UP017", "UP035", "UP006"]
+# server.py embute um documento HTML/CSS/JS inteiro numa string: quebrar
+# essas linhas em 100 colunas estragaria o HTML sem ganhar legibilidade.
+"src/pulsearb/ui/server.py" = ["E501"]

@@ -23,6 +23,7 @@ out-*.json
 bench-*.json
 
 # Python
+.venv/
 __pycache__/
 *.py[cod]
 .venv/

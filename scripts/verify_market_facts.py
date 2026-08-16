@@ -66,7 +66,7 @@ def get_json(base: str, path: str, params: dict[str, Any] | None = None, timeout
         query = "?" + urllib.parse.urlencode(pairs)
     url = f"{base}{path}{query}"
     request = urllib.request.Request(url, headers={"User-Agent": "pulsearb-verify/0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode())
 
 
@@ -81,7 +81,7 @@ def try_get_json(base: str, path: str, params: dict[str, Any] | None = None) -> 
         return get_json(base, path, params)
     except urllib.error.HTTPError as exc:
         return {"__erro__": f"HTTP {exc.code}", "url": f"{base}{path}", "corpo": exc.read()[:400].decode(errors="replace")}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"__erro__": f"{type(exc).__name__}: {exc}", "url": f"{base}{path}"}
 
 

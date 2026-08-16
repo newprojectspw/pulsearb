@@ -393,9 +393,11 @@ threshold de 2pp de edge, é 10% do sinal inteiro.
 | `comments` | — | comentários (fora do escopo) |
 
 - Payload de preço `[VERIFICADO]` (`PriceUpdatePayload`): `symbol`, `timestamp`
-  (epoch ms), `value` (Decimal). Os eventos Chainlink passam por
-  `_chainlink_e18_to_decimal` — ou seja, **chegam escalados em 1e18** e precisam
-  de conversão.
+  (epoch ms), `value` (decimal). **Nuance do TWAP** (`CryptoPricesChainlinkTwapPayload`):
+  o payload traz também `window_s` (30 ou 60) e `full_accuracy_value` — string
+  inteira **escalada em 1e18**, que o SDK prefere sobre `value` (conversão em
+  `_chainlink_e18_to_decimal`). O evento `crypto_prices_chainlink` simples traz
+  só `value` decimal, sem escala.
 - Formato do símbolo TWAP `[VERIFICADO]` (docstring de
   `CryptoPricesChainlinkTwapSpec`): *"lowercase slash-delimited pairs such as
   `btc/usd`"*. Sem `symbols`, a assinatura recebe todos.
@@ -453,11 +455,12 @@ confirmar ao vivo, isso está **errado para 5m/15m/4h**:
   *melhor* que a original, não pior — mas só se o modelo for construído em cima
   do feed certo.
 
-**Decisão registrada para o M1/M3:** o feed primário de preço-verdade passa a ser
-o **RTDS** (`prices.crypto.chainlink.twap`, janela conforme o mercado), e a
-Binance vira feed **secundário** (referência e detecção de divergência). O
-`feeds/binance_ws.py` continua no plano, mas rebaixado. **Isto precisa da sua
-aprovação antes do M1** — é um desvio consciente do enunciado.
+**Decisão registrada para o M1/M3** (revisada pela verificação ao vivo, ver
+12.2b): o preço-verdade é **por duração**, e os dois feeds são de primeira
+classe — TWAP 60s da Chainlink para 5m/15m/4h, spot da Binance para 1h. Ambos
+chegam pelo **RTDS**, num único WebSocket (`crypto_prices_twap_sixty` e
+`crypto_prices`), então `feeds/binance_ws.py` não é necessário: o RTDS já
+repassa o spot da Binance.
 
 ### 7.4. Regra permanente
 
@@ -555,7 +558,8 @@ imprime os campos crus e gera um bloco pronto para colar aqui.
 ## 11. Scripts entregues neste marco
 
 Ambos são **stdlib pura** — sem `pip install`, sem `venv`. Rodam em qualquer
-VPS com Python 3.9+, o que é o ponto: dá para medir latência de Amsterdã e de
+VPS com Python 3.10+ (verificado em 3.10, 3.11 e 3.12), o que é o ponto: dá
+para medir latência de Amsterdã e de
 Londres antes de existir projeto.
 
 ### `scripts/benchmark_latency.py`
@@ -592,7 +596,193 @@ objetivo é você **ver o dado**, não confiar no meu parser.
 
 ---
 
-## 12. Fontes
+## 12. Verificação ao vivo — 2026-08-16
+
+Verificação executada pelo Paulo contra a Gamma e o CLOB **de produção** (via
+Colab, IP dos EUA), em 2026-08-16. Os fatos abaixo são **dados primários** e
+substituem qualquer suposição anterior deste documento onde houver conflito.
+As duas respostas cruas estão versionadas em `tests/fixtures/` (Gamma:
+`gamma_market_btc_updown_5m.json`; CLOB: `clob_market_compact.json`).
+
+### 12.1. Slugs e ciclo de vida das janelas `[VERIFICADO ao vivo]`
+
+- Padrão: **`{ativo}-updown-{dur}-{epoch_do_INÍCIO_da_janela}`**, com a grade
+  **alinhada** (início múltiplo da duração — ex.: janelas de 5m começam em
+  epochs múltiplos de 300).
+- Confirmado para **btc** e **eth** nas durações **5m, 15m e 4h**.
+- Mercados são criados **~24h antes** do início da janela;
+  `acceptingOrdersTimestamp` fica ~24h antes do início.
+
+### 12.2. A duração 1h usa OUTRO padrão de slug `[VERIFICADO ao vivo — adendo 2]`
+
+`btc-updown-1h-{epoch}` → **404**: a 1h **não** segue o padrão epoch. O padrão
+real é nominal e em fuso de Nova York:
+
+```
+{ativo_por_extenso}-up-or-down-{mês}-{dia}[-{ano}]-{hora}{am|pm}-et
+ex.: bitcoin-up-or-down-august-16-2026-10am-et
+```
+
+- calculado em **America/New_York com horário de verão** — usar `zoneinfo`,
+  **nunca offset fixo**;
+- existem as duas variantes, **com e sem o ano** — a descoberta gera ambas;
+- ativo por extenso: `bitcoin`, `ethereum` (não `btc`/`eth`).
+
+**Consequência de projeto mantida: durações NUNCA hardcoded** — a grade de
+sondagem é config e o fallback por keyset pega qualquer padrão novo.
+
+### 12.2b. Mapa de verdade final por duração `[VERIFICADO ao vivo — adendo 2]`
+
+| Duração | Fonte de resolução | Feed correspondente |
+|---|---|---|
+| 5m, 15m, 4h | TWAP 60s Chainlink | RTDS `crypto_prices_twap_sixty` |
+| 1h | **candle 1h BTC/USDT (ETH/USDT) da Binance**, fechamento ≥ abertura | RTDS `crypto_prices` (spot Binance) |
+
+**Os dois feeds são de primeira classe** — o spot Binance não é mais
+"secundário": é o preço-verdade das janelas de 1h.
+
+### 12.3. Fonte de resolução das janelas TWAP `[VERIFICADO ao vivo]` — corrige a seção 7
+
+Para **5m, 15m e 4h** (btc e eth): **streams TWAP de 60 segundos da Chainlink**
+— `https://data.chain.link/streams/btc-usd-twap-60s-streams` e equivalente eth.
+**Um stream por ativo cobre todas as durações.**
+
+> **O anúncio público de agosto/2026 está DESATUALIZADO neste ponto**: dizia
+> janela de 30s para mercados de 5m, mas o dado vivo mostra **60s para todas
+> as durações**. O tópico RTDS correspondente é **`crypto_prices_twap_sixty`**.
+> O tópico `crypto_prices_twap_thirty` existe no protocolo mas não corresponde
+> a nenhum mercado observado.
+
+### 12.4. Regra de resolução (texto capturado) `[VERIFICADO ao vivo, semântica PENDENTE]`
+
+**Up** se o TWAP do intervalo do título ≥ preço no início do intervalo; senão
+**Down**. **Empate resolve Up.**
+
+A semântica exata da âncora de abertura ("preço no início do intervalo" é o
+TWAP no instante de abertura? o último update antes? o primeiro depois?) fica
+**PENDENTE — validar empiricamente no M2**: gravar o stream e comparar com as
+resoluções reais.
+
+### 12.5. Tick e mínimo `[VERIFICADO ao vivo]`
+
+- Tick: **0.01** (Gamma `orderPriceMinTickSize`; CLOB `mts=0.01`)
+- Mínimo: **5 shares** (Gamma `orderMinSize`; CLOB `mos=5`)
+- O stake inicial de US$ 5 do M4 é viável: 5 shares a p≤1.00 custam ≤ US$ 5.
+
+### 12.6. Fees `[VERIFICADO ao vivo]` — fecha a pendência da seção 5.3
+
+Gamma `feeSchedule` e CLOB `fd` são **idênticos**:
+
+- `feeType = "crypto_fees_v2"`
+- **`rate = 0.07`**, **`exponent = 1`**, `takerOnly = true`, `rebateRate = 0.2`
+- Com a fórmula verificada na seção 5.1: pico em p=0,50 → **0,0175 USDC/share**
+  (= 1,75% do valor nominal; **3,5% do capital investido**). A hipótese da
+  fonte secundária (seção 5.3) estava certa; a referência de jan/2026 do
+  enunciado original (1,56%) está desatualizada.
+
+### 12.7. Campos de significado NÃO confirmado — proibido usar em cálculo
+
+- `makerBaseFee = 1000`, `takerBaseFee = 1000` (Gamma; CLOB `mbf`/`tbf`)
+- `makerRebatesFeeShareBps = 10000`
+
+Ver investigação na seção 12.13 (tarefa M1.T). Até lá, nenhum desses números
+entra em `engine/fees.py`.
+
+### 12.8. Rewards de liquidez (rota maker, v2) `[VERIFICADO ao vivo]`
+
+- `rewardsMinSize = 50` shares (CLOB `r.mi`)
+- `rewardsMaxSpread`: observado **1.5** (15m, 4h e um 5m ativo) e **4.5**
+  (um 5m pré-abertura) (CLOB `r.ma`)
+- No 4h: `clobRewards.rewardsDailyRate = 1666.666667` com
+  `assetAddress = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` — o **USDC.e
+  real da Polygon**. Relevante para a rota maker (anotada como v2).
+- CLOB `r.moas = 1`: significado **desconhecido** — registrado como tal.
+
+### 12.9. `restricted = true` em todos os mercados cripto lidos `[PENDENTE]`
+
+Candidato: restrição regional/regulatória. **Não bloqueia M1–M3** (leitura é
+L0 pública). Registrado para investigação antes do M4/LIVE.
+
+### 12.10. Cloudflare exige User-Agent `[VERIFICADO ao vivo]`
+
+Request sem User-Agent de navegador → **`403 error code: 1010`**.
+**REGRA PERMANENTE: todo cliente HTTP/WS do projeto envia User-Agent explícito
+e configurável** (`user_agent` no `config.yaml`).
+
+### 12.11. Glossário do CLOB compacto (`GET /clob-markets/{conditionId}`)
+
+| Campo | Significado |
+|---|---|
+| `c` | conditionId |
+| `t` | lista `[{"t": tokenId, "o": outcome}]` — **mapear token pelo `o`, nunca por posição** |
+| `mos` | minOrderSize |
+| `mts` | minTickSize |
+| `mbf` / `tbf` | maker/takerBaseFee — **significado pendente** (M1.T) |
+| `ao` | acceptingOrders |
+| `aot` | acceptingOrdersTimestamp |
+| `fd` | `{r: rate, e: exponent, to: takerOnly}` |
+| `r` | `{mi: rewardsMinSize, ma: rewardsMaxSpread, e: enabled, moas: **desconhecido**}` |
+| `itode` | **desconhecido** — registrado como tal |
+
+### 12.12. Mercados-zumbi na Gamma `[VERIFICADO ao vivo]`
+
+A Gamma contém **mercados-zumbi**: janelas updown de dez/2025 e jan/2026
+ainda com `closed=false`. Regra obrigatória em `markets/discovery.py`:
+**nunca confiar em `closed=false` isolado**. Filtro sempre triplo:
+
+1. `end_date_min`/`end_date_max` na query (agora até +2h);
+2. `acceptingOrders = true`;
+3. `endDate` no futuro (checado localmente, não só na query).
+
+Um mercado-zumbi real está em `tests/fixtures/gamma_market_zombie.json` como
+teste negativo.
+
+### 12.13. M1.T — o que o SDK oficial diz sobre os campos pendentes
+
+Investigação executada em 2026-08-16 sobre o código-fonte de
+`polymarket-client==0.6.0` (sdist do PyPI, mesmo método da seção 0.2).
+
+**Pergunta 1: o que são `makerBaseFee`/`takerBaseFee` = 1000? Como o SDK os
+usa ao montar/assinar uma ordem?**
+
+Resposta: **o SDK 0.6.0 não lê esses campos em lugar nenhum.** Não existe
+ocorrência de `makerBaseFee`, `takerBaseFee`, `mbf` ou `tbf` no código
+(`grep` em todo o sdist devolve zero). O modelo Gamma (`models/gamma/market.py`)
+não os declara, e o parser do CLOB compacto
+(`_internal/actions/orders/market_data.py`) lê apenas `fd`, `mos`-equivalentes,
+`t` e `neg_risk` — ignora `mbf`/`tbf`.
+
+Mais forte ainda: **a struct EIP-712 da ordem (CTF Exchange v2) não tem campo
+de fee nenhum.** Os campos assinados são exatamente `salt, maker, signer,
+tokenId, makerAmount, takerAmount, side, signatureType, timestamp, metadata,
+builder` (`_internal/actions/orders/typed_data.py`, `_ORDER_TYPE_STRING` /
+`_ORDER_FIELDS`). O `feeRateBps` do protocolo v1 antigo sumiu da ordem. A fee
+de plataforma é aplicada pelo servidor e apenas *reportada* de volta: o nome
+`fee_rate_bps` só aparece em modelos de resposta — trades
+(`models/clob/account.py`), eventos de mercado (`models/clob/market_events.py`)
+e eventos de usuário (`models/clob/user_events.py`).
+
+Interpretação registrada: `mbf`/`tbf`=1000 são metadados do modelo de fees
+antigo do CLOB (bps — 1000 bps = 10%), presentes na resposta mas **não usados**
+pelo caminho `crypto_fees_v2`, cujo cálculo real vem de `fd.r`/`fd.e`
+(fórmula da seção 5.1). **Proibido usá-los em cálculo** até que alguma fonte
+oficial diga o contrário.
+
+**Pergunta 2: o que é `makerRebatesFeeShareBps = 10000`?**
+
+Resposta: **o SDK 0.6.0 não menciona esse campo** (zero ocorrências de
+`makerRebatesFeeShareBps` no sdist). O que existe de rebate no SDK: o campo
+`rebateRate` do `feeSchedule` da Gamma (`models/gamma/market.py`, alias
+`rebateRate`) e os tipos de atividade `MAKER_REBATE`/`TAKER_REBATE` na Data
+API (`_internal/actions/data.py`) — ou seja, rebates aparecem como *histórico
+de pagamento*, não como parâmetro de ordem. Leitura plausível — registrada
+como hipótese, não como fato: 10000 bps = 100% → fração do pool de rebates
+atribuída àquele mercado. O único campo de rebate que o projeto usa é
+`rebateRate = 0.2`, e mesmo esse só na rota maker (v2).
+
+---
+
+## 13. Fontes
 
 Primárias:
 - `polymarket-client` 0.6.0, sdist oficial — https://pypi.org/project/polymarket-client/

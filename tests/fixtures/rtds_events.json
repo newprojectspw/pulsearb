@@ -1,0 +1,33 @@
+{
+  "_comentario": "Sintético estrutural — formato conforme protocolo verificado no SDK 0.6.0 (models/rtds_events.py). No TWAP, full_accuracy_value é string inteira escalada 1e18 e é a fonte preferida; value é o decimal de conveniência. Substituir por capturas reais do recorder.",
+  "twap_sixty_btc": {
+    "topic": "crypto_prices_twap_sixty",
+    "type": "update",
+    "timestamp": 1786891560123,
+    "payload": {
+      "symbol": "btc/usd",
+      "timestamp": 1786891560123,
+      "value": 118432.17,
+      "full_accuracy_value": "118432170000000000000000",
+      "window_s": 60
+    }
+  },
+  "chainlink_eth": {
+    "topic": "crypto_prices_chainlink",
+    "type": "update",
+    "timestamp": 1786891560456,
+    "payload": {"symbol": "eth/usd", "timestamp": 1786891560456, "value": "4412.5"}
+  },
+  "binance_btc": {
+    "topic": "crypto_prices",
+    "type": "update",
+    "timestamp": 1786891560789,
+    "payload": {"symbol": "btcusdt", "timestamp": 1786891560789, "value": "118431.55"}
+  },
+  "desconhecido": {
+    "topic": "algum_topico_novo",
+    "type": "update",
+    "timestamp": 1786891560999,
+    "payload": {"qualquer": "coisa"}
+  }
+}

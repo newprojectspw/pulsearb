@@ -1,0 +1,20 @@
+{
+  "_comentario": "Janela de 1h (API_NOTES 12.2/12.2b): slug nominal em America/New_York, resolução por candle 1h BTC/USDT da Binance. Sintético estrutural sobre o padrão informado no adendo 2.",
+  "slug": "bitcoin-up-or-down-august-16-2026-10am-et",
+  "conditionId": "0x2222222222222222222222222222222222222222222222222222222222222222",
+  "resolutionSource": "",
+  "outcomes": "[\"Up\", \"Down\"]",
+  "outcomePrices": "[\"0.52\", \"0.48\"]",
+  "clobTokenIds": "[\"777000000000000000000000000000000000000000000000000000000000000000000000001\", \"777000000000000000000000000000000000000000000000000000000000000000000000002\"]",
+  "orderPriceMinTickSize": 0.01,
+  "orderMinSize": 5,
+  "feeType": "crypto_fees_v2",
+  "feeSchedule": {"exponent": 1, "rate": 0.07, "takerOnly": true, "rebateRate": 0.2},
+  "restricted": true,
+  "active": true,
+  "closed": false,
+  "acceptingOrders": true,
+  "startDate": "2026-08-16T14:00:00Z",
+  "endDate": "2026-08-16T15:00:00Z",
+  "description": "This market will resolve to \"Up\" if the Binance 1 hour candle for BTCUSDT closes higher than or equal to its open. Otherwise, this market will resolve to \"Down\"."
+}
