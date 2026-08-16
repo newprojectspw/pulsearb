@@ -1,0 +1,35 @@
+# Segredos — NUNCA commitar (ver seção 9 do prompt do projeto)
+.env
+.env.*
+!.env.example
+
+# Travas de operação: existem só na VPS, jamais no repositório.
+# Um CONFIRM_LIVE versionado ligaria o modo real de quem clonasse o repo.
+CONFIRM_LIVE
+KILL
+
+# Dados gravados pelo recorder (M2) e saídas de análise
+data/
+recordings/
+*.parquet
+*.jsonl
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Saídas dos scripts do M0
+out-*.json
+bench-*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
