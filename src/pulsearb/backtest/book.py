@@ -45,6 +45,20 @@ class OrderBook:
             return None
         return (self.best_bid + self.best_ask) / 2.0
 
+    def clone(self) -> OrderBook:
+        """Cópia rasa suficiente: os níveis são tuplas imutáveis.
+
+        `deepcopy` aqui seria ordens de grandeza mais caro e não compraria
+        nada — e o replay faz isto a cada price_change, milhões de vezes numa
+        gravação de 72h.
+        """
+        return OrderBook(
+            asset_id=self.asset_id,
+            bids=list(self.bids),
+            asks=list(self.asks),
+            ts_ns=self.ts_ns,
+        )
+
     def depth_usdc(self, *, side: str, ticks: int, tick_size: float) -> float:
         """Quanto cabe, em USDC, dentro de N ticks do topo.
 

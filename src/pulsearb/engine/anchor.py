@@ -88,9 +88,12 @@ def compute_anchor(
         janela = [p for ts, p in samples if corte <= ts <= open_ts_ns]
         return sum(janela) / len(janela) if janela else None
 
-    # INTERPOLADO
-    if not antes or not depois:
-        return (antes or depois)[-1][1] if (antes or depois) else None
+    # INTERPOLADO — sem os dois lados não há o que interpolar; cai para o
+    # único lado disponível.
+    if not antes:
+        return depois[0][1] if depois else None
+    if not depois:
+        return antes[-1][1]
     ts0, p0 = antes[-1]
     ts1, p1 = depois[0]
     if ts1 == ts0:

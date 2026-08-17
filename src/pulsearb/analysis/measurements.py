@@ -16,6 +16,7 @@ Cada uma responde uma pergunta que decide algo:
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import defaultdict
 from typing import Any
@@ -95,7 +96,7 @@ def medir_mudanca_de_tick(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
                     anterior = tick
 
     afinou = [m for m in mudancas if m["para"] < m["de"]]
-    tempos = [m["seconds_left"] for m in afinou if m["seconds_left"] == m["seconds_left"]]
+    tempos = [m["seconds_left"] for m in afinou if not math.isnan(m["seconds_left"])]
     precos = [m["preco_no_momento"] for m in afinou if m["preco_no_momento"] is not None]
     extremos = [p for p in precos if p < 0.10 or p > 0.90]
 

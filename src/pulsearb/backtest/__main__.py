@@ -78,10 +78,16 @@ class RecordingIndex:
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
 
     def _on_poly(self, record: ReplayRecord) -> None:
+        # O WS de mercado do CLOB entrega tanto um evento solto quanto um LOTE
+        # em array. Tratar só o dict descartaria os lotes em silêncio — e é
+        # justamente em rajada de atividade que eles aparecem.
         payload = record.payload
-        if not isinstance(payload, dict):
+        if isinstance(payload, list):
+            eventos: list[Any] = payload
+        elif isinstance(payload, dict):
+            eventos = [payload]
+        else:
             return
-        eventos = payload if isinstance(payload, list) else [payload]
         for evento in eventos:
             if not isinstance(evento, dict):
                 continue
@@ -97,9 +103,7 @@ class RecordingIndex:
             elif tipo == "price_change":
                 atual = self.book_atual.get(asset_id)
                 if atual is not None:
-                    import copy
-
-                    novo = copy.deepcopy(atual)
+                    novo = atual.clone()
                     novo.apply_price_change(evento)
                     self.book_atual[asset_id] = novo
                     self.books[asset_id].append(novo, record.ts_wall_ns)

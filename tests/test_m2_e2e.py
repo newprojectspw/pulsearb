@@ -136,6 +136,66 @@ def test_cli_completo(gravacao, tmp_path, capsys):
         assert medicao in relatorio["medicoes"]
 
 
+def test_indexador_aceita_lote_em_array(tmp_path):
+    """O CLOB entrega tanto evento solto quanto LOTE em array.
+
+    Tratar só o dict descartaria os lotes em silêncio — e é justamente em
+    rajada de atividade que eles aparecem, ou seja, quando mais importam.
+    """
+    import gzip
+
+    import orjson
+
+    from pulsearb.replay.reader import RecordingReader
+
+    def book(asset_id: str, ask: str) -> dict:
+        return {
+            "event_type": "book",
+            "asset_id": asset_id,
+            "timestamp": "1786891561000",
+            "bids": [{"price": "0.40", "size": "100"}],
+            "asks": [{"price": ask, "size": "100"}],
+        }
+
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        # um lote em array e um evento solto
+        for payload in ([book("tokA", "0.60"), book("tokB", "0.70")], book("tokC", "0.80")):
+            handle.write(
+                orjson.dumps(
+                    {"ts_mono_ns": 1, "ts_wall_ns": 1, "fonte": "poly_ws", "payload": payload}
+                )
+                + b"\n"
+            )
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    assert set(index.book_atual) == {"tokA", "tokB", "tokC"}
+    assert index.book_atual["tokA"].best_ask == 0.60
+    assert index.book_atual["tokB"].best_ask == 0.70
+
+
+def test_clone_do_book_e_independente():
+    """price_change não pode mutar o snapshot anterior da timeline."""
+    from pulsearb.backtest.book import OrderBook
+
+    original = OrderBook.from_event(
+        {
+            "event_type": "book",
+            "asset_id": "t",
+            "timestamp": "1",
+            "bids": [{"price": "0.40", "size": "100"}],
+            "asks": [{"price": "0.60", "size": "100"}],
+        }
+    )
+    copia = original.clone()
+    copia.apply_price_change(
+        {"timestamp": "2", "changes": [{"price": "0.60", "size": "0", "side": "SELL"}]}
+    )
+    assert copia.best_ask is None
+    assert original.best_ask == 0.60  # o histórico não foi corrompido
+
+
 def test_cli_recusa_gravacao_inexistente(tmp_path):
     assert main([str(tmp_path / "nao-existe")]) == 2
 
