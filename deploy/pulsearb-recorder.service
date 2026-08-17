@@ -1,0 +1,48 @@
+# PULSEARB recorder sob systemd.
+#
+#   sudo cp deploy/pulsearb-recorder.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pulsearb-recorder
+#
+# Restart=always é o ponto: uma gravação de 72h não pode terminar porque a
+# rede piscou. O recorder já reconecta sozinho; o systemd cobre o caso de o
+# processo morrer de vez.
+
+[Unit]
+Description=PULSEARB recorder (M2) — gravacao continua dos feeds
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pulsearb
+Group=pulsearb
+WorkingDirectory=/opt/pulsearb
+
+# Duração longa de propósito: o recorder encerra sozinho ao fim dela, e o
+# systemd o reinicia — na prática isso rotaciona o processo sem perder dado.
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.recorder --duration 72h
+
+# EnvironmentFile é opcional no M2 (não há segredo: tudo é leitura pública L0).
+# Passa a ser obrigatório no M4.
+EnvironmentFile=-/opt/pulsearb/.env
+
+Restart=always
+RestartSec=10
+# Um pico de falhas não pode desistir da gravação.
+StartLimitIntervalSec=0
+
+# Logs vão para o journal em JSON (o logger do projeto já emite uma linha por
+# evento): journalctl -u pulsearb-recorder -f
+StandardOutput=journal
+StandardError=journal
+
+# Endurecimento básico — o recorder só precisa ler config e escrever em data/.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pulsearb/data
+
+[Install]
+WantedBy=multi-user.target

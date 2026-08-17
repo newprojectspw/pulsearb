@@ -24,6 +24,12 @@ import orjson
 
 from pulsearb.obs import get_logger
 
+# Fontes SINTETIZADAS pelo recorder — não vieram do fio. O replay as trata
+# como metadados, não como eventos de feed.
+FONTE_DISCOVERY = "discovery_snapshot"
+FONTE_GAP = "gap"
+FONTES_META = frozenset({FONTE_DISCOVERY, FONTE_GAP, "recorder_relatorio"})
+
 
 @dataclass(frozen=True, slots=True)
 class RecordEnvelope:

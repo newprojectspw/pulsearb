@@ -92,7 +92,7 @@ async def run(settings: Settings, fake_feeds: bool) -> None:
             url=settings.endpoints.rtds_ws,
             user_agent=settings.user_agent,
             assets=settings.all_price_assets,
-            stale_after_seconds=settings.feeds.stale_after_seconds,
+            stale_after_seconds=settings.feeds.stale_after_seconds_twap,
             reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
             reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
         )
@@ -101,7 +101,7 @@ async def run(settings: Settings, fake_feeds: bool) -> None:
             user_agent=settings.user_agent,
             ping_interval_seconds=settings.feeds.clob_ping_interval_seconds,
             pong_stale_seconds=settings.feeds.clob_stale_seconds,
-            stale_after_seconds=settings.feeds.stale_after_seconds,
+            stale_after_seconds=settings.feeds.stale_after_seconds_book,
             reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
             reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
         )

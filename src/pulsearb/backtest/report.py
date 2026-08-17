@@ -1,0 +1,216 @@
+"""Agregação dos resultados do backtest.
+
+Tudo aqui é descritivo: nenhuma métrica é "ajustada", nenhum trade é
+descartado por ser inconveniente. Se o número for feio, o relatório mostra o
+número feio — é para isso que o M2 existe.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class Trade:
+    """Um trade simulado, com tudo que foi descontado explícito."""
+
+    slug: str
+    jogo: str            # "twap" | "horario"
+    asset: str
+    duracao_s: int
+    bucket_tempo: str
+    prob_prevista: float
+    preco_pago: float    # médio, já com slippage do book real
+    shares: float
+    custo_usdc: float
+    fee_usdc: float
+    latencia_ms: float
+    resolveu_up: bool
+    lado_up: bool        # comprou Up?
+
+    @property
+    def acertou(self) -> bool:
+        return self.lado_up == self.resolveu_up
+
+    @property
+    def payout_usdc(self) -> float:
+        """Share vencedora paga 1.00; perdedora paga 0."""
+        return self.shares if self.acertou else 0.0
+
+    @property
+    def pnl_usdc(self) -> float:
+        return self.payout_usdc - self.custo_usdc - self.fee_usdc
+
+
+@dataclass
+class CalibrationBucket:
+    bucket: str
+    n: int = 0
+    soma_prob: float = 0.0
+    acertos_up: int = 0
+
+    @property
+    def prob_media_prevista(self) -> float:
+        return self.soma_prob / self.n if self.n else float("nan")
+
+    @property
+    def freq_realizada(self) -> float:
+        return self.acertos_up / self.n if self.n else float("nan")
+
+    @property
+    def erro_calibracao(self) -> float:
+        """Previsto − realizado. Positivo = modelo otimista demais."""
+        return self.prob_media_prevista - self.freq_realizada
+
+
+@dataclass
+class BacktestReport:
+    """Coletor. Alimente com `add_trade`/`add_calibration`, depois `to_dict`."""
+
+    trades: list[Trade] = field(default_factory=list)
+    calibracao: dict[str, CalibrationBucket] = field(default_factory=dict)
+    sinais_gerados: int = 0
+    sinais_sem_book: int = 0
+    sinais_abaixo_do_minimo: int = 0
+    sinais_nao_preenchiveis: int = 0
+    janelas_avaliadas: int = 0
+
+    # ------------------------------------------------------------- coleta
+    def add_trade(self, trade: Trade) -> None:
+        self.trades.append(trade)
+
+    def add_calibration(self, bucket: str, prob_up: float, resolveu_up: bool) -> None:
+        """Calibração é medida sobre TODAS as previsões, não só as negociadas.
+
+        Medir só onde se operou enviesaria a curva: operou-se justamente onde
+        o modelo estava mais confiante.
+        """
+        entry = self.calibracao.setdefault(bucket, CalibrationBucket(bucket=bucket))
+        entry.n += 1
+        entry.soma_prob += prob_up
+        if resolveu_up:
+            entry.acertos_up += 1
+
+    # ------------------------------------------------------------ métricas
+    @property
+    def pnl_liquido(self) -> float:
+        return sum(t.pnl_usdc for t in self.trades)
+
+    @property
+    def hit_rate(self) -> float:
+        return (
+            sum(1 for t in self.trades if t.acertou) / len(self.trades)
+            if self.trades
+            else float("nan")
+        )
+
+    @property
+    def fees_pagas(self) -> float:
+        return sum(t.fee_usdc for t in self.trades)
+
+    @property
+    def capital_movimentado(self) -> float:
+        return sum(t.custo_usdc for t in self.trades)
+
+    def max_drawdown(self) -> float:
+        """Maior queda do pico da curva de PnL acumulado, em USDC."""
+        pico = 0.0
+        acumulado = 0.0
+        pior = 0.0
+        for trade in self.trades:
+            acumulado += trade.pnl_usdc
+            pico = max(pico, acumulado)
+            pior = min(pior, acumulado - pico)
+        return pior
+
+    def _grupo(self, chave) -> dict[str, dict[str, Any]]:
+        buckets: dict[Any, list[Trade]] = defaultdict(list)
+        for trade in self.trades:
+            buckets[chave(trade)].append(trade)
+        return {
+            str(nome): {
+                "n": len(grupo),
+                "pnl_usdc": round(sum(t.pnl_usdc for t in grupo), 4),
+                "hit_rate": round(sum(1 for t in grupo if t.acertou) / len(grupo), 4),
+                "pnl_medio": round(sum(t.pnl_usdc for t in grupo) / len(grupo), 5),
+                "fees_usdc": round(sum(t.fee_usdc for t in grupo), 4),
+            }
+            for nome, grupo in sorted(buckets.items(), key=lambda kv: str(kv[0]))
+        }
+
+    # ------------------------------------------------------------ saída
+    def to_dict(self) -> dict[str, Any]:
+        n = len(self.trades)
+        return {
+            "resumo": {
+                "janelas_avaliadas": self.janelas_avaliadas,
+                "sinais_gerados": self.sinais_gerados,
+                "trades": n,
+                "pnl_liquido_usdc": round(self.pnl_liquido, 4),
+                "pnl_medio_por_trade": round(self.pnl_liquido / n, 5) if n else None,
+                "hit_rate": round(self.hit_rate, 4) if n else None,
+                "max_drawdown_usdc": round(self.max_drawdown(), 4),
+                "fees_pagas_usdc": round(self.fees_pagas, 4),
+                "capital_movimentado_usdc": round(self.capital_movimentado, 2),
+                "retorno_sobre_capital": (
+                    round(self.pnl_liquido / self.capital_movimentado, 5)
+                    if self.capital_movimentado
+                    else None
+                ),
+            },
+            "funil_de_sinais": {
+                "gerados": self.sinais_gerados,
+                "descartados_sem_book": self.sinais_sem_book,
+                "descartados_abaixo_do_minimo": self.sinais_abaixo_do_minimo,
+                "descartados_nao_preenchiveis": self.sinais_nao_preenchiveis,
+                "viraram_trade": n,
+                "taxa_de_conversao": (
+                    round(n / self.sinais_gerados, 4) if self.sinais_gerados else None
+                ),
+            },
+            "por_jogo": self._grupo(lambda t: t.jogo),
+            "por_ativo": self._grupo(lambda t: t.asset),
+            "por_duracao": self._grupo(lambda t: f"{t.duracao_s}s"),
+            "por_bucket_tempo": self._grupo(lambda t: t.bucket_tempo),
+            "calibracao": {
+                bucket: {
+                    "n": entry.n,
+                    "prob_media_prevista": round(entry.prob_media_prevista, 4),
+                    "freq_realizada": round(entry.freq_realizada, 4),
+                    "erro": round(entry.erro_calibracao, 4),
+                }
+                for bucket, entry in sorted(self.calibracao.items())
+            },
+        }
+
+
+def curva_de_edge_por_threshold(
+    trades_por_threshold: dict[float, BacktestReport],
+) -> dict[str, Any]:
+    """Qual threshold de entrada maximiza o resultado LÍQUIDO."""
+    linhas = {
+        f"{threshold:.3f}": {
+            "trades": len(report.trades),
+            "pnl_liquido_usdc": round(report.pnl_liquido, 4),
+            "hit_rate": round(report.hit_rate, 4) if report.trades else None,
+            "pnl_medio": (
+                round(report.pnl_liquido / len(report.trades), 5) if report.trades else None
+            ),
+        }
+        for threshold, report in sorted(trades_por_threshold.items())
+    }
+    melhor = max(
+        trades_por_threshold.items(),
+        key=lambda kv: kv[1].pnl_liquido if kv[1].trades else -math.inf,
+        default=(None, None),
+    )
+    return {
+        "por_threshold": linhas,
+        "melhor_threshold": melhor[0],
+        "melhor_pnl_usdc": (
+            round(melhor[1].pnl_liquido, 4) if melhor[1] is not None else None
+        ),
+    }

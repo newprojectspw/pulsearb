@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 
 from fastapi.testclient import TestClient
 
@@ -58,7 +59,7 @@ def test_excecao_vai_para_o_json():
 def test_histograma_vazio():
     hist = LatencyHistogram("tick_para_decisao")
     assert hist.count == 0
-    assert hist.percentile_us(50) != hist.percentile_us(50)  # nan
+    assert math.isnan(hist.percentile_us(50))
 
 
 def test_histograma_percentis():

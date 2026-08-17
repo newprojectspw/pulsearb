@@ -49,9 +49,10 @@ src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "RUF"]
-# RUF002: docstrings em português usam notação matemática (−, ×, ≥) de
-# propósito. Trocar por ASCII pioraria a leitura das fórmulas de fee.
-ignore = ["RUF002"]
+# RUF002/RUF003: docstrings e comentários em português usam notação
+# matemática (−, ×, ≥, σ) de propósito. Trocar por ASCII pioraria a leitura
+# das fórmulas de fee e do modelo TWAP.
+ignore = ["RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 # Scripts standalone: rodam FORA do projeto (Colab/VPS recém-criada), com
