@@ -200,6 +200,31 @@ def test_cli_recusa_gravacao_inexistente(tmp_path):
     assert main([str(tmp_path / "nao-existe")]) == 2
 
 
+def test_validacao_de_caminhos(tmp_path, gravacao):
+    """Caminhos vindos da CLI são resolvidos e validados antes de qualquer I/O."""
+    from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
+
+    assert caminho_de_leitura(str(gravacao)).is_absolute()
+    with pytest.raises(ValueError, match="não encontrada"):
+        caminho_de_leitura(str(tmp_path / "nada"))
+
+    ok = caminho_de_escrita(str(tmp_path / "rel.json"))
+    assert ok.is_absolute() and ok.suffix == ".json"
+    with pytest.raises(ValueError, match=r"\.json"):
+        caminho_de_escrita(str(tmp_path / "rel.txt"))
+    with pytest.raises(ValueError, match="não existe"):
+        caminho_de_escrita(str(tmp_path / "sem" / "esse" / "dir" / "rel.json"))
+    # destino que existe e É um diretório (com sufixo .json, para passar da
+    # checagem anterior e chegar nesta)
+    (tmp_path / "engano.json").mkdir()
+    with pytest.raises(ValueError, match="é um diretório"):
+        caminho_de_escrita(str(tmp_path / "engano.json"))
+
+
+def test_cli_recusa_saida_invalida(gravacao, tmp_path):
+    assert main([str(gravacao), "--json", str(tmp_path / "x.txt")]) == 2
+
+
 def test_cli_recusa_gravacao_sem_snapshot(tmp_path, capsys):
     """Sem metadados de janela não há backtest — e o comando diz isso."""
     import gzip

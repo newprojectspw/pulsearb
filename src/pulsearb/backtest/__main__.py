@@ -46,6 +46,36 @@ from pulsearb.replay.reader import RecordingReader, ReplayRecord
 TOKEN_DURACAO_PADRAO = 300
 
 
+def caminho_de_leitura(bruto: str) -> Path:
+    """Valida um caminho de ENTRADA vindo da linha de comando.
+
+    Resolve para caminho canônico e confirma que existe. Além de fechar o
+    caminho para travessia de diretório (o valor vem de fora do programa),
+    troca um traceback de `FileNotFoundError` lá na frente por um erro que
+    diz o que está errado.
+    """
+    caminho = Path(bruto).expanduser().resolve(strict=False)
+    if not caminho.exists():
+        raise ValueError(f"gravação não encontrada: {caminho}")
+    return caminho
+
+
+def caminho_de_escrita(bruto: str) -> Path:
+    """Valida um caminho de SAÍDA vindo da linha de comando.
+
+    Exige diretório-pai existente e sufixo .json. Um relatório de backtest
+    escrito em local inesperado é pior que um erro: some sem ninguém notar.
+    """
+    caminho = Path(bruto).expanduser().resolve(strict=False)
+    if caminho.suffix != ".json":
+        raise ValueError(f"o relatório precisa terminar em .json: {caminho}")
+    if not caminho.parent.is_dir():
+        raise ValueError(f"diretório de saída não existe: {caminho.parent}")
+    if caminho.is_dir():
+        raise ValueError(f"o destino é um diretório: {caminho}")
+    return caminho
+
+
 class RecordingIndex:
     """Varre a gravação uma vez e organiza tudo que o backtest precisa."""
 
@@ -172,9 +202,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", help="grava o relatório completo neste arquivo")
     args = parser.parse_args(argv)
 
-    caminho = Path(args.recordings)
-    if not caminho.exists():
-        print(f"gravação não encontrada: {caminho}", file=sys.stderr)
+    try:
+        caminho = caminho_de_leitura(args.recordings)
+        destino = caminho_de_escrita(args.json) if args.json else None
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
         return 2
 
     reader = RecordingReader(caminho)
@@ -274,9 +306,9 @@ def main(argv: list[str] | None = None) -> int:
 
     saida = json.dumps(relatorio, indent=2, ensure_ascii=False, default=str)
     print(saida)
-    if args.json:
-        Path(args.json).write_text(saida, encoding="utf-8")
-        print(f"\nrelatório gravado em {args.json}", file=sys.stderr)
+    if destino is not None:
+        destino.write_text(saida, encoding="utf-8")
+        print(f"\nrelatório gravado em {destino}", file=sys.stderr)
     return 0
 
 
