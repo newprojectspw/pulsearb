@@ -45,9 +45,17 @@ endpoints:
   rtds_ws: "wss://ws-live-data.polymarket.com"
 
 feeds:
-  # Watchdog: feed sem mensagem por mais de N segundos = parado
-  # (zera posição-alvo e pausa entradas — regra do hot path).
-  stale_after_seconds: 2.0
+  # Watchdog POR TIPO DE FEED. O limiar único de 2s do M1 era um bug: a
+  # cadência medida ao vivo em 2026-08-16 (API_NOTES 13.1) mostrou p99 de
+  # 2,47s no TWAP — o watchdog dispararia falso positivo em operação normal.
+  #
+  # TWAP: p50 0,86s / p99 2,47s  → 5s
+  # spot: p50 1,00s / p99 1,20s  → 3s
+  # book do CLOB: silêncio é normal em janela sem negociação, então o limiar
+  # é generoso e serve só para detectar conexão morta.
+  stale_after_seconds_twap: 5.0
+  stale_after_seconds_spot: 3.0
+  stale_after_seconds_book: 30.0
   # Reconexão: backoff exponencial com jitter.
   reconnect_initial_seconds: 0.5
   reconnect_max_seconds: 30.0

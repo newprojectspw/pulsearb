@@ -3,11 +3,15 @@
 Bot de arbitragem de latência/mispricing para os mercados **Up/Down de cripto
 da Polymarket**. Modo simulação por padrão; modo real só com trava tripla.
 
-> **Estado atual: M1 concluído.** Existem feeds, descoberta de janelas, curva
-> de fee, recorder e dashboard. **Não existe sinal, modelo nem execução** —
-> isso é M3/M4. O bot ainda não decide nada e não envia ordem nenhuma.
-
-O runbook completo de deploy é o M6. Este README cobre o que já roda.
+> **Estado atual: M2 implementado, veredito PENDENTE de dado.** Existem
+> feeds, descoberta, recorder de produção, replay determinístico, modelo TWAP
+> endgame e backtest com todos os descontos. **Não existe execução** — isso é
+> M4. O bot não envia ordem nenhuma e não toca em dinheiro.
+>
+> O M2 responde uma pergunta: *existe edge líquido depois de taxa, spread,
+> slippage e latência?* A resposta exige 72h de gravação real — ver
+> [`docs/VEREDITO_M2.md`](docs/VEREDITO_M2.md) e
+> [`docs/RUNBOOK_VPS.md`](docs/RUNBOOK_VPS.md).
 
 ---
 
@@ -23,8 +27,15 @@ src/pulsearb/
 │   ├── binance_ws.py    # Binance direto: bookTicker + kline_1h
 │   └── poly_ws.py       # book do CLOB + heartbeat PING/PONG
 ├── markets/discovery.py # janelas ativas, fonte de resolução, gates
-├── engine/fees.py       # curva de taker fee (as duas unidades)
-├── recorder/            # gravação JSONL gzip via fila assíncrona
+├── engine/
+│   ├── fees.py          # curva de taker fee (as duas unidades)
+│   ├── twap.py          # modelo TWAP endgame — o núcleo analítico
+│   ├── hourly.py        # modelo do candle horário
+│   └── anchor.py        # validação empírica da âncora de abertura
+├── recorder/            # gravação JSONL gzip, rotação, lacunas
+├── replay/              # reprodução determinística das gravações
+├── backtest/            # book real, slippage, latência, relatórios
+├── analysis/            # as quatro medições do M2.E
 ├── ui/server.py         # dashboard FastAPI + WebSocket
 └── obs/                 # logging JSON + histogramas de latência
 ```
@@ -73,12 +84,14 @@ aviso no log. As travas chegam no M4.
 
 ## Recorder — comece a gravar hoje
 
-Cada dia sem gravação é dado de backtest perdido. O replay é M2, mas o coletor
-já funciona.
+Cada dia sem gravação é dado de backtest perdido.
 
 ```bash
-python -m pulsearb.recorder --hours 24
+python -m pulsearb.recorder --duration 72h
 ```
+
+Na VPS, sob systemd: [`docs/RUNBOOK_VPS.md`](docs/RUNBOOK_VPS.md).
+**~5 MB/h comprimido** — 10 GB de disco cobrem meses.
 
 Grava em `data/recordings/pulsearb-YYYYmmdd-HHMM.jsonl.gz` (rotação horária,
 coberto pelo `.gitignore`). Cada linha:
@@ -135,6 +148,32 @@ python3 scripts/smoke_discovery.py
 ```
 
 ---
+
+## Backtest
+
+Sobre uma gravação já coletada:
+
+```bash
+python -m pulsearb.backtest data/recordings --json relatorio.json
+```
+
+Sai um relatório JSON com PnL líquido por jogo/ativo/duração, hit rate,
+drawdown, curva de calibração por bucket de tempo restante, curva de edge por
+threshold, sensibilidade a latência (150/300/600/1000ms), o funil de sinais
+(quantos existiram × quantos seriam preenchíveis) e as quatro medições do
+M2.E.
+
+Ele é **pessimista por construção**:
+
+- **taxa** com `r` e `e` lidos do mercado gravado, nunca constantes
+- **slippage** atravessando o book real, nível a nível — não é parâmetro
+  chutado, é o que o livro dizia
+- **latência** entre sinal e fill: o preenchimento usa o book de
+  `t + latência`, não o que gerou o sinal
+- só conta preenchido o que o book **comportava** naquele instante
+
+Sem gravação, o comando falha com mensagem clara em vez de produzir número
+sobre conjunto vazio.
 
 ## Configuração
 

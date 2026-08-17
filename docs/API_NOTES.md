@@ -844,7 +844,76 @@ atribuída àquele mercado. O único campo de rebate que o projeto usa é
 
 ---
 
-## 13. Fontes
+## 13. Cadência e regime — medições ao vivo de 2026-08-16 (M2)
+
+### 13.1. Cadência do RTDS `[MEDIDO ao vivo]`
+
+| Tópico | p50 entre mensagens | p99 |
+|---|---|---|
+| `crypto_prices_twap_sixty` | **0,86s** | **2,47s** |
+| `crypto_prices` (spot Binance) | **1,00s** | **1,20s** |
+
+**Este é um jogo de segundos, não de milissegundos.** É a conclusão mais
+importante do M2 até aqui e ela reordena as prioridades do projeto inteiro:
+
+- Otimização de micro-latência é **irrelevante** neste regime. A diferença
+  entre 5ms e 50ms de RTT desaparece diante de um feed que atualiza a cada
+  ~1s. O tempo do bot é gasto **esperando dado**, não processando.
+- O que importa é **quando** decidir dentro da janela, não **quão rápido**.
+  Com o TWAP atualizando a ~1s e a janela de 5m tendo 300s, existem ~300
+  oportunidades de reavaliação — e as últimas valem muito mais que as
+  primeiras (13.4).
+- A escolha de região da VPS (Londres) é, portanto, de baixo impacto no
+  resultado. **Decisão revisável**: se o backtest mostrar sensibilidade real
+  a latência, revisita-se; enquanto não mostrar, é ruído.
+
+### 13.2. Correção do watchdog `[BUG CORRIGIDO]`
+
+O limiar único de **2s** do M1 estava **errado**: com p99 do TWAP em 2,47s, o
+watchdog marcaria o feed como parado em operação normal e o bot pausaria
+entradas sem motivo — um freio que dispara sozinho.
+
+Novos defaults, por tipo de feed e configuráveis (`config.yaml`):
+
+| Feed | Limiar | Racional |
+|---|---|---|
+| TWAP | **5,0s** | ~2x o p99 medido |
+| spot | **3,0s** | ~2,5x o p99 medido |
+| book do CLOB | **30,0s** | silêncio é normal em janela sem negociação; serve só para detectar conexão morta |
+
+### 13.3. Tick é ESTADO, não constante `[MEDIDO ao vivo — PENDENTE explicar]`
+
+Janelas de 5m próximas do fim apareceram com **tick 0,001** enquanto as demais
+estavam em **0,01**. **Hipótese:** o tick afina quando o preço encosta nos
+extremos (perto de 0 ou de 1), onde 0,01 seria grosso demais para expressar a
+probabilidade.
+
+Consequência imediata de projeto: **`tick_size` precisa ser relido a cada
+ciclo de descoberta**, nunca cacheado para a vida da janela. O recorder grava
+`tick_size` em cada snapshot justamente para permitir medir isso (M2.E.1).
+
+### 13.4. Regime do modelo TWAP
+
+Com lookback de 60s e janela de duração D, a fração da média final já travada
+quando restam t segundos é `max(0, (60 − t)) / 60` para t < 60 — ou seja, nos
+últimos 60 segundos a incerteza **colapsa de forma conhecida**. Antes disso, a
+janela ainda é dominada pelo que vai acontecer. É por isso que a calibração é
+reportada **por bucket de tempo restante**, e não agregada.
+
+### 13.5. O jogo horário também existe para ETH `[VERIFICADO ao vivo]`
+
+`ethereum-up-or-down-{mês}-{dia}-{ano}-{hora}{am|pm}-et`, mesma resolução por
+candle 1h da Binance (`close ≥ open`). O `build_hourly_slugs` já usa o nome
+por extenso por ativo, então cobre os dois sem mudança.
+
+### 13.6. Descoberta validada em produção `[VERIFICADO ao vivo]`
+
+**76 janelas descobertas, 76 operáveis**, com classificação correta nos dois
+jogos. Os gates do M1/M1.1 não produziram falso negativo em produção.
+
+---
+
+## 14. Fontes
 
 Primárias:
 - `polymarket-client` 0.6.0, sdist oficial — https://pypi.org/project/polymarket-client/

@@ -34,7 +34,16 @@ class Endpoints(BaseModel):
 
 
 class FeedSettings(BaseModel):
-    stale_after_seconds: float = 2.0
+    """Watchdog por tipo de feed — cadências medidas, não chutadas.
+
+    O M1 usava 2s para tudo. A medição ao vivo (API_NOTES 13.1) mostrou p99
+    de 2,47s no TWAP: o limiar único marcaria o feed como parado em operação
+    normal, e o bot pausaria entradas sem motivo. Cada feed tem o seu.
+    """
+
+    stale_after_seconds_twap: float = 5.0
+    stale_after_seconds_spot: float = 3.0
+    stale_after_seconds_book: float = 30.0
     reconnect_initial_seconds: float = 0.5
     reconnect_max_seconds: float = 30.0
     clob_ping_interval_seconds: float = 10.0
@@ -121,10 +130,24 @@ class Settings(BaseSettings):
             loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 yaml_data = loaded
-        # Env deve vencer YAML: remove do YAML as chaves presentes no ambiente.
+        # Env deve vencer YAML. Como o pydantic-settings dá precedência a
+        # kwargs de init sobre variáveis de ambiente, a única forma de o env
+        # ganhar é REMOVER do YAML a chave que ele cobre.
+        #
+        # Cobre os dois casos:
+        #   PULSEARB_MODE                  → chave de topo `mode`
+        #   PULSEARB_RECORDER__OUTPUT_DIR  → chave de topo `recorder` (aninhada)
+        #
+        # O caso aninhado importa de verdade: o Dockerfile define
+        # PULSEARB_RECORDER__OUTPUT_DIR=/data, e sem isto a imagem gravaria no
+        # caminho do config.yaml — em silêncio, que é o pior jeito de errar.
         import os
 
         for key in list(yaml_data):
-            if f"PULSEARB_{key.upper()}" in os.environ:
+            prefixo = f"PULSEARB_{key.upper()}"
+            if any(
+                nome == prefixo or nome.startswith(f"{prefixo}__")
+                for nome in os.environ
+            ):
                 del yaml_data[key]
         return cls(**{**yaml_data, **overrides})
