@@ -105,6 +105,56 @@ O que olhar no log (uma linha JSON por evento):
   dia é normal; muitas ou longas significam problema de rede.
 - `descartadas` > 0 no relatório — disco lento demais para a fila.
 
+### 5.1. Verificação pós-start — NÃO pule
+
+Subir sem erro **não** significa que está gravando. Um feed pode conectar,
+ser recusado no protocolo e reconectar em loop indefinidamente, com o
+`systemctl status` mostrando `active (running)` o tempo todo. Foi exatamente
+isso que aconteceu no primeiro deploy real: o RTDS fechava a conexão com
+`1003 unsupported data` a cada tentativa, e o serviço parecia saudável.
+
+Espere **60 segundos** depois do start e rode:
+
+```bash
+# 1. Quantas vezes cada feed caiu no último minuto?
+journalctl -u pulsearb-recorder --since "60 seconds ago" \
+  | grep -c "conexão caiu"
+```
+
+**O número tem que ser 0 ou 1.** Qualquer coisa acima disso é loop de
+reconexão — pare e investigue antes de deixar rodando 72h.
+
+```bash
+# 2. Os três feeds estão recebendo mensagem?
+journalctl -u pulsearb-recorder --since "60 seconds ago" \
+  | grep '"msg":"descoberta"' | tail -1 | python3 -m json.tool
+```
+
+Espere ver, no último ciclo:
+
+| Campo | O que significa | Valor saudável após 60s |
+|---|---|---|
+| `msgs_rtds` | ticks de preço (TWAP + spot) | **centenas** — a cadência é ~1/s por ativo |
+| `msgs_binance` | bookTicker + kline_1h | **dezenas ou mais** |
+| `msgs_poly` | book do CLOB | **> 0** assim que houver janelas assinadas |
+| `janelas` / `operaveis` | descoberta funcionando | dezenas, e `operaveis` próximo de `janelas` |
+| `assinadas` | tokens no WS do CLOB | 2× o número de janelas |
+| `descartadas` | eventos perdidos por disco lento | **0** |
+
+**Qualquer `msgs_*` em 0 depois de 60s é falha**, mesmo sem erro no log.
+Um feed que conecta e não recebe nada é indistinguível de um feed morto para
+efeito de gravação.
+
+```bash
+# 3. O arquivo está crescendo?
+ls -la /opt/pulsearb/data/recordings/
+sleep 60 && ls -la /opt/pulsearb/data/recordings/
+```
+
+O `.jsonl.gz` corrente tem que estar maior na segunda listagem.
+
+Só depois desses três checks a gravação está de fato iniciada.
+
 Alternativa com Docker:
 
 ```bash
@@ -166,6 +216,7 @@ tolera isso e conta quantas foram.
 
 - [ ] `smoke_discovery` achou janelas dos **dois** jogos (TWAP e horário)
 - [ ] `systemctl status` mostra `active (running)`
+- [ ] **§5.1 passou**: 0-1 "conexão caiu" em 60s, e os três `msgs_*` > 0
 - [ ] o log tem `descoberta` a cada 30s, com `assinadas` estável
 - [ ] `data/recordings/` tem um `.jsonl.gz` crescendo
 - [ ] `du -sh` bate com a ordem de grandeza da §6

@@ -20,8 +20,11 @@ import websockets
 
 from pulsearb.feeds.base import FeedEvent, OnEvent, ReconnectingFeed
 
-PING = b"PING"
-PONG = b"PONG"
+# Heartbeat de aplicação do CLOB: texto puro, NUNCA binário (API_NOTES 6.1).
+PING = "PING"
+PONG = "PONG"
+# O FeedEvent.raw chega sempre em bytes; esta é a forma comparável.
+PONG_BYTES = PONG.encode()
 
 
 class PolyMarketWsFeed(ReconnectingFeed):
@@ -51,28 +54,30 @@ class PolyMarketWsFeed(ReconnectingFeed):
         self.pong_count = 0
 
     # ------------------------------------------------------------------ frames
-    def initial_frame(self) -> bytes:
+    def initial_frame(self) -> str:
         return orjson.dumps(
             {
                 "type": "market",
                 "assets_ids": sorted(self.token_ids),
                 "custom_feature_enabled": self.custom_feature_enabled,
             }
-        )
+        ).decode()
 
     @staticmethod
-    def subscribe_frame(token_ids: list[str], custom_feature_enabled: bool = True) -> bytes:
+    def subscribe_frame(token_ids: list[str], custom_feature_enabled: bool = True) -> str:
         return orjson.dumps(
             {
                 "operation": "subscribe",
                 "assets_ids": token_ids,
                 "custom_feature_enabled": custom_feature_enabled,
             }
-        )
+        ).decode()
 
     @staticmethod
-    def unsubscribe_frame(token_ids: list[str]) -> bytes:
-        return orjson.dumps({"operation": "unsubscribe", "assets_ids": token_ids})
+    def unsubscribe_frame(token_ids: list[str]) -> str:
+        return orjson.dumps(
+            {"operation": "unsubscribe", "assets_ids": token_ids}
+        ).decode()
 
     # -------------------------------------------------------------- subscribes
     async def subscribe(self, token_ids: list[str]) -> None:
@@ -80,19 +85,19 @@ class PolyMarketWsFeed(ReconnectingFeed):
         new = [t for t in token_ids if t not in self.token_ids]
         self.token_ids.update(new)
         if new and self._ws is not None:
-            await self._ws.send(self.subscribe_frame(new, self.custom_feature_enabled))
+            await self.send_frame(self.subscribe_frame(new, self.custom_feature_enabled))
 
     async def unsubscribe(self, token_ids: list[str]) -> None:
         gone = [t for t in token_ids if t in self.token_ids]
         self.token_ids.difference_update(gone)
         if gone and self._ws is not None:
-            await self._ws.send(self.unsubscribe_frame(gone))
+            await self.send_frame(self.unsubscribe_frame(gone))
 
     # ------------------------------------------------------------------- ciclo
     async def _on_connected(self, ws: websockets.ClientConnection) -> None:
         self._last_pong_mono = time.monotonic()
         if self.token_ids:
-            await ws.send(self.initial_frame())
+            await self.send_frame(self.initial_frame(), ws)
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat(ws), name="poly-ws-heartbeat"
         )
@@ -117,10 +122,10 @@ class PolyMarketWsFeed(ReconnectingFeed):
                 )
                 await ws.close(code=1000, reason="heartbeat timeout")
                 return
-            await ws.send(PING)
+            await self.send_frame(PING, ws)
 
     async def _handle_message(self, event: FeedEvent) -> None:
-        if event.raw.strip() == PONG:
+        if event.raw.strip() == PONG_BYTES:
             self._last_pong_mono = time.monotonic()
             self.pong_count += 1
             return

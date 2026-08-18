@@ -900,6 +900,35 @@ quando restam t segundos é `max(0, (60 − t)) / 60` para t < 60 — ou seja, n
 janela ainda é dominada pelo que vai acontecer. É por isso que a calibração é
 reportada **por bucket de tempo restante**, e não agregada.
 
+### 13.4b. Os WebSockets recusam frames BINÁRIOS `[VERIFICADO em produção]`
+
+O RTDS fecha a conexão imediatamente ao receber um frame binário:
+
+```
+received 1003 (unsupported data) Binary is not supported;
+then sent 1003 (unsupported data) Binary is not supported
+```
+
+**Todo frame enviado a qualquer WS do projeto precisa ser TEXTO.**
+
+A armadilha é de linguagem, não de protocolo: a lib `websockets` escolhe o
+tipo de frame pelo TIPO DO ARGUMENTO — `str` vira texto, `bytes` vira
+binário. E `orjson.dumps()` devolve **bytes**. Serializar o subscribe com
+orjson e mandar direto gera frame binário e loop de reconexão infinito.
+
+Pior: o serviço parece saudável. `systemctl status` mostra
+`active (running)`, o processo não morre, e só o log revela a queda a cada
+tentativa. Por isso o runbook tem a §5.1 (verificação pós-start).
+
+O que torna o caso instrutivo: `scripts/smoke_feeds.py` usa `json.dumps()`
+(que devolve `str`) e sempre funcionou contra o MESMO endpoint. Smoke verde
+e produção em loop, "falando o mesmo protocolo" — a diferença estava numa
+letra de tipo.
+
+Defesa no código: `ReconnectingFeed.send_frame` recusa não-`str` com
+`TypeError`, e `tests/test_regressao_frame_texto.py` verifica em três
+camadas (construtores, guard, e o tipo que chega pelo fio).
+
 ### 13.5. O jogo horário também existe para ETH `[VERIFICADO ao vivo]`
 
 `ethereum-up-or-down-{mês}-{dia}-{ano}-{hora}{am|pm}-et`, mesma resolução por
