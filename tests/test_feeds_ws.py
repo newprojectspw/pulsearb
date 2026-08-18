@@ -13,7 +13,7 @@ import orjson
 import pytest
 import websockets
 
-from pulsearb.feeds.poly_ws import PING, PONG, PolyMarketWsFeed
+from pulsearb.feeds.poly_ws import PING, PONG, PONG_BYTES, PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
 
 
@@ -22,6 +22,10 @@ class FakeWsServer:
 
     def __init__(self) -> None:
         self.received: list[str] = []
+        # Guarda o objeto CRU como o websockets entregou: str = frame de
+        # texto, bytes = frame BINÁRIO. É o que permite provar que o cliente
+        # nunca manda binário (o RTDS fecha com 1003 se mandar).
+        self.received_raw: list[str | bytes] = []
         self.connections: int = 0
         self.server: websockets.Server | None = None
         self.to_send: list[str] = []
@@ -53,6 +57,7 @@ class FakeWsServer:
             await ws.send(message)
         try:
             async for message in ws:
+                self.received_raw.append(message)
                 text = message if isinstance(message, str) else message.decode()
                 self.received.append(text)
                 if text.strip() == "PING":
@@ -227,7 +232,7 @@ async def test_heartbeat_ping_pong(server):
     await feed.start()
     try:
         await _wait_for(lambda: feed.pong_count >= 2, limite_s=3.0)
-        assert PING.decode() in server.received
+        assert PING in server.received
         # PONG não polui a contagem de ticks de mercado? Conta como mensagem
         # recebida, mas é tratado e não vira evento de book.
         assert feed.pong_count >= 2
@@ -266,14 +271,14 @@ async def test_book_event_chega_ao_callback(server, clob_ws_events):
 
 async def test_pong_nao_quebra_o_parser(server):
     """PONG é texto puro, não JSON — o parser devolve None sem explodir."""
-    server.to_send = [PONG.decode()]
+    server.to_send = [PONG]
     eventos = []
     feed = PolyMarketWsFeed(url=server.url, user_agent="ua", on_event=eventos.append)
     await feed.start()
     try:
         await _wait_for(lambda: bool(eventos))
         assert eventos[0].parsed is None
-        assert eventos[0].raw == PONG
+        assert eventos[0].raw == PONG_BYTES
         assert feed.pong_count == 1
     finally:
         await feed.stop()

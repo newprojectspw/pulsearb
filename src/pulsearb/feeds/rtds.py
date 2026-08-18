@@ -137,10 +137,12 @@ class RtdsFeed(ReconnectingFeed):
         self.on_tick = on_tick
         self.last_tick_by_key: dict[tuple[str, str], PriceTick] = {}
 
-    def subscribe_frame(self) -> bytes:
+    def subscribe_frame(self) -> str:
         # Sem filtro de symbols: o RTDS aceita filtrar, mas receber todos e
         # filtrar localmente é mais robusto a grafias de símbolo divergentes
         # (custo: alguns KB/s). Os ativos configurados são o filtro local.
+        # .decode() NÃO é cosmético: orjson devolve bytes, e bytes vira frame
+        # BINÁRIO no websockets — que é o que derrubava o RTDS com 1003.
         return orjson.dumps(
             {
                 "action": "subscribe",
@@ -149,10 +151,10 @@ class RtdsFeed(ReconnectingFeed):
                     {"topic": TOPIC_TWAP_60, "type": "update"},
                 ],
             }
-        )
+        ).decode()
 
     async def _on_connected(self, ws: websockets.ClientConnection) -> None:
-        await ws.send(self.subscribe_frame())
+        await self.send_frame(self.subscribe_frame(), ws)
 
     async def _handle_message(self, event: FeedEvent) -> None:
         tick = parse_rtds_event(event.parsed, event.ts_mono_ns, event.ts_wall_ns)

@@ -172,6 +172,33 @@ class ReconnectingFeed:
         except orjson.JSONDecodeError:
             return None  # ex.: "PONG" do heartbeat do CLOB
 
+    # ------------------------------------------------------------- envio
+    async def send_frame(
+        self, frame: str, ws: websockets.ClientConnection | None = None
+    ) -> None:
+        """Envia um frame SEMPRE como texto.
+
+        Existe para tornar a invariante estrutural, não só convencional: a
+        lib `websockets` decide o tipo de frame pelo tipo do argumento —
+        `str` vira frame de texto, `bytes` vira BINÁRIO. O RTDS da Polymarket
+        fecha a conexão com `1003 unsupported data / Binary is not supported`
+        ao receber binário, e o recorder entrava em loop de reconexão em
+        produção por causa disso (o `orjson.dumps` devolve bytes).
+
+        Passar bytes aqui é erro de programação, não condição de runtime:
+        levanta TypeError em vez de virar uma desconexão silenciosa em
+        produção três semanas depois.
+        """
+        if not isinstance(frame, str):
+            raise TypeError(
+                f"frame de WS precisa ser str (texto), veio {type(frame).__name__}. "
+                "orjson.dumps() devolve bytes — use .decode()."
+            )
+        destino = ws if ws is not None else self._ws
+        if destino is None:
+            raise RuntimeError(f"feed {self.name} não está conectado")
+        await destino.send(frame)
+
     # ------------------------------------------------------------ p/ subclasse
     async def _on_connected(self, ws: websockets.ClientConnection) -> None:
         raise NotImplementedError

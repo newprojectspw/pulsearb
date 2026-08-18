@@ -12,6 +12,11 @@
 Description=PULSEARB recorder (M2) — gravacao continua dos feeds
 After=network-online.target
 Wants=network-online.target
+# StartLimit* pertence a [Unit], NAO a [Service]. Na secao errada o systemd
+# rejeita a unit com "Unknown key name" — encontrado no deploy real.
+# Zero = sem limite de tentativas: um pico de falhas nao pode fazer o
+# systemd desistir de uma gravacao de 72h.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -19,8 +24,16 @@ User=pulsearb
 Group=pulsearb
 WorkingDirectory=/opt/pulsearb
 
-# Duração longa de propósito: o recorder encerra sozinho ao fim dela, e o
-# systemd o reinicia — na prática isso rotaciona o processo sem perder dado.
+# ProtectSystem=strict + ReadWritePaths exige que o diretorio JA EXISTA na
+# montagem do namespace. Se nao existir, a unit falha com 226/NAMESPACE
+# antes de o Python rodar — entao criar a pasta dentro do recorder nao
+# resolveria (ele nem chega a iniciar). Encontrado no deploy real.
+#
+# O prefixo "+" roda o comando FORA do sandbox e com privilegio total, que e
+# exatamente o caso de uso: preparar o terreno que o sandbox vai exigir.
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/recordings
+ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
+
 ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.recorder --duration 72h
 
 # EnvironmentFile é opcional no M2 (não há segredo: tudo é leitura pública L0).
@@ -29,8 +42,6 @@ EnvironmentFile=-/opt/pulsearb/.env
 
 Restart=always
 RestartSec=10
-# Um pico de falhas não pode desistir da gravação.
-StartLimitIntervalSec=0
 
 # Logs vão para o journal em JSON (o logger do projeto já emite uma linha por
 # evento): journalctl -u pulsearb-recorder -f
@@ -42,7 +53,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/pulsearb/data
+# O "-" tolera o caminho ausente na montagem do namespace; combinado com o
+# ExecStartPre acima, a unit sobe mesmo num deploy limpo.
+ReadWritePaths=-/opt/pulsearb/data
 
 [Install]
 WantedBy=multi-user.target
