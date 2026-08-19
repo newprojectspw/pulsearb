@@ -2,7 +2,7 @@
 
 **Status: PENDENTE DE DADO. Nenhum veredito pode ser emitido ainda.**
 
-Data: 2026-08-16
+Data: 2026-08-16 · atualizado 2026-08-19 (M2.1)
 
 ---
 
@@ -25,7 +25,8 @@ Ele prova que o **pipeline** funciona. Não diz nada sobre o mercado.
 
 ## O que já dá para afirmar, com o que foi medido
 
-Duas coisas foram medidas ao vivo e mudam o quadro antes de qualquer backtest.
+Estas foram medidas ao vivo e mudam o quadro antes de qualquer backtest —
+a terceira derruba uma hipótese que estava registrada como plausível.
 
 ### 1. A taxa é o adversário principal, não a latência
 
@@ -67,7 +68,32 @@ que é onde o book é mais eficiente e o ruído domina. **A hipótese a testar �
 que o edge, se existir, está concentrado nos buckets `60-30s` e `<30s`** — e é
 por isso que a calibração é reportada por bucket, nunca agregada.
 
-### 3. A capacidade pode importar mais que o edge
+### 3. A hipótese do tick nos extremos foi REFUTADA
+
+A primeira gravação real produziu **zero trades** — os seis bugs do M2.1 —, mas
+produziu **uma** medição aproveitável, e ela derrubou uma hipótese que estava
+registrada como plausível.
+
+**Hipótese registrada em 2026-08-16:** o `tick_size` afina de 0,01 para 0,001
+quando o preço encosta nos extremos, onde 0,01 seria grosso demais.
+
+**Medido (1h, 15 afinamentos):** preço p50 no afinamento = **0,48**; apenas
+**1 dos 15** fora de [0,10; 0,90]. É o oposto do previsto. O tick afina em
+mercado **equilibrado**, onde a disputa está apertada.
+
+Por que isso entra no veredito e não só nas notas técnicas: a granularidade
+fina aparece exatamente onde a **taxa é máxima** (p ≈ 0,50; 3,5% do capital,
+item 1 acima). Tick fino ali não é convite — é sinal de que o mercado está
+caro de atravessar justamente onde parece mais disputado. A hipótese antiga
+teria mandado procurar oportunidade nos extremos por causa do tick, que é o
+lugar errado.
+
+**Ressalva, e ela é grande:** n = 15 numa única hora, e a hipótese concorrente
+— *o gatilho é o tempo restante, não o preço* — **não foi testada**, porque
+`seconds_left` saía NaN (BUG 3 do M2.1, corrigido). A próxima gravação decide
+entre as duas. Detalhe completo em API_NOTES 13.3a.
+
+### 4. A capacidade pode importar mais que o edge
 
 Mesmo com edge positivo, a medição de profundidade (M2.E.3) pode inviabilizar
 o projeto por outro caminho: se o book só comporta dezenas de USDC a 3 ticks
@@ -97,9 +123,10 @@ E preencha esta tabela com os números do relatório:
 | Melhor threshold | `curva_de_edge.melhor_threshold` | _pendente_ |
 | Sensibilidade a latência | `sensibilidade_latencia` | _pendente_ |
 | Sinais × preenchíveis | `backtest.funil_de_sinais` | _pendente_ |
-| Mudança de tick | `medicoes.tick` | _pendente_ |
+| Mudança de tick | `medicoes.tick` | hipótese dos extremos **refutada** (n=15); tempo restante pendente |
 | Atraso de liquidação por jogo | `medicoes.atraso_liquidacao` | _pendente_ |
 | Profundidade do book | `medicoes.profundidade` | _pendente_ |
+| Memória e retenção do backtest | `gravacao.memoria` | _pendente_ |
 
 ### Regras de decisão, definidas ANTES de ver os números
 
@@ -161,6 +188,24 @@ deste mercado — o problema não é o modelo.
 
 **Bloqueio único: gravação de produção.** Próximo passo em
 `docs/RUNBOOK_VPS.md`.
+
+### A primeira tentativa de gravação (2026-08-18) e o que ela custou
+
+Uma hora de mercado real, 104 janelas conhecidas, **zero trades**. Nenhum dos
+seis motivos era o mercado:
+
+| # | Defeito | Efeito |
+|---|---|---|
+| 1 | assinatura cancelada no `endDate` | 0 resoluções capturadas → 0 janelas avaliáveis |
+| 2 | RTDS sem keepalive de protocolo | reconexão a cada 30–306s a hora inteira |
+| 3 | `seconds_left` NaN nos snapshots | medição de tick sem eixo de tempo |
+| 4 | arquivo da hora reaberto em append | 3 de 26 gzips inválidos |
+| 5 | indexador do backtest acumulando todo book | `Killed` (OOM) num arquivo só |
+| 6 | estimativa de disco 100x abaixo | dimensionamento da VPS errado |
+
+Todos corrigidos no M2.1, com teste onde cabia teste. **A lição operacional:
+"o serviço subiu" e "o serviço está gravando" são afirmações diferentes** — é
+o que a §5.1 do runbook passou a verificar. A gravação recomeça do zero.
 
 ### O que foi verificado de fato, e como
 

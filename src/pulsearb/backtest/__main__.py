@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,8 @@ from pulsearb.analysis.measurements import (
 from pulsearb.backtest.book import OrderBook
 from pulsearb.backtest.report import curva_de_edge_por_threshold
 from pulsearb.backtest.runner import (
+    LIMITE_SNAPSHOTS_PADRAO,
+    NIVEIS_RETIDOS_PADRAO,
     BacktestConfig,
     BacktestRunner,
     BookTimeline,
@@ -39,8 +41,10 @@ from pulsearb.engine.anchor import (
     evaluate_hypotheses,
     report_anchor_validation,
 )
+from pulsearb.feeds.poly_ws import RESOLUTION_EVENT_TYPES
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.markets.discovery import parse_end_date_epoch
+from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
 
 TOKEN_DURACAO_PADRAO = 300
@@ -76,29 +80,118 @@ def caminho_de_escrita(bruto: str) -> Path:
     return caminho
 
 
-class RecordingIndex:
-    """Varre a gravação uma vez e organiza tudo que o backtest precisa."""
+# Quanto tempo ANTES da abertura da janela o book do token ainda interessa.
+# `BookTimeline.at(t)` devolve o último snapshot ≤ t, então a primeira
+# consulta da janela precisa de um snapshot anterior a ela. O recorder assina
+# o token quando a descoberta o encontra, alguns minutos antes; 10 minutos de
+# pré-rolo cobrem isso com folga e mantêm a retenção limitada.
+PRE_ROLO_S = 600
+# E depois do fechamento: a penalidade de latência consulta `t + latência`,
+# no máximo 1s à frente (LATENCIAS_MS_PADRAO). 5s de folga.
+POS_ROLO_S = 5
 
-    def __init__(self, reader: RecordingReader) -> None:
+
+class RecordingIndex:
+    """Duas passadas sobre a gravação, com memória limitada por construção.
+
+    Por que DUAS passadas, e não uma:
+
+    A passada 1 lê só o que é leve — snapshots de descoberta, ticks do RTDS,
+    resoluções, lacunas. Ela é o que define QUAIS tokens existem e em que
+    intervalo de tempo cada um importa. Sem essa informação, a passada única
+    da versão anterior era obrigada a guardar o book de TODO token em TODO
+    instante da gravação, inclusive de janelas que já tinham fechado horas
+    antes e nunca seriam avaliadas.
+
+    A passada 2 reconstrói os books, mas só dos tokens conhecidos e só dentro
+    do intervalo `[abertura − PRE_ROLO, fechamento + POS_ROLO]`. Reler o
+    arquivo custa I/O e descompressão; guardar 12 milhões de books custa a
+    máquina inteira. O I/O é o lado barato dessa troca.
+
+    A memória fica limitada por `tokens_de_interesse × limite_por_token`, um
+    número que dá para calcular antes de rodar — e que o relatório imprime.
+    """
+
+    def __init__(
+        self,
+        reader: RecordingReader,
+        *,
+        limite_por_token: int = LIMITE_SNAPSHOTS_PADRAO,
+        niveis_retidos: int = NIVEIS_RETIDOS_PADRAO,
+    ) -> None:
         self.reader = reader
+        self.limite_por_token = limite_por_token
+        self.niveis_retidos = niveis_retidos
         self.streams: dict[str, list[tuple[int, float]]] = defaultdict(list)
-        self.books: dict[str, BookTimeline] = defaultdict(BookTimeline)
+        self.books: dict[str, BookTimeline] = {}
         self.book_atual: dict[str, OrderBook] = {}
-        self.snapshots: list[dict[str, Any]] = []
+        self.snapshots: list[dict[str, Any]] = []   # compactado: ver _on_discovery
+        self.n_snapshots = 0
+        self.ticks_vistos: Counter[str] = Counter()
+        self.janelas_por_slug: dict[str, dict[str, Any]] = {}
         self.resolucoes: dict[str, int] = {}   # asset_id → ts_ns da resolução
         self.resolvido_up: dict[str, bool] = {}
         self.gaps: list[dict[str, Any]] = []
+        self.janelas_de_interesse: dict[str, tuple[int, int]] = {}  # token → (ini, fim)
+        self._ultimo_tick: dict[str, float] = {}
 
+    # --------------------------------------------------------------- passadas
     def build(self) -> None:
+        self._primeira_passada()
+        self._marcar_tokens_de_interesse()
+        self._segunda_passada()
+
+    def _primeira_passada(self) -> None:
+        """Metadados, preço-verdade e resoluções. Ignora o book por completo."""
         for record in self.reader.iter_records():
             if record.fonte == "gap" and isinstance(record.payload, dict):
                 self.gaps.append(record.payload)
             elif record.fonte == "discovery_snapshot" and isinstance(record.payload, dict):
-                self.snapshots.append(record.payload)
+                self._on_discovery(record.payload)
             elif record.fonte == "rtds":
                 self._on_rtds(record)
-            elif record.fonte == "poly_ws":
-                self._on_poly(record)
+            elif record.fonte in ("poly_ws", FONTE_RESOLUCAO_SINTETICA):
+                self._on_poly_meta(record)
+
+    def _segunda_passada(self) -> None:
+        """Reconstrói os books dos tokens de interesse, dentro da janela deles."""
+        if not self.janelas_de_interesse:
+            return
+        for record in self.reader.iter_records():
+            if record.fonte == "poly_ws":
+                self._on_poly_book(record)
+
+    # ------------------------------------------------------------- passada 1
+    def _on_discovery(self, payload: dict[str, Any]) -> None:
+        """Guarda a última visão de cada slug + só as MUDANÇAS de tick.
+
+        A descoberta roda a cada 30s com ~100 janelas: 72h de gravação dariam
+        ~900 mil dicts de janela retidos à toa. A medição de tick (M2.E.1) só
+        olha transições, então guardar repetição idêntica não acrescenta nada
+        — mas a DISTRIBUIÇÃO de tick conta observações, e essa vai à parte,
+        no `ticks_vistos`, para não ser falseada pela compactação.
+        """
+        self.n_snapshots += 1
+        janelas = payload.get("janelas")
+        if not isinstance(janelas, list):
+            return
+        mudaram: list[dict[str, Any]] = []
+        for janela in janelas:
+            if not isinstance(janela, dict):
+                continue
+            slug = janela.get("slug")
+            if not isinstance(slug, str):
+                continue
+            self.janelas_por_slug[slug] = janela
+            tick = janela.get("tick_size")
+            if not isinstance(tick, (int, float)) or isinstance(tick, bool):
+                continue
+            self.ticks_vistos[f"{float(tick):g}"] += 1
+            if self._ultimo_tick.get(slug) != float(tick):
+                self._ultimo_tick[slug] = float(tick)
+                mudaram.append(janela)
+        if mudaram:
+            self.snapshots.append({"janelas": mudaram})
 
     def _on_rtds(self, record: ReplayRecord) -> None:
         tick = parse_rtds_event(record.payload, record.ts_mono_ns, record.ts_wall_ns)
@@ -107,53 +200,102 @@ class RecordingIndex:
         if tick is not None and tick.topic == TOPIC_TWAP_60:
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
 
-    def _on_poly(self, record: ReplayRecord) -> None:
-        # O WS de mercado do CLOB entrega tanto um evento solto quanto um LOTE
-        # em array. Tratar só o dict descartaria os lotes em silêncio — e é
-        # justamente em rajada de atividade que eles aparecem.
-        payload = record.payload
-        if isinstance(payload, list):
-            eventos: list[Any] = payload
-        elif isinstance(payload, dict):
-            eventos = [payload]
-        else:
-            return
-        for evento in eventos:
-            if not isinstance(evento, dict):
-                continue
+    def _on_poly_meta(self, record: ReplayRecord) -> None:
+        """Só resoluções. O book desta passada é descartado sem construir."""
+        for evento in _eventos_do_payload(record.payload):
             tipo = evento.get("event_type")
+            if tipo not in RESOLUTION_EVENT_TYPES:
+                continue
             asset_id = evento.get("asset_id")
             if not isinstance(asset_id, str):
                 continue
+            self.resolucoes[asset_id] = record.ts_wall_ns
+            vencedor = evento.get("winning_outcome") or evento.get("outcome")
+            if isinstance(vencedor, str):
+                self.resolvido_up[asset_id] = vencedor.lower() == "up"
+
+    def _marcar_tokens_de_interesse(self) -> None:
+        for slug, meta in self.janelas_por_slug.items():
+            fim_epoch = parse_end_date_epoch({"endDate": meta.get("end_date_iso")})
+            if fim_epoch is None:
+                continue
+            duracao = _duracao_do_slug(slug)
+            inicio_ns = int((fim_epoch - duracao - PRE_ROLO_S) * 1e9)
+            fim_ns = int((fim_epoch + POS_ROLO_S) * 1e9)
+            tokens = meta.get("token_id_by_outcome") or {}
+            for token in (tokens.get("Up"), tokens.get("Down")):
+                if isinstance(token, str):
+                    self.janelas_de_interesse[token] = (inicio_ns, fim_ns)
+
+    # ------------------------------------------------------------- passada 2
+    def _on_poly_book(self, record: ReplayRecord) -> None:
+        # O WS de mercado do CLOB entrega tanto um evento solto quanto um LOTE
+        # em array. Tratar só o dict descartaria os lotes em silêncio — e é
+        # justamente em rajada de atividade que eles aparecem.
+        for evento in _eventos_do_payload(record.payload):
+            tipo = evento.get("event_type")
+            if tipo not in ("book", "price_change"):
+                continue
+            asset_id = evento.get("asset_id")
+            if not isinstance(asset_id, str):
+                continue
+            intervalo = self.janelas_de_interesse.get(asset_id)
+            if intervalo is None or not (intervalo[0] <= record.ts_wall_ns <= intervalo[1]):
+                continue
             if tipo == "book":
                 book = OrderBook.from_event(evento)
-                if book is not None:
-                    self.book_atual[asset_id] = book
-                    self.books[asset_id].append(book, record.ts_wall_ns)
-            elif tipo == "price_change":
-                atual = self.book_atual.get(asset_id)
-                if atual is not None:
-                    novo = atual.clone()
-                    novo.apply_price_change(evento)
-                    self.book_atual[asset_id] = novo
-                    self.books[asset_id].append(novo, record.ts_wall_ns)
-            elif tipo in ("market_resolved", "resolution"):
-                self.resolucoes[asset_id] = record.ts_wall_ns
-                vencedor = evento.get("winning_outcome") or evento.get("outcome")
-                if isinstance(vencedor, str):
-                    self.resolvido_up[asset_id] = vencedor.lower() == "up"
+                if book is None:
+                    continue
+                self.book_atual[asset_id] = book
+            else:
+                book = self.book_atual.get(asset_id)
+                if book is None:
+                    continue
+                # Mutação no lugar: o clone por evento existia só para
+                # alimentar a timeline, e a timeline agora faz a própria
+                # cópia (truncada) quando de fato retém o snapshot.
+                book.apply_price_change(evento)
+            self._timeline(asset_id).append(book, record.ts_wall_ns)
 
-    # ------------------------------------------------------------- janelas
+    def _timeline(self, asset_id: str) -> BookTimeline:
+        timeline = self.books.get(asset_id)
+        if timeline is None:
+            timeline = BookTimeline(
+                limite=self.limite_por_token, niveis=self.niveis_retidos
+            )
+            self.books[asset_id] = timeline
+        return timeline
+
+    # ---------------------------------------------------------------- memória
+    def uso_de_memoria(self) -> dict[str, Any]:
+        """O que foi retido e o que foi descartado — o relatório precisa dizer."""
+        retidos = sum(len(t.ts) for t in self.books.values())
+        descartados = sum(t.descartados for t in self.books.values())
+        raleados = [t for t in self.books.values() if t.raleamentos]
+        resolucoes_ms = sorted(
+            t.resolucao_ns / 1e6 for t in self.books.values() if t.resolucao_ns
+        )
+        return {
+            "tokens_de_interesse": len(self.janelas_de_interesse),
+            "tokens_com_book": len(self.books),
+            "snapshots_retidos": retidos,
+            "snapshots_descartados": descartados,
+            "limite_por_token": self.limite_por_token,
+            "niveis_retidos_por_lado": self.niveis_retidos,
+            "tokens_raleados": len(raleados),
+            "pior_resolucao_ms": round(resolucoes_ms[-1], 1) if resolucoes_ms else 0.0,
+            "nota": (
+                "Books truncados aos N níveis do topo e raleados ao estourar o "
+                "limite por token. `pior_resolucao_ms` acima de 150 significa que "
+                "o cenário de latência mais baixo já não é distinguível."
+            ),
+        }
+
+    # ------------------------------------------------------------------ janelas
     def janelas(self) -> list[WindowState]:
         """Última visão de cada janela nos snapshots, virando WindowState."""
-        por_slug: dict[str, dict[str, Any]] = {}
-        for snapshot in self.snapshots:
-            for janela in snapshot.get("janelas") or []:
-                if isinstance(janela, dict) and isinstance(janela.get("slug"), str):
-                    por_slug[janela["slug"]] = janela
-
         saida: list[WindowState] = []
-        for slug, meta in por_slug.items():
+        for slug, meta in self.janelas_por_slug.items():
             tokens = meta.get("token_id_by_outcome") or {}
             token_up, token_down = tokens.get("Up"), tokens.get("Down")
             if not isinstance(token_up, str) or not isinstance(token_down, str):
@@ -185,6 +327,15 @@ class RecordingIndex:
         return saida
 
 
+def _eventos_do_payload(payload: Any) -> list[dict[str, Any]]:
+    """O CLOB manda ora um evento solto, ora um lote em array."""
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [e for e in payload if isinstance(e, dict)]
+    return []
+
+
 def _duracao_do_slug(slug: str) -> int:
     if "-up-or-down-" in slug:
         return 3600
@@ -200,6 +351,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--latencia-ms", type=float, default=300.0)
     parser.add_argument("--json", help="grava o relatório completo neste arquivo")
+    parser.add_argument(
+        "--limite-snapshots",
+        type=int,
+        default=LIMITE_SNAPSHOTS_PADRAO,
+        help="teto de snapshots de book por token (memória; ver BookTimeline)",
+    )
+    parser.add_argument(
+        "--niveis-book",
+        type=int,
+        default=NIVEIS_RETIDOS_PADRAO,
+        help="níveis do topo retidos por lado em cada snapshot",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -210,10 +373,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     reader = RecordingReader(caminho)
-    index = RecordingIndex(reader)
+    index = RecordingIndex(
+        reader,
+        limite_por_token=max(2, args.limite_snapshots),
+        niveis_retidos=max(1, args.niveis_book),
+    )
     index.build()
 
-    if not index.snapshots:
+    if not index.n_snapshots:
         print(
             "nenhum snapshot de descoberta na gravação — sem metadados de janela\n"
             "não há backtest possível. Rode o recorder primeiro:\n"
@@ -259,10 +426,11 @@ def main(argv: list[str] | None = None) -> int:
         "gravacao": {
             "arquivos": len(reader.files),
             "linhas_corrompidas": reader.corrompidas,
-            "snapshots_de_descoberta": len(index.snapshots),
+            "snapshots_de_descoberta": index.n_snapshots,
             "janelas_conhecidas": len(janelas),
             "janelas_com_resolucao": len(resolvidas),
             "gaps": index.gaps,
+            "memoria": index.uso_de_memoria(),
         },
         "ancora": {**validacao, "usada_no_backtest": escolhida.value},
         "backtest": report.to_dict(),
@@ -275,7 +443,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         ),
         "medicoes": {
-            "tick": medir_mudanca_de_tick(index.snapshots),
+            "tick": medir_mudanca_de_tick(
+                index.snapshots, distribuicao_de_tick=dict(index.ticks_vistos)
+            ),
             "atraso_liquidacao": medir_atraso_liquidacao(
                 [
                     {

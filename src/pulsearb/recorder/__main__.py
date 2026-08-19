@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import re
 import time
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -42,14 +43,19 @@ import orjson
 
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.binance_ws import BinanceWsFeed
-from pulsearb.feeds.poly_ws import PolyMarketWsFeed
+from pulsearb.feeds.poly_ws import RESOLUTION_EVENT_TYPES, PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
-from pulsearb.markets.discovery import DiscoveredMarket, MarketDiscovery
+from pulsearb.markets.discovery import (
+    DiscoveredMarket,
+    MarketDiscovery,
+    parse_end_date_epoch,
+)
 from pulsearb.obs import get_logger, setup_logging
 from pulsearb.recorder.gaps import GapTracker, resumo_gaps
 from pulsearb.recorder.writer import (
     FONTE_DISCOVERY,
     FONTE_GAP,
+    FONTE_RESOLUCAO_SINTETICA,
     JsonlGzipWriter,
     RecordEnvelope,
 )
@@ -63,6 +69,17 @@ DISCOVERY_INTERVAL_SECONDS = 30.0
 # Polling do watchdog de lacunas. Precisa ser bem menor que o menor limiar.
 GAP_POLL_SECONDS = 1.0
 
+# CARÊNCIA DE RESOLUÇÃO — a correção do bug que zerou o primeiro backtest.
+# A janela sai da descoberta no endDate, mas o evento de resolução só é
+# publicado DEPOIS (o M0 estimava ~2min; no jogo horário, com UMA no caminho,
+# pode ser bem mais). Desassinar no endDate desligava a escuta antes do
+# resultado existir: 104 janelas conhecidas, ZERO resoluções capturadas.
+RESOLUTION_GRACE_SECONDS = 600.0
+# Fallback: consultar a Gamma para janelas encerradas cuja resolução não
+# chegou pelo WS. Independente do caminho do WS de propósito — se um falhar,
+# o outro cobre.
+RESOLUTION_POLL_SECONDS = 120.0
+
 _DURATION_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
 _DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 3600.0}
 
@@ -75,12 +92,22 @@ def parse_duration(text: str) -> float:
     return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
 
 
-def market_snapshot(market: DiscoveredMarket) -> dict[str, Any]:
+def market_snapshot(
+    market: DiscoveredMarket, *, agora_epoch: float | None = None
+) -> dict[str, Any]:
     """Metadados da janela para o snapshot da descoberta.
 
     `tick_size` entra de propósito: é ESTADO, não constante (API_NOTES 13.3),
     e a série destes snapshots é o dado bruto da medição M2.E.1.
+
+    `_seconds_left` é o tempo restante NO MOMENTO da observação. Sem ele a
+    medição do tick não sabe em que fase da janela o afinamento aconteceu — e
+    era exatamente o que faltava: o campo era lido pela análise mas nunca
+    escrito aqui, então todo `seconds_left` saía NaN.
     """
+    if agora_epoch is None:
+        agora_epoch = time.time()
+    fim = parse_end_date_epoch({"endDate": market.end_date_iso})
     return {
         "slug": market.slug,
         "condition_id": market.condition_id,
@@ -97,6 +124,8 @@ def market_snapshot(market: DiscoveredMarket) -> dict[str, Any]:
         "end_date_iso": market.end_date_iso,
         "operable": market.operable,
         "gate_failures": market.gate_failures,
+        "_seconds_left": (fim - agora_epoch) if fim is not None else None,
+        "_observado_em_epoch": agora_epoch,
         "rewards_min_size": market.raw_gamma.get("rewardsMinSize"),
         "rewards_max_spread": market.raw_gamma.get("rewardsMaxSpread"),
         "uma_reward": market.raw_gamma.get("umaReward"),
@@ -158,9 +187,41 @@ class Recorder:
         }
         self.discovery_cycles = 0
         self.subscribed_ever: set[str] = set()
+        # token -> instante (epoch) em que pode ser desassinado. É o endDate
+        # da janela MAIS a carência de resolução.
+        self.desassinar_apos: dict[str, float] = {}
+        # token -> metadados mínimos para o fallback e o relatório
+        self.janela_por_token: dict[str, dict[str, Any]] = {}
+        # Resoluções já capturadas (por qualquer caminho), para não repolar.
+        self.resolvidos: set[str] = set()
+        # O que chega do CLOB, por event_type. Torna visível o que está sendo
+        # recebido E o que está sendo ignorado por tipo desconhecido — sem
+        # isto, "0 resoluções" não distingue "não chegou" de "chegou e foi
+        # descartado".
+        self.eventos_poly: Counter[str] = Counter()
 
     # ------------------------------------------------------------- hot path
+    def _contar_evento_poly(self, event: FeedEvent) -> None:
+        """Conta os tipos que chegam do CLOB, inclusive os desconhecidos."""
+        payload = event.parsed
+        if payload is None:
+            self.eventos_poly["__nao_json__"] += 1
+            return
+        itens = payload if isinstance(payload, list) else [payload]
+        for item in itens:
+            if not isinstance(item, dict):
+                self.eventos_poly["__nao_dict__"] += 1
+                continue
+            tipo = str(item.get("event_type") or "__sem_event_type__")
+            self.eventos_poly[tipo] += 1
+            if tipo in RESOLUTION_EVENT_TYPES:
+                asset_id = item.get("asset_id")
+                if isinstance(asset_id, str):
+                    self.resolvidos.add(asset_id)
+
     def _on_event(self, event: FeedEvent) -> None:
+        if event.source == "poly_ws":
+            self._contar_evento_poly(event)
         self.writer.submit(
             RecordEnvelope(
                 ts_mono_ns=event.ts_mono_ns,
@@ -194,17 +255,47 @@ class Recorder:
         markets = await discovery.discover()
         self.discovery_cycles += 1
 
+        agora = time.time()
+
         # Tokens que DEVEM estar assinados agora. Janela não-operável continua
         # sendo gravada: o motivo da recusa é dado, e o M2 quer medir isso.
         desejados = {
             token for market in markets for token in market.token_id_by_outcome.values()
         }
+        # Registra a carência de cada token visto nesta descoberta.
+        for market in markets:
+            fim = parse_end_date_epoch({"endDate": market.end_date_iso})
+            limite = (fim + RESOLUTION_GRACE_SECONDS) if fim is not None else (
+                agora + RESOLUTION_GRACE_SECONDS
+            )
+            for token in market.token_id_by_outcome.values():
+                self.desassinar_apos[token] = limite
+                self.janela_por_token[token] = {
+                    "slug": market.slug,
+                    "condition_id": market.condition_id,
+                    "end_date_iso": market.end_date_iso,
+                    "outcome": next(
+                        (o for o, t in market.token_id_by_outcome.items() if t == token),
+                        None,
+                    ),
+                }
+
         atuais = set(self.poly.token_ids)
         novos = sorted(desejados - atuais)
-        # Rotação: o que sumiu da descoberta é janela encerrada. Desassinar
-        # mantém o número de assinaturas estável ao longo de 72h — sem isso, a
-        # conexão acumularia uma janela de 5m nova a cada 5 minutos.
-        encerrados = sorted(atuais - desejados)
+
+        # Rotação COM CARÊNCIA: o token só sai depois que a janela encerrou
+        # E a carência de resolução passou. Desassinar no endDate — como era
+        # antes — desligava a escuta antes de o resultado ser publicado, e foi
+        # por isso que o primeiro backtest real viu 104 janelas e 0 resoluções.
+        candidatos = atuais - desejados
+        encerrados = sorted(
+            token
+            for token in candidatos
+            if agora >= self.desassinar_apos.get(token, 0.0)
+            or token in self.resolvidos
+        )
+        for token in encerrados:
+            self.desassinar_apos.pop(token, None)
 
         if novos:
             await self.poly.subscribe(novos)
@@ -221,7 +312,9 @@ class Recorder:
                     "novas": len(novos),
                     "encerradas": len(encerrados),
                     "ativas": len(self.poly.token_ids),
+                    "em_carencia": len(candidatos) - len(encerrados),
                 },
+                "eventos_poly_por_tipo": dict(self.eventos_poly),
             },
         )
         log.info(
@@ -232,12 +325,97 @@ class Recorder:
             novas=len(novos),
             encerradas=len(encerrados),
             assinadas=len(self.poly.token_ids),
+            em_carencia=len(candidatos) - len(encerrados),
+            resolucoes=len(self.resolvidos),
             msgs_rtds=self.rtds.message_count,
             msgs_binance=self.binance.message_count,
             msgs_poly=self.poly.message_count,
             gravadas=self.writer.written,
             descartadas=self.writer.dropped,
         )
+
+    # --------------------------------------------------- fallback de resolução
+    async def _resolution_poll_loop(
+        self, http_get_json: Any, deadline: float
+    ) -> None:
+        """Confere na Gamma o resultado de janelas encerradas.
+
+        Caminho INDEPENDENTE do WS de propósito: se o evento de resolução não
+        chegar (perdido numa reconexão, tipo novo não reconhecido, carência
+        curta demais), este laço ainda captura o resultado. Uma resolução
+        perdida invalida a janela inteira para o backtest — vale ter dois
+        caminhos.
+
+        O que sai daqui é gravado como evento SINTÉTICO, com fonte própria e
+        `_sintetico: true`. Nunca se disfarça de evento do fio.
+        """
+        while time.monotonic() < deadline:
+            await asyncio.sleep(RESOLUTION_POLL_SECONDS)
+            agora = time.time()
+            pendentes = [
+                (token, meta)
+                for token, meta in self.janela_por_token.items()
+                if token not in self.resolvidos
+                and (fim := parse_end_date_epoch({"endDate": meta.get("end_date_iso")}))
+                is not None
+                and agora > fim + 60.0
+            ]
+            # Só os mais antigos por ciclo, para não martelar a Gamma.
+            for token, meta in pendentes[:20]:
+                try:
+                    await self._consultar_resolucao(http_get_json, token, meta)
+                except Exception as exc:
+                    log.warning(
+                        "falha ao consultar resolução",
+                        slug=meta.get("slug"),
+                        erro=f"{type(exc).__name__}: {exc}",
+                    )
+
+    async def _consultar_resolucao(
+        self, http_get_json: Any, token: str, meta: dict[str, Any]
+    ) -> None:
+        slug = meta.get("slug")
+        if not slug:
+            return
+        gamma = await http_get_json(
+            f"{self.settings.endpoints.gamma}/markets/slug/{slug}", None
+        )
+        if not isinstance(gamma, dict):
+            return
+
+        # A Gamma marca o vencedor pelos outcomePrices (1/0 depois de resolver).
+        precos = gamma.get("outcomePrices")
+        if isinstance(precos, str):
+            with contextlib.suppress(orjson.JSONDecodeError):
+                precos = orjson.loads(precos)
+        vencedor: str | None = None
+        if isinstance(precos, list) and len(precos) == 2:
+            with contextlib.suppress(TypeError, ValueError):
+                up, down = float(precos[0]), float(precos[1])
+                if up >= 0.99 and down <= 0.01:
+                    vencedor = "Up"
+                elif down >= 0.99 and up <= 0.01:
+                    vencedor = "Down"
+        if vencedor is None:
+            return  # ainda não resolveu; tenta no próximo ciclo
+
+        self.resolvidos.add(token)
+        self._write_meta(
+            FONTE_RESOLUCAO_SINTETICA,
+            {
+                "_sintetico": True,
+                "event_type": "market_resolved",
+                "asset_id": token,
+                "market": meta.get("condition_id"),
+                "slug": slug,
+                "winning_outcome": vencedor,
+                "outcome_prices": precos,
+                "uma_resolution_status": gamma.get("umaResolutionStatus"),
+                "closed": gamma.get("closed"),
+                "observado_em_epoch": time.time(),
+            },
+        )
+        log.info("resolução capturada via Gamma", slug=slug, vencedor=vencedor)
 
     # ----------------------------------------------------------------- gaps
     async def _gap_loop(self, deadline: float) -> None:
@@ -287,6 +465,9 @@ class Recorder:
             tasks = [
                 asyncio.create_task(self._discovery_loop(discovery, deadline)),
                 asyncio.create_task(self._gap_loop(deadline)),
+                asyncio.create_task(
+                    self._resolution_poll_loop(http_get_json, deadline)
+                ),
             ]
             try:
                 await asyncio.gather(*tasks)
@@ -318,6 +499,16 @@ class Recorder:
             },
             "gravadas": self.writer.written,
             "descartadas": self.writer.dropped,
+            "eventos_poly_por_tipo": dict(self.eventos_poly),
+            "resolucoes_capturadas": len(self.resolvidos),
+            "janelas_vistas": len(self.janela_por_token),
+            "quedas_por_feed": {
+                nome: {
+                    "total": feed.close_count,
+                    "ultimas": feed.close_reasons[-10:],
+                }
+                for nome, feed in self._feed_by_name.items()
+            },
             "gaps": resumo_gaps(self.trackers, duracao),
         }
         self._write_meta("recorder_relatorio", relatorio)

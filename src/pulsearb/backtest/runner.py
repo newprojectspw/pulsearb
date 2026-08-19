@@ -31,6 +31,23 @@ LATENCIAS_MS_PADRAO = (150.0, 300.0, 600.0, 1000.0)
 LATENCIA_PADRAO_MS = 300.0
 THRESHOLDS_PADRAO = (0.01, 0.02, 0.03, 0.05, 0.08, 0.12)
 
+# Teto de memória do backtest — ver BookTimeline.
+#
+# O custo foi MEDIDO, não estimado: com 5 níveis por lado, cada snapshot
+# retido custa ~1,3 KB (as tuplas de nível dominam, ~270 B cada). O orçamento
+# é `tokens_vivos × LIMITE × 1,3 KB`; com os ~150 tokens simultâneos que a
+# gravação real mostrou, 1.500 dão ~300 MB — cabe na VPS de 1 GB, que é onde
+# o backtest morreu com `Killed` da primeira vez.
+#
+# 1.500 snapshots dão ~5/s numa janela de 5m: resolução de 200ms, suficiente
+# para separar os cenários de latência de 300ms, 600ms e 1s. O de 150ms fica
+# no limite, e é por isso que `pior_resolucao_ms` vai no relatório.
+LIMITE_SNAPSHOTS_PADRAO = 1_500
+# 5 níveis cobrem o que o backtest lê: o fill de 5 shares (o mínimo do
+# mercado) raramente sai do topo, e `depth_usdc(ticks=3)` alcança no máximo 4
+# níveis. Subir isto custa ~270 B por nível por snapshot.
+NIVEIS_RETIDOS_PADRAO = 5
+
 
 @dataclass(slots=True)
 class BookTimeline:
@@ -38,14 +55,75 @@ class BookTimeline:
 
     A penalidade de latência precisa perguntar "como estava o book 300ms
     depois do sinal?" — então os snapshots ficam indexados por timestamp.
+
+    MEMÓRIA É O PROBLEMA CENTRAL DESTA CLASSE. A versão anterior guardava um
+    clone completo do book a cada `price_change`. Medido na gravação real:
+    ~3.300 eventos/s, ~12 milhões de eventos por hora de gravação. Doze
+    milhões de `OrderBook` com duas listas de níveis não cabem em 1 GB — o
+    backtest morria com `Killed` (OOM) num único arquivo de 450 MB.
+
+    Três defesas, nesta ordem:
+
+    1. **Truncagem** (`niveis`): guarda só os N níveis do topo de cada lado.
+       O backtest compra `min_order_size` = 5 shares e mede profundidade a 3
+       ticks; nível 11 para baixo nunca é lido. Truncar é perda REAL de
+       informação e por isso é explícita e configurável — não é "otimização".
+    2. **Deduplicação**: se o topo não mudou, não há snapshot novo para
+       guardar. `at()` devolveria o anterior, que é idêntico. Esta defesa é
+       LOSSLESS dado (1), e é a que mais economiza: a maioria dos
+       `price_change` mexe em níveis fundos.
+    3. **Raleamento adaptativo** (`limite`): teto duro de snapshots por token.
+       Ao estourar, descarta um a cada dois e passa a exigir um intervalo
+       mínimo entre snapshots. A resolução temporal cai pela metade a cada
+       raleamento, e `resolucao_ns` reporta a resolução efetiva — quem lê o
+       relatório precisa saber se a penalidade de 150ms ainda é distinguível.
     """
 
     ts: list[int] = field(default_factory=list)
     books: list[OrderBook] = field(default_factory=list)
+    limite: int = LIMITE_SNAPSHOTS_PADRAO
+    niveis: int = NIVEIS_RETIDOS_PADRAO
+    intervalo_min_ns: int = 0
+    descartados: int = 0
+    raleamentos: int = 0
 
     def append(self, book: OrderBook, ts_ns: int) -> None:
+        bids = book.bids[: self.niveis]
+        asks = book.asks[: self.niveis]
+        if self.ts:
+            if ts_ns - self.ts[-1] < self.intervalo_min_ns:
+                self.descartados += 1
+                return
+            anterior = self.books[-1]
+            if anterior.bids == bids and anterior.asks == asks:
+                self.descartados += 1
+                return
         self.ts.append(ts_ns)
-        self.books.append(book)
+        self.books.append(
+            OrderBook(asset_id=book.asset_id, bids=bids, asks=asks, ts_ns=book.ts_ns)
+        )
+        if len(self.ts) > self.limite:
+            self._ralear()
+
+    def _ralear(self) -> None:
+        """Descarta um snapshot a cada dois e sobe o intervalo mínimo.
+
+        O intervalo novo é `span // limite` — metade do espaçamento médio
+        resultante — para a série voltar a preencher o orçamento em vez de
+        ralear de novo no evento seguinte.
+        """
+        self.descartados += len(self.ts) - len(self.ts[::2])
+        self.ts = self.ts[::2]
+        self.books = self.books[::2]
+        self.raleamentos += 1
+        span = self.ts[-1] - self.ts[0] if len(self.ts) > 1 else 0
+        if span > 0:
+            self.intervalo_min_ns = max(self.intervalo_min_ns * 2, span // self.limite)
+
+    @property
+    def resolucao_ns(self) -> int:
+        """Intervalo mínimo efetivo entre snapshots retidos (0 = sem perda)."""
+        return self.intervalo_min_ns
 
     def at(self, ts_ns: int) -> OrderBook | None:
         """Último snapshot com ts ≤ ts_ns. None se não havia book ainda."""

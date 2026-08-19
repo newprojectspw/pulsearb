@@ -103,3 +103,83 @@ async def test_cria_diretorio_inexistente(tmp_path):
     await writer.stop()
     assert destino.exists()
     assert len(_read_all(destino)) == 1
+
+
+# ---------------------------------------------------------------- M2.1 BUG 4
+# 3 de 26 arquivos da primeira gravação real nasceram inválidos (`gzip -t`
+# recusava: "format violated"), sempre nas horas em que houve reinício. Causa:
+# o arquivo da hora era reaberto em append, e anexar um membro gzip novo
+# depois de um membro TRUNCADO invalida o arquivo inteiro.
+
+
+def _gzip_valido(path) -> bool:
+    """O equivalente em Python ao `gzip -t`: lê até o fim, CRC e trailer."""
+    try:
+        with gzip.open(path, "rb") as handle:
+            while handle.read(1 << 16):
+                pass
+    except (OSError, EOFError):
+        return False
+    return True
+
+
+async def test_todo_arquivo_rotacionado_passa_no_gzip_t(tmp_path):
+    """Regressão: cada arquivo fechado por rotação tem trailer e CRC válidos."""
+    fake_now = [1786891500.0]
+    writer = JsonlGzipWriter(
+        output_dir=tmp_path, rotate_seconds=3600, clock=lambda: fake_now[0]
+    )
+    await writer.start()
+    for hora in range(5):
+        for i in range(300):
+            writer.submit(RecordEnvelope(i, i, "rtds", b'{"hora":%d}' % hora))
+        await asyncio.sleep(0.05)
+        fake_now[0] += 3600
+    await writer.stop()
+
+    arquivos = sorted(tmp_path.glob("*.jsonl.gz"))
+    assert len(arquivos) == 5
+    invalidos = [p.name for p in arquivos if not _gzip_valido(p)]
+    assert invalidos == []
+    assert len(_read_all(tmp_path)) == 1500
+
+
+async def test_arquivo_truncado_nao_e_reaberto_em_append(tmp_path):
+    """Reinício na mesma hora: abre arquivo NOVO, não anexa ao quebrado.
+
+    Simula o que o systemd fazia — subir de novo dentro da mesma hora de
+    rotação, com o arquivo anterior truncado por ter morrido no meio de uma
+    escrita. O dano tem que ficar contido no arquivo velho.
+    """
+    fake_now = [1786891500.0]
+    writer = JsonlGzipWriter(
+        output_dir=tmp_path, rotate_seconds=3600, clock=lambda: fake_now[0]
+    )
+    await writer.start()
+    writer.submit(RecordEnvelope(1, 1, "rtds", b'{"antes":1}'))
+    await asyncio.sleep(0.05)
+    await writer.stop()
+
+    # morte súbita: o arquivo fica com a cauda cortada
+    caminho = sorted(tmp_path.glob("*.jsonl.gz"))[0]
+    bruto = caminho.read_bytes()
+    caminho.write_bytes(bruto[: len(bruto) - 4])
+    assert not _gzip_valido(caminho)
+
+    # reinício DENTRO da mesma hora
+    writer2 = JsonlGzipWriter(
+        output_dir=tmp_path, rotate_seconds=3600, clock=lambda: fake_now[0]
+    )
+    await writer2.start()
+    writer2.submit(RecordEnvelope(2, 2, "rtds", b'{"depois":1}'))
+    await asyncio.sleep(0.05)
+    await writer2.stop()
+
+    arquivos = sorted(tmp_path.glob("*.jsonl.gz"))
+    assert len(arquivos) == 2, "o reinício tem que abrir um arquivo novo"
+    novos = [p for p in arquivos if p != caminho]
+    assert len(novos) == 1
+    novo = novos[0]
+    assert _gzip_valido(novo), "o arquivo novo não pode herdar o dano do velho"
+    with gzip.open(novo, "rb") as handle:
+        assert json.loads(handle.readline())["payload"] == {"depois": 1}

@@ -110,7 +110,13 @@ class OrderBook:
             restantes = [(p, s) for p, s in niveis if p != preco]
             if tamanho > 0:
                 restantes.append((preco, tamanho))
-            restantes.sort(key=lambda item: item[0], reverse=(lado == "BUY"))
+            # `sort()` sem `key`: comparação de tupla, feita em C. Com
+            # `key=lambda item: item[0]` era uma chamada Python por comparação
+            # — ~200 por evento, 12 milhões de eventos por hora de gravação, e
+            # respondia pela maior parte do tempo do backtest. O resultado é o
+            # mesmo: preços são únicos na lista (o duplicado acaba de ser
+            # removido), então o segundo elemento nunca chega a desempatar.
+            restantes.sort(reverse=(lado == "BUY"))
             if lado == "BUY":
                 self.bids = restantes
             else:
@@ -178,7 +184,7 @@ def _levels(raw: Any, *, reverse: bool) -> list[tuple[float, float]]:
         tamanho = _as_float(item.get("size"))
         if preco is not None and tamanho is not None and tamanho > 0:
             saida.append((preco, tamanho))
-    saida.sort(key=lambda item: item[0], reverse=reverse)
+    saida.sort(reverse=reverse)  # tupla ordena por preço primeiro; ver apply_price_change
     return saida
 
 

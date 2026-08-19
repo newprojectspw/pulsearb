@@ -9,6 +9,7 @@ de gravação de produção (docs/VEREDITO_M2.md).
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from tests.synthetic import gerar_gravacao
@@ -136,17 +137,41 @@ def test_cli_completo(gravacao, tmp_path, capsys):
         assert medicao in relatorio["medicoes"]
 
 
-def test_indexador_aceita_lote_em_array(tmp_path):
-    """O CLOB entrega tanto evento solto quanto LOTE em array.
+def _gravacao_de_books(tmp_path, tokens, fim_epoch, declarados=None):
+    """Gravação mínima: um snapshot de descoberta + books dos tokens dele.
 
-    Tratar só o dict descartaria os lotes em silêncio — e é justamente em
-    rajada de atividade que eles aparecem, ou seja, quando mais importam.
+    O snapshot é obrigatório: desde o M2.1 o indexador só retém o book de
+    tokens que pertencem a alguma janela conhecida, dentro do intervalo dela.
+    Sem essa restrição a memória crescia com a gravação inteira (BUG 5).
     """
     import gzip
 
     import orjson
 
-    from pulsearb.replay.reader import RecordingReader
+    linhas = [
+        {
+            "ts_mono_ns": 1,
+            "ts_wall_ns": int((fim_epoch - 60) * 1e9),
+            "fonte": "discovery_snapshot",
+            "payload": {
+                "janelas": [
+                    {
+                        "slug": f"btc-up-or-down-5m-{i}",
+                        "asset": "BTC",
+                        "resolution": "twap_sixty",
+                        "end_date_iso": (
+                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fim_epoch))
+                        ),
+                        "tick_size": 0.01,
+                        "token_id_by_outcome": {"Up": token, "Down": f"{token}-down"},
+                    }
+                    for i, token in enumerate(
+                        tokens if declarados is None else declarados
+                    )
+                ]
+            },
+        }
+    ]
 
     def book(asset_id: str, ask: str) -> dict:
         return {
@@ -157,22 +182,62 @@ def test_indexador_aceita_lote_em_array(tmp_path):
             "asks": [{"price": ask, "size": "100"}],
         }
 
+    itens = list(tokens.items())
+    lote = [book(t, a) for t, a in itens[:-1]]
+    solto = book(*itens[-1])
+    for ordem, payload in enumerate(([lote, solto] if lote else [solto]), start=2):
+        linhas.append(
+            {
+                "ts_mono_ns": ordem,
+                "ts_wall_ns": int((fim_epoch - 30) * 1e9),
+                "fonte": "poly_ws",
+                "payload": payload,
+            }
+        )
+
     caminho = tmp_path / "rec.jsonl.gz"
     with gzip.open(caminho, "wb") as handle:
-        # um lote em array e um evento solto
-        for payload in ([book("tokA", "0.60"), book("tokB", "0.70")], book("tokC", "0.80")):
-            handle.write(
-                orjson.dumps(
-                    {"ts_mono_ns": 1, "ts_wall_ns": 1, "fonte": "poly_ws", "payload": payload}
-                )
-                + b"\n"
-            )
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+    return caminho
 
+
+def test_indexador_aceita_lote_em_array(tmp_path):
+    """O CLOB entrega tanto evento solto quanto LOTE em array.
+
+    Tratar só o dict descartaria os lotes em silêncio — e é justamente em
+    rajada de atividade que eles aparecem, ou seja, quando mais importam.
+    """
+    from pulsearb.replay.reader import RecordingReader
+
+    caminho = _gravacao_de_books(
+        tmp_path, {"tokA": "0.60", "tokB": "0.70", "tokC": "0.80"}, 1786891560
+    )
     index = RecordingIndex(RecordingReader(caminho))
     index.build()
     assert set(index.book_atual) == {"tokA", "tokB", "tokC"}
     assert index.book_atual["tokA"].best_ask == 0.60
     assert index.book_atual["tokB"].best_ask == 0.70
+
+
+def test_indexador_ignora_token_fora_de_qualquer_janela(tmp_path):
+    """BUG 5: reter o book de token desconhecido é o que estourava a memória.
+
+    Numa gravação de 72h a versão antiga guardava a linha do tempo de TODO
+    token que passasse pelo fio, inclusive de janelas fechadas horas antes e
+    que nunca seriam avaliadas.
+    """
+    from pulsearb.replay.reader import RecordingReader
+
+    caminho = _gravacao_de_books(
+        tmp_path, {"tokA": "0.60", "intruso": "0.99"}, 1786891560, declarados=["tokA"]
+    )
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    # "intruso" chega no fio mas não pertence a janela nenhuma.
+    assert "intruso" not in index.book_atual
+    assert "intruso" not in index.books
+    assert "tokA" in index.books
 
 
 def test_clone_do_book_e_independente():
@@ -273,3 +338,71 @@ def test_medicao_de_atraso_de_liquidacao(indexado):
     assert medicao["por_jogo"]["twap"]["p50"] == pytest.approx(90.0)
     # Sem janelas horárias na gravação sintética, a comparação é honesta:
     assert "insuficiente" in medicao["comparacao"]
+
+
+def test_indexador_aceita_resolucao_sintetica_da_gamma(tmp_path):
+    """BUG 1: a resolução também chega pelo fallback de polling da Gamma.
+
+    O recorder grava esse caminho com fonte própria e `_sintetico: true` — ele
+    nunca se disfarça de evento do fio. O backtest precisa aceitá-lo mesmo
+    assim: uma janela sem resolução é uma janela perdida, e foi por 104 delas
+    que o primeiro backtest real não produziu trade nenhum.
+    """
+    import gzip
+
+    import orjson
+
+    from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
+    from pulsearb.replay.reader import RecordingReader
+
+    fim = 1786891560
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        handle.write(
+            orjson.dumps(
+                {
+                    "ts_mono_ns": 1,
+                    "ts_wall_ns": int((fim - 60) * 1e9),
+                    "fonte": "discovery_snapshot",
+                    "payload": {
+                        "janelas": [
+                            {
+                                "slug": "btc-up-or-down-5m-x",
+                                "asset": "BTC",
+                                "resolution": "twap_sixty",
+                                "end_date_iso": time.strftime(
+                                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(fim)
+                                ),
+                                "tick_size": 0.01,
+                                "token_id_by_outcome": {"Up": "up1", "Down": "dn1"},
+                            }
+                        ]
+                    },
+                }
+            )
+            + b"\n"
+        )
+        handle.write(
+            orjson.dumps(
+                {
+                    "ts_mono_ns": 2,
+                    "ts_wall_ns": int((fim + 120) * 1e9),
+                    "fonte": FONTE_RESOLUCAO_SINTETICA,
+                    "payload": {
+                        "_sintetico": True,
+                        "event_type": "market_resolved",
+                        "asset_id": "up1",
+                        "winning_outcome": "Up",
+                    },
+                }
+            )
+            + b"\n"
+        )
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    assert index.resolvido_up["up1"] is True
+    assert index.resolucoes["up1"] == int((fim + 120) * 1e9)
+    janelas = index.janelas()
+    assert len(janelas) == 1
+    assert janelas[0].resolveu_up is True

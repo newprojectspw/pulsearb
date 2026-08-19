@@ -91,7 +91,13 @@ python -m pulsearb.recorder --duration 72h
 ```
 
 Na VPS, sob systemd: [`docs/RUNBOOK_VPS.md`](docs/RUNBOOK_VPS.md).
-**~5 MB/h comprimido** — 10 GB de disco cobrem meses.
+
+**~470 MB/h comprimido — medido em produção, ~100x a estimativa original.**
+72h ≈ 34 GB; cada 1 GB livre compra ~2h de gravação. Peça **80 GB** de disco,
+ou 50 GB com descarga periódica das horas já baixadas. O volume vem do book do
+CLOB: uma única janela ativa gera mais de 300 eventos `price_change` por
+segundo. Dimensionamento, descarga e volume extra na
+[§6 do runbook](docs/RUNBOOK_VPS.md).
 
 Grava em `data/recordings/pulsearb-YYYYmmdd-HHMM.jsonl.gz` (rotação horária,
 coberto pelo `.gitignore`). Cada linha:

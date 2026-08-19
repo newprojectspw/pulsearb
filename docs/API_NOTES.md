@@ -881,16 +881,62 @@ Novos defaults, por tipo de feed e configuráveis (`config.yaml`):
 | spot | **3,0s** | ~2,5x o p99 medido |
 | book do CLOB | **30,0s** | silêncio é normal em janela sem negociação; serve só para detectar conexão morta |
 
-### 13.3. Tick é ESTADO, não constante `[MEDIDO ao vivo — PENDENTE explicar]`
+### 13.3. Tick é ESTADO, não constante `[MEDIDO ao vivo]`
 
 Janelas de 5m próximas do fim apareceram com **tick 0,001** enquanto as demais
-estavam em **0,01**. **Hipótese:** o tick afina quando o preço encosta nos
-extremos (perto de 0 ou de 1), onde 0,01 seria grosso demais para expressar a
-probabilidade.
+estavam em **0,01**.
 
-Consequência imediata de projeto: **`tick_size` precisa ser relido a cada
-ciclo de descoberta**, nunca cacheado para a vida da janela. O recorder grava
-`tick_size` em cada snapshot justamente para permitir medir isso (M2.E.1).
+Consequência imediata de projeto, e esta se mantém: **`tick_size` precisa ser
+relido a cada ciclo de descoberta**, nunca cacheado para a vida da janela. O
+recorder grava `tick_size` em cada snapshot justamente para permitir medir
+isso (M2.E.1).
+
+#### 13.3a. Hipótese dos extremos — **REFUTADA** `[MEDIDO 2026-08-18]`
+
+> **Hipótese registrada em 2026-08-16 (agora refutada):** *"o tick afina
+> quando o preço encosta nos extremos (perto de 0 ou de 1), onde 0,01 seria
+> grosso demais para expressar a probabilidade."*
+
+A primeira medição sobre gravação real (1h, M2.E.1) mediu **15 afinamentos de
+0,01 para 0,001** e disse o contrário:
+
+| Medida | Valor |
+|---|---|
+| Afinamentos observados | 15 |
+| Preço no afinamento (p50) | **0,48** |
+| Afinamentos com preço fora de [0,10; 0,90] | **1 de 15** |
+
+Se a hipótese dos extremos valesse, a maioria dos afinamentos teria preço
+extremo. Aconteceu o oposto: o preço mediano no afinamento é praticamente
+0,50, e apenas um caso em quinze estava perto das pontas.
+
+**Leitura nova, que substitui a antiga:** o tick afina em mercado
+**equilibrado** — onde a disputa está apertada e 0,01 é grosso demais para
+separar dois lados quase empatados. Nos extremos, 0,01 já basta: a diferença
+entre 0,97 e 0,98 não move ninguém; a diferença entre 0,497 e 0,498 move.
+
+Consequências para o modelo:
+
+- a granularidade fina aparece **justamente onde o edge é mais difícil** (p ≈
+  0,5, onde a taxa dinâmica também é máxima — 1,75% do notional, §5). Tick
+  fino ali não é presente, é sinal de que o mercado está caro de atravessar.
+- a suposição inversa levaria a procurar oportunidade nos extremos por causa
+  do tick, o que seria buscar edge no lugar errado.
+
+**Ressalvas honestas**, para que ninguém trate isto como fato fechado:
+
+1. n = 15, numa **única hora** de gravação. É o suficiente para derrubar a
+   hipótese antiga (que previa o contrário do observado), não para consagrar a
+   nova como lei.
+2. Nesta mesma medição o campo `seconds_left` saía **NaN** (BUG 3 do M2.1), de
+   modo que a hipótese concorrente — *o gatilho é o tempo restante, não o
+   preço* — **não foi testada**. A correção do M2.1 passou a gravar
+   `_seconds_left` em cada snapshot de descoberta, e o relatório do backtest
+   agora traz `medicoes.tick.relacao_com_tempo_restante`. **A próxima gravação
+   decide entre "preço equilibrado" e "tempo restante".**
+3. `medicoes.tick.hipotese_extremos` continua reportando a comparação, não a
+   conclusão: se uma gravação maior sustentar os extremos, o texto avisa que o
+   resultado contraria esta medição em vez de escondê-lo.
 
 ### 13.4. Regime do modelo TWAP
 
@@ -939,6 +985,30 @@ por extenso por ativo, então cobre os dois sem mudança.
 
 **76 janelas descobertas, 76 operáveis**, com classificação correta nos dois
 jogos. Os gates do M1/M1.1 não produziram falso negativo em produção.
+
+### 13.7. RTDS e Binance exigem keepalive de PROTOCOLO `[VERIFICADO em produção]`
+
+Na primeira gravação real o RTDS caiu e reconectou em ciclos de **30 a 306
+segundos**, a hora inteira. Não havia erro no log além do "conexão caiu", e o
+`systemctl status` mostrava `active (running)`.
+
+Causa: a base dos feeds passava `ping_interval=None` para a `websockets`,
+desligando o ping/pong do protocolo. A justificativa escrita no código era
+"heartbeat é responsabilidade da subclasse" — o que vale para o **CLOB**, que
+tem PING/PONG de aplicação (§6.1), e **não vale para RTDS nem Binance**, que
+ficavam sem keepalive nenhum e eram derrubados por inatividade em qualquer
+intermediário do caminho.
+
+O caso é o irmão do 13.4b, e com a mesma pegadinha: `scripts/smoke_feeds.py`
+segurava 60s tranquilo contra o mesmo endpoint porque usa os **defaults da
+lib** (ping a cada 20s). A diferença não estava no endpoint nem na rede —
+estava em dois caminhos de código que pareciam equivalentes.
+
+Regra: **o keepalive de protocolo fica LIGADO por padrão** (20s/20s na base);
+quem tem heartbeat de aplicação desliga explicitamente, e só esse. Além disso
+o motivo de cada queda passou a ser registrado (`close_code`, `close_reason`,
+`close_origem`) e o relatório do recorder traz `quedas_por_feed` — "caiu" sem
+código é indistinguível de "caiu por bug nosso".
 
 ---
 

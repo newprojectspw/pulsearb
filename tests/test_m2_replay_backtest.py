@@ -389,3 +389,96 @@ def test_contadores_resetam_entre_passadas(tmp_path):
     segunda = sum(1 for _ in reader.iter_records())
     assert primeira == segunda == 200
     assert reader.total == total_primeira  # não acumulou
+
+
+# ---------------------------------------------------------------- M2.1 BUG 5
+# A memória do backtest. Um único arquivo de ~450 MB matava o processo com
+# `Killed` numa máquina de 1 GB, porque a linha do tempo do book guardava um
+# clone completo a cada `price_change` — ~12 milhões por hora de gravação.
+
+
+def _book(ask: float, size: float = 100.0, ts_ns: int = 0):
+    from pulsearb.backtest.book import OrderBook
+
+    return OrderBook(
+        asset_id="t",
+        bids=[(round(ask - 0.01, 4), size)],
+        asks=[(ask, size)],
+        ts_ns=ts_ns,
+    )
+
+
+def test_timeline_nao_guarda_snapshot_de_topo_repetido():
+    """Deduplicação: se o topo não mudou, `at()` devolveria o mesmo objeto.
+
+    É a defesa que mais economiza, e é LOSSLESS: a maioria dos `price_change`
+    mexe em nível fundo, que a truncagem já descarta.
+    """
+    from pulsearb.backtest.runner import BookTimeline
+
+    timeline = BookTimeline()
+    for ts in range(1_000):
+        timeline.append(_book(0.60), ts)
+
+    assert len(timeline.ts) == 1
+    assert timeline.descartados == 999
+    # E o que sobrou responde igual em qualquer instante.
+    assert timeline.at(999).best_ask == 0.60
+
+
+def test_timeline_trunca_aos_niveis_do_topo():
+    """Truncagem é perda REAL de informação — por isso explícita e testada."""
+    from pulsearb.backtest.book import OrderBook
+    from pulsearb.backtest.runner import BookTimeline
+
+    fundo = OrderBook(
+        asset_id="t",
+        bids=[(0.5 - i * 0.01, 10.0) for i in range(40)],
+        asks=[(0.6 + i * 0.01, 10.0) for i in range(40)],
+    )
+    timeline = BookTimeline(niveis=3)
+    timeline.append(fundo, 1)
+
+    guardado = timeline.at(1)
+    assert len(guardado.asks) == 3
+    assert len(guardado.bids) == 3
+    assert guardado.best_ask == 0.6  # o topo, que é o que o backtest lê
+
+
+def test_timeline_respeita_o_teto_por_token():
+    """Teto duro: memória previsível antes de rodar, não descoberta no OOM."""
+    from pulsearb.backtest.runner import BookTimeline
+
+    timeline = BookTimeline(limite=100)
+    for ts in range(50_000):
+        # topo sempre diferente: a deduplicação não ajuda aqui de propósito
+        timeline.append(_book(round(0.10 + (ts % 800) * 0.001, 4)), ts * 1_000_000)
+
+    assert len(timeline.ts) <= 100
+    assert timeline.raleamentos > 0
+    # A cobertura temporal sobrevive ao raleamento: começo e fim continuam lá.
+    assert timeline.at(0) is not None
+    assert timeline.at(49_999 * 1_000_000) is not None
+    # E a resolução efetiva fica reportada, não escondida.
+    assert timeline.resolucao_ns > 0
+
+
+def test_timeline_isola_o_snapshot_da_mutacao_posterior():
+    """O indexador agora muta o book NO LUGAR; a timeline faz a própria cópia.
+
+    Se a timeline guardasse a referência, um `price_change` posterior
+    reescreveria o passado e o backtest preencheria com um livro que nunca
+    existiu naquele instante.
+    """
+    from pulsearb.backtest.runner import BookTimeline
+
+    timeline = BookTimeline()
+    corrente = _book(0.60)
+    timeline.append(corrente, 1)
+    corrente.apply_price_change(
+        {"timestamp": "2", "changes": [{"price": "0.60", "size": "0", "side": "SELL"}]}
+    )
+    timeline.append(corrente, 2)
+
+    assert timeline.at(1).best_ask == 0.60
+    assert timeline.at(2).best_ask is None
