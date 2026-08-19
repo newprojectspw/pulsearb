@@ -19,7 +19,7 @@ Qualquer VPS pequena serve. O recorder é I/O de rede e escrita sequencial:
 |---|---|---|
 | vCPU | 1 | o processo passa a vida esperando socket |
 | RAM | 1 GB | fila assíncrona + buffers de WS |
-| Disco | 10 GB | ~5 MB/h comprimido (ver §6); 72h ≈ 0,35 GB |
+| Disco | **50 GB** | ~400 MB/h comprimido (ver §6); 72h ≈ 29 GB |
 | Região | Londres | ver ressalva acima |
 
 Ubuntu 24.04 LTS. Ao criar, adicione sua chave SSH.
@@ -163,26 +163,38 @@ docker run -d --restart=always --name pulsearb-recorder \
   -v /opt/pulsearb/data:/data pulsearb-recorder --duration 72h
 ```
 
-## 6. Uso de disco
+## 6. Uso de disco — MEDIDO em produção
 
-Estimativa a partir das cadências **medidas** (API_NOTES 13.1) e de 76 janelas
-ativas (13.6), com 7 ativos de preço:
+| | Estimativa original | **Real (medido 2026-08-18)** |
+|---|---|---|
+| Comprimido | ~5 MB/h | **~400 MB/h** |
+| Por dia | ~0,12 GB | **~9,5 GB** |
+| **72h** | ~0,35 GB | **~29 GB** |
+| Semana | ~0,82 GB | ~67 GB |
 
-| | Valor |
-|---|---|
-| Eventos/hora | ~72.000 |
-| Cru | ~27 MB/h |
-| **Comprimido (gzip -1)** | **~5 MB/h** |
-| Por dia | ~0,12 GB |
-| **72h** | **~0,35 GB** |
-| Semana | ~0,82 GB |
+**A estimativa original estava errada por ~80x.** Ela modelava ~30 snapshots
+de book por token por hora; na prática o livro do CLOB atualiza a cada poucos
+segundos em 150+ tokens simultâneos, e são esses eventos que dominam o volume.
 
-Ou seja: **10 GB de disco cobrem meses.** A razão de compressão medida é ~5,7x.
+Consequência prática, e é séria: com disco de 10 GB — o que este runbook
+recomendava — a gravação **morre por disco cheio em ~25 horas**, no meio das
+72h, sem completar. Use **50 GB**.
 
-Se quiser conferir na prática depois de uma hora rodando:
+Confira na primeira hora, não no fim:
 
 ```bash
+df -h /opt/pulsearb/data
 du -sh /opt/pulsearb/data/recordings
+```
+
+Regra de bolso: **cada 1 GB livre compra ~2h30 de gravação.**
+
+Se o disco apertar no meio de uma gravação longa, baixe e apague as horas já
+transferidas conforme avança, em vez de esperar o fim:
+
+```bash
+# na máquina de análise, depois de confirmar a integridade do que baixou
+ssh root@SEU_IP 'rm /opt/pulsearb/data/recordings/pulsearb-20260818-0*.jsonl.gz'
 ```
 
 ## 7. Coletar as gravações
@@ -195,10 +207,33 @@ Da máquina de análise:
 ```
 
 O script verifica a integridade de cada gzip e imprime a contagem de linhas.
+
+Sem o repositório clonado na máquina de análise, o `rsync` direto faz o mesmo
+(as aspas são necessárias: sem elas o zsh tenta expandir o `*` localmente):
+
+```bash
+rsync -avz --partial --progress \
+  'root@SEU_IP:/opt/pulsearb/data/recordings/pulsearb-20260818-*.jsonl.gz' \
+  ~/pulsearb-dados/
+```
+
+Use **rsync, não scp**: com arquivos de ~400 MB num link doméstico a
+transferência cai, e o `scp` recomeça do zero enquanto o `rsync --partial`
+retoma de onde parou.
+
 Depois:
 
 ```bash
 python -m pulsearb.backtest data/recordings --json relatorio.json
+```
+
+**Comece por UM arquivo**, não pelo diretório inteiro. O leitor de gravação é
+streaming e usa memória limitada (~60 MB), mas o indexador do backtest ainda
+acumula a linha do tempo do book de cada token em memória — com muitas horas
+isso pode estourar, e ainda não foi medido em escala real:
+
+```bash
+python -m pulsearb.backtest ~/pulsearb-dados/pulsearb-20260818-1000.jsonl.gz
 ```
 
 ## 8. Parar
