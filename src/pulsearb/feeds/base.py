@@ -45,6 +45,9 @@ class ReconnectingFeed:
       - `_handle_message(event)`: processa uma mensagem (já com FeedEvent)
     """
 
+    #: Quantos motivos de queda guardar. `close_count` conta todas.
+    MAX_CLOSE_REASONS = 200
+
     def __init__(
         self,
         *,
@@ -54,6 +57,8 @@ class ReconnectingFeed:
         stale_after_seconds: float = 2.0,
         reconnect_initial_seconds: float = 0.5,
         reconnect_max_seconds: float = 30.0,
+        ws_ping_interval: float | None = 20.0,
+        ws_ping_timeout: float | None = 20.0,
         on_event: OnEvent | None = None,
     ) -> None:
         self.name = name
@@ -62,6 +67,8 @@ class ReconnectingFeed:
         self.stale_after_seconds = stale_after_seconds
         self.reconnect_initial_seconds = reconnect_initial_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
+        self.ws_ping_interval = ws_ping_interval
+        self.ws_ping_timeout = ws_ping_timeout
         self.on_event = on_event
         self.log = get_logger(f"pulsearb.feeds.{name}")
 
@@ -72,6 +79,12 @@ class ReconnectingFeed:
         self._connected = False
         self.reconnect_count = 0
         self.message_count = 0
+        # Motivo de cada queda: sem isto, "conexão caiu" é um beco sem saída
+        # na investigação. Limitado às últimas MAX_CLOSE_REASONS — numa
+        # gravação de 72h uma lista sem teto seria um vazamento lento, e o
+        # padrão de queda aparece nas últimas dezenas tanto quanto em todas.
+        self.close_reasons: list[dict[str, Any]] = []
+        self.close_count = 0
 
     # ------------------------------------------------------------------ estado
     @property
@@ -118,7 +131,15 @@ class ReconnectingFeed:
                     additional_headers={"User-Agent": self.user_agent},
                     max_queue=4096,
                     open_timeout=10,
-                    ping_interval=None,  # heartbeat é responsabilidade da subclasse
+                    # KEEPALIVE — a causa da instabilidade do RTDS em produção.
+                    # Estava fixo em None ("heartbeat é responsabilidade da
+                    # subclasse"), o que vale para o CLOB (que tem PING/PONG de
+                    # aplicação) mas deixava RTDS e Binance SEM keepalive
+                    # nenhum. O smoke_feeds.py sustentava a conexão porque usa
+                    # os defaults da lib (ping a cada 20s) — era essa a
+                    # diferença entre os dois caminhos de código.
+                    ping_interval=self.ws_ping_interval,
+                    ping_timeout=self.ws_ping_timeout,
                 ) as ws:
                     self._ws = ws
                     self._connected = True
@@ -129,8 +150,11 @@ class ReconnectingFeed:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                motivo = self._registrar_queda(exc)
                 self.log.warning(
-                    "conexão caiu", erro=f"{type(exc).__name__}: {exc}", backoff_s=round(backoff, 2)
+                    "conexão caiu",
+                    backoff_s=round(backoff, 2),
+                    **motivo,
                 )
             finally:
                 self._connected = False
@@ -141,6 +165,33 @@ class ReconnectingFeed:
             # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
             await asyncio.sleep(backoff * (0.5 + random.random()))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
+
+    def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
+        """Extrai código e razão do close — o dado que faltava para diagnosticar.
+
+        Um `ConnectionClosed` do websockets carrega o frame de close com o
+        código do RFC 6455 (1000 normal, 1006 anormal, 1011 erro do servidor,
+        1013 try again later...). Sem registrar isso, toda queda vira a mesma
+        linha de log e a investigação não tem por onde começar.
+        """
+        codigo: int | None = None
+        razao: str | None = None
+        recebido = getattr(exc, "rcvd", None)
+        enviado = getattr(exc, "sent", None)
+        frame = recebido if recebido is not None else enviado
+        if frame is not None:
+            codigo = getattr(frame, "code", None)
+            razao = getattr(frame, "reason", None)
+        motivo = {
+            "erro": f"{type(exc).__name__}: {exc}",
+            "close_code": codigo,
+            "close_reason": razao,
+            "close_origem": "servidor" if recebido is not None else "cliente",
+        }
+        self.close_count += 1
+        self.close_reasons.append(motivo)
+        del self.close_reasons[: -self.MAX_CLOSE_REASONS]
+        return motivo
 
     async def _receive_loop(self, ws: websockets.ClientConnection) -> None:
         async for message in ws:

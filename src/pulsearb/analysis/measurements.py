@@ -23,6 +23,15 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook
 
+# Faixas que DEFINEM a hipótese do tick (API_NOTES 13.3a). Ficam nomeadas
+# porque não são números de conveniência: mudar qualquer uma muda o que
+# "extremo" e "equilibrado" significam, e portanto o que a medição afirma
+# sobre a hipótese refutada. O texto do veredito cita as mesmas faixas.
+PRECO_EXTREMO_BAIXO = 0.10
+PRECO_EXTREMO_ALTO = 0.90
+PRECO_EQUILIBRADO_BAIXO = 0.35
+PRECO_EQUILIBRADO_ALTO = 0.65
+
 
 def _percentil(valores: list[float], pct: float) -> float | None:
     if not valores:
@@ -47,11 +56,21 @@ def _dist(valores: list[float]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- M2.E.1
-def medir_mudanca_de_tick(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+def medir_mudanca_de_tick(
+    snapshots: list[dict[str, Any]],
+    *,
+    distribuicao_de_tick: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """O tick afina no fim da janela? Em que condição?
 
     `snapshots`: lista de registros `discovery_snapshot` já decodificados.
     Cada janela vira uma série temporal de (tempo_restante, tick, preço).
+
+    `distribuicao_de_tick`: contagem de observações por tick, quando quem
+    chama já a acumulou. O indexador do backtest compacta os snapshots
+    (guarda só as transições, para não reter 900 mil dicts numa gravação de
+    72h) e nesse caso a contagem tirada da série seria a de TRANSIÇÕES, não a
+    de observações. Passar a contagem verdadeira evita esse falseamento.
     """
     series: dict[str, list[tuple[float, float, float | None]]] = defaultdict(list)
     for snapshot in snapshots:
@@ -98,26 +117,91 @@ def medir_mudanca_de_tick(snapshots: list[dict[str, Any]]) -> dict[str, Any]:
     afinou = [m for m in mudancas if m["para"] < m["de"]]
     tempos = [m["seconds_left"] for m in afinou if not math.isnan(m["seconds_left"])]
     precos = [m["preco_no_momento"] for m in afinou if m["preco_no_momento"] is not None]
-    extremos = [p for p in precos if p < 0.10 or p > 0.90]
+    extremos = [
+        p for p in precos if p < PRECO_EXTREMO_BAIXO or p > PRECO_EXTREMO_ALTO
+    ]
+    equilibrados = [
+        p
+        for p in precos
+        if PRECO_EQUILIBRADO_BAIXO <= p <= PRECO_EQUILIBRADO_ALTO
+    ]
 
     return {
         "janelas_observadas": len(series),
-        "distribuicao_de_tick": dict(sorted(ticks_vistos.items())),
+        "distribuicao_de_tick": (
+            dict(sorted(distribuicao_de_tick.items()))
+            if distribuicao_de_tick is not None
+            else dict(sorted(ticks_vistos.items()))
+        ),
         "mudancas_detectadas": len(mudancas),
         "afinamentos": len(afinou),
         "seconds_left_no_afinamento": _dist(tempos),
         "preco_no_afinamento": _dist(precos),
         "afinamentos_com_preco_extremo": len(extremos),
-        "hipotese_extremos": (
-            "sem dado" if not precos
-            else f"{len(extremos)}/{len(precos)} afinamentos ocorreram com preço "
-                 f"fora de [0.10, 0.90] — "
-                 + ("compatível com a hipótese dos extremos (API_NOTES 13.3)"
-                    if len(extremos) > len(precos) / 2
-                    else "NÃO sustenta a hipótese dos extremos; investigar tempo restante")
-        ),
+        "afinamentos_com_preco_equilibrado": len(equilibrados),
+        "hipotese_extremos": _veredito_extremos(precos, extremos, equilibrados),
+        "relacao_com_tempo_restante": _veredito_tempo(tempos, len(afinou)),
         "exemplos": mudancas[:20],
     }
+
+
+def _veredito_extremos(
+    precos: list[float], extremos: list[float], equilibrados: list[float]
+) -> str:
+    """A hipótese dos extremos (API_NOTES 13.3a) foi REFUTADA pela medição.
+
+    A hipótese registrada dizia que o tick afina para 0,001 quando o preço vai
+    para os extremos, onde 0,01 é grosso demais para expressar a diferença. A
+    primeira medição real deu o contrário: 15 afinamentos, p50 de preço 0,48,
+    e apenas 1 dos 15 fora de [0.10, 0.90]. O tick afina em mercado
+    EQUILIBRADO, onde a disputa está apertada — não nos extremos.
+
+    Esta função continua reportando a comparação em vez de só afirmar a
+    conclusão: a refutação vale para o dado medido, e uma gravação maior tem
+    de poder derrubá-la também.
+    """
+    if not precos:
+        return "sem dado"
+    fora = (
+        f"{len(extremos)}/{len(precos)} afinamentos com preço fora de "
+        f"[{PRECO_EXTREMO_BAIXO:.2f}, {PRECO_EXTREMO_ALTO:.2f}]"
+    )
+    dentro = (
+        f"{len(equilibrados)}/{len(precos)} com preço em "
+        f"[{PRECO_EQUILIBRADO_BAIXO:.2f}, {PRECO_EQUILIBRADO_ALTO:.2f}]"
+    )
+    if len(extremos) > len(precos) / 2:
+        return (
+            f"{fora}; {dentro} — este dado SUSTENTA a hipótese dos extremos, o "
+            "que CONTRARIA a medição de 2026-08-18 que a refutou (API_NOTES "
+            "13.3a). Reabrir a questão antes de usar qualquer uma das duas."
+        )
+    return (
+        f"{fora}; {dentro} — REFUTA a hipótese dos extremos, confirmando a "
+        "medição de 2026-08-18 (API_NOTES 13.3a): o tick afina em mercado "
+        "equilibrado, onde a disputa está apertada."
+    )
+
+
+def _veredito_tempo(tempos: list[float], afinamentos: int) -> str:
+    """Se não é o preço que explica o afinamento, é o tempo restante?
+
+    Só respondível depois da correção do `_seconds_left` (BUG 3 do M2.1): na
+    primeira medição este campo saía NaN em todos os exemplos e a pergunta
+    ficou sem resposta.
+    """
+    if not tempos:
+        return (
+            "sem dado — nenhum afinamento com `seconds_left` conhecido "
+            f"({afinamentos} afinamentos observados)"
+        )
+    d = _dist(tempos)
+    return (
+        f"{len(tempos)}/{afinamentos} afinamentos datados: p50 a {d['p50']}s do "
+        f"fim, p90 a {d['p90']}s. Concentração perto do fim indica que o "
+        "gatilho é o tempo, não o preço; espalhamento indica que nenhum dos "
+        "dois explica sozinho."
+    )
 
 
 # ---------------------------------------------------------------- M2.E.2

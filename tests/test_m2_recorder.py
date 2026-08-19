@@ -117,10 +117,14 @@ async def test_snapshot_e_gravado_a_cada_ciclo(recorder, tmp_path):
     assert fontes["discovery_snapshot"] == 2
 
     snapshots = [item["payload"] for item in linhas if item["fonte"] == "discovery_snapshot"]
-    assert snapshots[0]["assinaturas"] == {"novas": 4, "encerradas": 0, "ativas": 4}
+    assert snapshots[0]["assinaturas"]["novas"] == 4
+    assert snapshots[0]["assinaturas"]["ativas"] == 4
     assert snapshots[1]["assinaturas"]["encerradas"] == 2
     assert len(snapshots[0]["janelas"]) == 2
     assert snapshots[0]["janelas"][0]["tick_size"] == 0.01
+    # BUG 3: sem este campo a medição do tick não sabe em que fase da janela
+    # o afinamento ocorreu, e todo seconds_left saía NaN.
+    assert snapshots[0]["janelas"][0]["_seconds_left"] is not None
 
 
 async def test_eventos_de_feed_chegam_ao_arquivo(recorder, server, tmp_path):  # noqa: F811
@@ -157,3 +161,129 @@ async def test_eventos_de_feed_chegam_ao_arquivo(recorder, server, tmp_path):  #
     assert rtds[0]["payload"]["topic"] == "crypto_prices_twap_sixty"
     # os dois relógios foram capturados na chegada
     assert rtds[0]["ts_mono_ns"] > 0 and rtds[0]["ts_wall_ns"] > 0
+
+
+
+# ------------------------------------------ carência de resolução (BUG 1)
+def _janela_com_fim(indice: int, fim_epoch: float) -> DiscoveredMarket:
+    from datetime import UTC, datetime
+
+    janela = _janela(indice)
+    janela.end_date_iso = (
+        datetime.fromtimestamp(fim_epoch, tz=UTC).isoformat().replace("+00:00", "Z")
+    )
+    return janela
+
+
+async def test_janela_recem_encerrada_fica_em_carencia(recorder, monkeypatch):
+    """A janela sai da descoberta no endDate, mas a resolução vem DEPOIS.
+
+    Desassinar na hora foi o que produziu 104 janelas e ZERO resoluções no
+    primeiro backtest real.
+    """
+    import time as _time
+
+    from pulsearb.recorder import __main__ as mod
+
+    agora = _time.time()
+    # Janela que acabou de encerrar: dentro da carência.
+    viva = _janela_com_fim(1, agora + 300)
+    recem_encerrada = _janela_com_fim(2, agora - 10)
+    fake = FakeDiscovery([[viva, recem_encerrada], [viva]])
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+        assert set(recorder.poly.token_ids) == {"up1", "dn1", "up2", "dn2"}
+
+        await recorder._discovery_cycle(fake)
+        # A janela 2 sumiu da descoberta, mas a carência ainda protege:
+        # continuamos escutando para capturar a resolução.
+        assert {"up2", "dn2"} <= set(recorder.poly.token_ids)
+        assert recorder.desassinar_apos["up2"] > agora + mod.RESOLUTION_GRACE_SECONDS - 60
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+
+async def test_carencia_vencida_desassina(recorder):
+    """A carência é uma janela de tempo, não uma assinatura eterna."""
+    import time as _time
+
+    from pulsearb.recorder import __main__ as mod
+
+    agora = _time.time()
+    viva = _janela_com_fim(1, agora + 300)
+    # Encerrada há mais tempo que a carência inteira.
+    antiga = _janela_com_fim(2, agora - mod.RESOLUTION_GRACE_SECONDS - 60)
+    fake = FakeDiscovery([[viva, antiga], [viva]])
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+        await recorder._discovery_cycle(fake)
+        assert set(recorder.poly.token_ids) == {"up1", "dn1"}
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+
+async def test_resolucao_capturada_libera_a_assinatura(recorder, server):  # noqa: F811
+    """Chegou a resolução? Não há por que continuar escutando aquele token."""
+    import time as _time
+
+    agora = _time.time()
+    viva = _janela_com_fim(1, agora + 300)
+    encerrada = _janela_com_fim(2, agora - 10)
+    fake = FakeDiscovery([[viva, encerrada], [viva]])
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+        # O evento de resolução chega pelo WS.
+        recorder._contar_evento_poly(
+            _evento_poly({"event_type": "market_resolved", "asset_id": "up2",
+                          "winning_outcome": "Up"})
+        )
+        assert "up2" in recorder.resolvidos
+        await recorder._discovery_cycle(fake)
+        assert "up2" not in recorder.poly.token_ids
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+
+def _evento_poly(payload: dict):
+    from pulsearb.feeds.base import FeedEvent
+
+    return FeedEvent(
+        source="poly_ws", ts_mono_ns=1, ts_wall_ns=1,
+        raw=json.dumps(payload).encode(), parsed=payload,
+    )
+
+
+def test_contagem_por_tipo_inclui_o_desconhecido(recorder):
+    """Sem isto, "0 resoluções" não distingue não-chegou de foi-descartado."""
+    recorder._contar_evento_poly(_evento_poly({"event_type": "book", "asset_id": "a"}))
+    recorder._contar_evento_poly(_evento_poly({"event_type": "price_change", "asset_id": "a"}))
+    recorder._contar_evento_poly(_evento_poly({"event_type": "tipo_novo_da_polymarket"}))
+    recorder._contar_evento_poly(_evento_poly({"sem": "event_type"}))
+    assert recorder.eventos_poly["book"] == 1
+    assert recorder.eventos_poly["price_change"] == 1
+    # o tipo que não conhecemos aparece pelo nome, não some
+    assert recorder.eventos_poly["tipo_novo_da_polymarket"] == 1
+    assert recorder.eventos_poly["__sem_event_type__"] == 1
+
+
+def test_contagem_aceita_lote_em_array(recorder):
+    recorder._contar_evento_poly(
+        _evento_poly([{"event_type": "book", "asset_id": "a"},
+                      {"event_type": "book", "asset_id": "b"}])
+    )
+    assert recorder.eventos_poly["book"] == 2

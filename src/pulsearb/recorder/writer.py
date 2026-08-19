@@ -28,7 +28,12 @@ from pulsearb.obs import get_logger
 # como metadados, não como eventos de feed.
 FONTE_DISCOVERY = "discovery_snapshot"
 FONTE_GAP = "gap"
-FONTES_META = frozenset({FONTE_DISCOVERY, FONTE_GAP, "recorder_relatorio"})
+# Resolução obtida por polling da Gamma, não pelo WS. Fonte própria para que
+# ninguém a confunda com um evento que veio do fio (ver recorder/__main__).
+FONTE_RESOLUCAO_SINTETICA = "resolucao_via_gamma"
+FONTES_META = frozenset(
+    {FONTE_DISCOVERY, FONTE_GAP, "recorder_relatorio", FONTE_RESOLUCAO_SINTETICA}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +71,13 @@ class JsonlGzipWriter:
         prefix: str = "pulsearb",
         rotate_seconds: int = 3600,
         queue_max: int = 65536,
+        flush_a_cada: int = 2000,
         clock: Any = time.time,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.prefix = prefix
         self.rotate_seconds = rotate_seconds
+        self.flush_a_cada = max(1, flush_a_cada)
         self.clock = clock
         self.queue: asyncio.Queue[RecordEnvelope] = asyncio.Queue(maxsize=queue_max)
         self.dropped = 0
@@ -79,6 +86,7 @@ class JsonlGzipWriter:
         self._task: asyncio.Task[None] | None = None
         self._file: IO[bytes] | None = None
         self._file_slot: int = -1
+        self._desde_flush = 0
         self._stopping = False
 
     # ---------------------------------------------------------------- hot path
@@ -119,23 +127,73 @@ class JsonlGzipWriter:
                     break
             await asyncio.sleep(0)  # cede o loop
 
+    def _caminho_livre(self, slot: int) -> Path:
+        """Caminho da hora, com sufixo se o arquivo já existir.
+
+        NUNCA reabrir em modo append. Se o processo morreu no meio de uma
+        escrita (systemd Restart, OOM), o último membro gzip do arquivo ficou
+        truncado; anexar um membro NOVO depois de um truncado produz um
+        arquivo que o `gzip -t` recusa inteiro — "format violated". Foi assim
+        que 3 de 26 arquivos nasceram inválidos em produção, sempre nas horas
+        em que houve reinício.
+
+        Abrindo um arquivo novo (`-002`, `-003`...), o dano fica contido: o
+        arquivo truncado perde só a cauda, e o replay o lê até onde dá.
+        """
+        stamp = time.strftime("%Y%m%d-%H%M", time.gmtime(slot * self.rotate_seconds))
+        base = self.output_dir / f"{self.prefix}-{stamp}.jsonl.gz"
+        if not base.exists():
+            return base
+        for sufixo in range(2, 1000):
+            alternativo = self.output_dir / f"{self.prefix}-{stamp}-{sufixo:03d}.jsonl.gz"
+            if not alternativo.exists():
+                self.log.warning(
+                    "arquivo da hora já existe (reinício?): abrindo um novo",
+                    existente=str(base),
+                    novo=str(alternativo),
+                )
+                return alternativo
+        raise RuntimeError(f"arquivos demais para a hora {stamp}")
+
     def _write(self, envelope: RecordEnvelope) -> None:
         slot = int(self.clock()) // self.rotate_seconds
         if slot != self._file_slot or self._file is None:
             self._close_file()
-            stamp = time.strftime(
-                "%Y%m%d-%H%M", time.gmtime(slot * self.rotate_seconds)
-            )
-            path = self.output_dir / f"{self.prefix}-{stamp}.jsonl.gz"
-            # gzip nível 1: rápido; a taxa de dados dos feeds é baixa o
-            # suficiente para o writer não virar gargalo.
-            self._file = gzip.open(path, "ab", compresslevel=1)
+            path = self._caminho_livre(slot)
+            # "wb", não "ab": ver _caminho_livre.
+            # gzip nível 1: rápido; o writer não pode virar gargalo.
+            self._file = gzip.open(path, "wb", compresslevel=1)
             self._file_slot = slot
+            self._desde_flush = 0
             self.log.info("novo arquivo de gravação", arquivo=str(path))
         self._file.write(envelope.to_line() + b"\n")
         self.written += 1
+        self._desde_flush += 1
+        # Flush periódico: uma morte súbita perde no máximo o último lote, em
+        # vez da última hora. O custo é pequeno porque é a cada N linhas, não
+        # a cada linha.
+        if self._desde_flush >= self.flush_a_cada:
+            self._file.flush()
+            self._desde_flush = 0
 
     def _close_file(self) -> None:
-        if self._file is not None:
-            self._file.close()
+        """Fecha finalizando o membro gzip (trailer + CRC).
+
+        Sem o close explícito o arquivo fica sem trailer e o `gzip -t` recusa.
+        O `finally` garante que o handle some mesmo se o flush falhar por
+        disco cheio — senão a próxima rotação tentaria escrever no mesmo
+        handle quebrado.
+        """
+        if self._file is None:
+            return
+        try:
+            self._file.flush()
+        except OSError as erro:
+            self.log.warning("falha ao dar flush no fechamento", erro=str(erro))
+        finally:
+            try:
+                self._file.close()
+            except OSError as erro:
+                self.log.warning("falha ao fechar o arquivo", erro=str(erro))
             self._file = None
+            self._desde_flush = 0

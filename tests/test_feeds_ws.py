@@ -14,7 +14,7 @@ import pytest
 import websockets
 
 from pulsearb.feeds.poly_ws import PING, PONG, PONG_BYTES, PolyMarketWsFeed
-from pulsearb.feeds.rtds import RtdsFeed
+from pulsearb.feeds.rtds import TOPIC_BINANCE, TOPIC_TWAP_60, RtdsFeed
 
 
 class FakeWsServer:
@@ -153,8 +153,88 @@ async def test_reconecta_apos_queda(server):
     try:
         await _wait_for(lambda: server.connections >= 2, limite_s=5.0)
         assert feed.reconnect_count >= 1
-        # resubscribe aconteceu na reconexão
+        # resubscribe aconteceu na reconexão — e com TODOS os tópicos.
+        # M2.1 BUG 2 item 3: reconectar e voltar assinando menos do que antes
+        # é indistinguível de um feed saudável no log, e some dado em
+        # silêncio.
         await _wait_for(lambda: bool(server.received))
+        assinatura = json.loads(server.received[-1])
+        topicos = {s["topic"] for s in assinatura["subscriptions"]}
+        assert topicos == {TOPIC_BINANCE, TOPIC_TWAP_60}
+    finally:
+        await feed.stop()
+
+
+async def test_queda_registra_codigo_e_origem(server):
+    """BUG 2: "conexão caiu" sem código é um beco sem saída na investigação.
+
+    A primeira gravação real teve reconexão a cada 30–306s a hora inteira, e o
+    log não dizia o motivo de nenhuma. Agora cada queda guarda o código do
+    close, a razão e de que lado ela partiu.
+    """
+    server.drop_next = True
+    feed = RtdsFeed(
+        url=server.url,
+        user_agent="ua",
+        assets=["btc"],
+        reconnect_initial_seconds=0.01,
+        reconnect_max_seconds=0.05,
+    )
+    await feed.start()
+    try:
+        await _wait_for(lambda: bool(feed.close_reasons), limite_s=5.0)
+        motivo = feed.close_reasons[0]
+        assert motivo["close_origem"] == "servidor"
+        assert motivo["close_code"] == 1000
+        assert feed.close_count >= 1
+    finally:
+        await feed.stop()
+
+
+def test_lista_de_quedas_tem_teto():
+    """72h de reconexão não podem virar vazamento lento de memória."""
+    feed = RtdsFeed(url="ws://127.0.0.1:1", user_agent="ua", assets=["btc"])
+    for _ in range(feed.MAX_CLOSE_REASONS * 3):
+        feed._registrar_queda(OSError("boom"))
+    assert len(feed.close_reasons) == feed.MAX_CLOSE_REASONS
+    assert feed.close_count == feed.MAX_CLOSE_REASONS * 3
+
+
+async def test_poly_ws_reassina_todos_os_tokens_na_reconexao(server):
+    """Token assinado dinamicamente sobrevive à queda da conexão.
+
+    O estado da assinatura vive no cliente (`token_ids`), não no servidor:
+    quem reconecta manda o frame inicial com o conjunto INTEIRO. Se dependesse
+    do servidor lembrar, cada queda perderia os tokens acrescentados depois da
+    conexão — que são justamente as janelas novas.
+    """
+    feed = PolyMarketWsFeed(
+        url=server.url,
+        user_agent="ua",
+        token_ids=["tokenA"],
+        reconnect_initial_seconds=0.01,
+        reconnect_max_seconds=0.05,
+    )
+    await feed.start()
+    try:
+        await _wait_for(lambda: bool(server.received))
+        await feed.subscribe(["tokenB"])
+        await _wait_for(lambda: len(server.received) >= 2)
+
+        conexoes = server.connections
+        await server.broadcast("")  # garante socket vivo antes de derrubar
+        for ws in list(server._sockets):
+            await ws.close()
+        await _wait_for(lambda: server.connections > conexoes, limite_s=5.0)
+        await _wait_for(
+            lambda: any(
+                json.loads(m).get("type") == "market"
+                and set(json.loads(m)["assets_ids"]) == {"tokenA", "tokenB"}
+                for m in server.received
+                if m.startswith("{")
+            ),
+            limite_s=5.0,
+        )
     finally:
         await feed.stop()
 

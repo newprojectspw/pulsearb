@@ -26,6 +26,10 @@ PONG = "PONG"
 # O FeedEvent.raw chega sempre em bytes; esta é a forma comparável.
 PONG_BYTES = PONG.encode()
 
+# Tipos que o CLOB usa para anunciar resolução. Conjunto (e não igualdade
+# solta) para que um tipo novo apareça na contagem por tipo em vez de sumir.
+RESOLUTION_EVENT_TYPES = frozenset({"market_resolved", "resolution"})
+
 
 class PolyMarketWsFeed(ReconnectingFeed):
     """Feed do livro CLOB com heartbeat de aplicação e subscribe dinâmico."""
@@ -42,6 +46,10 @@ class PolyMarketWsFeed(ReconnectingFeed):
         on_event: OnEvent | None = None,
         **kwargs: Any,
     ) -> None:
+        # O CLOB tem heartbeat de APLICAÇÃO (PING/PONG texto), então o ping
+        # do protocolo WS é redundante aqui — mas só aqui. RTDS e Binance
+        # ficam com o keepalive da lib, que é o default da base.
+        kwargs.setdefault("ws_ping_interval", None)
         super().__init__(
             name="poly_ws", url=url, user_agent=user_agent, on_event=on_event, **kwargs
         )

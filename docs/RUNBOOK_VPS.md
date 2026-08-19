@@ -19,7 +19,7 @@ Qualquer VPS pequena serve. O recorder é I/O de rede e escrita sequencial:
 |---|---|---|
 | vCPU | 1 | o processo passa a vida esperando socket |
 | RAM | 1 GB | fila assíncrona + buffers de WS |
-| Disco | **50 GB** | ~400 MB/h comprimido (ver §6); 72h ≈ 29 GB |
+| Disco | **80 GB** (mín. 50 GB com descarga periódica) | ~470 MB/h comprimido (ver §6); 72h ≈ 34 GB |
 | Região | Londres | ver ressalva acima |
 
 Ubuntu 24.04 LTS. Ao criar, adicione sua chave SSH.
@@ -167,18 +167,30 @@ docker run -d --restart=always --name pulsearb-recorder \
 
 | | Estimativa original | **Real (medido 2026-08-18)** |
 |---|---|---|
-| Comprimido | ~5 MB/h | **~400 MB/h** |
-| Por dia | ~0,12 GB | **~9,5 GB** |
-| **72h** | ~0,35 GB | **~29 GB** |
-| Semana | ~0,82 GB | ~67 GB |
+| Comprimido | ~5 MB/h | **~470 MB/h** |
+| Por dia | ~0,12 GB | **~11 GB** |
+| **72h** | ~0,35 GB | **~34 GB** |
+| Semana | ~0,82 GB | ~77 GB |
 
-**A estimativa original estava errada por ~80x.** Ela modelava ~30 snapshots
-de book por token por hora; na prática o livro do CLOB atualiza a cada poucos
-segundos em 150+ tokens simultâneos, e são esses eventos que dominam o volume.
+**A estimativa original estava errada por quase 100x.** Ela modelava ~30
+snapshots de book por token por hora. Na prática o livro do CLOB atualiza a
+cada poucos segundos em 150+ tokens simultâneos, e **uma única janela ativa
+gera mais de 300 eventos `price_change` por segundo**. São esses eventos que
+dominam o volume — não os ticks de preço, não os snapshots de descoberta.
 
 Consequência prática, e é séria: com disco de 10 GB — o que este runbook
-recomendava — a gravação **morre por disco cheio em ~25 horas**, no meio das
-72h, sem completar. Use **50 GB**.
+recomendava — a gravação **morre por disco cheio em ~21 horas**, no meio das
+72h, sem completar.
+
+### Quanto disco pedir
+
+| Objetivo | Disco | Precisa de descarga durante a gravação? |
+|---|---|---|
+| 72h sem tocar na máquina | **80 GB** | não |
+| 72h com descarga a cada ~12h | **50 GB** | sim, ver abaixo |
+| 24h de teste | 20 GB | não |
+
+Regra de bolso: **cada 1 GB livre compra ~2h de gravação.**
 
 Confira na primeira hora, não no fim:
 
@@ -187,15 +199,55 @@ df -h /opt/pulsearb/data
 du -sh /opt/pulsearb/data/recordings
 ```
 
-Regra de bolso: **cada 1 GB livre compra ~2h30 de gravação.**
+Se a primeira hora fechada não estiver na casa das centenas de MB, algo está
+errado — provavelmente um feed calado (§5.1).
 
-Se o disco apertar no meio de uma gravação longa, baixe e apague as horas já
-transferidas conforme avança, em vez de esperar o fim:
+### Descarga periódica (disco menor) ou volume extra
+
+Duas saídas quando o disco é o limite. Escolha uma **antes** de começar as
+72h, não no meio.
+
+**a) Descarga periódica.** Baixe e apague as horas já transferidas conforme
+avança, em vez de esperar o fim. Rode isto na máquina de análise a cada ~12h:
 
 ```bash
-# na máquina de análise, depois de confirmar a integridade do que baixou
-ssh root@SEU_IP 'rm /opt/pulsearb/data/recordings/pulsearb-20260818-0*.jsonl.gz'
+# baixa tudo que já fechou, verifica a integridade e só então apaga da VPS
+rsync -avz --partial --progress \
+  'root@SEU_IP:/opt/pulsearb/data/recordings/pulsearb-*.jsonl.gz' ~/pulsearb-dados/
+
+for f in ~/pulsearb-dados/pulsearb-*.jsonl.gz; do gzip -t "$f" || echo "RUIM: $f"; done
+
+# apague só o que baixou íntegro, e NUNCA o arquivo da hora corrente
+ssh root@SEU_IP 'ls -t /opt/pulsearb/data/recordings/*.jsonl.gz | tail -n +2 | xargs rm -f'
 ```
+
+O `tail -n +2` preserva o arquivo mais recente, que é aquele em que o recorder
+está escrevendo neste instante.
+
+**b) Volume extra.** Se preferir não depender de rotina manual, anexe um
+volume e aponte o recorder para ele — o caminho de saída é configurável por
+variável de ambiente, e o override de ambiente vence o `config.yaml`:
+
+```bash
+# na Digital Ocean: Volumes → Create, depois
+sudo mkdir -p /mnt/pulsearb-dados
+sudo mount /dev/disk/by-id/scsi-0DO_Volume_pulsearb /mnt/pulsearb-dados
+sudo chown pulsearb:pulsearb /mnt/pulsearb-dados
+echo '/dev/disk/by-id/scsi-0DO_Volume_pulsearb /mnt/pulsearb-dados ext4 defaults,nofail,discard 0 0' \
+  | sudo tee -a /etc/fstab
+```
+
+E no service (`deploy/pulsearb-recorder.service`), acrescente o override e
+libere o caminho no sandbox — sem as duas linhas o systemd falha com
+`226/NAMESPACE`:
+
+```ini
+Environment=PULSEARB_RECORDER__OUTPUT_DIR=/mnt/pulsearb-dados/recordings
+ReadWritePaths=/mnt/pulsearb-dados
+```
+
+Depois `sudo systemctl daemon-reload && sudo systemctl restart pulsearb-recorder`
+e confirme pela §5.1 que o arquivo está crescendo **no caminho novo**.
 
 ## 7. Coletar as gravações
 
@@ -217,7 +269,7 @@ rsync -avz --partial --progress \
   ~/pulsearb-dados/
 ```
 
-Use **rsync, não scp**: com arquivos de ~400 MB num link doméstico a
+Use **rsync, não scp**: com arquivos de ~470 MB num link doméstico a
 transferência cai, e o `scp` recomeça do zero enquanto o `rsync --partial`
 retoma de onde parou.
 
@@ -227,14 +279,31 @@ Depois:
 python -m pulsearb.backtest data/recordings --json relatorio.json
 ```
 
-**Comece por UM arquivo**, não pelo diretório inteiro. O leitor de gravação é
-streaming e usa memória limitada (~60 MB), mas o indexador do backtest ainda
-acumula a linha do tempo do book de cada token em memória — com muitas horas
-isso pode estourar, e ainda não foi medido em escala real:
+A memória do backtest é **limitada por construção** desde o M2.1: o leitor é
+streaming e o indexador retém no máximo `--limite-snapshots` (1.500) snapshots
+de book por token, só dos tokens que pertencem a alguma janela conhecida e só
+dentro do intervalo da janela. Antes disso, um único arquivo de 450 MB matava
+o processo com `Killed` numa máquina de 1 GB.
 
-```bash
-python -m pulsearb.backtest ~/pulsearb-dados/pulsearb-20260818-1000.jsonl.gz
+O orçamento é calculável antes de rodar:
+
 ```
+memória ≈ tokens_simultâneos × --limite-snapshots × --niveis-book × 270 B
+        ≈ 150 × 1500 × 5 × 270 B ≈ 300 MB
+```
+
+Medido: 2 milhões de eventos `price_change` sobre 40 tokens → **81 MB de
+pico** (50 mil snapshots retidos, 1,95 milhão descartados), contra o `Killed` da versão anterior. O preço é uma segunda passada
+sobre o arquivo (a primeira só lê metadados, e é ela que descobre quais tokens
+importam) e a truncagem dos books aos `--niveis-book` do topo.
+
+O relatório imprime o que foi retido e o que foi descartado em
+`gravacao.memoria`. Olhe dois campos:
+
+| Campo | O que fazer |
+|---|---|
+| `pior_resolucao_ms` > 150 | algum token estourou o teto e foi raleado; o cenário de latência de 150ms já não é distinguível dele. Suba `--limite-snapshots` se houver RAM. |
+| `tokens_com_book` muito menor que `tokens_de_interesse` | a gravação não cobre as janelas que a descoberta conhecia — provavelmente feed do CLOB caindo (§5.1). |
 
 ## 8. Parar
 
@@ -254,5 +323,6 @@ tolera isso e conta quantas foram.
 - [ ] **§5.1 passou**: 0-1 "conexão caiu" em 60s, e os três `msgs_*` > 0
 - [ ] o log tem `descoberta` a cada 30s, com `assinadas` estável
 - [ ] `data/recordings/` tem um `.jsonl.gz` crescendo
-- [ ] `du -sh` bate com a ordem de grandeza da §6
+- [ ] `du -sh` bate com a ordem de grandeza da §6 (~470 MB na primeira hora)
+- [ ] o plano de disco da §6 está decidido: 80 GB, ou 50 GB **com** descarga agendada
 - [ ] `descartadas` está em 0
