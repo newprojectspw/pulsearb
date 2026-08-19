@@ -94,7 +94,7 @@ async def test_lote_sai_ordenado_por_ts_mono(tmp_path):
     await asyncio.sleep(0.05)
     await writer.stop()
 
-    with gzip.open(sorted(tmp_path.glob("*.jsonl.gz"))[0], "rb") as handle:
+    with gzip.open(min(tmp_path.glob("*.jsonl.gz")), "rb") as handle:
         ordem = [json.loads(linha)["ts_mono_ns"] for linha in handle if linha.strip()]
     assert ordem == [10, 20, 30]
 

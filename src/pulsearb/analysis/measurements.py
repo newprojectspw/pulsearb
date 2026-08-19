@@ -487,11 +487,17 @@ def conta_do_maker(
             "- capital_imobilizado"
         ),
         "o_que_falta_para_fechar": [
-            "volume_taker_usdc: exige simular QUAIS das nossas cotações teriam "
-            "sido executadas, o que depende de posição na fila — e a fila não é "
-            "observável no WS agregado (ver limitacao_de_fila).",
-            "custo_de_markout em USDC: sai de markout * shares executadas, que "
-            "depende do mesmo número acima.",
+            # Parênteses explícitos: dentro de uma lista, concatenação
+            # implícita é indistinguível de vírgula esquecida.
+            (
+                "volume_taker_usdc: exige simular QUAIS das nossas cotações "
+                "teriam sido executadas, o que depende de posição na fila — e "
+                "a fila não é observável no WS agregado (ver limitacao_de_fila)."
+            ),
+            (
+                "custo_de_markout em USDC: sai de markout * shares executadas, "
+                "que depende do mesmo número acima."
+            ),
             "capital_imobilizado: dimensionamento de posição é decisão do M3.",
         ],
         "limitacao_de_fila": (

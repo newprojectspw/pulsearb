@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(erro), file=sys.stderr)
         return 3
     print(orjson.dumps(resumo, option=orjson.OPT_INDENT_2).decode())
-    log.info("conversão colunar concluída", **{"linhas": resumo["linhas"]})
+    log.info("conversão colunar concluída", linhas=resumo["linhas"])
     return 0
 
 
