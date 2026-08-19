@@ -131,7 +131,29 @@ nohup python -m pulsearb.recorder --hours 168 > recorder.log 2>&1 &
 ```
 
 Se o disco engasgar, o writer **descarta** o excesso e conta em `descartadas`
-no log — perder tick de gravação é aceitável, travar o feed não é.
+no log — perder tick de preço é aceitável, travar o feed não é. **Delta de
+livro é outra história**: vai por um canal sem perda separado, porque um delta
+perdido corrompe o livro reconstruído dali em diante *em silêncio*. Se esse
+canal transbordar, o recorder registra incidente e força resync do token, e
+`descartadas_book` no log tem que ser 0.
+
+### Integridade — o que impede número bonito e errado
+
+O CLOB manda o topo autoritativo (`best_bid`/`best_ask`) em cada delta. O
+recorder reconstrói o livro ao vivo e **compara**: divergiu, o token é
+marcado, resincronizado, e a janela sai do backtest. O relatório traz o bloco
+`integridade` com taxa de divergência, offset de relógio (p50/p99) e as
+janelas invalidadas.
+
+Duas conexões simultâneas ao RTDS, deduplicadas por (tópico, ativo,
+timestamp), cobrem a falha que apareceu em produção — reconexão em ciclos de
+30 a 306 segundos, com lacuna a cada ciclo. `redundancia_rtds.por_conexao`
+mostra quanto cada uma acrescentou; se uma nunca chega primeiro, desligue no
+`config.yaml`.
+
+Instale `chrony` na VPS antes de gravar ([runbook §4.1](docs/RUNBOOK_VPS.md)):
+o modelo endgame depende de `seconds_left`, e 2s de deriva erram 3% da fração
+de TWAP já travada.
 
 ---
 
@@ -181,6 +203,40 @@ Ele é **pessimista por construção**:
 Sem gravação, o comando falha com mensagem clara em vez de produzir número
 sobre conjunto vazio.
 
+### Rota maker — medida, não implementada
+
+O relatório traz um bloco `rota_maker` que **não envia ordem nenhuma**: é
+simulação sobre gravação.
+
+- **rewards**: reconstrói o score de todos os makers a partir do livro, simula
+  cotações hipotéticas nossas e calcula a fatia do pool que teríamos capturado
+- **markout**: para cada execução observada no topo, quanto o preço andou 1s,
+  5s e 30s depois, com sinal do ponto de vista de quem forneceu a liquidez.
+  Negativo = fomos atropelados. É o custo que o reward precisa superar.
+- **conta_fechada**: `rewards + rebate − markout − taxa(0 p/ maker)`, por
+  duração, ativo e faixa horária, com as horas de amostra de cada célula
+
+Duas ressalvas que estão escritas também dentro do relatório:
+
+1. **A fórmula de reward não foi verificada** contra a documentação oficial —
+   `docs.polymarket.com` responde 403 no proxy deste ambiente. Os parâmetros
+   vêm do dado gravado; o fator de desconto é palpite, e o relatório traz uma
+   varredura mostrando quanto a conclusão depende dele
+   ([API_NOTES §15](docs/API_NOTES.md)).
+2. **A simulação maker é otimista por construção.** O WS entrega níveis
+   agregados, não ordens: a posição na fila é inobservável
+   ([VEREDITO_M2](docs/VEREDITO_M2.md)).
+
+### Formato colunar, para gravações longas
+
+```bash
+pip install -e '.[analise]'
+python -m pulsearb.replay.columnar data/recordings --out data/parquet
+```
+
+Particionado por fonte e por dia. É **derivado**: o JSONL continua sendo a
+fonte, e o parquet pode ser apagado e regerado.
+
 ## Configuração
 
 `config.yaml` — parâmetros. `.env` (copiado de `.env.example`) — modo e, a
@@ -200,7 +256,7 @@ Três decisões que estão no config e têm motivo:
 
 ---
 
-## Duas coisas que o código se recusa a fazer
+## O que o código se recusa a fazer
 
 **Não opera janela cuja fee não consegue ler.** `r` e `e` da curva de fee vêm
 da API por mercado, nunca de constante no código. Sem fee legível — ou com
@@ -210,6 +266,12 @@ divergência entre Gamma e CLOB — a janela é marcada não-operável e logada.
 ainda abertas. O filtro é triplo — `end_date` na query, `acceptingOrders=true`
 concordando nas duas fontes, e `endDate` no futuro checado localmente
 ([API_NOTES 12.12](docs/API_NOTES.md)).
+
+**Não confia no livro que ele mesmo reconstruiu.** Todo delta do CLOB traz o
+topo autoritativo do servidor; o recorder compara com a sua reconstrução a
+cada evento. Divergiu, o token é resincronizado e a janela sai do backtest —
+porque número calculado sobre livro furado é pior que número nenhum: parece
+bom ([API_NOTES 6.1b](docs/API_NOTES.md)).
 
 **Não confia em "o slug resolveu".** A Gamma responde HTTP 200 para slug de
 janela antiga, devolvendo o mercado do ano passado sem sinalizar nada — e o

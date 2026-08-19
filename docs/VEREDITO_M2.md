@@ -2,7 +2,7 @@
 
 **Status: PENDENTE DE DADO. Nenhum veredito pode ser emitido ainda.**
 
-Data: 2026-08-16 · atualizado 2026-08-19 (M2.1)
+Data: 2026-08-16 · atualizado 2026-08-19 (M2.1 e M2.2)
 
 ---
 
@@ -127,6 +127,11 @@ E preencha esta tabela com os números do relatório:
 | Atraso de liquidação por jogo | `medicoes.atraso_liquidacao` | _pendente_ |
 | Profundidade do book | `medicoes.profundidade` | _pendente_ |
 | Memória e retenção do backtest | `gravacao.memoria` | _pendente_ |
+| **Integridade do livro reconstruído** | `integridade.divergencia_topo_book` | _pendente_ |
+| **Offset de relógio** | `integridade.offset_relogio_ms` | _pendente_ |
+| **Rewards simulados** | `rota_maker.rewards` | _pendente_ |
+| **Markout (seleção adversa)** | `medicoes.markout` | _pendente_ |
+| **Conta fechada do maker** | `rota_maker.conta_fechada` | _pendente_ |
 
 ### Regras de decisão, definidas ANTES de ver os números
 
@@ -140,9 +145,37 @@ Definir os critérios agora é o que impede de racionalizar o resultado depois.
 4. Positivo também em **600ms** (se só sobrevive a 150ms, é miragem)
 5. Profundidade a 3 ticks ≥ **US$ 200** no p50 (senão não escala)
 
-**SÓ MAKER VIÁVEL**: taker negativo, mas a medição M2.E.4 mostra rebate +
-rewards superando o risco de seleção adversa. Isso viraria um projeto
-diferente — market making é v2, e o M2 só mede o potencial.
+**SÓ MAKER VIÁVEL** — critérios do M2.2, escritos ANTES de ver os números.
+Exige TODAS:
+
+1. `rota_maker.conta_fechada` positiva com o fator de desconto em **0,3** —
+   o extremo pessimista da varredura. Positivo só em 0,9 é resultado do
+   palpite, não do mercado.
+2. **Markout de 5s ≥ −0,5 centavo por share** no p50 de pelo menos um recorte
+   (duração ou faixa horária). Markout pior que isso come qualquer reward
+   plausível: com pool de ~1.667 USDC/dia rateado, a fatia de quem cota 50
+   shares é da ordem de centavos por hora.
+3. Pelo menos **20 horas de amostra** na célula que sustenta a conclusão —
+   `horas_de_amostra` vem em cada célula justamente para isto.
+4. `integridade.divergencia_topo_book.taxa` **abaixo de 1%** na gravação. A
+   conta do maker é uma soma sobre o livro reconstruído: se o livro é
+   duvidoso, o resultado é decorativo.
+5. A fórmula de reward **confirmada** contra a documentação oficial
+   (API_NOTES §15.2). Enquanto for palpite, o veredito maker é "promissor,
+   não verificado" — nunca "viável".
+
+O critério 5 é o que impede o erro mais fácil de cometer aqui: tratar um
+número bem formatado, saído de uma fórmula que ninguém confirmou, como se
+fosse medição.
+
+**Por que o maker entra no veredito e o M2 não o implementa:** a economia dos
+dois lados é estruturalmente diferente. O edge do taker é PREDITIVO — depende
+de a nossa probabilidade bater melhor que a do book, contra participantes que
+viram o mesmo dado no mesmo segundo. O reward do maker é MECÂNICO — é uma
+fórmula sobre o livro, com orçamento diário conhecido e rateio pro-rata. Sobre
+gravação, o segundo é simulável com fidelidade muito maior. Isso não o torna
+melhor; torna-o **mensurável antes de arriscar capital**, que é o que o M2
+existe para fazer. Implementar market making continua sendo v2.
 
 **NENHUM VIÁVEL**: taker negativo e maker sem margem. **Neste caso o projeto
 para, e isso é sucesso.** O M2 existe justamente para custar 72h de VPS em vez
@@ -173,6 +206,40 @@ deste mercado — o problema não é o modelo.
 
 ---
 
+## A limitação que infla o resultado do maker — leia antes do número
+
+O WS de mercado entrega **níveis agregados, não ordens individuais**. Do
+tamanho de 500 shares em 0,49 não dá para saber se são duas ordens ou
+cinquenta, nem em que posição a nossa entraria.
+
+Consequência direta: **a posição na fila é inobservável**, e toda simulação de
+preenchimento maker aqui é **otimista por construção**.
+
+E o viés não é neutro — ele erra para o mesmo lado nas duas pontas:
+
+- **Superestima a execução boa.** A simulação assume que seríamos executados
+  sempre que o topo é atravessado. Na fila real, atrás de 500 shares, muitas
+  dessas execuções não aconteceriam.
+- **Subestima a execução ruim.** No pior caso — a nossa ordem sempre no fim da
+  fila — só somos executados quando o nível INTEIRO é varrido. Varrer o nível
+  inteiro é exatamente o evento de informação: é o caso de markout pior. Ou
+  seja, a fila real nos daria proporcionalmente MAIS das execuções ruins e
+  MENOS das boas.
+
+**Hipótese de fila usada:** nenhuma — a simulação de reward não modela
+execução, só presença no livro (que é o que a fórmula de reward pontua). O
+markout é medido sobre execuções REAIS observadas no topo, não simuladas. A
+conta de B.3 fica, por isso, deliberadamente **incompleta**: `rewards` e
+`rebate` têm número; `custo_de_markout` em USDC e `capital_imobilizado` estão
+listados em `o_que_falta_para_fechar` em vez de preenchidos com um palpite.
+
+Quanto isso infla, no pior caso: se cotássemos 50 shares atrás de 500 e
+fôssemos executados só nas varridas completas, o markout efetivo seria o da
+cauda ruim da distribuição — o p10, não a média. A diferença entre os dois na
+tabela de markout **é** a margem de erro desta simulação. Está reportada.
+
+---
+
 ## Estado da implementação
 
 | Item | Estado |
@@ -185,6 +252,8 @@ deste mercado — o problema não é o modelo.
 | M2.D Backtest com descontos | pronto (taxa do dado, slippage do book, latência) |
 | M2.E Medições | prontas; **sem dado para responder** |
 | M2.F Empacotamento | Dockerfile, systemd, runbook, script de coleta |
+| M2.2 A Integridade de dados | canal sem perda, validação cruzada de topo, resync, relógio, RTDS redundante, parquet |
+| M2.2 B Instrumentação do maker | score de rewards, markout, conta fechada — **medição, nada implementado** |
 
 **Bloqueio único: gravação de produção.** Próximo passo em
 `docs/RUNBOOK_VPS.md`.

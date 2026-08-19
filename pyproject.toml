@@ -23,6 +23,12 @@ dependencies = [
 # Decisão registrada em docs/API_NOTES.md seção 1.4.
 
 [project.optional-dependencies]
+# Extra de ANÁLISE, não de runtime. Só a máquina que roda backtest instala:
+# a VPS que grava não converte nada, e carregar ~40 MB de biblioteca colunar
+# lá não compraria nada. Ver src/pulsearb/replay/columnar.py.
+analise = [
+    "pyarrow==22.0.0",
+]
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",

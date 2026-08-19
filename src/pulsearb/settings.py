@@ -48,11 +48,29 @@ class FeedSettings(BaseModel):
     reconnect_max_seconds: float = 30.0
     clob_ping_interval_seconds: float = 10.0
     clob_stale_seconds: float = 30.0
+    # REDUNDÂNCIA DO RTDS (M2.2 A.5). Duas conexões ao mesmo endpoint,
+    # consumindo a primeira mensagem que chegar e deduplicando por
+    # (tópico, ativo, timestamp). Custa banda dobrada num feed de poucos KB/s
+    # e cobre justamente a falha que apareceu em produção: reconexão do RTDS
+    # em ciclos de 30-306s, com lacuna a cada ciclo.
+    rtds_conexoes: int = 2
+    # Teto da janela de deduplicação, em mensagens lembradas. Precisa cobrir a
+    # diferença de chegada entre as duas conexões (milissegundos), não a
+    # gravação inteira.
+    rtds_dedup_janela: int = 20000
 
 
 class RecorderSettings(BaseModel):
     output_dir: str = "data/recordings"
     rotate_seconds: int = 3600
+    # Fila SEM PERDA dos eventos de livro (M2.2 A.1). Encher esta fila é
+    # incidente, não descarte aceitável: um delta perdido corrompe o livro
+    # reconstruído em silêncio.
+    queue_max_book: int = 524288
+    queue_max: int = 65536
+    # Intervalo do laço que refaz a assinatura dos tokens marcados como
+    # corrompidos, para forçar um snapshot novo do livro.
+    resync_intervalo_s: float = 5.0
 
 
 class UiSettings(BaseModel):

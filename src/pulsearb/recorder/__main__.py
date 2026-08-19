@@ -41,10 +41,16 @@ from typing import Any
 import httpx
 import orjson
 
+from pulsearb.analysis.integrity import MonitorDeIntegridade, MonitorDeRelogio
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.binance_ws import BinanceWsFeed
-from pulsearb.feeds.poly_ws import RESOLUTION_EVENT_TYPES, PolyMarketWsFeed
-from pulsearb.feeds.rtds import RtdsFeed
+from pulsearb.feeds.poly_ws import (
+    EVENTOS_DE_LIVRO,
+    RESOLUTION_EVENT_TYPES,
+    PolyMarketWsFeed,
+    tokens_do_evento,
+)
+from pulsearb.feeds.rtds import RtdsFeed, parse_rtds_event
 from pulsearb.markets.discovery import (
     DiscoveredMarket,
     MarketDiscovery,
@@ -53,9 +59,12 @@ from pulsearb.markets.discovery import (
 from pulsearb.obs import get_logger, setup_logging
 from pulsearb.recorder.gaps import GapTracker, resumo_gaps
 from pulsearb.recorder.writer import (
+    CANAL_BOOK,
+    CANAL_PADRAO,
     FONTE_DISCOVERY,
     FONTE_GAP,
     FONTE_RESOLUCAO_SINTETICA,
+    FONTE_RESYNC,
     JsonlGzipWriter,
     RecordEnvelope,
 )
@@ -90,6 +99,42 @@ def parse_duration(text: str) -> float:
     if match is None:
         raise ValueError(f"duração inválida: {text!r} (use 90s, 30m, 72h, 7d)")
     return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
+
+
+def _taxa_diaria_de_reward(gamma: dict[str, Any]) -> float | None:
+    """Soma as taxas diárias de `clobRewards` (VERIFICADO ao vivo, 12.8).
+
+    É lista porque um mercado pode ter mais de uma fonte de reward (nativa e
+    patrocinada, que o CLOB expõe como `native_daily_rate` e
+    `sponsored_daily_rate`). Somar é o que corresponde ao `total_daily_rate`.
+    """
+    bruto = gamma.get("clobRewards")
+    if not isinstance(bruto, list):
+        return None
+    total = 0.0
+    achou = False
+    for item in bruto:
+        if not isinstance(item, dict):
+            continue
+        taxa = _numero(item.get("rewardsDailyRate"))
+        if taxa is not None:
+            total += taxa
+            achou = True
+    return total if achou else None
+
+
+def _numero(valor: Any) -> float | None:
+    """Número vindo do fio: o CLOB manda timestamp ora int, ora string."""
+    if isinstance(valor, bool) or valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        try:
+            return float(valor)
+        except ValueError:
+            return None
+    return None
 
 
 def market_snapshot(
@@ -128,6 +173,10 @@ def market_snapshot(
         "_observado_em_epoch": agora_epoch,
         "rewards_min_size": market.raw_gamma.get("rewardsMinSize"),
         "rewards_max_spread": market.raw_gamma.get("rewardsMaxSpread"),
+        # Orçamento do pool. Sem ele a simulação de reward (M2.2 B.1) não tem
+        # numerador e a janela sai da conta em vez de receber um default
+        # inventado.
+        "rewards_daily_rate": _taxa_diaria_de_reward(market.raw_gamma),
         "uma_reward": market.raw_gamma.get("umaReward"),
         "best_bid": market.raw_gamma.get("bestBid"),
         "best_ask": market.raw_gamma.get("bestAsk"),
@@ -142,16 +191,28 @@ class Recorder:
         self.writer = JsonlGzipWriter(
             output_dir=settings.recorder.output_dir,
             rotate_seconds=settings.recorder.rotate_seconds,
+            queue_max=settings.recorder.queue_max,
+            queue_max_book=settings.recorder.queue_max_book,
+            ao_perder_book=self._on_perda_de_book,
         )
-        self.rtds = RtdsFeed(
-            url=settings.endpoints.rtds_ws,
-            user_agent=settings.user_agent,
-            assets=settings.all_price_assets,
-            on_event=self._on_event,
-            stale_after_seconds=settings.feeds.stale_after_seconds_twap,
-            reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
-            reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
-        )
+        # REDUNDÂNCIA (M2.2 A.5): N conexões ao MESMO endpoint do RTDS. A
+        # primeira mensagem a chegar é gravada; as repetidas são contadas e
+        # descartadas. Não é paranoia: a primeira gravação real teve o RTDS
+        # reconectando em ciclos de 30 a 306 segundos, com lacuna a cada
+        # ciclo, e o feed é de poucos KB/s — a banda dobrada é barata.
+        self.rtds_feeds: list[RtdsFeed] = [
+            RtdsFeed(
+                url=settings.endpoints.rtds_ws,
+                user_agent=settings.user_agent,
+                assets=settings.all_price_assets,
+                on_event=self._fazer_callback_rtds(indice),
+                stale_after_seconds=settings.feeds.stale_after_seconds_twap,
+                reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
+                reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+            )
+            for indice in range(max(1, settings.feeds.rtds_conexoes))
+        ]
+        self.rtds = self.rtds_feeds[0]
         self.binance = BinanceWsFeed(
             assets=settings.assets,
             user_agent=settings.user_agent,
@@ -200,7 +261,88 @@ class Recorder:
         # descartado".
         self.eventos_poly: Counter[str] = Counter()
 
+        # ------------------------------------------------------ integridade
+        # A.2/A.3: reconstrói o topo do livro ao vivo e confere contra o topo
+        # que o próprio servidor manda em cada delta. Divergiu, o token entra
+        # na fila de resync.
+        self.integridade = MonitorDeIntegridade()
+        self.relogio = MonitorDeRelogio()
+        self.a_resincronizar: set[str] = set()
+        self.resyncs = 0
+        self.motivos_de_resync: Counter[str] = Counter()
+        self.incidentes_de_fila = 0
+
+        # A.5: deduplicação entre as conexões redundantes do RTDS.
+        self._vistos_rtds: dict[tuple[Any, ...], None] = {}
+        self._dedup_janela = max(1, settings.feeds.rtds_dedup_janela)
+        self.rtds_primeiro_por_conexao: Counter[int] = Counter()
+        self.rtds_duplicados_por_conexao: Counter[int] = Counter()
+
     # ------------------------------------------------------------- hot path
+    def _fazer_callback_rtds(self, indice: int) -> Any:
+        """Callback por conexão do RTDS, com deduplicação (M2.2 A.5).
+
+        A chave é (tópico, ativo, timestamp do servidor): é o que identifica
+        um tick independentemente de qual conexão o entregou. Mensagem que não
+        é tick de preço cai no hash do bruto — deduplicar por conteúdo é pior
+        que deduplicar por identidade, mas é melhor que gravar em dobro.
+
+        Quem chega primeiro grava. `rtds_primeiro_por_conexao` mostra o que
+        cada conexão de fato acrescentou: se uma delas entregar ~0% primeiro,
+        a redundância não está comprando nada e pode ser desligada.
+        """
+
+        def callback(event: FeedEvent) -> None:
+            chave = self._chave_rtds(event)
+            if chave in self._vistos_rtds:
+                self.rtds_duplicados_por_conexao[indice] += 1
+                return
+            self._vistos_rtds[chave] = None
+            if len(self._vistos_rtds) > self._dedup_janela:
+                # dict preserva ordem de inserção: o mais antigo sai primeiro
+                self._vistos_rtds.pop(next(iter(self._vistos_rtds)))
+            self.rtds_primeiro_por_conexao[indice] += 1
+            self._on_event(event)
+
+        return callback
+
+    def _chave_rtds(self, event: FeedEvent) -> tuple[Any, ...]:
+        tick = parse_rtds_event(event.parsed, event.ts_mono_ns, event.ts_wall_ns)
+        if tick is not None and tick.src_timestamp_ms > 0:
+            self.relogio.observar(tick.src_timestamp_ms, event.ts_wall_ns)
+            return (tick.topic, tick.asset, tick.src_timestamp_ms)
+        return ("__bruto__", hash(event.raw))
+
+    def _on_perda_de_book(self, envelope: RecordEnvelope) -> None:
+        """A fila SEM PERDA encheu. Isto é incidente, não descarte.
+
+        Chamado de dentro do `submit`, ou seja, no hot path: aqui só se marca
+        o token: o resync em si é assíncrono. Continuar aplicando deltas sobre
+        um livro que já sabemos furado produziria um livro plausível e errado,
+        que é exatamente o que a parte A do M2.2 existe para impedir.
+        """
+        self.incidentes_de_fila += 1
+        with contextlib.suppress(orjson.JSONDecodeError):
+            payload = orjson.loads(envelope.raw)
+            eventos = payload if isinstance(payload, list) else [payload]
+            for evento in eventos:
+                if not isinstance(evento, dict):
+                    continue
+                for token in tokens_do_evento(evento):
+                    self.integridade.marcar_perda(token)
+                    self.a_resincronizar.add(token)
+                    self.motivos_de_resync["fila_cheia"] += 1
+
+    def _canal_do_evento(self, event: FeedEvent) -> str:
+        """Livro vai pelo canal sem perda; o resto pode ser descartado."""
+        if event.source != "poly_ws":
+            return CANAL_PADRAO
+        payload = event.parsed
+        eventos = payload if isinstance(payload, list) else [payload]
+        for evento in eventos:
+            if isinstance(evento, dict) and evento.get("event_type") in EVENTOS_DE_LIVRO:
+                return CANAL_BOOK
+        return CANAL_PADRAO
     def _contar_evento_poly(self, event: FeedEvent) -> None:
         """Conta os tipos que chegam do CLOB, inclusive os desconhecidos."""
         payload = event.parsed
@@ -218,6 +360,12 @@ class Recorder:
                 asset_id = item.get("asset_id")
                 if isinstance(asset_id, str):
                     self.resolvidos.add(asset_id)
+            carimbo = _numero(item.get("timestamp"))
+            if carimbo:
+                self.relogio.observar(carimbo, event.ts_wall_ns)
+            for divergencia in self.integridade.observar(item, event.ts_wall_ns):
+                self.a_resincronizar.add(divergencia.asset_id)
+                self.motivos_de_resync["divergencia_de_topo"] += 1
 
     def _on_event(self, event: FeedEvent) -> None:
         if event.source == "poly_ws":
@@ -228,7 +376,8 @@ class Recorder:
                 ts_wall_ns=event.ts_wall_ns,
                 fonte=event.source,
                 raw=event.raw,
-            )
+            ),
+            canal=self._canal_do_evento(event),
         )
 
     def _write_meta(self, fonte: str, payload: dict[str, Any]) -> None:
@@ -315,6 +464,7 @@ class Recorder:
                     "em_carencia": len(candidatos) - len(encerrados),
                 },
                 "eventos_poly_por_tipo": dict(self.eventos_poly),
+                "integridade": self.integridade_resumo(),
             },
         )
         log.info(
@@ -332,6 +482,10 @@ class Recorder:
             msgs_poly=self.poly.message_count,
             gravadas=self.writer.written,
             descartadas=self.writer.dropped,
+            descartadas_book=self.writer.dropped_por_canal.get(CANAL_BOOK, 0),
+            divergencias=self.integridade.divergencias,
+            resyncs=self.resyncs,
+            offset_relogio_p50_ms=self.relogio.resumo()["p50_ms"],
         )
 
     # --------------------------------------------------- fallback de resolução
@@ -417,21 +571,133 @@ class Recorder:
         )
         log.info("resolução capturada via Gamma", slug=slug, vencedor=vencedor)
 
+    # --------------------------------------------------------------- resync
+    async def _resync_loop(self, deadline: float) -> None:
+        """Refaz a assinatura dos tokens com livro furado, forçando snapshot.
+
+        Não existe "peça o snapshot de novo" no protocolo do WS de mercado: o
+        `book` completo chega quando se assina. Desassinar e reassinar é,
+        portanto, o resync — feio, mas é o mecanismo que o protocolo oferece.
+
+        Cada resync vira um registro na gravação, com a causa. Sem isso, o
+        backtest veria o livro se consertar sozinho no meio da série e não
+        teria como saber que houve um buraco antes.
+        """
+        intervalo = self.settings.recorder.resync_intervalo_s
+        while time.monotonic() < deadline:
+            await asyncio.sleep(intervalo)
+            pendentes = sorted(self.a_resincronizar & set(self.poly.token_ids))
+            # Tokens que já saíram da assinatura não têm o que resincronizar.
+            self.a_resincronizar.difference_update(
+                self.a_resincronizar - set(self.poly.token_ids)
+            )
+            if not pendentes:
+                continue
+            self.a_resincronizar.difference_update(pendentes)
+            try:
+                await self.poly.unsubscribe(pendentes)
+                await self.poly.subscribe(pendentes)
+            except Exception as exc:
+                log.warning(
+                    "falha no resync do livro",
+                    tokens=len(pendentes),
+                    erro=f"{type(exc).__name__}: {exc}",
+                )
+                self.a_resincronizar.update(pendentes)
+                continue
+            self.resyncs += len(pendentes)
+            for token in pendentes:
+                self.integridade.marcar_perda(token)
+            self._write_meta(
+                FONTE_RESYNC,
+                {
+                    "_sintetico": True,
+                    "tokens": pendentes,
+                    "motivos": dict(self.motivos_de_resync),
+                    "observado_em_epoch": time.time(),
+                },
+            )
+            log.warning(
+                "resync do livro",
+                tokens=len(pendentes),
+                total=self.resyncs,
+                divergencias=self.integridade.divergencias,
+                incidentes_de_fila=self.incidentes_de_fila,
+            )
+
     # ----------------------------------------------------------------- gaps
+    def _saude_da_fonte(self, fonte: str) -> tuple[bool, float]:
+        """Conectado? e há quanto tempo veio a última mensagem?
+
+        Para o RTDS a resposta agrega as conexões redundantes: com duas
+        conexões, só há lacuna quando as DUAS estão mudas. Perguntar só à
+        primeira registraria lacuna sempre que ela caísse, mesmo com a
+        segunda entregando tudo — que é justamente o caso que a redundância
+        existe para cobrir.
+        """
+        if fonte == "rtds":
+            return (
+                any(feed.connected for feed in self.rtds_feeds),
+                min(feed.last_message_age_seconds for feed in self.rtds_feeds),
+            )
+        feed = self._feed_by_name[fonte]
+        return feed.connected, feed.last_message_age_seconds
+
     async def _gap_loop(self, deadline: float) -> None:
         while time.monotonic() < deadline:
             agora = time.time_ns()
             for tracker in self.trackers:
-                feed = self._feed_by_name[tracker.fonte]
+                conectado, idade = self._saude_da_fonte(tracker.fonte)
                 fechado = tracker.observe(
-                    conectado=feed.connected,
-                    idade_ultima_msg_s=feed.last_message_age_seconds,
+                    conectado=conectado,
+                    idade_ultima_msg_s=idade,
                     agora_wall_ns=agora,
                 )
                 if fechado is not None:
                     self._write_meta(FONTE_GAP, fechado.to_dict())
                     log.warning("lacuna na gravação", **fechado.to_dict())
             await asyncio.sleep(GAP_POLL_SECONDS)
+
+    # ------------------------------------------------------------ relatórios
+    def integridade_resumo(self) -> dict[str, Any]:
+        """O bloco `integridade` do M2.2, do lado do recorder.
+
+        O do backtest é o mesmo monitor rodado offline sobre a gravação; este
+        aqui é o que a VPS viu ao vivo. Os dois têm de bater — divergirem é
+        sinal de que a gravação perdeu algo entre o fio e o disco.
+        """
+        return {
+            "divergencia_topo_book": self.integridade.resumo(),
+            "offset_relogio_ms": self.relogio.resumo(),
+            "resyncs": self.resyncs,
+            "motivos_de_resync": dict(self.motivos_de_resync),
+            "incidentes_de_fila_sem_perda": self.incidentes_de_fila,
+            "tokens_aguardando_resync": len(self.a_resincronizar),
+        }
+
+    def redundancia_resumo(self) -> dict[str, Any]:
+        """Quanto cada conexão do RTDS de fato acrescentou (M2.2 A.5).
+
+        `entregou_primeiro` é a métrica que decide se a redundância se paga:
+        uma conexão que nunca chega antes da outra não está cobrindo nada, e
+        a segunda conexão pode ser desligada no config.
+        """
+        return {
+            "conexoes": len(self.rtds_feeds),
+            "por_conexao": [
+                {
+                    "indice": indice,
+                    "entregou_primeiro": self.rtds_primeiro_por_conexao.get(indice, 0),
+                    "duplicadas_descartadas": self.rtds_duplicados_por_conexao.get(
+                        indice, 0
+                    ),
+                    "mensagens": feed.message_count,
+                    "quedas": feed.close_count,
+                }
+                for indice, feed in enumerate(self.rtds_feeds)
+            ],
+            "janela_de_dedup": self._dedup_janela,
+        }
 
     # ---------------------------------------------------------------- ciclo
     async def run(self, duration_seconds: float) -> dict[str, Any]:
@@ -458,7 +724,8 @@ class Recorder:
                 probe_durations_seconds=self.settings.probe_durations_seconds,
             )
 
-            await self.rtds.start()
+            for feed in self.rtds_feeds:
+                await feed.start()
             await self.binance.start()
             await self.poly.start()
 
@@ -468,6 +735,7 @@ class Recorder:
                 asyncio.create_task(
                     self._resolution_poll_loop(http_get_json, deadline)
                 ),
+                asyncio.create_task(self._resync_loop(deadline)),
             ]
             try:
                 await asyncio.gather(*tasks)
@@ -483,7 +751,8 @@ class Recorder:
                     pendente = tracker.finalizar(agora)
                     if pendente is not None:
                         self._write_meta(FONTE_GAP, pendente.to_dict())
-                await self.rtds.stop()
+                for feed in self.rtds_feeds:
+                    await feed.stop()
                 await self.binance.stop()
                 await self.poly.stop()
 
@@ -493,12 +762,14 @@ class Recorder:
             "ciclos_descoberta": self.discovery_cycles,
             "tokens_assinados_no_total": len(self.subscribed_ever),
             "mensagens": {
-                "rtds": self.rtds.message_count,
+                "rtds": sum(feed.message_count for feed in self.rtds_feeds),
                 "binance_ws": self.binance.message_count,
                 "poly_ws": self.poly.message_count,
             },
             "gravadas": self.writer.written,
             "descartadas": self.writer.dropped,
+            "descartadas_por_canal": dict(self.writer.dropped_por_canal),
+            "integridade": self.integridade_resumo(),
             "eventos_poly_por_tipo": dict(self.eventos_poly),
             "resolucoes_capturadas": len(self.resolvidos),
             "janelas_vistas": len(self.janela_por_token),
@@ -510,6 +781,7 @@ class Recorder:
                 for nome, feed in self._feed_by_name.items()
             },
             "gaps": resumo_gaps(self.trackers, duracao),
+            "redundancia_rtds": self.redundancia_resumo(),
         }
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()

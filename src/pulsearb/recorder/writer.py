@@ -1,9 +1,21 @@
 """Escrita do recorder: fila assíncrona + JSONL gzip com rotação.
 
 Regra do hot path: ZERO I/O síncrono no caminho de recepção. O callback do
-feed só faz queue.put_nowait(); um task separado consome a fila e escreve.
-Se a fila encher (disco lento), o dado mais novo é descartado e CONTADO —
-perder tick de gravação é aceitável, travar o feed não é.
+feed só faz queue.put_nowait(); um task separado consome as filas e escreve.
+
+DOIS CANAIS, e a distinção é a correção central do M2.2 (A.1):
+
+- **CANAL_PADRAO** (com descarte): tick de preço, snapshot de descoberta,
+  lacuna. Perder um tick sob pressão de disco é aceitável — o seguinte vem
+  em ~1s e o dado é auto-suficiente.
+- **CANAL_BOOK** (sem perda): `book` e `price_change`. Perder UM delta
+  corrompe o livro reconstruído dali em diante, em silêncio, e todo número
+  do backtest continua saindo — bonito e errado. Esta fila é muito maior, e
+  se ainda assim encher, isso é INCIDENTE: fica registrado e dispara resync
+  do token afetado, nunca segue em silêncio.
+
+O lote de cada ciclo é ordenado por `ts_mono_ns` antes de escrever, para que
+drenar duas filas não introduza desordem que o replay teria de absorver.
 
 Formato de cada linha (JSON):
     {"ts_mono_ns": ..., "ts_wall_ns": ..., "fonte": "rtds"|"poly_ws",
@@ -16,6 +28,8 @@ import asyncio
 import base64
 import gzip
 import time
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -28,12 +42,30 @@ from pulsearb.obs import get_logger
 # como metadados, não como eventos de feed.
 FONTE_DISCOVERY = "discovery_snapshot"
 FONTE_GAP = "gap"
+# Incidente de fila sem perda: gravado como registro próprio para que a perda
+# apareça na gravação, e não só num contador que ninguém leu.
+FONTE_INCIDENTE = "incidente_gravacao"
+# Pedido de snapshot novo depois de perda detectada. Também é sintetizado
+# por nós, e por isso tem fonte própria.
+FONTE_RESYNC = "resync_book"
 # Resolução obtida por polling da Gamma, não pelo WS. Fonte própria para que
 # ninguém a confunda com um evento que veio do fio (ver recorder/__main__).
 FONTE_RESOLUCAO_SINTETICA = "resolucao_via_gamma"
 FONTES_META = frozenset(
-    {FONTE_DISCOVERY, FONTE_GAP, "recorder_relatorio", FONTE_RESOLUCAO_SINTETICA}
+    {
+        FONTE_DISCOVERY,
+        FONTE_GAP,
+        FONTE_INCIDENTE,
+        FONTE_RESYNC,
+        "recorder_relatorio",
+        FONTE_RESOLUCAO_SINTETICA,
+    }
 )
+
+# Canais do writer. Ver o cabeçalho do módulo.
+CANAL_PADRAO = "padrao"
+CANAL_BOOK = "book"
+CANAIS = (CANAL_BOOK, CANAL_PADRAO)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,16 +103,28 @@ class JsonlGzipWriter:
         prefix: str = "pulsearb",
         rotate_seconds: int = 3600,
         queue_max: int = 65536,
+        queue_max_book: int = 524288,
         flush_a_cada: int = 2000,
+        max_por_ciclo: int = 20000,
+        ao_perder_book: Callable[[RecordEnvelope], None] | None = None,
         clock: Any = time.time,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.prefix = prefix
         self.rotate_seconds = rotate_seconds
         self.flush_a_cada = max(1, flush_a_cada)
+        self.max_por_ciclo = max(1, max_por_ciclo)
         self.clock = clock
-        self.queue: asyncio.Queue[RecordEnvelope] = asyncio.Queue(maxsize=queue_max)
+        # A fila sem perda é 8x maior: um livro de 150 tokens em rajada gera
+        # muito mais eventos que os ticks de preço, e é justamente a rajada
+        # que não pode ser descartada.
+        self.queues: dict[str, asyncio.Queue[RecordEnvelope]] = {
+            CANAL_BOOK: asyncio.Queue(maxsize=queue_max_book),
+            CANAL_PADRAO: asyncio.Queue(maxsize=queue_max),
+        }
+        self.ao_perder_book = ao_perder_book
         self.dropped = 0
+        self.dropped_por_canal: Counter[str] = Counter()
         self.written = 0
         self.log = get_logger("pulsearb.recorder")
         self._task: asyncio.Task[None] | None = None
@@ -90,12 +134,27 @@ class JsonlGzipWriter:
         self._stopping = False
 
     # ---------------------------------------------------------------- hot path
-    def submit(self, envelope: RecordEnvelope) -> None:
-        """Chamado pelo callback do feed. Nunca bloqueia."""
+    def submit(self, envelope: RecordEnvelope, *, canal: str = CANAL_PADRAO) -> None:
+        """Chamado pelo callback do feed. Nunca bloqueia.
+
+        Descarte no CANAL_BOOK não é "perda aceitável": é incidente. O
+        callback `ao_perder_book` existe para o recorder marcar o token como
+        corrompido e forçar resync — seguir aplicando deltas sobre um livro
+        que já sabemos furado produziria um resultado plausível e errado.
+        """
+        fila = self.queues.get(canal) or self.queues[CANAL_PADRAO]
         try:
-            self.queue.put_nowait(envelope)
+            fila.put_nowait(envelope)
         except asyncio.QueueFull:
             self.dropped += 1
+            self.dropped_por_canal[canal] += 1
+            if canal == CANAL_BOOK and self.ao_perder_book is not None:
+                self.ao_perder_book(envelope)
+
+    @property
+    def queue(self) -> asyncio.Queue[RecordEnvelope]:
+        """Compat: o canal padrão. Havia uma fila só até o M2.2."""
+        return self.queues[CANAL_PADRAO]
 
     # ------------------------------------------------------------------- ciclo
     async def start(self) -> None:
@@ -110,21 +169,40 @@ class JsonlGzipWriter:
             self._task = None
         self._close_file()
 
-    async def _drain(self) -> None:
-        while True:
-            try:
-                envelope = await asyncio.wait_for(self.queue.get(), timeout=0.5)
-            except TimeoutError:
-                if self._stopping:
-                    return
-                continue
-            self._write(envelope)
-            # Esvazia rajadas sem voltar ao event loop a cada linha.
-            while True:
+    def _coletar(self) -> list[RecordEnvelope]:
+        """Tudo que está disponível nas duas filas, até o teto do ciclo."""
+        lote: list[RecordEnvelope] = []
+        for canal in CANAIS:
+            fila = self.queues[canal]
+            while len(lote) < self.max_por_ciclo:
                 try:
-                    self._write(self.queue.get_nowait())
+                    lote.append(fila.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+        return lote
+
+    async def _drain(self) -> None:
+        """Drena as duas filas, em ordem de `ts_mono_ns`.
+
+        A espera é por polling curto em vez de `await queue.get()` porque são
+        duas filas: esperar numa delas deixaria a outra parada. 5ms de sono só
+        acontece com as duas vazias — sob carga o laço nunca dorme.
+
+        O `sort` por ciclo é o que impede que drenar duas filas embaralhe a
+        saída: sem ele, uma rajada de book sairia inteira antes dos ticks de
+        preço do mesmo instante, e o buffer de reordenação do replay teria de
+        absorver a diferença.
+        """
+        while True:
+            lote = self._coletar()
+            if not lote:
+                if self._stopping:
+                    return
+                await asyncio.sleep(0.005)
+                continue
+            lote.sort(key=lambda envelope: envelope.ts_mono_ns)
+            for envelope in lote:
+                self._write(envelope)
             await asyncio.sleep(0)  # cede o loop
 
     def _caminho_livre(self, slot: int) -> Path:

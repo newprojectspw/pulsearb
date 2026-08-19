@@ -365,6 +365,59 @@ threshold de 2pp de edge, é 10% do sinal inteiro.
   `NewMarketEvent` e `MarketResolvedEvent` (docstring de `MarketSpec` em
   `streams/_specs.py`). **Interessa ao PULSEARB**: top-of-book direto e evento de
   resolução, sem polling.
+
+#### 6.1a. Os `event_type` do wire `[VERIFICADO]`
+
+Fonte: os `Literal[...]` de cada evento em `models/clob/market_events.py` do
+SDK 0.6.0. O wire é plano (`{event_type, ...}`) e o SDK o eleva para
+`{topic, type, payload}` em `_lift_wire_event`.
+
+| `event_type` | Payload traz |
+|---|---|
+| `book` | `market`, `asset_id`, `bids`, `asks`, `hash`, `timestamp`, `min_order_size`, `tick_size`, `neg_risk`, `last_trade_price` |
+| `price_change` | `market`, **`price_changes[]`**, `timestamp` |
+| `last_trade_price` | `market`, `asset_id`, `price`, `size`, `side`, `fee_rate_bps`, `transaction_hash`, `timestamp` |
+| `tick_size_change` | `market`, `asset_id`, `old_tick_size`, `new_tick_size` |
+| `best_bid_ask` | `market`, `asset_id`, `best_bid`, `best_ask`, `spread`, `timestamp` |
+| `new_market` | metadados do mercado novo |
+| `market_resolved` | `assets_ids`, `winning_asset_id`, `winning_outcome` |
+
+Ordem dos níveis no `book` `[VERIFICADO]`, e é contraintuitiva: *"bids:
+Ascending price order, lowest bid first"* e *"asks: Descending price order,
+highest ask first"* — ou seja, o **melhor** preço de cada lado vem por
+ÚLTIMO. O `OrderBook` deste projeto reordena explicitamente na leitura
+(`_levels`), então a ordem do wire não o afeta; quem escrever outro parser não
+pode assumir "posição 0 = topo".
+
+#### 6.1b. A forma do `price_change` — divergência ABERTA `[PARCIAL]`
+
+**Verificado no SDK 0.6.0** (`MarketPriceChangePayload` + `PriceChange`): o
+payload NÃO tem `asset_id` no topo. Ele tem `market`, `timestamp` e uma lista
+**`price_changes`**, e cada entrada dela traz o seu próprio `asset_id`,
+`price`, `size`, `side`, `hash` e — o que mais importa aqui —
+**`best_bid` e `best_ask`**.
+
+**Assumido até o M2.2, e nunca confirmado:** este projeto vinha lendo
+`asset_id` no topo e a lista em `changes`. Isso nasceu de uma fixture
+**sintética** nossa (`tests/fixtures/clob_ws_book.json`), montada quando os
+docs estavam bloqueados, e foi tratada como se fosse formato do servidor.
+
+Consequência, caso o servidor fale a forma do SDK: o parser antigo procurava
+`changes`, não achava, e aplicava **zero deltas** — em silêncio. O livro
+reconstruído ficaria congelado no último snapshot `book`, e o backtest
+continuaria produzindo números. É a corrupção silenciosa exata que a parte A
+do M2.2 existe para pegar.
+
+**Como isto está tratado, já que não dá para verificar daqui:** o parser
+(`feeds/poly_ws.py: iter_mudancas`) aceita **as duas formas**, e o recorder
+CONTA qual chegou (`integridade.divergencia_topo_book.formas_de_price_change`
+no relatório). A próxima gravação responde a pergunta de vez, sem custar uma
+aposta.
+
+**Presente colateral da forma do SDK:** se `best_bid`/`best_ask` vêm dentro de
+cada delta, o servidor está dizendo o topo autoritativo a cada mudança. Isso
+torna a validação cruzada do livro reconstruído gratuita e contínua, não só
+nos eventos `best_bid_ask` (M2.2 A.2).
 - **Heartbeat de aplicação** `[VERIFICADO]`: cliente manda o texto puro `"PING"`
   a cada **10 s**; servidor responde `"PONG"`; a conexão é considerada morta com
   **30 s** sem PONG. Não é o ping/pong do protocolo WebSocket — é texto na
@@ -1020,6 +1073,9 @@ Primárias:
 - https://github.com/Polymarket/py-clob-client (arquivado)
 - https://github.com/Polymarket/py-clob-client-v2
 - https://github.com/Polymarket/real-time-data-client
+- `polymarket_client-0.6.0`: `_internal/actions/rewards.py`,
+  `models/clob/rewards.py`, `models/clob/market_events.py` — base da §15
+  e da §6.1a/6.1b
 
 Secundárias (usadas só como pista, tudo marcado `[NÃO VERIFICADO]`):
 - Cobertura de imprensa sobre a migração para TWAP Chainlink (ago/2026)
@@ -1027,3 +1083,81 @@ Secundárias (usadas só como pista, tudo marcado `[NÃO VERIFICADO]`):
 
 Bloqueadas neste ambiente, a reler na VPS: `docs.polymarket.com`,
 `help.polymarket.com`.
+
+---
+
+## 15. Liquidity rewards — a rota maker `[VERIFICADO em parte]`
+
+Investigado no M2.2 para instrumentar a medição da rota maker. Esta seção
+separa com cuidado o que tem fonte primária do que é palpite, porque o número
+de receita que sai do simulador depende dos dois.
+
+### 15.1. O que ESTÁ verificado
+
+Fonte primária: código do SDK oficial `polymarket-client` 0.6.0
+(`_internal/actions/rewards.py`, `models/clob/rewards.py`,
+`models/gamma/market.py`), mais a leitura ao vivo de 2026-08-16 (§12.8).
+
+**Endpoints** (`_internal/actions/rewards.py`):
+
+| Endpoint | Parâmetros | Devolve |
+|---|---|---|
+| `GET /rewards/markets/current` | `sponsored`, `next_cursor` | pool corrente de todos os mercados |
+| `GET /rewards/markets/{conditionId}` | `sponsored`, `next_cursor` | pool de um mercado |
+| `GET /order-scoring` | `order_id` | `{"scoring": bool}` — **só se pontua, não quanto** |
+| `POST /orders-scoring` | lista de ids | `{order_id: bool}` |
+| `GET /rewards/user` | `date`, `signature_type` | ganho por mercado/dia |
+| `GET /rewards/user/total` | `date`, `signature_type` | ganho total do dia |
+| `GET /rewards/user/markets` | `date`, `signature_type`, `no_competition`, `order_by`, `position`, `page_size` | ganho + config do mercado |
+| `GET /rewards/user/percentages` | `signature_type` | `{conditionId: float}` |
+
+**Campos** (`CurrentReward` / `MarketReward`):
+
+- `rewards_min_size`, `rewards_max_spread`
+- `rewards_config[]` com `rate_per_day`, `start_date`, `end_date`,
+  `asset_address`, `total_rewards` — ou seja, **a taxa diária é datada**, não
+  um número solto
+- `native_daily_rate`, `sponsored_daily_rate`, `total_daily_rate`
+- `market_competitiveness` (float, por mercado)
+- `earning_percentage` (por usuário/mercado/dia)
+- na Gamma: `clobRewards[]` com `rewardsDailyRate`, mais
+  `holdingRewardsEnabled` — que indica existir um **segundo** tipo de reward,
+  por posse, distinto do de liquidez
+
+Confirmado ao vivo (§12.8): `rewardsMinSize = 50`, `rewardsMaxSpread` em
+{1.5, 4.5}, `rewardsDailyRate = 1666.666667` num 4h, pago em USDC.e real da
+Polygon.
+
+### 15.2. O que NÃO está verificado — e por quê
+
+`docs.polymarket.com`, `polymarket.com` e `learn.polymarket.com` respondem
+**403 no CONNECT** do proxy de saída deste ambiente (mesma barreira da §0). O
+SDK expõe os PARÂMETROS mas não a FÓRMULA: `/order-scoring` devolve booleano,
+e não há em lugar nenhum do código do SDK o cálculo do score.
+
+Fica registrado como **assumido**, não como fato:
+
+| Item | Estado | Como está tratado no código |
+|---|---|---|
+| fórmula `fator_desconto ^ ticks × tamanho` | **assumida** (vem do enunciado do projeto) | implementada em `analysis/rewards.py`, com o aviso no próprio relatório |
+| valor do fator de desconto | **assumido** = 0,5 | campo de `ParametrosDeReward`; o relatório traz varredura em 0,3/0,5/0,7/0,9 |
+| cadência de pontuação | **assumida** = 1/s | campo; erro aqui escala a receita linearmente |
+| unidade de `rewardsMaxSpread` | **inferida** = centavos | 1,5 só faz sentido como 1,5¢; como fração seriam 150% de spread, que não gateia nada |
+| exigência de cotar dos dois lados | **assumida** = não exigida | campo `exige_dois_lados`, default `False` |
+| significado de `market_competitiveness` | **desconhecido** | não usado |
+| `moas` no CLOB compacto | **desconhecido** (§12.11) | não usado |
+
+**Regra prática enquanto isto não for confirmado:** o número de receita do
+simulador é **ordem de grandeza**, não previsão. Na gravação sintética, variar
+só o fator de desconto entre 0,3 e 0,9 muda a receita em **2,6x** — quem ler o
+número sem ler a varredura tira conclusão errada.
+
+**Como confirmar, quando houver acesso:** ler
+`docs.polymarket.com` (seção de liquidity rewards) de uma máquina sem o
+bloqueio — a VPS de Londres serve — e comparar a fórmula com
+`analysis/rewards.py`. Alternativa independente: rodar o recorder guardando
+`GET /rewards/user` do próprio endereço por alguns dias e ajustar o fator que
+reproduz o `earning_percentage` observado. A segunda é mais trabalhosa e mais
+convincente.
+
+---
