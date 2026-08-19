@@ -315,3 +315,77 @@ def test_calibracao_mede_todas_as_previsoes():
     assert bucket.prob_media_prevista == pytest.approx(0.8)
     assert bucket.freq_realizada == pytest.approx(0.8)
     assert bucket.erro_calibracao == pytest.approx(0.0)  # perfeitamente calibrado
+
+
+# ------------------------------------------------- streaming do reader
+def _gravacao_multi_arquivo(tmp_path, arquivos=4, por_arquivo=500, jitter_ns=50_000_000):
+    """Simula a rotação horária COM a desordem local entre feeds.
+
+    O jitter não é enfeite: três feeds submetem em paralelo, então dentro de
+    um arquivo os ts_mono_ns vêm quase ordenados, não ordenados. É isso que o
+    buffer de reordenação existe para absorver.
+    """
+    import random
+
+    rng = random.Random(11)
+    ts = 1786891500 * 10**9
+    for indice in range(arquivos):
+        with gzip.open(tmp_path / f"rec-{indice:02d}.jsonl.gz", "wb") as handle:
+            for _ in range(por_arquivo):
+                ts += rng.randint(1_000_000, 9_000_000)
+                desvio = rng.randint(-jitter_ns, jitter_ns)
+                handle.write(
+                    orjson.dumps(
+                        {
+                            "ts_mono_ns": ts + desvio,
+                            "ts_wall_ns": ts + desvio,
+                            "fonte": rng.choice(["rtds", "poly_ws", "binance_ws"]),
+                            "payload": {"n": 1},
+                        }
+                    )
+                    + b"\n"
+                )
+    return tmp_path
+
+
+def test_merge_entre_arquivos_sai_ordenado(tmp_path):
+    """Arquivo rotacionado não garante ordem GLOBAL: o merge é que garante."""
+    diretorio = _gravacao_multi_arquivo(tmp_path)
+    reader = RecordingReader(diretorio)
+    ts = [r.ts_mono_ns for r in reader.iter_records()]
+    assert len(ts) == 2000
+    assert ts == sorted(ts)
+    assert reader.fora_de_ordem == 0
+
+
+def test_reader_nao_carrega_tudo_em_memoria(tmp_path):
+    """O reader é um GERADOR: consumir 1 registro não pode ler a gravação toda.
+
+    Regressão da versão que fazia sort() sobre a lista completa — com os
+    ~400 MB/h reais, aquilo não terminava numa máquina de análise.
+    """
+    diretorio = _gravacao_multi_arquivo(tmp_path, arquivos=4, por_arquivo=5_000)
+    reader = RecordingReader(diretorio, reorder_buffer=100)
+    fluxo = reader.iter_records()
+    next(fluxo)
+    # Só o necessário para encher o buffer foi lido, não os 20.000.
+    assert reader.total < 1_000, f"leu {reader.total} registros para emitir 1"
+
+
+def test_buffer_pequeno_conta_o_que_saiu_fora_de_ordem(tmp_path):
+    """Inversão maior que o buffer é CONTADA, não escondida."""
+    diretorio = _gravacao_multi_arquivo(tmp_path, arquivos=1, por_arquivo=300)
+    reader = RecordingReader(diretorio, reorder_buffer=1)
+    ts = [r.ts_mono_ns for r in reader.iter_records()]
+    assert ts != sorted(ts)          # com buffer 1 a desordem passa
+    assert reader.fora_de_ordem > 0  # e o reader avisa
+
+
+def test_contadores_resetam_entre_passadas(tmp_path):
+    diretorio = _gravacao_multi_arquivo(tmp_path, arquivos=2, por_arquivo=100)
+    reader = RecordingReader(diretorio)
+    primeira = sum(1 for _ in reader.iter_records())
+    total_primeira = reader.total
+    segunda = sum(1 for _ in reader.iter_records())
+    assert primeira == segunda == 200
+    assert reader.total == total_primeira  # não acumulou
