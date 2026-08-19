@@ -23,6 +23,15 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook
 
+# Faixas que DEFINEM a hipótese do tick (API_NOTES 13.3a). Ficam nomeadas
+# porque não são números de conveniência: mudar qualquer uma muda o que
+# "extremo" e "equilibrado" significam, e portanto o que a medição afirma
+# sobre a hipótese refutada. O texto do veredito cita as mesmas faixas.
+PRECO_EXTREMO_BAIXO = 0.10
+PRECO_EXTREMO_ALTO = 0.90
+PRECO_EQUILIBRADO_BAIXO = 0.35
+PRECO_EQUILIBRADO_ALTO = 0.65
+
 
 def _percentil(valores: list[float], pct: float) -> float | None:
     if not valores:
@@ -108,8 +117,14 @@ def medir_mudanca_de_tick(
     afinou = [m for m in mudancas if m["para"] < m["de"]]
     tempos = [m["seconds_left"] for m in afinou if not math.isnan(m["seconds_left"])]
     precos = [m["preco_no_momento"] for m in afinou if m["preco_no_momento"] is not None]
-    extremos = [p for p in precos if p < 0.10 or p > 0.90]
-    equilibrados = [p for p in precos if 0.35 <= p <= 0.65]
+    extremos = [
+        p for p in precos if p < PRECO_EXTREMO_BAIXO or p > PRECO_EXTREMO_ALTO
+    ]
+    equilibrados = [
+        p
+        for p in precos
+        if PRECO_EQUILIBRADO_BAIXO <= p <= PRECO_EQUILIBRADO_ALTO
+    ]
 
     return {
         "janelas_observadas": len(series),
@@ -147,8 +162,14 @@ def _veredito_extremos(
     """
     if not precos:
         return "sem dado"
-    fora = f"{len(extremos)}/{len(precos)} afinamentos com preço fora de [0.10, 0.90]"
-    dentro = f"{len(equilibrados)}/{len(precos)} com preço em [0.35, 0.65]"
+    fora = (
+        f"{len(extremos)}/{len(precos)} afinamentos com preço fora de "
+        f"[{PRECO_EXTREMO_BAIXO:.2f}, {PRECO_EXTREMO_ALTO:.2f}]"
+    )
+    dentro = (
+        f"{len(equilibrados)}/{len(precos)} com preço em "
+        f"[{PRECO_EQUILIBRADO_BAIXO:.2f}, {PRECO_EQUILIBRADO_ALTO:.2f}]"
+    )
     if len(extremos) > len(precos) / 2:
         return (
             f"{fora}; {dentro} — este dado SUSTENTA a hipótese dos extremos, o "
