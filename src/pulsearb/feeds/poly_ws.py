@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import orjson
@@ -26,9 +28,140 @@ PONG = "PONG"
 # O FeedEvent.raw chega sempre em bytes; esta é a forma comparável.
 PONG_BYTES = PONG.encode()
 
+# ---------------------------------------------------------------- event_type
+# Valores VERIFICADOS no SDK oficial 0.6.0
+# (`models/clob/market_events.py`, os `Literal[...]` de cada evento).
+EVENT_BOOK = "book"
+EVENT_PRICE_CHANGE = "price_change"
+EVENT_LAST_TRADE = "last_trade_price"
+EVENT_TICK_SIZE_CHANGE = "tick_size_change"
+EVENT_BEST_BID_ASK = "best_bid_ask"
+EVENT_NEW_MARKET = "new_market"
+EVENT_MARKET_RESOLVED = "market_resolved"
+
 # Tipos que o CLOB usa para anunciar resolução. Conjunto (e não igualdade
 # solta) para que um tipo novo apareça na contagem por tipo em vez de sumir.
-RESOLUTION_EVENT_TYPES = frozenset({"market_resolved", "resolution"})
+# "resolution" não aparece no SDK; fica no conjunto por precaução.
+RESOLUTION_EVENT_TYPES = frozenset({EVENT_MARKET_RESOLVED, "resolution"})
+
+# Eventos que MUDAM o livro. Perder um destes corrompe o book reconstruído
+# dali em diante, em silêncio — por isso eles vão pelo canal sem perda do
+# writer (M2.2 A.1), enquanto tick de preço pode ser descartado sob pressão.
+EVENTOS_DE_LIVRO = frozenset({EVENT_BOOK, EVENT_PRICE_CHANGE})
+
+
+@dataclass(frozen=True, slots=True)
+class MudancaDePreco:
+    """Uma alteração de nível dentro de um evento `price_change`.
+
+    `best_bid`/`best_ask` vêm no PRÓPRIO delta (campos do modelo `PriceChange`
+    do SDK). São o topo autoritativo do servidor no instante do delta, e é com
+    eles que a validação cruzada do M2.2 A.2 confere o livro que reconstruímos
+    — sem custo nenhum, em todo delta, não só nos eventos `best_bid_ask`.
+    """
+
+    asset_id: str
+    price: float
+    size: float
+    side: str                  # "BUY" | "SELL"
+    best_bid: float | None = None
+    best_ask: float | None = None
+
+
+def iter_mudancas(
+    payload: dict[str, Any], *, asset_padrao: str | None = None
+) -> Iterator[MudancaDePreco]:
+    """Percorre um `price_change`, aceitando as DUAS formas de payload.
+
+    Aqui mora uma dúvida que a gravação seguinte tem de resolver, e que por
+    ora é tratada aceitando os dois formatos em vez de apostar em um:
+
+    - **Forma A** (a que este projeto vinha assumindo): `asset_id` no topo do
+      evento e a lista em `changes`.
+    - **Forma B** (a do SDK oficial 0.6.0, `MarketPriceChangePayload`): sem
+      `asset_id` no topo; a lista vem em `price_changes` e **cada entrada**
+      traz o seu próprio `asset_id`, mais `best_bid`/`best_ask`.
+
+    A forma B é a que tem evidência primária. A forma A era uma fixture
+    SINTÉTICA nossa, nunca confirmada contra o fio — e se o servidor fala B,
+    o parser antigo lia `changes`, não achava nada e aplicava ZERO deltas, em
+    silêncio, deixando o livro parado no último snapshot. Aceitar as duas
+    custa dez linhas; apostar na errada custa a gravação inteira.
+
+    Quem chama conta qual forma apareceu (`forma_do_price_change`), e o
+    relatório diz qual o servidor está usando de fato.
+
+    `asset_padrao` cobre o delta que não nomeia token nem no topo nem na
+    entrada: quem chamou já sabe de qual livro se trata (é o caso de
+    `OrderBook.apply_price_change`, que roteia por livro).
+    """
+    brutas = payload.get("price_changes")
+    asset_do_topo = payload.get("asset_id")
+    if not isinstance(brutas, list):
+        brutas = payload.get("changes")
+    if not isinstance(brutas, list):
+        return
+    for bruta in brutas:
+        if not isinstance(bruta, dict):
+            continue
+        asset_id = bruta.get("asset_id")
+        if not isinstance(asset_id, str):
+            asset_id = (
+                asset_do_topo if isinstance(asset_do_topo, str) else asset_padrao
+            )
+        preco = _numero(bruta.get("price"))
+        tamanho = _numero(bruta.get("size"))
+        if asset_id is None or preco is None or tamanho is None:
+            continue
+        yield MudancaDePreco(
+            asset_id=asset_id,
+            price=preco,
+            size=tamanho,
+            side=str(bruta.get("side", "")).upper(),
+            best_bid=_numero(bruta.get("best_bid")),
+            best_ask=_numero(bruta.get("best_ask")),
+        )
+
+
+def forma_do_price_change(payload: dict[str, Any]) -> str:
+    """Qual das duas formas este evento usa. Ver `iter_mudancas`."""
+    if isinstance(payload.get("price_changes"), list):
+        return "price_changes"
+    if isinstance(payload.get("changes"), list):
+        return "changes"
+    return "__sem_lista__"
+
+
+def tokens_do_evento(evento: dict[str, Any]) -> set[str]:
+    """Todos os tokens que um evento do CLOB toca.
+
+    Um `price_change` na forma B pode carregar deltas de VÁRIOS tokens no
+    mesmo evento — ler só o `asset_id` do topo perderia os demais.
+    """
+    tokens: set[str] = set()
+    asset_id = evento.get("asset_id")
+    if isinstance(asset_id, str):
+        tokens.add(asset_id)
+    if evento.get("event_type") == EVENT_PRICE_CHANGE:
+        tokens.update(m.asset_id for m in iter_mudancas(evento))
+    for chave in ("assets_ids", "asset_ids"):
+        valor = evento.get(chave)
+        if isinstance(valor, list):
+            tokens.update(item for item in valor if isinstance(item, str))
+    return tokens
+
+
+def _numero(valor: Any) -> float | None:
+    if isinstance(valor, bool) or valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        try:
+            return float(valor)
+        except ValueError:
+            return None
+    return None
 
 
 class PolyMarketWsFeed(ReconnectingFeed):

@@ -17,11 +17,15 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from pulsearb.analysis.integrity import MonitorDeIntegridade, MonitorDeRelogio
 from pulsearb.analysis.measurements import (
+    conta_do_maker,
     medir_atraso_liquidacao,
+    medir_markout,
     medir_mudanca_de_tick,
     medir_profundidade,
 )
+from pulsearb.analysis.rewards import simular as simular_rewards
 from pulsearb.backtest.book import OrderBook
 from pulsearb.backtest.report import curva_de_edge_por_threshold
 from pulsearb.backtest.runner import (
@@ -41,7 +45,12 @@ from pulsearb.engine.anchor import (
     evaluate_hypotheses,
     report_anchor_validation,
 )
-from pulsearb.feeds.poly_ws import RESOLUTION_EVENT_TYPES
+from pulsearb.feeds.poly_ws import (
+    EVENT_BOOK,
+    EVENT_LAST_TRADE,
+    EVENT_PRICE_CHANGE,
+    RESOLUTION_EVENT_TYPES,
+)
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.markets.discovery import parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
@@ -134,6 +143,13 @@ class RecordingIndex:
         self.gaps: list[dict[str, Any]] = []
         self.janelas_de_interesse: dict[str, tuple[int, int]] = {}  # token → (ini, fim)
         self._ultimo_tick: dict[str, float] = {}
+        # M2.2 A.2/A.4: o MESMO monitor que roda ao vivo no recorder, agora
+        # sobre a gravação. Se os dois discordarem, o que se perdeu foi entre
+        # o fio e o disco.
+        self.integridade = MonitorDeIntegridade()
+        self.relogio = MonitorDeRelogio()
+        # M2.2 B.2: execuções observadas, por token.
+        self.trades: dict[str, list[tuple[int, float, float, str]]] = defaultdict(list)
 
     # --------------------------------------------------------------- passadas
     def build(self) -> None:
@@ -201,8 +217,18 @@ class RecordingIndex:
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
 
     def _on_poly_meta(self, record: ReplayRecord) -> None:
-        """Só resoluções. O book desta passada é descartado sem construir."""
+        """Resoluções + integridade. O livro pesado fica para a passada 2.
+
+        A integridade roda AQUI, e não na passada 2, porque ela precisa ver
+        TODOS os tokens e TODO o período — inclusive os que a passada 2
+        descarta por não pertencerem a janela nenhuma. Um livro corrompido
+        num token fora de janela ainda é sinal de que a gravação teve perda.
+        """
         for evento in _eventos_do_payload(record.payload):
+            carimbo = _numero_bruto(evento.get("timestamp"))
+            if carimbo:
+                self.relogio.observar(carimbo, record.ts_wall_ns)
+            self.integridade.observar(evento, record.ts_wall_ns)
             tipo = evento.get("event_type")
             if tipo not in RESOLUTION_EVENT_TYPES:
                 continue
@@ -234,7 +260,10 @@ class RecordingIndex:
         # justamente em rajada de atividade que eles aparecem.
         for evento in _eventos_do_payload(record.payload):
             tipo = evento.get("event_type")
-            if tipo not in ("book", "price_change"):
+            if tipo == EVENT_LAST_TRADE:
+                self._on_trade(evento, record.ts_wall_ns)
+                continue
+            if tipo not in (EVENT_BOOK, EVENT_PRICE_CHANGE):
                 continue
             asset_id = evento.get("asset_id")
             if not isinstance(asset_id, str):
@@ -242,7 +271,7 @@ class RecordingIndex:
             intervalo = self.janelas_de_interesse.get(asset_id)
             if intervalo is None or not (intervalo[0] <= record.ts_wall_ns <= intervalo[1]):
                 continue
-            if tipo == "book":
+            if tipo == EVENT_BOOK:
                 book = OrderBook.from_event(evento)
                 if book is None:
                     continue
@@ -256,6 +285,23 @@ class RecordingIndex:
                 # cópia (truncada) quando de fato retém o snapshot.
                 book.apply_price_change(evento)
             self._timeline(asset_id).append(book, record.ts_wall_ns)
+
+    def _on_trade(self, evento: dict[str, Any], ts_ns: int) -> None:
+        """Execução observada no topo — a matéria-prima do markout (B.2)."""
+        asset_id = evento.get("asset_id")
+        if not isinstance(asset_id, str) or asset_id not in self.janelas_de_interesse:
+            return
+        preco = _numero_bruto(evento.get("price"))
+        if preco is None:
+            return
+        self.trades[asset_id].append(
+            (
+                ts_ns,
+                preco,
+                _numero_bruto(evento.get("size")) or 0.0,
+                str(evento.get("side", "")).upper(),
+            )
+        )
 
     def _timeline(self, asset_id: str) -> BookTimeline:
         timeline = self.books.get(asset_id)
@@ -317,14 +363,38 @@ class RecordingIndex:
                 min_order_size=float(meta.get("min_order_size") or 5),
                 fee_rate=float(meta.get("fee_rate") or 0.0),
                 fee_exponent=float(meta.get("fee_exponent") or 1.0),
+                fee_rebate_rate=float(meta.get("fee_rebate_rate") or 0.0),
                 open_ts_ns=int((fim_epoch - duracao) * 1e9),
                 close_ts_ns=int(fim_epoch * 1e9),
                 resolveu_up=resolucao,
             )
             janela.books[token_up] = self.books.get(token_up, BookTimeline())
             janela.books[token_down] = self.books.get(token_down, BookTimeline())
+            janela.reward_meta = {
+                "rewards_daily_rate": meta.get("rewards_daily_rate"),
+                "rewards_min_size": meta.get("rewards_min_size"),
+                "rewards_max_spread": meta.get("rewards_max_spread"),
+                "tick_size": meta.get("tick_size"),
+            }
+            janela.trades = sorted(
+                self.trades.get(token_up, []) + self.trades.get(token_down, [])
+            )
             saida.append(janela)
         return saida
+
+
+def _numero_bruto(valor: Any) -> float | None:
+    """O CLOB manda número ora como int, ora como string decimal."""
+    if isinstance(valor, bool) or valor is None:
+        return None
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        try:
+            return float(valor)
+        except ValueError:
+            return None
+    return None
 
 
 def _eventos_do_payload(payload: Any) -> list[dict[str, Any]]:
@@ -334,6 +404,16 @@ def _eventos_do_payload(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [e for e in payload if isinstance(e, dict)]
     return []
+
+
+def _rebate_medio(janelas: list[WindowState]) -> float:
+    """Taxa de rebate do maker, lida do dado gravado — nunca constante.
+
+    Sem janela com o campo, devolve 0: melhor uma conta que não credita
+    rebate nenhum do que uma que credita um número inventado.
+    """
+    taxas = [j.fee_rebate_rate for j in janelas if getattr(j, "fee_rebate_rate", None)]
+    return sum(taxas) / len(taxas) if taxas else 0.0
 
 
 def _duracao_do_slug(slug: str) -> int:
@@ -390,7 +470,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     janelas = index.janelas()
-    resolvidas = [j for j in janelas if j.resolveu_up is not None]
+    # A.2: janela cujo livro divergiu do que o servidor afirmou é descartada.
+    # O backtest continua rodando sobre as demais, e o relatório diz quantas
+    # e quais saíram — silenciar seria o mesmo que confiar no livro furado.
+    integras = [
+        j
+        for j in janelas
+        if not index.integridade.token_corrompido(j.token_up)
+        and not index.integridade.token_corrompido(j.token_down)
+    ]
+    resolvidas = [j for j in integras if j.resolveu_up is not None]
 
     # Âncora: valida as hipóteses contra as resoluções REAIS antes de usar
     # qualquer uma delas no modelo.
@@ -432,6 +521,22 @@ def main(argv: list[str] | None = None) -> int:
             "gaps": index.gaps,
             "memoria": index.uso_de_memoria(),
         },
+        "integridade": {
+            "divergencia_topo_book": index.integridade.resumo(),
+            "offset_relogio_ms": index.relogio.resumo(),
+            "janelas_invalidadas": sorted(
+                j.slug
+                for j in janelas
+                if index.integridade.token_corrompido(j.token_up)
+                or index.integridade.token_corrompido(j.token_down)
+            ),
+            "nota": (
+                "Divergência entre o topo que o servidor afirma e o topo que "
+                "reconstruímos. Acima do limiar, a janela sai do backtest: "
+                "número calculado sobre livro furado é pior que número "
+                "nenhum, porque parece bom."
+            ),
+        },
         "ancora": {**validacao, "usada_no_backtest": escolhida.value},
         "backtest": report.to_dict(),
         "sensibilidade_latencia": sensibilidade_latencia(
@@ -457,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
                     for j in resolvidas
                 ]
             ),
+            "markout": medir_markout(resolvidas),
             "profundidade": medir_profundidade(
                 [
                     {
@@ -472,6 +578,23 @@ def main(argv: list[str] | None = None) -> int:
                 ]
             ),
         },
+    }
+
+    # ─── rota maker (M2.2 parte B): medição, nunca implementação ───
+    rewards = simular_rewards(resolvidas)
+    relatorio["rota_maker"] = {
+        "rewards": rewards,
+        "markout": relatorio["medicoes"]["markout"],
+        "conta_fechada": conta_do_maker(
+            rewards=rewards,
+            markout=relatorio["medicoes"]["markout"],
+            fee_rebate_rate=_rebate_medio(resolvidas),
+        ),
+        "aviso": (
+            "NADA aqui envia ordem. É simulação sobre gravação. A fórmula de "
+            "score NÃO foi verificada contra a documentação oficial — ver "
+            "`rota_maker.rewards.hipoteses` e docs/API_NOTES.md 15."
+        ),
     }
 
     saida = json.dumps(relatorio, indent=2, ensure_ascii=False, default=str)

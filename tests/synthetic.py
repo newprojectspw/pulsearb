@@ -140,6 +140,11 @@ def gerar_gravacao(
                                 "gate_failures": [],
                                 "_seconds_left": restante,
                                 "best_ask": 0.5,
+                                # Parâmetros de reward (M2.2 B.1). Valores da
+                                # ordem dos observados ao vivo (API_NOTES 12.8).
+                                "rewards_daily_rate": 1666.666667,
+                                "rewards_min_size": 50,
+                                "rewards_max_spread": 1.5,
                             }
                         ],
                         "assinaturas": {"novas": 0, "encerradas": 0, "ativas": 2},
@@ -173,6 +178,82 @@ def gerar_gravacao(
                                 {"price": f"{min(mid + 0.01, 0.99):.3f}", "size": "200"},
                                 {"price": f"{min(mid + 0.02, 0.99):.3f}", "size": "500"},
                             ],
+                        },
+                    )
+                )
+
+        # --- deltas na forma do SDK (`price_changes`, com o topo
+        # autoritativo dentro do próprio delta), mais `best_bid_ask` e uma
+        # execução no topo. É o que exercita a validação cruzada (M2.2 A.2) e
+        # o markout (B.2).
+        for offset in range(2, duracao_s, 5):
+            ts_ns = int((janela_inicio + offset) * 1e9)
+            # O topo afirmado no delta tem de bater com o livro que a
+            # reconstrução tem NAQUELE instante — ou seja, com o último
+            # snapshot `book`, não com um preço recalculado. Gerar os dois a
+            # partir de mids diferentes produziria divergência sintética, e a
+            # validação cruzada do M2.2 invalidaria a janela inteira (foi o
+            # que aconteceu na primeira versão deste gerador).
+            offset_do_book = (offset // 5) * 5
+            ts_book_ns = int((janela_inicio + offset_do_book) * 1e9)
+            restante = duracao_s - offset_do_book
+            spot = next((p for ts, p in reversed(serie) if ts <= ts_book_ns), preco_inicial)
+            prob = _prob_verdadeira(spot, ancora, restante, sigma_1s)
+            for token, p in ((token_up, prob), (token_down, 1 - prob)):
+                mid = min(max(p, 0.02), 0.98)
+                bid = round(max(mid - 0.01, 0.01), 3)
+                ask = round(min(mid + 0.01, 0.99), 3)
+                novo_bid = round(max(bid - 0.001, 0.001), 3)
+                linhas.append(
+                    _linha(
+                        ts_ns,
+                        ts_ns,
+                        "poly_ws",
+                        {
+                            "event_type": "price_change",
+                            "market": condition_id,
+                            "timestamp": str(int(ts_ns / 1e6)),
+                            "price_changes": [
+                                {
+                                    "asset_id": token,
+                                    "price": f"{novo_bid:.3f}",
+                                    "size": "150",
+                                    "side": "BUY",
+                                    "best_bid": f"{bid:.3f}",
+                                    "best_ask": f"{ask:.3f}",
+                                }
+                            ],
+                        },
+                    )
+                )
+                linhas.append(
+                    _linha(
+                        ts_ns + 10**8,
+                        ts_ns + 10**8,
+                        "poly_ws",
+                        {
+                            "event_type": "best_bid_ask",
+                            "asset_id": token,
+                            "market": condition_id,
+                            "timestamp": str(int((ts_ns + 10**8) / 1e6)),
+                            "best_bid": f"{bid:.3f}",
+                            "best_ask": f"{ask:.3f}",
+                        },
+                    )
+                )
+                linhas.append(
+                    _linha(
+                        ts_ns + 2 * 10**8,
+                        ts_ns + 2 * 10**8,
+                        "poly_ws",
+                        {
+                            "event_type": "last_trade_price",
+                            "asset_id": token,
+                            "market": condition_id,
+                            "timestamp": str(int((ts_ns + 2 * 10**8) / 1e6)),
+                            "price": f"{ask:.3f}",
+                            "size": "20",
+                            "side": "BUY",
                         },
                     )
                 )

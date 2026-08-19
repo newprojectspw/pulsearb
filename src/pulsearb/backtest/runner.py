@@ -154,7 +154,17 @@ class WindowState:
     close_ts_ns: int
     ancora: float | None = None
     resolveu_up: bool | None = None
+    # Fração da taxa do taker que volta para o maker que o executou
+    # (API_NOTES 12.6). Lida do dado, nunca constante.
+    fee_rebate_rate: float = 0.0
     books: dict[str, BookTimeline] = field(default_factory=dict)
+    # Parâmetros de reward lidos do snapshot (M2.2 B.1). Fica como dict cru
+    # de propósito: quem simula decide o que sabe ler, e um campo novo do
+    # mercado não exige mudar esta classe.
+    reward_meta: dict[str, Any] = field(default_factory=dict)
+    # Execuções observadas no topo, para o markout (M2.2 B.2):
+    # (ts_ns, preço, tamanho, lado)
+    trades: list[tuple[int, float, float, str]] = field(default_factory=list)
 
 
 @dataclass

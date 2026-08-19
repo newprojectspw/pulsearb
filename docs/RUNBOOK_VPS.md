@@ -75,6 +75,41 @@ python3.12 -m venv .venv
 mkdir -p data/recordings
 ```
 
+### 4.1. Relógio — NÃO pule
+
+O modelo endgame depende de `seconds_left`. Numa janela em que os últimos 60
+segundos decidem, **2 segundos de deriva de relógio erram em 3% a fração de
+TWAP já travada** — e esse erro entra no backtest como se fosse sinal, sem
+nada avisar. Deriva de relógio é silenciosa por natureza: o `date` continua
+mostrando uma hora plausível.
+
+```bash
+sudo apt install -y chrony
+sudo systemctl enable --now chrony
+
+# a fonte tem que estar sincronizada, e o offset em MILISSEGUNDOS
+chronyc tracking | grep -E "Reference ID|System time|Leap status"
+chronyc sources -v | head -20
+```
+
+O que precisa estar verdadeiro:
+
+| Campo | Valor aceitável |
+|---|---|
+| `Leap status` | `Normal` |
+| `System time` | offset **< 50 ms** do relógio de referência |
+| `chronyc sources` | pelo menos uma fonte com `^*` (a selecionada) |
+
+Se `Leap status` for `Not synchronised`, espere alguns minutos e repita. Se
+não sincronizar, o provedor pode estar bloqueando NTP na saída (UDP 123) —
+resolva **antes** de gravar 72h, não depois.
+
+O recorder mede isso continuamente por conta própria: o relatório traz
+`integridade.offset_relogio_ms` (p50/p99), que é a diferença entre a chegada
+local e o carimbo do servidor. Ele inclui latência de rede, então é **teto**
+do erro de relógio, não o erro em si — mas se o p50 crescer ao longo da
+gravação, é deriva, e não latência.
+
 Antes de deixar rodando, confirme que a VPS **enxerga** os endpoints:
 
 ```bash
@@ -153,7 +188,27 @@ sleep 60 && ls -la /opt/pulsearb/data/recordings/
 
 O `.jsonl.gz` corrente tem que estar maior na segunda listagem.
 
-Só depois desses três checks a gravação está de fato iniciada.
+```bash
+# 4. O livro que estamos reconstruindo bate com o que o servidor afirma?
+journalctl -u pulsearb-recorder --since "60 seconds ago" \
+  | grep '"msg":"descoberta"' | tail -1 | python3 -m json.tool \
+  | grep -E "divergencias|resyncs|descartadas_book|offset_relogio"
+```
+
+| Campo | Valor saudável | O que significa se estourar |
+|---|---|---|
+| `descartadas_book` | **0**, sempre | a fila SEM PERDA transbordou: delta de livro se perdeu. Disco ou CPU insuficientes. |
+| `divergencias` | 0, ou poucas e estáveis | o topo que reconstruímos discorda do que o servidor manda. Crescendo sem parar = parser errado (ver API_NOTES 6.1b), não perda. |
+| `resyncs` | poucos | cada um é um buraco que foi consertado. Muitos = a fonte do problema não foi resolvida. |
+| `offset_relogio_p50_ms` | estável, dezenas de ms | crescendo ao longo da gravação = NTP quebrado (§4.1). |
+
+**`divergencias` alto logo no primeiro minuto é o sinal mais importante desta
+lista**, e vale parar por ele: significa que o livro reconstruído não
+corresponde ao real, e uma gravação de 72h nessas condições não sustenta
+veredito nenhum. Confira `integridade.divergencia_topo_book.formas_de_price_change`
+no relatório final para saber qual formato o servidor está usando.
+
+Só depois desses quatro checks a gravação está de fato iniciada.
 
 Alternativa com Docker:
 
@@ -297,6 +352,30 @@ pico** (50 mil snapshots retidos, 1,95 milhão descartados), contra o `Killed` d
 sobre o arquivo (a primeira só lê metadados, e é ela que descobre quais tokens
 importam) e a truncagem dos books aos `--niveis-book` do topo.
 
+### Antes do backtest longo: converta para colunar
+
+Sobre 72h de JSONL, cada cenário do backtest reparseia o arquivo inteiro. A
+conversão colunar é feita uma vez e paga em todas as passadas seguintes:
+
+```bash
+pip install -e '.[analise]'        # extra opcional, só na máquina de análise
+python -m pulsearb.replay.columnar ~/pulsearb-dados --out ~/pulsearb-parquet
+```
+
+Sai particionado por fonte e por dia (`fonte=poly_ws/dia=20260818/...`), o que
+permite carregar só o que interessa:
+
+```python
+import pyarrow.parquet as pq
+t = pq.read_table("~/pulsearb-parquet", columns=["ts_wall_ns", "asset_id", "best_ask"],
+                  filters=[("fonte", "=", "poly_ws")])
+```
+
+O parquet é **derivado**: pode ser apagado e regerado do JSONL a qualquer
+momento. Se os dois discordarem, o JSONL está certo.
+
+### O que olhar no relatório
+
 O relatório imprime o que foi retido e o que foi descartado em
 `gravacao.memoria`. Olhe dois campos:
 
@@ -304,6 +383,15 @@ O relatório imprime o que foi retido e o que foi descartado em
 |---|---|
 | `pior_resolucao_ms` > 150 | algum token estourou o teto e foi raleado; o cenário de latência de 150ms já não é distinguível dele. Suba `--limite-snapshots` se houver RAM. |
 | `tokens_com_book` muito menor que `tokens_de_interesse` | a gravação não cobre as janelas que a descoberta conhecia — provavelmente feed do CLOB caindo (§5.1). |
+
+E o bloco `integridade`, que decide se o resto do relatório vale alguma coisa:
+
+| Campo | Leitura |
+|---|---|
+| `divergencia_topo_book.taxa` | acima de 1% invalida a conta do maker (ver `VEREDITO_M2.md`) |
+| `janelas_invalidadas` | janelas que saíram do backtest por livro furado — se for a maioria, o número agregado não significa nada |
+| `formas_de_price_change` | qual formato o servidor usa de fato (API_NOTES 6.1b). É a resposta que a primeira gravação não deu. |
+| `offset_relogio_ms.p50` | teto do erro de relógio; dezenas de ms é normal, segundos não |
 
 ## 8. Parar
 
@@ -320,7 +408,9 @@ tolera isso e conta quantas foram.
 
 - [ ] `smoke_discovery` achou janelas dos **dois** jogos (TWAP e horário)
 - [ ] `systemctl status` mostra `active (running)`
+- [ ] **§4.1 passou**: `chronyc tracking` com `Leap status: Normal`
 - [ ] **§5.1 passou**: 0-1 "conexão caiu" em 60s, e os três `msgs_*` > 0
+- [ ] `descartadas_book` em **0** e `divergencias` sem crescer
 - [ ] o log tem `descoberta` a cada 30s, com `assinadas` estável
 - [ ] `data/recordings/` tem um `.jsonl.gz` crescendo
 - [ ] `du -sh` bate com a ordem de grandeza da §6 (~470 MB na primeira hora)

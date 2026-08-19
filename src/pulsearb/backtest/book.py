@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pulsearb.feeds.poly_ws import MudancaDePreco, iter_mudancas
+
 
 @dataclass(slots=True)
 class OrderBook:
@@ -92,35 +94,38 @@ class OrderBook:
     def apply_price_change(self, payload: dict[str, Any]) -> None:
         """Aplica um evento `price_change` ao book corrente.
 
-        size = 0 remove o nível — é assim que o CLOB sinaliza cancelamento.
+        As mudanças vêm de `iter_mudancas`, que aceita as duas formas de
+        payload do CLOB (ver `feeds/poly_ws.py`) — antes esta função lia só
+        `changes` com `asset_id` no topo, que era uma suposição nossa nunca
+        confirmada contra o fio.
+
+        Um `price_change` pode carregar deltas de vários tokens; aqui só
+        entram os deste livro. `size = 0` remove o nível — é assim que o CLOB
+        sinaliza cancelamento.
         """
-        changes = payload.get("changes")
-        if not isinstance(changes, list):
-            return
         self.ts_ns = _ts_ns(payload.get("timestamp")) or self.ts_ns
-        for change in changes:
-            if not isinstance(change, dict):
+        for mudanca in iter_mudancas(payload, asset_padrao=self.asset_id):
+            if mudanca.asset_id != self.asset_id:
                 continue
-            preco = _as_float(change.get("price"))
-            tamanho = _as_float(change.get("size"))
-            lado = str(change.get("side", "")).upper()
-            if preco is None or tamanho is None:
-                continue
-            niveis = self.bids if lado == "BUY" else self.asks
-            restantes = [(p, s) for p, s in niveis if p != preco]
-            if tamanho > 0:
-                restantes.append((preco, tamanho))
-            # `sort()` sem `key`: comparação de tupla, feita em C. Com
-            # `key=lambda item: item[0]` era uma chamada Python por comparação
-            # — ~200 por evento, 12 milhões de eventos por hora de gravação, e
-            # respondia pela maior parte do tempo do backtest. O resultado é o
-            # mesmo: preços são únicos na lista (o duplicado acaba de ser
-            # removido), então o segundo elemento nunca chega a desempatar.
-            restantes.sort(reverse=(lado == "BUY"))
-            if lado == "BUY":
-                self.bids = restantes
-            else:
-                self.asks = restantes
+            self.aplicar_mudanca(mudanca)
+
+    def aplicar_mudanca(self, mudanca: MudancaDePreco) -> None:
+        """Um nível, já decodificado. Separado para o monitor de integridade."""
+        niveis = self.bids if mudanca.side == "BUY" else self.asks
+        restantes = [(p, s) for p, s in niveis if p != mudanca.price]
+        if mudanca.size > 0:
+            restantes.append((mudanca.price, mudanca.size))
+        # `sort()` sem `key`: comparação de tupla, feita em C. Com
+        # `key=lambda item: item[0]` era uma chamada Python por comparação
+        # — ~200 por evento, 12 milhões de eventos por hora de gravação, e
+        # respondia pela maior parte do tempo do backtest. O resultado é o
+        # mesmo: preços são únicos na lista (o duplicado acaba de ser
+        # removido), então o segundo elemento nunca chega a desempatar.
+        restantes.sort(reverse=(mudanca.side == "BUY"))
+        if mudanca.side == "BUY":
+            self.bids = restantes
+        else:
+            self.asks = restantes
 
 
 @dataclass(frozen=True, slots=True)

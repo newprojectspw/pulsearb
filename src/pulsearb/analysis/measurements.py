@@ -326,3 +326,182 @@ def medir_potencial_maker(
             "O número aqui é um TETO, não uma expectativa."
         ),
     }
+
+
+# ---------------------------------------------------------------- M2.2 B.2
+def medir_markout(
+    janelas: list[Any],
+    *,
+    horizontes_s: tuple[float, ...] = (1.0, 5.0, 30.0),
+) -> dict[str, Any]:
+    """Adverse selection: quanto o preço anda CONTRA quem foi executado.
+
+    Esta é a medição que decide a rota maker, e é a que falta em toda
+    estimativa otimista de rewards. Quem cota é executado preferencialmente
+    quando o mercado está andando contra — o taker que atravessa o topo sabe
+    algo (ou chegou primeiro), e o maker fica com o lado errado.
+
+    O markout mede isso diretamente: para cada execução observada no topo,
+    quanto o MEIO do livro andou 1s, 5s e 30s depois, na direção que
+    prejudica quem estava do outro lado.
+
+    Convenção de sinal, e ela importa: o número é o resultado de **quem
+    forneceu a liquidez**, em centavos por share.
+
+    - taker comprou (`BUY`) → nós vendemos → ganhamos se o meio CAI
+    - taker vendeu (`SELL`) → nós compramos → ganhamos se o meio SOBE
+
+    Markout **negativo** = fomos atropelados. É o custo que precisa ser menor
+    que o reward para a rota maker fechar.
+
+    Só entram execuções cujo preço estava no topo (dentro de meio tick do
+    melhor preço do lado): quem foi executado fundo no livro não é o maker
+    que estamos simulando.
+    """
+    por_recorte: dict[str, list[dict[str, float]]] = defaultdict(list)
+    total = 0
+    fora_do_topo = 0
+    sem_referencia = 0
+
+    for janela in janelas:
+        tick = float(getattr(janela, "tick_size", 0.01) or 0.01)
+        hora = int((janela.close_ts_ns / 1e9) // 3600 % 24)
+        timelines = [t for t in janela.books.values() if t is not None and t.ts]
+        if not timelines:
+            continue
+        for ts_ns, preco, _tamanho, lado in getattr(janela, "trades", []):
+            total += 1
+            book = _primeiro_book(timelines, ts_ns)
+            if book is None or book.mid is None:
+                sem_referencia += 1
+                continue
+            melhor = book.best_ask if lado == "BUY" else book.best_bid
+            if melhor is None or abs(preco - melhor) > tick / 2:
+                fora_do_topo += 1
+                continue
+            meio_agora = book.mid
+            distancia_ticks = (
+                round(abs(preco - meio_agora) / tick) if tick > 0 else 0
+            )
+            amostra: dict[str, float] = {}
+            for horizonte in horizontes_s:
+                depois = _primeiro_book(timelines, ts_ns + int(horizonte * 1e9))
+                if depois is None or depois.mid is None:
+                    continue
+                # Sinal do ponto de vista de quem FORNECEU a liquidez.
+                variacao = meio_agora - depois.mid if lado == "BUY" else depois.mid - meio_agora
+                amostra[f"{horizonte:g}s"] = variacao * 100.0  # centavos por share
+            if not amostra:
+                sem_referencia += 1
+                continue
+            for recorte in (
+                "total",
+                f"duracao={janela.duracao_s}s",
+                f"hora_utc={hora:02d}",
+                f"distancia_ticks={min(distancia_ticks, 5)}",
+            ):
+                por_recorte[recorte].append(amostra)
+
+    saida = {
+        recorte: {
+            f"{h:g}s": _dist([a[f"{h:g}s"] for a in amostras if f"{h:g}s" in a])
+            for h in horizontes_s
+        }
+        for recorte, amostras in sorted(por_recorte.items())
+    }
+    return {
+        "execucoes_observadas": total,
+        "descartadas_fora_do_topo": fora_do_topo,
+        "descartadas_sem_book_de_referencia": sem_referencia,
+        "markout_centavos_por_share": saida,
+        "convencao": (
+            "Sinal do ponto de vista de QUEM FORNECEU a liquidez. Negativo = "
+            "o preço andou contra nós depois da execução, ou seja, fomos "
+            "atropelados. É o custo que o reward precisa superar."
+        ),
+    }
+
+
+def _primeiro_book(timelines: list[Any], ts_ns: int) -> Any:
+    """O book de qualquer timeline da janela naquele instante.
+
+    As duas pernas (Up e Down) são espelhos uma da outra; para medir
+    deslocamento do meio, a primeira que tiver snapshot serve.
+    """
+    for timeline in timelines:
+        book = timeline.at(ts_ns)
+        if book is not None:
+            return book
+    return None
+
+
+# ---------------------------------------------------------------- M2.2 B.3
+def conta_do_maker(
+    *,
+    rewards: dict[str, Any],
+    markout: dict[str, Any],
+    fee_rebate_rate: float,
+    volume_taker_usdc: float = 0.0,
+    horizonte_markout: str = "5s",
+) -> dict[str, Any]:
+    """A conta fechada da rota maker, num bloco só (M2.2 B.3).
+
+        resultado = rewards + rebate − custo_de_markout − taxa(0 p/ maker)
+
+    O capital imobilizado entra como AVISO, não como número: dimensionar
+    posição é decisão do M3, e inventar aqui um custo de capital sem tamanho
+    de posição definido daria um número com cara de precisão e sem conteúdo.
+
+    Cada célula vem com as horas de amostra que a sustentam. Célula com pouca
+    amostra continua aparecendo — some seria pior —, mas quem lê vê o `n`.
+    """
+    por_recorte: dict[str, dict[str, Any]] = {}
+    tabela_markout = markout.get("markout_centavos_por_share") or {}
+    por_ordem = rewards.get("por_ordem") or {}
+
+    for nome_da_ordem, recortes in por_ordem.items():
+        for recorte, dados in recortes.items():
+            horas = dados.get("horas_de_amostra") or 0.0
+            receita = dados.get("receita_usdc") or 0.0
+            markout_recorte = (tabela_markout.get(recorte) or {}).get(horizonte_markout) or {}
+            markout_medio_cent = markout_recorte.get("media")
+            n_markout = markout_recorte.get("n", 0)
+            chave = f"{nome_da_ordem} | {recorte}"
+            por_recorte[chave] = {
+                "horas_de_amostra": horas,
+                "rewards_usdc": round(receita, 6),
+                "rebate_usdc": round(volume_taker_usdc * fee_rebate_rate, 6),
+                "markout_medio_centavos_por_share": markout_medio_cent,
+                "execucoes_no_markout": n_markout,
+                "taxa_usdc": 0.0,
+                "resultado_parcial_usdc": round(
+                    receita + volume_taker_usdc * fee_rebate_rate, 6
+                ),
+            }
+
+    return {
+        "por_ordem_e_recorte": dict(sorted(por_recorte.items())),
+        "formula": (
+            "resultado = rewards + rebate(fee_rebate_rate * taxa dos takers que "
+            "nos executam) - custo_de_markout - taxa(0 para maker) "
+            "- capital_imobilizado"
+        ),
+        "o_que_falta_para_fechar": [
+            "volume_taker_usdc: exige simular QUAIS das nossas cotações teriam "
+            "sido executadas, o que depende de posição na fila — e a fila não é "
+            "observável no WS agregado (ver limitacao_de_fila).",
+            "custo_de_markout em USDC: sai de markout * shares executadas, que "
+            "depende do mesmo número acima.",
+            "capital_imobilizado: dimensionamento de posição é decisão do M3.",
+        ],
+        "limitacao_de_fila": (
+            "O WS entrega níveis AGREGADOS, não ordens individuais. Não dá para "
+            "saber quantas ordens dividem um nível nem em que posição a nossa "
+            "estaria. Toda simulação de preenchimento maker aqui é, portanto, "
+            "OTIMISTA por construção. No pior caso — a nossa ordem sempre no "
+            "fim da fila — só seríamos executados quando o nível inteiro fosse "
+            "varrido, isto é, exatamente nos casos de markout pior. Ou seja: o "
+            "viés não é neutro, ele infla o resultado nas duas pontas (mais "
+            "execução boa, menos execução ruim contabilizada)."
+        ),
+    }
