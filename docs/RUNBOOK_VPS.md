@@ -374,6 +374,34 @@ t = pq.read_table("~/pulsearb-parquet", columns=["ts_wall_ns", "asset_id", "best
 O parquet é **derivado**: pode ser apagado e regerado do JSONL a qualquer
 momento. Se os dois discordarem, o JSONL está certo.
 
+### Na máquina de análise: solte os limites de memória
+
+Os defaults do backtest são dimensionados para a VPS de 1 GB — e na máquina
+de análise eles **sufocam a simulação**. A rodada real de 2026-08-19 descartou
+42% dos snapshots e ficou com resolução efetiva de ~1,9s, o que torna o
+cenário de latência de 300ms indistinguível.
+
+Num Mac com 16 GB+, rode com:
+
+```bash
+python -m pulsearb.backtest ~/pulsearb-dados \
+  --limite-por-token 20000 --niveis-por-lado 10 --json relatorio.json
+```
+
+Ou por ambiente, para não repetir em cada invocação:
+
+```bash
+export PULSEARB_BACKTEST_LIMITE_POR_TOKEN=20000
+export PULSEARB_BACKTEST_NIVEIS_POR_LADO=10
+```
+
+Regra de bolso do orçamento (a mesma fórmula da seção anterior):
+`tokens × limite × níveis × 270 B`. Com 150 tokens, 20.000 snapshots e 10
+níveis ≈ **8 GB** — confortável num Mac, impossível na VPS. Depois de rodar,
+confira `gravacao.memoria.pior_resolucao_ms`: com os limites soltos ele deve
+ficar **abaixo de 150** e os quatro cenários de latência voltam a ser
+distinguíveis.
+
 ### O que olhar no relatório
 
 O relatório imprime o que foi retido e o que foi descartado em

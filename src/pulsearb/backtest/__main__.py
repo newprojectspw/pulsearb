@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -49,7 +50,9 @@ from pulsearb.feeds.poly_ws import (
     EVENT_BOOK,
     EVENT_LAST_TRADE,
     EVENT_PRICE_CHANGE,
-    RESOLUTION_EVENT_TYPES,
+    Resolucao,
+    normalizar_condition_id,
+    resolucao_do_evento,
 )
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.markets.discovery import parse_end_date_epoch
@@ -138,8 +141,18 @@ class RecordingIndex:
         self.n_snapshots = 0
         self.ticks_vistos: Counter[str] = Counter()
         self.janelas_por_slug: dict[str, dict[str, Any]] = {}
+        # M2.3: a resolução é indexada pelos DOIS caminhos que o evento
+        # oferece — condition id e token. O condition id é a chave primária
+        # (identifica o mercado inteiro); o token cobre o fallback sintético
+        # da Gamma, que só nomeia um token por vez.
+        self.resolucoes_por_condicao: dict[str, Resolucao] = {}
+        self.resolucoes_por_token: dict[str, Resolucao] = {}
         self.resolucoes: dict[str, int] = {}   # asset_id → ts_ns da resolução
         self.resolvido_up: dict[str, bool] = {}
+        self.eventos_de_resolucao = 0
+        self.resolucoes_sinteticas = 0
+        self.resolucoes_sem_janela: list[str] = []
+        self.resolucoes_ambiguas: list[str] = []
         self.gaps: list[dict[str, Any]] = []
         self.janelas_de_interesse: dict[str, tuple[int, int]] = {}  # token → (ini, fim)
         self._ultimo_tick: dict[str, float] = {}
@@ -229,16 +242,57 @@ class RecordingIndex:
             if carimbo:
                 self.relogio.observar(carimbo, record.ts_wall_ns)
             self.integridade.observar(evento, record.ts_wall_ns)
-            tipo = evento.get("event_type")
-            if tipo not in RESOLUTION_EVENT_TYPES:
-                continue
-            asset_id = evento.get("asset_id")
-            if not isinstance(asset_id, str):
-                continue
-            self.resolucoes[asset_id] = record.ts_wall_ns
-            vencedor = evento.get("winning_outcome") or evento.get("outcome")
-            if isinstance(vencedor, str):
-                self.resolvido_up[asset_id] = vencedor.lower() == "up"
+            self._on_resolucao(evento, record.ts_wall_ns)
+
+    def _on_resolucao(self, evento: dict[str, Any], chegada_ns: int) -> None:
+        """Indexa a resolução pelos dois caminhos e guarda o instante do evento.
+
+        O instante preferido é o carimbo do SERVIDOR, não a chegada local: o
+        que a medição de atraso de liquidação (M2.E.2) quer saber é quanto
+        tempo a plataforma levou entre o `endDate` e a publicação do
+        resultado, e a latência da nossa rede não faz parte dessa pergunta.
+        A chegada local fica como fallback.
+        """
+        resolucao = resolucao_do_evento(evento)
+        if resolucao is None:
+            return
+        self.eventos_de_resolucao += 1
+        if resolucao.sintetico:
+            self.resolucoes_sinteticas += 1
+        ts_ns = (
+            int(resolucao.ts_servidor_ms * 1e6)
+            if resolucao.ts_servidor_ms
+            else chegada_ns
+        )
+        if resolucao.condition_id is not None:
+            self.resolucoes_por_condicao[resolucao.condition_id] = resolucao
+        for token in resolucao.tokens:
+            self.resolucoes_por_token[token] = resolucao
+            self.resolucoes[token] = ts_ns
+        if resolucao.winning_token_id is not None:
+            self.resolucoes.setdefault(resolucao.winning_token_id, ts_ns)
+
+        # `resolvido_up` continua significando "o lado Up venceu", e por isso
+        # só é preenchido pelo RÓTULO. A identidade do token vencedor decide
+        # melhor, mas exige saber qual token é o Up — informação que só a
+        # janela tem, e que entra em `janelas()`.
+        if isinstance(resolucao.winning_outcome, str):
+            venceu_up = resolucao.winning_outcome.strip().lower() == "up"
+            for token in resolucao.tokens:
+                self.resolvido_up[token] = venceu_up
+
+    def _resolucao_da_janela(
+        self, condition_id: str, token_up: str, token_down: str
+    ) -> Resolucao | None:
+        """Casa a janela com a resolução, por condition id ou por token."""
+        chave = normalizar_condition_id(condition_id)
+        if chave is not None:
+            achada = self.resolucoes_por_condicao.get(chave)
+            if achada is not None:
+                return achada
+        return self.resolucoes_por_token.get(token_up) or self.resolucoes_por_token.get(
+            token_down
+        )
 
     def _marcar_tokens_de_interesse(self) -> None:
         for slug, meta in self.janelas_por_slug.items():
@@ -312,6 +366,45 @@ class RecordingIndex:
             self.books[asset_id] = timeline
         return timeline
 
+    def resolucoes_resumo(self, janelas: list[WindowState]) -> dict[str, Any]:
+        """Quantas resoluções chegaram, quantas casaram, e o que sobrou.
+
+        A contagem de eventos e a de janelas resolvidas são números
+        diferentes de propósito: o servidor manda um evento por mercado, e um
+        evento pode não corresponder a janela nenhuma que a descoberta viu
+        (janela que nasceu antes do recorder subir, por exemplo). Reportar só
+        um dos dois esconderia exatamente o defeito que o M2.3 corrigiu.
+        """
+        casadas = {
+            j.slug
+            for j in janelas
+            if self._resolucao_da_janela(j.condition_id, j.token_up, j.token_down)
+            is not None
+        }
+        condicoes_das_janelas = {
+            normalizar_condition_id(j.condition_id)
+            for j in janelas
+            if normalizar_condition_id(j.condition_id)
+        }
+        orfas = sorted(
+            set(self.resolucoes_por_condicao) - condicoes_das_janelas
+        )
+        return {
+            "eventos_lidos": self.eventos_de_resolucao,
+            "mercados_distintos": len(self.resolucoes_por_condicao),
+            "sinteticas_via_gamma": self.resolucoes_sinteticas,
+            "janelas_casadas": len(casadas),
+            "resolucoes_sem_janela_correspondente": len(orfas),
+            "condicoes_orfas": orfas[:20],
+            "janelas_com_resolucao_ambigua": self.resolucoes_ambiguas[:20],
+            "nota": (
+                "`eventos_lidos` conta o que veio do fio; `janelas_casadas` "
+                "conta quantas janelas conhecidas encontraram a sua. Órfã = "
+                "resolução de mercado que a descoberta nunca viu (nasceu antes "
+                "do recorder subir, ou fora dos ativos configurados)."
+            ),
+        }
+
     # ---------------------------------------------------------------- memória
     def uso_de_memoria(self) -> dict[str, Any]:
         """O que foi retido e o que foi descartado — o relatório precisa dizer."""
@@ -349,7 +442,19 @@ class RecordingIndex:
             fim_epoch = parse_end_date_epoch({"endDate": meta.get("end_date_iso")})
             if fim_epoch is None:
                 continue
-            resolucao = self.resolvido_up.get(token_up)
+            achada = self._resolucao_da_janela(
+                str(meta.get("condition_id") or ""), token_up, token_down
+            )
+            resolucao = (
+                achada.venceu_up(token_up, token_down) if achada is not None else None
+            )
+            if achada is not None and resolucao is None:
+                # O evento chegou mas não permite decidir o lado. Isso é
+                # anomalia, não ausência: some da contagem de resoluções e
+                # aparece no relatório com o slug.
+                self.resolucoes_ambiguas.append(slug)
+            if achada is not None:
+                self.resolvido_up[token_up] = bool(resolucao)
             duracao = _duracao_do_slug(slug)
             janela = WindowState(
                 slug=slug,
@@ -431,17 +536,40 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--latencia-ms", type=float, default=300.0)
     parser.add_argument("--json", help="grava o relatório completo neste arquivo")
+    # LIMITES DE MEMÓRIA — defaults dimensionados para a VPS de 1 GB e
+    # deliberadamente conservadores. Na máquina de ANÁLISE eles sufocam a
+    # simulação: a rodada real de 2026-08-19 descartou 42% dos snapshots e
+    # ficou com resolução efetiva de ~1,9s, o que torna o cenário de latência
+    # de 300ms indistinguível. Num Mac com memória de sobra, suba-os
+    # (recomendação no runbook §7). Env cobre o caso de quem roda via make ou
+    # script sem tocar na linha de comando; o flag explícito vence o env.
     parser.add_argument(
         "--limite-snapshots",
+        "--limite-por-token",
+        dest="limite_snapshots",
         type=int,
-        default=LIMITE_SNAPSHOTS_PADRAO,
-        help="teto de snapshots de book por token (memória; ver BookTimeline)",
+        default=int(
+            os.environ.get("PULSEARB_BACKTEST_LIMITE_POR_TOKEN", LIMITE_SNAPSHOTS_PADRAO)
+        ),
+        help=(
+            "teto de snapshots de book por token (memória; ver BookTimeline). "
+            f"Default {LIMITE_SNAPSHOTS_PADRAO}, dimensionado para 1 GB de RAM; "
+            "na máquina de análise use 20000+. Env: "
+            "PULSEARB_BACKTEST_LIMITE_POR_TOKEN"
+        ),
     )
     parser.add_argument(
         "--niveis-book",
+        "--niveis-por-lado",
+        dest="niveis_book",
         type=int,
-        default=NIVEIS_RETIDOS_PADRAO,
-        help="níveis do topo retidos por lado em cada snapshot",
+        default=int(
+            os.environ.get("PULSEARB_BACKTEST_NIVEIS_POR_LADO", NIVEIS_RETIDOS_PADRAO)
+        ),
+        help=(
+            "níveis do topo retidos por lado em cada snapshot. Default "
+            f"{NIVEIS_RETIDOS_PADRAO}. Env: PULSEARB_BACKTEST_NIVEIS_POR_LADO"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -518,6 +646,7 @@ def main(argv: list[str] | None = None) -> int:
             "snapshots_de_descoberta": index.n_snapshots,
             "janelas_conhecidas": len(janelas),
             "janelas_com_resolucao": len(resolvidas),
+            "resolucoes": index.resolucoes_resumo(janelas),
             "gaps": index.gaps,
             "memoria": index.uso_de_memoria(),
         },

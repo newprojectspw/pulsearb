@@ -50,6 +50,11 @@ LIMIAR_INVALIDACAO_PADRAO = 0.01
 # Divergências guardadas por token para o relatório. O contador é completo; a
 # lista é amostra — 72h de gravação não podem virar uma lista sem teto.
 MAX_AMOSTRAS = 50
+# Magnitudes retidas para os percentis. Reservatório em rodízio, como no
+# MonitorDeRelogio: determinístico (o replay tem de reproduzir) e limitado
+# (produção mostrou ~21k divergências numa sessão; 72h não podem virar lista
+# sem teto).
+MAX_MAGNITUDES = 50_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +134,12 @@ class MonitorDeIntegridade:
     divergencias: int = 0
     amostras: list[Divergencia] = field(default_factory=list)
     magnitudes: list[float] = field(default_factory=list)
+    #: divergências em que o NOSSO lado estava vazio (magnitude infinita).
+    #: População separada de propósito: "topo deslocado meio tick" é ruído de
+    #: timing; "o servidor afirma um topo e nós não temos lado NENHUM" é
+    #: livro que nunca recebeu os deltas — outra doença, outro remédio.
+    lados_vazios: int = 0
+    _magnitudes_total: int = 0
     #: token → maior magnitude vista. É o que invalida a janela.
     pior_por_token: dict[str, float] = field(default_factory=dict)
     #: token → quantas vezes divergiu
@@ -234,8 +245,16 @@ class MonitorDeIntegridade:
             )
             self.divergencias += 1
             self.divergencias_por_token[asset_id] += 1
-            if magnitude != float("inf"):
-                self.magnitudes.append(magnitude)
+            if magnitude == float("inf"):
+                self.lados_vazios += 1
+            else:
+                self._magnitudes_total += 1
+                if len(self.magnitudes) < MAX_MAGNITUDES:
+                    self.magnitudes.append(magnitude)
+                else:
+                    self.magnitudes[
+                        self._magnitudes_total % MAX_MAGNITUDES
+                    ] = magnitude
             anterior = self.pior_por_token.get(asset_id, 0.0)
             self.pior_por_token[asset_id] = max(anterior, magnitude)
             if len(self.amostras) < self.max_amostras:
@@ -251,13 +270,27 @@ class MonitorDeIntegridade:
     def resumo(self) -> dict[str, Any]:
         taxa = self.divergencias / self.comparacoes if self.comparacoes else 0.0
         ordenadas = sorted(self.magnitudes)
+        # Percentis em TICKS além de preço: 0,015 de magnitude é 1,5 tick num
+        # mercado de 0,01 e 15 ticks num de 0,001 — a unidade de preço sozinha
+        # não separa ruído de corrupção. O tick fino é o denominador
+        # conservador: superestima a gravidade, nunca a esconde.
+        tick_referencia = 0.001
         return {
             "comparacoes": self.comparacoes,
             "divergencias": self.divergencias,
             "taxa": round(taxa, 6),
+            "com_magnitude_finita": self._magnitudes_total,
+            "com_lado_vazio": self.lados_vazios,
             "magnitude_p50": _percentil(ordenadas, 50),
+            "magnitude_p90": _percentil(ordenadas, 90),
             "magnitude_p99": _percentil(ordenadas, 99),
-            "magnitude_max": round(max(ordenadas), 6) if ordenadas else 0.0,
+            "magnitude_max": round(max(ordenadas), 6) if ordenadas else None,
+            "magnitude_em_ticks_de_0.001": {
+                "p50": _em_ticks(_percentil(ordenadas, 50), tick_referencia),
+                "p90": _em_ticks(_percentil(ordenadas, 90), tick_referencia),
+                "p99": _em_ticks(_percentil(ordenadas, 99), tick_referencia),
+            },
+            "magnitudes_amostradas": len(ordenadas),
             "tokens_divergentes": len(self.divergencias_por_token),
             "tokens_corrompidos": sorted(
                 t for t in self.pior_por_token if self.token_corrompido(t)
@@ -268,13 +301,24 @@ class MonitorDeIntegridade:
             "formas_de_price_change": dict(self.formas_de_price_change),
             "amostras": [d.to_dict() for d in self.amostras],
             "nota": (
-                "`formas_de_price_change` diz qual formato o servidor usa de "
-                "fato: `price_changes` (a do SDK oficial) ou `changes` (a que "
-                "este projeto assumiu até o M2.2 sem nunca confirmar). Se vier "
-                "`changes`, os deltas NÃO trazem best_bid/best_ask e a "
-                "validação cruzada só acontece nos eventos `best_bid_ask`."
+                "Duas populações, dois diagnósticos. `com_magnitude_finita` = "
+                "topo deslocado: p50/p99 em ticks distinguem ruído de timing "
+                "(~1 tick) de corrupção real (muitos ticks). `com_lado_vazio` "
+                "= o servidor afirma um topo e a reconstrução não tem lado "
+                "NENHUM — livro que nunca recebeu os deltas, tipicamente a "
+                "forma de price_change que o leitor não aplicava (API_NOTES "
+                "6.1b) ou token sem snapshot inicial. Foi este o caso da "
+                "sessão de 2026-08-19: todas as divergências com lado vazio, "
+                "e por isso p99 vinha None. `formas_de_price_change` diz qual "
+                "formato o servidor usa de fato."
             ),
         }
+
+
+def _em_ticks(magnitude: float | None, tick: float) -> float | None:
+    if magnitude is None or tick <= 0:
+        return None
+    return round(magnitude / tick, 1)
 
 
 class MonitorDeRelogio:

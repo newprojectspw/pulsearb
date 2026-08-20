@@ -1,0 +1,32 @@
+{
+  "_origem": "CAPTURA REAL de produção — VPS Londres, arquivo pulsearb-20260819-1900.jsonl.gz, gravação de 2026-08-19 19h UTC. Linha copiada integralmente do JSONL, sem edição.",
+  "_por_que_importa": "É a forma que o servidor REALMENTE manda. O leitor do backtest procurava `asset_id` (singular) e o evento traz `assets_ids` (lista) + `winning_asset_id` — por isso 73 resoluções gravadas viraram 0 lidas. Fixture sintética não teria pego isso: ela teria a forma que nós imaginamos, que é justamente a errada.",
+  "_regra": "Forma de evento de servidor só entra aqui como captura real (regra desde o M2.2). Nunca inventar campos nem variantes.",
+  "linha_jsonl": {
+    "ts_mono_ns": 155418621290204,
+    "ts_wall_ns": 1787166722794475400,
+    "fonte": "poly_ws",
+    "payload": {
+      "id": "3708239",
+      "market": "0xabe6e955b2e4766f70aef23c58a5ae410b608bc611cba58877524262492f3069",
+      "assets_ids": [
+        "62619609207693980296808281881769971532618981069069777294730350429227476860752",
+        "25116436954067330024639590938839276092940548795556577387884315680561334250652"
+      ],
+      "winning_asset_id": "62619609207693980296808281881769971532618981069069777294730350429227476860752",
+      "winning_outcome": "Up",
+      "event_message": null,
+      "timestamp": "1787166722776",
+      "event_type": "market_resolved",
+      "tags": [
+        "Crypto",
+        "Bitcoin",
+        "Crypto Prices",
+        "Recurring",
+        "Up or Down",
+        "Hide From New",
+        "5M"
+      ]
+    }
+  }
+}
