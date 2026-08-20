@@ -540,3 +540,41 @@ def test_conta_do_maker_declara_o_que_falta_e_o_vies_da_fila():
     conta = conta_do_maker(rewards={}, markout={}, fee_rebate_rate=0.2)
     assert "OTIMISTA" in conta["limitacao_de_fila"]
     assert any("fila" in item for item in conta["o_que_falta_para_fechar"])
+
+
+def test_resumo_separa_lado_vazio_de_magnitude_finita():
+    """M2.3 item 3: p99 vinha None porque TODAS as divergências da sessão
+    real tinham o lado reconstruído VAZIO (magnitude infinita) — e os
+    percentis só olhavam as finitas, sem dizer que a outra população existia.
+
+    As duas populações têm diagnósticos diferentes: topo deslocado é ruído de
+    timing ou perda pontual; lado vazio é livro que nunca recebeu os deltas.
+    """
+    monitor = MonitorDeIntegridade()
+    monitor.observar(BOOK, 1)
+    # topo deslocado: magnitude finita de 0,01 (10 ticks de 0,001)
+    monitor.observar(_delta("0.30", "10", "BUY", "0.50", "0.51"), 2)
+    # lado vazio: o servidor afirma um ask e o nosso lado ask sumiu
+    monitor.observar(_delta("0.51", "0", "SELL", "0.49", "0.52"), 3)
+
+    resumo = monitor.resumo()
+    assert resumo["com_lado_vazio"] == 1
+    assert resumo["com_magnitude_finita"] >= 1
+    assert resumo["magnitude_p50"] is not None
+    assert resumo["magnitude_p99"] is not None
+    assert resumo["magnitude_em_ticks_de_0.001"]["p99"] >= 10.0
+
+
+def test_magnitudes_tem_teto_de_amostras():
+    """~21k divergências numa sessão real; 72h não podem virar lista sem teto."""
+    from pulsearb.analysis.integrity import MAX_MAGNITUDES
+
+    monitor = MonitorDeIntegridade()
+    monitor.observar(BOOK, 1)
+    for i in range(MAX_MAGNITUDES + 100):
+        # cada evento afirma um topo diferente do reconstruído → diverge
+        monitor.observar(_delta("0.49", "100", "BUY", "0.60", "0.61"), i + 2)
+
+    assert len(monitor.magnitudes) <= MAX_MAGNITUDES
+    # o contador completo não é limitado pela amostra
+    assert monitor.resumo()["com_magnitude_finita"] > MAX_MAGNITUDES

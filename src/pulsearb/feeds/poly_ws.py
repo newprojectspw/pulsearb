@@ -123,6 +123,116 @@ def iter_mudancas(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Resolucao:
+    """O resultado de uma janela, já normalizado a partir do evento do fio."""
+
+    condition_id: str | None
+    tokens: tuple[str, ...]
+    winning_token_id: str | None
+    winning_outcome: str | None   # "Up" | "Down" (como veio)
+    ts_servidor_ms: float | None
+    sintetico: bool = False
+
+    def venceu_up(self, token_up: str, token_down: str) -> bool | None:
+        """O lado Up ganhou? None se o evento não permite decidir.
+
+        Duas evidências independentes, nesta ordem de confiança:
+
+        1. `winning_asset_id` — identidade de token, não admite ambiguidade;
+        2. `winning_outcome` — a string "Up"/"Down", que depende de o mercado
+           ter sido montado com esses rótulos.
+
+        A (1) vem primeiro porque o mapeamento outcome→token é por mercado e
+        já mordeu este projeto antes (API_NOTES 12.11: mapear token pelo `o`,
+        nunca por posição).
+        """
+        if self.winning_token_id is not None:
+            if self.winning_token_id == token_up:
+                return True
+            if self.winning_token_id == token_down:
+                return False
+        if isinstance(self.winning_outcome, str):
+            rotulo = self.winning_outcome.strip().lower()
+            if rotulo == "up":
+                return True
+            if rotulo == "down":
+                return False
+        return None
+
+
+def normalizar_condition_id(valor: Any) -> str | None:
+    """Chave comparável de condition id: minúsculas, sem `0x`, sem espaço.
+
+    A Gamma, o CLOB e o WS não prometem a mesma grafia, e comparar
+    `0xABE6…` com `abe6…` falharia em silêncio — que é exatamente o modo de
+    falha que este marco existe para eliminar.
+    """
+    if not isinstance(valor, str):
+        return None
+    limpo = valor.strip().lower()
+    if limpo.startswith("0x"):
+        limpo = limpo[2:]
+    return limpo or None
+
+
+def resolucao_do_evento(evento: dict[str, Any]) -> Resolucao | None:
+    """Extrai a resolução de um evento, na forma REAL do servidor.
+
+    A forma foi capturada em produção (`tests/fixtures/clob_ws_market_resolved.json`)
+    e bate com o `MarketResolvedPayload` do SDK 0.6.0:
+
+        {"event_type": "market_resolved",
+         "market": "0xabe6…",                 ← condition id
+         "assets_ids": ["6261…", "2511…"],    ← os DOIS tokens
+         "winning_asset_id": "6261…",
+         "winning_outcome": "Up",
+         "timestamp": "1787166722776"}        ← epoch em MILISSEGUNDOS, string
+
+    Repare no que NÃO existe: `asset_id` no singular. O leitor do backtest
+    procurava exatamente esse campo e por isso descartava todo evento de
+    resolução — 73 gravados, 0 lidos. Mesma família do defeito do
+    `price_change` (API_NOTES 6.1b): a forma esperada foi escrita a partir do
+    que imaginávamos, não do que o servidor manda.
+
+    Também aceita a forma do fallback sintético que o próprio recorder grava
+    quando consulta a Gamma (`asset_id` + `winning_outcome`), marcada com
+    `sintetico=True` para que o relatório saiba distinguir as duas origens.
+    """
+    if evento.get("event_type") not in RESOLUTION_EVENT_TYPES:
+        return None
+
+    tokens: list[str] = []
+    for chave in ("assets_ids", "asset_ids"):
+        valor = evento.get(chave)
+        if isinstance(valor, list):
+            tokens.extend(item for item in valor if isinstance(item, str))
+    asset_id = evento.get("asset_id")
+    if isinstance(asset_id, str) and asset_id not in tokens:
+        tokens.append(asset_id)
+
+    vencedor_token = evento.get("winning_asset_id") or evento.get("winning_token_id")
+    if not isinstance(vencedor_token, str):
+        vencedor_token = None
+    vencedor_rotulo = evento.get("winning_outcome") or evento.get("outcome")
+    if not isinstance(vencedor_rotulo, str):
+        vencedor_rotulo = None
+
+    if not tokens and vencedor_token is None and vencedor_rotulo is None:
+        return None
+
+    return Resolucao(
+        condition_id=normalizar_condition_id(
+            evento.get("market") or evento.get("condition_id")
+        ),
+        tokens=tuple(tokens),
+        winning_token_id=vencedor_token,
+        winning_outcome=vencedor_rotulo,
+        ts_servidor_ms=_numero(evento.get("timestamp")),
+        sintetico=bool(evento.get("_sintetico")),
+    )
+
+
 def forma_do_price_change(payload: dict[str, Any]) -> str:
     """Qual das duas formas este evento usa. Ver `iter_mudancas`."""
     if isinstance(payload.get("price_changes"), list):

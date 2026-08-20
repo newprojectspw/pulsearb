@@ -418,6 +418,44 @@ aposta.
 cada delta, o servidor está dizendo o topo autoritativo a cada mudança. Isso
 torna a validação cruzada do livro reconstruído gratuita e contínua, não só
 nos eventos `best_bid_ask` (M2.2 A.2).
+
+#### 6.1c. A forma REAL do `market_resolved` `[CAPTURADO em produção, 2026-08-19]`
+
+Mesma família do 6.1b, agora com captura de verdade. Linha integral da
+gravação da VPS (`pulsearb-20260819-1900.jsonl.gz`, preservada em
+`tests/fixtures/clob_ws_market_resolved.json`):
+
+```json
+{"id": "3708239",
+ "market": "0xabe6e955b2e4766f70aef23c58a5ae410b608bc611cba58877524262492f3069",
+ "assets_ids": ["62619609…", "25116436…"],
+ "winning_asset_id": "62619609…",
+ "winning_outcome": "Up",
+ "event_message": null,
+ "timestamp": "1787166722776",
+ "event_type": "market_resolved",
+ "tags": ["Crypto", "Bitcoin", "Crypto Prices", "Recurring", "Up or Down", "Hide From New", "5M"]}
+```
+
+O que a captura estabelece:
+
+- **NÃO existe `asset_id` singular.** O leitor do backtest procurava esse
+  campo e descartava o evento — 73 gravados na hora, 0 lidos
+  (`janelas_com_resolucao: 0`). Corrigido no M2.3
+  (`feeds/poly_ws.py: resolucao_do_evento`).
+- A chave do mercado é `market` (condition id `0x…`). O casamento
+  resolução→janela é por condition id **normalizado** (minúsculas, sem `0x`)
+  com fallback por token — a Gamma e o WS não prometem a mesma grafia.
+- `winning_asset_id` decide o lado por IDENTIDADE de token, sem depender do
+  rótulo "Up"/"Down". É a evidência preferida (mesma razão do 12.11: mapear
+  token pelo identificador, nunca por posição ou rótulo).
+- `timestamp` é **string, epoch em milissegundos**. É o carimbo usado na
+  medição de atraso de liquidação — a chegada local mediria a nossa latência
+  junto.
+- `tags` traz ativo e duração ("Bitcoin", "5M") — redundante com a
+  descoberta, não usado como fonte.
+- Bate com o `MarketResolvedPayload` do SDK 0.6.0, que o 6.1a já listava —
+  a captura confirma o modelo do SDK contra o fio pela primeira vez.
 - **Heartbeat de aplicação** `[VERIFICADO]`: cliente manda o texto puro `"PING"`
   a cada **10 s**; servidor responde `"PONG"`; a conexão é considerada morta com
   **30 s** sem PONG. Não é o ping/pong do protocolo WebSocket — é texto na
