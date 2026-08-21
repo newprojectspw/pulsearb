@@ -578,6 +578,9 @@ class MonitorDeIntegridade:
         for asset_id, estado in self.estados.items():
             while estado.pendentes:
                 self._resolver_uma(asset_id, estado, forcada=True)
+            # `list()` NÃO é supérfluo: `_fechar_aberta` faz `pop` em
+            # `estado.abertas`, e iterar um dict enquanto ele encolhe levanta
+            # RuntimeError. A cópia das chaves é o que torna o laço legal.
             for lado in list(estado.abertas):
                 self._fechar_aberta(estado, lado, estado.ts_ultimo_ms)
             estado.fechar_sem_livro(estado.ts_ultimo_ms)

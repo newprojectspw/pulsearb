@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from tests.synthetic import gerar_gravacao
@@ -126,7 +127,12 @@ def test_sensibilidade_de_latencia_roda_os_quatro_cenarios(indexado):
     assert set(tabela) == {"150ms", "300ms", "600ms", "1000ms"}
 
 
-def test_cli_completo(gravacao, tmp_path, capsys):
+def test_cli_completo(gravacao, tmp_path, capsys, monkeypatch):
+    # O relatório sai fora do diretório de trabalho, que é justamente o que a
+    # contenção de `caminho_de_escrita` barra. Dizer a raiz de propósito é o
+    # caminho previsto — e passar por ele aqui mantém a saída de emergência
+    # exercitada em vez de só documentada.
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     destino = tmp_path / "relatorio.json"
     assert main([str(gravacao), "--json", str(destino)]) == 0
     relatorio = json.loads(destino.read_text())
@@ -265,10 +271,11 @@ def test_cli_recusa_gravacao_inexistente(tmp_path):
     assert main([str(tmp_path / "nao-existe")]) == 2
 
 
-def test_validacao_de_caminhos(tmp_path, gravacao):
+def test_validacao_de_caminhos(tmp_path, gravacao, monkeypatch):
     """Caminhos vindos da CLI são resolvidos e validados antes de qualquer I/O."""
     from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
 
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     assert caminho_de_leitura(str(gravacao)).is_absolute()
     with pytest.raises(ValueError, match="não encontrada"):
         caminho_de_leitura(str(tmp_path / "nada"))
@@ -286,8 +293,45 @@ def test_validacao_de_caminhos(tmp_path, gravacao):
         caminho_de_escrita(str(tmp_path / "engano.json"))
 
 
-def test_cli_recusa_saida_invalida(gravacao, tmp_path):
+def test_cli_recusa_saida_invalida(gravacao, tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     assert main([str(gravacao), "--json", str(tmp_path / "x.txt")]) == 2
+
+
+def test_saida_nao_escapa_da_raiz_permitida(tmp_path, monkeypatch):
+    """Sufixo certo e diretório-pai existente NÃO bastam.
+
+    `--json /etc/cron.d/qualquer.json` passa nas duas conferências antigas. O
+    que barra é a CONTENÇÃO: o caminho resolvido tem de ficar dentro da raiz
+    permitida. O argumento vem de fora do programa — de uma pessoa com
+    pressa, de um script, de um agente —, e um relatório escrito em lugar
+    inesperado some sem ninguém notar.
+    """
+    from pulsearb.backtest.__main__ import caminho_de_escrita
+
+    raiz = tmp_path / "raiz"
+    raiz.mkdir()
+    fora = tmp_path / "fora"
+    fora.mkdir()
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(raiz))
+
+    assert caminho_de_escrita(str(raiz / "rel.json")).is_absolute()
+
+    # irmão da raiz: existe, tem sufixo .json, e ainda assim é recusado
+    with pytest.raises(ValueError, match="fora da raiz permitida"):
+        caminho_de_escrita(str(fora / "rel.json"))
+
+    # travessia com `..` é resolvida ANTES da conferência, então não escapa
+    with pytest.raises(ValueError, match="fora da raiz permitida"):
+        caminho_de_escrita(str(raiz / ".." / "fora" / "rel.json"))
+
+
+def test_raiz_de_saida_padrao_e_o_diretorio_de_trabalho(monkeypatch):
+    """Sem env, a raiz é o cwd — que é o que o runbook usa."""
+    from pulsearb.backtest.__main__ import raiz_de_saida
+
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    assert raiz_de_saida() == Path.cwd().resolve()
 
 
 def test_cli_recusa_gravacao_sem_snapshot(tmp_path, capsys):

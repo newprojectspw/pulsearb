@@ -468,6 +468,15 @@ for h in $(seq -w 0 23); do
 done
 ```
 
+> **Onde o `--json` pode gravar.** O caminho de saída fica contido no
+> **diretório de trabalho**. Sufixo `.json` e diretório-pai existente não
+> impedem `--json /etc/cron.d/qualquer.json`; a contenção impede, e é
+> verificada sobre o caminho já resolvido, então `..` e symlink no meio não
+> escapam. Para gravar em outra raiz, defina
+> `PULSEARB_BACKTEST_OUTPUT_ROOT=/caminho/permitido` — de propósito, em vez de
+> o programa aceitar qualquer destino em silêncio. Os exemplos deste runbook
+> usam caminhos relativos e não precisam de nada.
+
 O seletor lê **uma hora a mais de cada lado**, porque o nome do arquivo é
 aproximação da hora do evento — sem essa margem, uma janela que abre às 13:58
 perderia o book do começo.

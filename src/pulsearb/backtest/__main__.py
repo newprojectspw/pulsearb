@@ -84,15 +84,50 @@ def caminho_de_leitura(bruto: str) -> Path:
     return caminho
 
 
+#: Variável que amplia a raiz permitida para o arquivo de saída.
+ENV_RAIZ_DE_SAIDA = "PULSEARB_BACKTEST_OUTPUT_ROOT"
+
+
+def raiz_de_saida() -> Path:
+    """Onde o relatório PODE ser escrito. Diretório de trabalho, por padrão.
+
+    O caminho do `--json` vem de fora do programa — de uma pessoa com pressa,
+    de um script, de um agente. Sufixo e diretório-pai existentes não impedem
+    `--json /etc/cron.d/qualquer.json`: para isso é preciso **conter** o
+    caminho, não só conferir a forma dele.
+
+    O padrão é o diretório de trabalho porque é onde o runbook manda gravar
+    (`--json relatorio.json`, `--json relatorios/2026-08-20-13.json`). Quem
+    precisa escrever em outro lugar diz isso de propósito, definindo
+    `PULSEARB_BACKTEST_OUTPUT_ROOT` — que é diferente de o programa aceitar
+    qualquer caminho em silêncio.
+    """
+    bruto = os.environ.get(ENV_RAIZ_DE_SAIDA)
+    if bruto:
+        return Path(bruto).expanduser().resolve(strict=False)
+    return Path.cwd().resolve()
+
+
 def caminho_de_escrita(bruto: str) -> Path:
     """Valida um caminho de SAÍDA vindo da linha de comando.
 
-    Exige diretório-pai existente e sufixo .json. Um relatório de backtest
-    escrito em local inesperado é pior que um erro: some sem ninguém notar.
+    Exige que o caminho fique DENTRO da raiz permitida, tenha sufixo .json e
+    diretório-pai existente. Um relatório de backtest escrito em local
+    inesperado é pior que um erro: some sem ninguém notar.
+
+    A contenção é verificada sobre o caminho já resolvido, antes de qualquer
+    acesso ao disco — `..` e symlink no meio do caminho não escapam dela.
     """
     caminho = Path(bruto).expanduser().resolve(strict=False)
     if caminho.suffix != ".json":
         raise ValueError(f"o relatório precisa terminar em .json: {caminho}")
+    raiz = raiz_de_saida()
+    if not caminho.is_relative_to(raiz):
+        raise ValueError(
+            f"saída fora da raiz permitida: {caminho}\n"
+            f"raiz atual: {raiz}\n"
+            f"para gravar em outro lugar, defina {ENV_RAIZ_DE_SAIDA}."
+        )
     if not caminho.parent.is_dir():
         raise ValueError(f"diretório de saída não existe: {caminho.parent}")
     if caminho.is_dir():
@@ -689,7 +724,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recordings", help="diretório (ou arquivo) da gravação")
     parser.add_argument("--threshold", type=float, default=0.02)
     parser.add_argument("--latencia-ms", type=float, default=300.0)
-    parser.add_argument("--json", help="grava o relatório completo neste arquivo")
+    parser.add_argument(
+        "--json",
+        help=(
+            "grava o relatorio completo neste arquivo (.json, dentro do "
+            "diretorio de trabalho). Para outra raiz, defina "
+            "PULSEARB_BACKTEST_OUTPUT_ROOT."
+        ),
+    )
     # LIMITES DE MEMÓRIA — defaults dimensionados para a VPS de 1 GB e
     # deliberadamente conservadores. Na máquina de ANÁLISE eles sufocam a
     # simulação: a rodada real de 2026-08-19 descartou 42% dos snapshots e
