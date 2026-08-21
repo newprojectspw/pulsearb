@@ -202,7 +202,21 @@ def report_anchor_validation(
     apertadas = sum(s.acertos_apertados + s.erros_apertados for s in scores.values()) / max(
         len(scores), 1
     )
-    if len(sobreviventes) == 1:
+    avaliadas = max((s.total_avaliado for s in scores.values()), default=0)
+    if avaliadas == 0:
+        # SEM DADO não é falsificação. `sobreviveu` exige pelo menos uma
+        # avaliação, então com zero janelas todas as hipóteses "morrem" ao
+        # mesmo tempo — e o texto antigo afirmava "NENHUMA sobreviveu", que é
+        # a conclusão mais forte possível, exatamente quando não havia base
+        # para conclusão nenhuma. Foi o que o relatório da gravação de
+        # 2026-08-19 mostrou: 26 resoluções casadas, âncora sem amostras, e
+        # um veredito de falsificação em cima do vazio.
+        veredito = (
+            "SEM DADO: nenhuma janela resolvida chegou à validação da âncora "
+            "(stream ausente ou nenhuma resolução casada). Isto é ausência de "
+            "amostra, não falsificação — nenhuma hipótese foi testada."
+        )
+    elif len(sobreviventes) == 1:
         veredito = f"âncora identificada: {sobreviventes[0]}"
     elif not sobreviventes:
         veredito = (

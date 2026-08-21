@@ -151,6 +151,16 @@ class RecordingIndex:
         self.resolvido_up: dict[str, bool] = {}
         self.eventos_de_resolucao = 0
         self.resolucoes_sinteticas = 0
+        # Redundância medida em produção: o recorder grava a MESMA resolução
+        # mais de uma vez (o fallback da Gamma escreve um evento por TOKEN —
+        # dois por janela — e o gate `resolvidos` dele não reconhece a forma
+        # do fio, então polla mesmo quando o evento já chegou). 73 eventos
+        # para 26 mercados na gravação de 2026-08-19 19h. O leitor deduplica
+        # por mercado e CONTA, em vez de fingir que cada evento é novidade.
+        self.resolucoes_redundantes = 0
+        # Fio e Gamma discordando sobre o vencedor do MESMO mercado seria
+        # gravíssimo — contado à parte, nunca resolvido em silêncio.
+        self.resolucoes_conflitantes: list[str] = []
         self.resolucoes_sem_janela: list[str] = []
         self.resolucoes_ambiguas: list[str] = []
         self.gaps: list[dict[str, Any]] = []
@@ -265,6 +275,16 @@ class RecordingIndex:
             else chegada_ns
         )
         if resolucao.condition_id is not None:
+            existente = self.resolucoes_por_condicao.get(resolucao.condition_id)
+            if existente is not None:
+                self.resolucoes_redundantes += 1
+                if _discordam(existente, resolucao):
+                    self.resolucoes_conflitantes.append(resolucao.condition_id)
+                # O evento do fio é mais rico (winning_asset_id) e mais
+                # direto (sem a inferência por outcomePrices da Gamma):
+                # sintético nunca sobrescreve um evento do fio já visto.
+                if resolucao.sintetico and not existente.sintetico:
+                    return
             self.resolucoes_por_condicao[resolucao.condition_id] = resolucao
         for token in resolucao.tokens:
             self.resolucoes_por_token[token] = resolucao
@@ -391,17 +411,23 @@ class RecordingIndex:
         )
         return {
             "eventos_lidos": self.eventos_de_resolucao,
-            "mercados_distintos": len(self.resolucoes_por_condicao),
+            "eventos_do_fio": self.eventos_de_resolucao - self.resolucoes_sinteticas,
             "sinteticas_via_gamma": self.resolucoes_sinteticas,
+            "eventos_redundantes": self.resolucoes_redundantes,
+            "conflitos_fio_vs_gamma": sorted(set(self.resolucoes_conflitantes))[:20],
+            "mercados_distintos": len(self.resolucoes_por_condicao),
             "janelas_casadas": len(casadas),
             "resolucoes_sem_janela_correspondente": len(orfas),
             "condicoes_orfas": orfas[:20],
             "janelas_com_resolucao_ambigua": self.resolucoes_ambiguas[:20],
             "nota": (
-                "`eventos_lidos` conta o que veio do fio; `janelas_casadas` "
-                "conta quantas janelas conhecidas encontraram a sua. Órfã = "
-                "resolução de mercado que a descoberta nunca viu (nasceu antes "
-                "do recorder subir, ou fora dos ativos configurados)."
+                "Redundância esperada: o fallback da Gamma no recorder grava "
+                "um evento por TOKEN (dois por janela) e não reconhece a forma "
+                "do fio no seu gate de deduplicação — por isso eventos_lidos "
+                "excede mercados_distintos. O leitor deduplica por mercado; "
+                "fio vence sintético. `conflitos_fio_vs_gamma` não-vazio "
+                "seria anomalia grave. Órfã = resolução de mercado que a "
+                "descoberta nunca viu."
             ),
         }
 
@@ -486,6 +512,19 @@ class RecordingIndex:
             )
             saida.append(janela)
         return saida
+
+
+def _discordam(a: Resolucao, b: Resolucao) -> bool:
+    """As duas resoluções do mesmo mercado apontam vencedores diferentes?
+
+    Compara o que for comparável: identidade de token quando ambas a têm,
+    senão o rótulo. Ausência de informação num dos lados não é conflito.
+    """
+    if a.winning_token_id and b.winning_token_id:
+        return a.winning_token_id != b.winning_token_id
+    ra = (a.winning_outcome or "").strip().lower()
+    rb = (b.winning_outcome or "").strip().lower()
+    return bool(ra and rb and ra != rb)
 
 
 def _numero_bruto(valor: Any) -> float | None:
@@ -598,16 +637,27 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     janelas = index.janelas()
-    # A.2: janela cujo livro divergiu do que o servidor afirmou é descartada.
-    # O backtest continua rodando sobre as demais, e o relatório diz quantas
-    # e quais saíram — silenciar seria o mesmo que confiar no livro furado.
+    # ORDEM DOS FILTROS — foi ela que zerou o M2.3 na primeira rodada real.
+    # A versão anterior aplicava o filtro de integridade ANTES de contar as
+    # resoluções e de alimentar a âncora: 26 janelas casaram, todas tinham
+    # livro invalidado, e o relatório saiu com `janelas_com_resolucao: 0` e a
+    # âncora sem amostra nenhuma — dois contadores em contradição no mesmo
+    # JSON. A regra correta separa as perguntas:
+    #
+    # - "a janela tem resultado?" NÃO depende do livro → `resolvidas`
+    # - "a âncora bate?" usa stream RTDS + resultado, NUNCA o livro → âncora
+    #   consome `resolvidas`
+    # - "o fill seria possível?" depende do livro → só o runner e as medições
+    #   de book usam `integras`
+    resolvidas = [j for j in janelas if j.resolveu_up is not None]
+    # A.2: janela cujo livro divergiu do que o servidor afirmou sai do
+    # backtest DE FILLS — e só dele. O relatório diz quantas e quais.
     integras = [
         j
-        for j in janelas
+        for j in resolvidas
         if not index.integridade.token_corrompido(j.token_up)
         and not index.integridade.token_corrompido(j.token_down)
     ]
-    resolvidas = [j for j in integras if j.resolveu_up is not None]
 
     # Âncora: valida as hipóteses contra as resoluções REAIS antes de usar
     # qualquer uma delas no modelo.
@@ -624,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     scores = evaluate_hypotheses(outcomes)
     validacao = report_anchor_validation(scores)
+    validacao["janelas_alimentadas"] = len(outcomes)
 
     # A âncora usada no backtest é a hipótese sobrevivente; havendo empate,
     # o default explícito (e o relatório diz que foi default).
@@ -637,7 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     runner = BacktestRunner(
         BacktestConfig(threshold_edge=args.threshold, latencia_ms=args.latencia_ms)
     )
-    report = runner.run(resolvidas, index.streams)
+    report = runner.run(integras, index.streams)
 
     relatorio: dict[str, Any] = {
         "gravacao": {
@@ -667,13 +718,17 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
         "ancora": {**validacao, "usada_no_backtest": escolhida.value},
-        "backtest": report.to_dict(),
+        "backtest": {
+            **report.to_dict(),
+            "janelas_avaliaveis": len(integras),
+            "janelas_excluidas_por_integridade": len(resolvidas) - len(integras),
+        },
         "sensibilidade_latencia": sensibilidade_latencia(
-            resolvidas, index.streams, threshold=args.threshold
+            integras, index.streams, threshold=args.threshold
         ),
         "curva_de_edge": curva_de_edge_por_threshold(
             varredura_de_threshold(
-                resolvidas, index.streams, latencia_ms=args.latencia_ms
+                integras, index.streams, latencia_ms=args.latencia_ms
             )
         ),
         "medicoes": {
@@ -691,7 +746,10 @@ def main(argv: list[str] | None = None) -> int:
                     for j in resolvidas
                 ]
             ),
-            "markout": medir_markout(resolvidas),
+            # Markout e profundidade LEEM o livro reconstruído — janela com
+            # livro invalidado sai delas. O atraso de liquidação acima usa só
+            # endDate × carimbo do evento, e por isso fica em `resolvidas`.
+            "markout": medir_markout(integras),
             "profundidade": medir_profundidade(
                 [
                     {
@@ -700,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
                         "tick_size": j.tick_size,
                         "hora_utc": int((j.close_ts_ns / 1e9) // 3600 % 24),
                     }
-                    for j in resolvidas
+                    for j in integras
                     for timeline in [j.books.get(j.token_up)]
                     if timeline is not None
                     for book in timeline.books[:50]
@@ -710,14 +768,14 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # ─── rota maker (M2.2 parte B): medição, nunca implementação ───
-    rewards = simular_rewards(resolvidas)
+    rewards = simular_rewards(integras)
     relatorio["rota_maker"] = {
         "rewards": rewards,
         "markout": relatorio["medicoes"]["markout"],
         "conta_fechada": conta_do_maker(
             rewards=rewards,
             markout=relatorio["medicoes"]["markout"],
-            fee_rebate_rate=_rebate_medio(resolvidas),
+            fee_rebate_rate=_rebate_medio(integras),
         ),
         "aviso": (
             "NADA aqui envia ordem. É simulação sobre gravação. A fórmula de "

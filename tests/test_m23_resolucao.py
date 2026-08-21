@@ -256,3 +256,185 @@ def test_sem_evento_a_janela_fica_sem_resolucao(tmp_path):
 
     assert janelas[0].resolveu_up is None
     assert index.resolucoes_resumo(janelas)["eventos_lidos"] == 0
+
+
+# ═══════════════ M2.3-b — contadores em contradição (invariantes)
+# Rodada real de 2026-08-19: `janelas_casadas: 26` e, no MESMO relatório,
+# `janelas_com_resolucao: 0` com a âncora sem amostra. Causa: o filtro de
+# integridade ficava ENTRE o casamento e o contador, e a âncora consumia o
+# conjunto já filtrado — sendo que a âncora usa stream RTDS + resolução e
+# nunca lê o livro. Estes testes fixam a ordem correta dos filtros.
+
+
+def _rodar_backtest(caminho: Path) -> dict:
+    import contextlib
+    import io
+
+    from pulsearb.backtest.__main__ import main
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert main([str(caminho.parent)]) == 0
+    return json.loads(buf.getvalue())
+
+
+def _linha_poly(ts_ns: int, payload: dict) -> dict:
+    return {
+        "ts_mono_ns": ts_ns,
+        "ts_wall_ns": ts_ns,
+        "fonte": "poly_ws",
+        "payload": payload,
+    }
+
+
+def _gravacao_com_livro_corrompido(tmp_path: Path) -> Path:
+    """Descoberta + resolução REAL + livro que diverge do topo afirmado.
+
+    O delta afirma um topo (0.90) incompatível com o livro reconstruído
+    (0.49) — magnitude 0.41, muito acima do limiar de invalidação (0.01).
+    A janela fica com resultado E com livro condenado, que é exatamente o
+    estado das 26 janelas da rodada real.
+    """
+    caminho = _gravacao(tmp_path)
+    base = int(LINHA_REAL["ts_wall_ns"]) - 240 * 10**9
+    with gzip.open(caminho, "ab") as handle:
+        for linha in (
+            _linha_poly(
+                base,
+                {
+                    "event_type": "book",
+                    "asset_id": TOKEN_VENCEDOR,
+                    "timestamp": str(base // 10**6),
+                    "bids": [{"price": "0.49", "size": "100"}],
+                    "asks": [{"price": "0.51", "size": "100"}],
+                },
+            ),
+            _linha_poly(
+                base + 10**9,
+                {
+                    "event_type": "price_change",
+                    "market": CONDITION_ID,
+                    "timestamp": str((base + 10**9) // 10**6),
+                    "price_changes": [
+                        {
+                            "asset_id": TOKEN_VENCEDOR,
+                            "price": "0.49",
+                            "size": "50",
+                            "side": "BUY",
+                            "best_bid": "0.90",
+                            "best_ask": "0.95",
+                        }
+                    ],
+                },
+            ),
+        ):
+            handle.write(orjson.dumps(linha) + b"\n")
+    return caminho
+
+
+def test_invariante_casada_implica_contada_e_ancora_alimentada(tmp_path):
+    """janelas_casadas > 0 ⇒ janelas_com_resolucao > 0 e âncora com amostra."""
+    rel = _rodar_backtest(_gravacao(tmp_path))
+
+    casadas = rel["gravacao"]["resolucoes"]["janelas_casadas"]
+    assert casadas == 1
+    assert rel["gravacao"]["janelas_com_resolucao"] == casadas
+    assert rel["ancora"]["janelas_alimentadas"] == casadas
+
+
+def test_livro_corrompido_nao_tira_a_janela_da_ancora(tmp_path):
+    """A invalidação por integridade vale para FILLS, não para a âncora.
+
+    A âncora compara stream RTDS com o resultado; o livro não entra nessa
+    conta. Condenar a janela inteira por livro furado foi o que deixou a
+    âncora sem amostra numa gravação com 26 resoluções casadas.
+    """
+    rel = _rodar_backtest(_gravacao_com_livro_corrompido(tmp_path))
+
+    # a janela foi invalidada para fills...
+    assert rel["integridade"]["janelas_invalidadas"] == ["bitcoin-up-or-down-5m-teste"]
+    assert rel["backtest"]["janelas_avaliaveis"] == 0
+    assert rel["backtest"]["janelas_excluidas_por_integridade"] == 1
+    # ...mas continua contada e continua alimentando a âncora
+    assert rel["gravacao"]["janelas_com_resolucao"] == 1
+    assert rel["ancora"]["janelas_alimentadas"] == 1
+
+
+def test_zero_amostras_na_ancora_nao_vira_falsificacao(tmp_path):
+    """SEM DADO ≠ 'nenhuma hipótese sobreviveu'.
+
+    Com zero janelas avaliadas todas as hipóteses têm total_avaliado = 0 e
+    `sobreviveu` False — o texto antigo declarava falsificação em cima do
+    vazio. O veredito agora distingue os dois casos.
+    """
+    rel = _rodar_backtest(_gravacao(tmp_path, com_resolucao=False))
+
+    assert rel["gravacao"]["janelas_com_resolucao"] == 0
+    assert rel["ancora"]["janelas_alimentadas"] == 0
+    assert rel["ancora"]["veredito"].startswith("SEM DADO")
+    assert "sobreviveu" not in rel["ancora"]["veredito"]
+
+
+def test_eventos_redundantes_sao_deduplicados_e_contados(tmp_path):
+    """73 eventos → 26 mercados na rodada real: fio + 2 sintéticos por janela.
+
+    O fallback da Gamma grava um evento por TOKEN, e o gate `resolvidos` do
+    recorder não reconhece a forma do fio (procura `asset_id`, que o evento
+    real não tem). O leitor deduplica por mercado e reporta a redundância.
+    """
+    caminho = _gravacao(tmp_path)
+    ts = int(LINHA_REAL["ts_wall_ns"]) + 10**9
+    with gzip.open(caminho, "ab") as handle:
+        for indice, token in enumerate((TOKEN_VENCEDOR, TOKEN_PERDEDOR)):
+            linha = {
+                "ts_mono_ns": ts + indice,
+                "ts_wall_ns": ts + indice,
+                "fonte": "resolucao_via_gamma",
+                "payload": {
+                    "_sintetico": True,
+                    "event_type": "market_resolved",
+                    "asset_id": token,
+                    "market": CONDITION_ID,
+                    "winning_outcome": "Up",
+                },
+            }
+            handle.write(orjson.dumps(linha) + b"\n")
+
+    index = _indexar(caminho)
+    resumo = index.resolucoes_resumo(index.janelas())
+
+    assert resumo["eventos_lidos"] == 3
+    assert resumo["eventos_do_fio"] == 1
+    assert resumo["sinteticas_via_gamma"] == 2
+    assert resumo["eventos_redundantes"] == 2
+    assert resumo["mercados_distintos"] == 1
+    assert resumo["conflitos_fio_vs_gamma"] == []
+    # e a dedup preserva o evento do fio como fonte da verdade
+    assert index.janelas()[0].resolveu_up is True
+
+
+def test_sintetico_nao_sobrescreve_o_fio_e_conflito_e_contado(tmp_path):
+    """Gamma discordando do fio é anomalia grave — contada, nunca engolida."""
+    caminho = _gravacao(tmp_path)
+    ts = int(LINHA_REAL["ts_wall_ns"]) + 10**9
+    with gzip.open(caminho, "ab") as handle:
+        linha = {
+            "ts_mono_ns": ts,
+            "ts_wall_ns": ts,
+            "fonte": "resolucao_via_gamma",
+            "payload": {
+                "_sintetico": True,
+                "event_type": "market_resolved",
+                "asset_id": TOKEN_VENCEDOR,
+                "market": CONDITION_ID,
+                "winning_outcome": "Down",
+            },
+        }
+        handle.write(orjson.dumps(linha) + b"\n")
+
+    index = _indexar(caminho)
+    resumo = index.resolucoes_resumo(index.janelas())
+
+    assert resumo["conflitos_fio_vs_gamma"] == [normalizar_condition_id(CONDITION_ID)]
+    # o fio ("Up", com winning_asset_id) continua valendo
+    assert index.janelas()[0].resolveu_up is True
