@@ -141,6 +141,10 @@ def test_delta_perdido_vira_divergencia():
 
     Aqui o delta que criaria o bid de 0.50 nunca chega; o próximo evento
     afirma que o topo é 0.50, e a reconstrução ainda diz 0.49.
+
+    A divergência é DETECTADA — isso não mudou. O que o M2.5 mudou é que uma
+    divergência isolada de um tick não condena mais o token: ver
+    `test_um_tick_isolado_nao_condena_o_token`.
     """
     monitor = MonitorDeIntegridade()
     monitor.observar(BOOK, 1)
@@ -150,7 +154,7 @@ def test_delta_perdido_vira_divergencia():
     assert achados[0].lado == "bid"
     assert achados[0].servidor == 0.50
     assert achados[0].reconstruido == 0.49
-    assert monitor.token_corrompido("tok") is True
+    assert monitor.divergencias == 1
 
 
 def test_ruido_de_arredondamento_nao_invalida_janela():

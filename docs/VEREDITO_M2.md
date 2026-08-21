@@ -2,7 +2,7 @@
 
 **Status: PENDENTE DE DADO. Nenhum veredito pode ser emitido ainda.**
 
-Data: 2026-08-16 · atualizado 2026-08-21 (M2.4)
+Data: 2026-08-16 · atualizado 2026-08-21 (M2.5)
 
 ---
 
@@ -68,7 +68,7 @@ que é onde o book é mais eficiente e o ruído domina. **A hipótese a testar �
 que o edge, se existir, está concentrado nos buckets `60-30s` e `<30s`** — e é
 por isso que a calibração é reportada por bucket, nunca agregada.
 
-### 2b. A âncora não é nenhuma das hipóteses nomeadas — e o M2.4 a caça por varredura
+### 2b. A âncora não era nenhuma das hipóteses nomeadas — a varredura do M2.4 a encontrou `[RESOLVIDO]`
 
 Primeira validação real (26 janelas resolvidas, ~14 determináveis, hora 19h de
 2026-08-19): as melhores hipóteses nomeadas (`primeiro_depois`,
@@ -118,6 +118,181 @@ publicação) come as pontas — investigar as falhas UMA A UMA antes de subir N
 
 As hipóteses nomeadas continuam no relatório como referência; a varredura vem
 além delas, nunca no lugar.
+
+#### RESULTADO — âncora IDENTIFICADA `[VERIFICADO 2026-08-21]`
+
+A varredura rodou sobre **6h de gravação real** (2026-08-20, 10h–15h UTC),
+**152 janelas elegíveis**, e deu resposta:
+
+```
+final_stream_no_fechamento -> tau com consistência 1.0: [-1, 0, 1, 2]
+final_media_60s            -> teto de 0.9648, nenhum tau com 1.0
+```
+
+**A âncora é o valor do stream `crypto_prices_twap_sixty` no instante da
+abertura da janela, e o valor final é o mesmo stream no instante do
+fechamento.** Empate resolve Up.
+
+O critério escrito antes pedia ≥ 98% sobre ≥ 100 janelas. O resultado é
+**100% sobre 152** — passou com folga, e passou na definição de final que a
+teoria previa.
+
+**Por que a região viável tem 4 segundos de largura e isso não é frouxidão:**
+a cadência do feed é de ~0,86s (p50, §13.1 do API_NOTES). Entre τ = −1 e
+τ = +2 o stream simplesmente não tem outro ponto para discordar — é a
+**resolução máxima que o dado permite**, não ambiguidade do método. Nenhuma
+gravação mais longa estreita isso; só um feed mais rápido estreitaria.
+
+**Corolário, e é o achado de projeto mais caro deste marco: não devemos
+calcular média de 60s nenhuma.** O feed já entrega a média da Chainlink
+pronta — `crypto_prices_twap_sixty` **é** o TWAP, não o insumo dele. A
+família `final_media_60s`, que refazia essa conta por cima do stream, nunca
+passou de **96,48%**. Aqueles 3,5% de erro não eram do mercado nem do
+alinhamento: eram **a nossa conta errando** — reamostragem, borda da janela
+e arredondamento sobre um valor que já vinha pronto.
+
+O que isso muda no código, em regra permanente:
+
+> **Nenhum componente do PULSEARB recalcula TWAP.** O valor de liquidação e a
+> âncora saem do stream, do jeito que chegam, em inteiro e18. Qualquer média
+> que apareça no caminho da decisão é bug até prova em contrário.
+
+**Hipóteses nomeadas (`primeiro_depois`, `mais_proximo`, `interpolado`):
+SUPERADAS por este resultado.** Elas acertavam 11/14 ≈ 79% porque estavam na
+vizinhança certa — todas leem o stream perto da abertura. O que faltava não
+era escolher entre elas, era o **lado do fechamento**: as três usavam o nosso
+TWAP recalculado como final. Ficam no relatório como referência histórica,
+sem uso em decisão.
+
+**O modelo endgame continua válido e agora tem fundação.** Com `t < 60s`, a
+fração `(60−t)/60` da média final está travada — e travada num número que
+podemos LER, não estimar.
+
+### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
+
+O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por
+integridade. Antes de mexer em qualquer limiar, o que o relatório disse:
+
+```
+integridade.divergencia_topo_book:
+  comparacoes: 117.445.854   divergencias: 4.023.803   taxa: 0,0343
+  com_magnitude_finita: 1.320.824
+  com_lado_vazio:       2.702.979
+  magnitude_em_ticks_de_0.001: p50=10, p90=20, p99=999
+  limiar_invalidacao: 0,01
+```
+
+**O detector estava errado, não o dado.** Duas provas independentes:
+
+1. `p50 = 10 ticks de 0,001` = **0,01** = exatamente **um tick do mercado
+   real**. O limiar de invalidação também era 0,01. Um detector que reprova
+   por um tick de diferença está medindo a corrida entre `best_bid_ask` e
+   `price_change`, não corrupção.
+2. A varredura da âncora atingiu **1.0 sobre 152 janelas** usando a MESMA
+   gravação. Dado corrompido não produz consistência perfeita.
+
+Os limiares abaixo ficam registrados **antes** de olhar quantas janelas
+sobrevivem. Se o resultado vier ruim com estes números, o que muda é o
+diagnóstico — não o limiar.
+
+**Uma divergência só invalida se as TRÊS condições valerem juntas:**
+
+| Critério | Valor | Por quê |
+|---|---|---|
+| **Magnitude relevante** | `> 2 ticks de 0,01` (= 0,02) | 1 tick é o p50 observado, ou seja, o ruído de corrida. 2 ticks é a primeira magnitude que o ruído não explica. `K` é configurável (`--ticks-divergencia`), nunca menor que 2. |
+| **Persistência** | sobrevive à próxima observação autoritativa **e** dura `> 250 ms` | Corrida se resolve na mensagem seguinte. 250 ms são ~2 ordens de grandeza acima do intervalo entre deltas do CLOB — folga suficiente para não confundir latência com perda. |
+| **Fração de tempo** | token passa `> 1%` do tempo observado com livro divergente | Um episódio isolado não corrompe uma janela de 5 minutos. 1% de 5 min = 3 s: acima disso o livro deixou de descrever o mercado por tempo que importa para uma entrada. |
+
+**Lado vazio deixa de ser corrupção por decreto.** São quatro causas
+distintas e só duas invalidam:
+
+| Categoria | Invalida? | Leitura |
+|---|---|---|
+| `vazio_desde_o_snapshot` | **não** | o lado já veio vazio no snapshot: nossa visão de profundidade é incompleta, o livro não está furado |
+| `esvaziado_por_delta` | **não** | deltas removeram todos os níveis que tínhamos e o servidor mostra um nível abaixo que nunca nos foi contado — **truncagem de profundidade**, sinal de que `N` deve ser maior |
+| `sem_snapshot` | **sim, por tempo** | o token não tinha livro inicial: não há reconstrução, há chute |
+| `apos_perda` | **sim, por tempo** | perda conhecida (fila cheia, reconexão) sem resync: o livro é sabidamente furado |
+
+As duas primeiras não são doença, são **miopia nossa** — e a resposta certa é
+subir `--niveis-book`, não jogar a janela fora.
+
+As duas últimas nem sequer são divergência: são **ausência de livro**, e
+contá-las como divergência foi o que produziu os 2,7 milhões de "lado vazio"
+do relatório do M2.2. Elas saem das populações e viram **tempo sem livro**,
+cobrado pelo mesmo teto de fração que a divergência. A razão é a mesma que
+vale para tudo aqui: um token que ficou 200 ms sem livro no começo da vida
+não é o mesmo que um que passou a janela inteira sem, e um detector que não
+distingue os dois reprova os dois.
+
+A marca de qualidade cobra a **soma** das duas doenças — tempo divergente
+mais tempo sem livro — porque, para quem vai entrar, dá no mesmo: ou o topo
+estava errado, ou não havia topo. Um token que **nunca** recebeu snapshot é
+`baixa` direto, sem conta de fração: não existe reconstrução para julgar.
+
+**Marca de qualidade, no lugar da exclusão binária.** Cada token recebe
+`qualidade_do_livro`, e a janela herda a **pior** das duas pontas:
+
+| Marca | Condição |
+|---|---|
+| `alta` | fração divergente ≤ 0,1%, nenhuma divergência persistente acima de 0,05, snapshot presente, sem resync pendente |
+| `media` | fração divergente ≤ 1% |
+| `baixa` | fração > 1%, **ou** sem snapshot, **ou** resync pendente, **ou** divergência persistente acima de 0,10 |
+
+O relatório passa a trazer o corte por marca (`janelas_por_qualidade`) e o
+backtest aceita `--qualidade-minima` (padrão `media`). Assim o número nunca
+depende de uma decisão escondida: quem lê vê quantas janelas cada marca
+carrega e pode refazer o corte.
+
+**O que faria eu mudar estes limiares:** se com `K = 2` a fração de janelas
+`baixa` continuar acima de 20% **e** as amostras mostrarem magnitudes
+concentradas em poucos ticks, o problema é alinhamento, não corrupção — e a
+correção é no alinhamento (M2.5 tarefa 1), não em subir `K` até o número
+ficar bonito.
+
+#### O que o alinhamento encontrou — e não era o que eu esperava
+
+A tarefa 1 foi escrita para corrigir a corrida entre `best_bid_ask` e
+`price_change`. Ela corrigiu — e, ao ser medida, denunciou uma causa maior,
+que estava dentro do `price_change`:
+
+> **`best_bid`/`best_ask` descrevem o livro depois de TODA a mensagem, não
+> depois de cada mudança de nível.** O M2.2 conferia a cada mudança, contra
+> estados intermediários que nunca existiram no servidor.
+
+Quando a mensagem move o topo um nível — insere o novo, remove o antigo — o
+estado do meio fica **exatamente um tick** fora. É a assinatura do relatório:
+`p50 = 10 ticks de 0,001` = 0,01 = um tick de mercado. Os 4 milhões de
+divergências eram, em boa parte, **a nossa forma de conferir**.
+
+Medição do antes e do depois, sobre 20.000 `best_bid_ask` atrasados em 150 ms
+(a corrida real) mais os deltas correspondentes:
+
+| Método | Comparações | Divergências | Taxa | p50 em ticks de mercado |
+|---|---|---|---|---|
+| Sem alinhamento (M2.2) | 40.000 | **26.358** | 0,659 | 1,0 |
+| Com alinhamento (M2.5) | 66.358 | **0** | 0,000 | — |
+
+Duas honestidades sobre esta tabela:
+
+1. **Não é a gravação real.** É um cenário construído para conter a corrida
+   e nada além dela. O que ele prova é que o método antigo acusa 66% onde não
+   há perda nenhuma, e que o novo não acusa. O número da gravação real sai
+   quando a gravação real rodar — e o relatório traz as duas contas lado a
+   lado justamente para não ter de acreditar em mim.
+2. **O alinhamento não conserta tudo.** Ele conserta corrida de
+   milissegundos. Não conserta gravação que chegou ao disco fora de ordem
+   além do buffer de reordenação do leitor — livro reconstruído de trás para
+   frente está errado e nenhum carimbo o desembaralha. Por isso o relatório
+   passou a trazer `deltas_com_carimbo_fora_de_ordem` e
+   `snapshots_com_carimbo_fora_de_ordem`: se esses números forem altos na
+   gravação real, o achado é outro, e a correção é subir o buffer.
+
+Isto apareceu porque a fixture sintética do projeto tinha **19% dos registros
+fora de ordem** — ela montava o arquivo por TIPO de evento (todos os books da
+janela, depois todos os deltas), com inversões de até 300 segundos, enquanto o
+recorder real drena uma fila e escreve quase ordenado. O detector condenava um
+livro que só estava embaralhado pela fixture. A fixture foi corrigida para
+escrever em ordem cronológica; o detector estava certo.
 
 ### 3. A hipótese do tick nos extremos foi REFUTADA
 

@@ -15,12 +15,18 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
-from pulsearb.analysis.integrity import MonitorDeIntegridade, MonitorDeRelogio
+from pulsearb.analysis.integrity import (
+    ORDEM_QUALIDADE,
+    QUALIDADES,
+    MonitorDeIntegridade,
+    MonitorDeRelogio,
+)
 from pulsearb.analysis.measurements import (
     conta_do_maker,
     medir_atraso_liquidacao,
@@ -184,6 +190,10 @@ class RecordingIndex:
     # --------------------------------------------------------------- passadas
     def build(self) -> None:
         self._primeira_passada()
+        # M2.5: fecha as afirmações de `best_bid_ask` que ainda esperavam
+        # alinhamento e as divergências abertas no último evento. Sem isto os
+        # dois erros apontariam para o mesmo lado — o de esconder problema.
+        self.integridade.finalizar()
         self._marcar_tokens_de_interesse()
         self._segunda_passada()
 
@@ -461,10 +471,48 @@ class RecordingIndex:
             "niveis_retidos_por_lado": self.niveis_retidos,
             "tokens_raleados": len(raleados),
             "pior_resolucao_ms": round(resolucoes_ms[-1], 1) if resolucoes_ms else 0.0,
+            "projecao_de_pico": self._projecao_de_pico(),
             "nota": (
                 "Books truncados aos N níveis do topo e raleados ao estourar o "
                 "limite por token. `pior_resolucao_ms` acima de 150 significa que "
-                "o cenário de latência mais baixo já não é distinguível."
+                "o cenário de latência mais baixo já não é distinguível. "
+                "`projecao_de_pico` diz quanto a passada 2 custaria SEM o "
+                "raleamento, que é o número que decide se a gravação cabe na "
+                "máquina — ver docs/RUNBOOK_VPS.md §7.1."
+            ),
+        }
+
+    #: Custo medido de um snapshot de book retido, em bytes: a tupla de
+    #: (ts, bids, asks) com N níveis por lado, já contando o overhead dos
+    #: objetos Python. Aferido no M2.2 (81 MB de pico para ~2M de eventos) e
+    #: usado só para PROJETAR — o número real sai do `snapshots_retidos`.
+    BYTES_POR_SNAPSHOT_NIVEL = 120
+
+    def _projecao_de_pico(self) -> dict[str, Any]:
+        """Quanto a passada 2 custaria com o teto atual, se ele fosse atingido.
+
+        A pergunta que isto responde é a do M2.5 tarefa 6: por que uma
+        gravação de ~24 GB com `--limite-por-token 20000` não termina numa
+        máquina comum. A conta é direta e o resultado é brutal — teto por
+        token × tokens de interesse × níveis × 2 lados. Com 3.700 tokens em
+        72h e teto de 20.000, são dezenas de GB só de book.
+
+        O `snapshots_descartados` conta o que o raleamento já jogou fora; se
+        ele for grande, o pico projetado é o que a rodada TERIA custado.
+        """
+        tokens = max(1, len(self.janelas_de_interesse))
+        por_token = self.limite_por_token * self.niveis_retidos * 2
+        bytes_pico = tokens * por_token * self.BYTES_POR_SNAPSHOT_NIVEL
+        return {
+            "tokens_de_interesse": tokens,
+            "teto_de_snapshots_por_token": self.limite_por_token,
+            "bytes_estimados": bytes_pico,
+            "gib_estimados": round(bytes_pico / 1024**3, 2),
+            "nota": (
+                "Estimativa do pico da passada 2 com o teto atual TOTALMENTE "
+                "ocupado. Nao e medicao: e o teto de gasto que os flags "
+                "autorizam. Acima da RAM da maquina, rode por fatias de hora "
+                "com --desde/--ate em vez de subir o teto."
             ),
         }
 
@@ -613,6 +661,29 @@ def _duracao_do_slug(slug: str) -> int:
     return TOKEN_DURACAO_PADRAO
 
 
+def _hora_utc(bruto: str | None) -> datetime | None:
+    """`YYYYMMDDHH`, `YYYY-MM-DD`, ou ISO completo. Sempre UTC.
+
+    Fuso implícito seria a pior armadilha possível aqui: a fatia sairia
+    deslocada e o relatório continuaria bonito, descrevendo horas erradas.
+    """
+    if not bruto:
+        return None
+    texto = bruto.strip()
+    for formato in ("%Y%m%d%H", "%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(texto, formato).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    try:
+        lido = datetime.fromisoformat(texto)
+    except ValueError as erro:
+        raise ValueError(
+            f"hora invalida: {bruto!r}. Use YYYYMMDDHH, YYYY-MM-DD ou ISO 8601."
+        ) from erro
+    return lido if lido.tzinfo else lido.replace(tzinfo=UTC)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PULSEARB backtest — M2.D + M2.E")
     parser.add_argument("recordings", help="diretório (ou arquivo) da gravação")
@@ -654,7 +725,59 @@ def main(argv: list[str] | None = None) -> int:
             f"{NIVEIS_RETIDOS_PADRAO}. Env: PULSEARB_BACKTEST_NIVEIS_POR_LADO"
         ),
     )
+    parser.add_argument(
+        "--qualidade-minima",
+        dest="qualidade_minima",
+        choices=("alta", "media", "baixa"),
+        default=os.environ.get("PULSEARB_BACKTEST_QUALIDADE_MINIMA", "media"),
+        help=(
+            "marca minima de qualidade do livro para a janela entrar no "
+            "backtest de fills. Default `media`. `baixa` inclui tudo e serve "
+            "para medir o custo do corte. Criterios em VEREDITO_M2 §2c. Env: "
+            "PULSEARB_BACKTEST_QUALIDADE_MINIMA"
+        ),
+    )
+    parser.add_argument(
+        "--ticks-divergencia",
+        dest="ticks_divergencia",
+        type=int,
+        default=int(os.environ.get("PULSEARB_BACKTEST_TICKS_DIVERGENCIA", "2")),
+        help=(
+            "K: quantos ticks de mercado (0,01) uma divergencia precisa ter "
+            "para ser candidata a corrupcao. Nunca menor que 2 — 1 tick e o "
+            "p50 observado, ou seja, o ruido da corrida entre best_bid_ask e "
+            "price_change. Env: PULSEARB_BACKTEST_TICKS_DIVERGENCIA"
+        ),
+    )
+    # M2.5 tarefa 6: processamento por FATIA de hora. A gravação de 72h dá
+    # ~24 GB e a passada 2 não cabe numa máquina comum com o teto de
+    # snapshots que a análise exige (ver `memoria.projecao_de_pico`). Cada
+    # hora cabe folgada, e as janelas de 5m/15m vivem dentro de uma hora — a
+    # margem de ±1h no seletor de arquivos cobre quem cruza a virada.
+    parser.add_argument(
+        "--desde",
+        dest="desde",
+        default=None,
+        help=(
+            "processa so a fatia a partir desta hora UTC (YYYYMMDDHH ou ISO). "
+            "Le uma hora a mais de cada lado, porque o nome do arquivo e "
+            "aproximacao da hora do evento."
+        ),
+    )
+    parser.add_argument(
+        "--ate",
+        dest="ate",
+        default=None,
+        help="fim da fatia, mesmo formato de --desde (inclusivo).",
+    )
     args = parser.parse_args(argv)
+
+    try:
+        desde = _hora_utc(args.desde)
+        ate = _hora_utc(args.ate)
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return 2
 
     try:
         caminho = caminho_de_leitura(args.recordings)
@@ -663,12 +786,13 @@ def main(argv: list[str] | None = None) -> int:
         print(str(erro), file=sys.stderr)
         return 2
 
-    reader = RecordingReader(caminho)
+    reader = RecordingReader(caminho, desde=desde, ate=ate)
     index = RecordingIndex(
         reader,
         limite_por_token=max(2, args.limite_snapshots),
         niveis_retidos=max(1, args.niveis_book),
     )
+    index.integridade.ticks_divergencia = max(2, args.ticks_divergencia)
     index.build()
 
     if not index.n_snapshots:
@@ -696,11 +820,25 @@ def main(argv: list[str] | None = None) -> int:
     resolvidas = [j for j in janelas if j.resolveu_up is not None]
     # A.2: janela cujo livro divergiu do que o servidor afirmou sai do
     # backtest DE FILLS — e só dele. O relatório diz quantas e quais.
+    #
+    # M2.5: o corte deixou de ser binário. Cada janela recebe a PIOR marca
+    # entre os seus dois tokens, e `--qualidade-minima` decide onde cortar.
+    # A diferença não é cosmética: o gate anterior reprovava por um tick de
+    # divergência e zerou 200 de 200 janelas reais. Agora quem lê o relatório
+    # vê quantas janelas cada marca carrega e pode refazer o corte sem rodar
+    # de novo. `sem_dado` (token nunca visto no fio) nunca é excluído aqui:
+    # ele não tem livro para o runner usar de qualquer forma, e excluí-lo
+    # esconderia a janela por um motivo que não é qualidade de livro.
+    qualidade_por_slug = {
+        j.slug: index.integridade.qualidade_da_janela(j.token_up, j.token_down)
+        for j in janelas
+    }
+    minimo = ORDEM_QUALIDADE[args.qualidade_minima]
     integras = [
         j
         for j in resolvidas
-        if not index.integridade.token_corrompido(j.token_up)
-        and not index.integridade.token_corrompido(j.token_down)
+        if ORDEM_QUALIDADE.get(qualidade_por_slug.get(j.slug, "sem_dado"), minimo)
+        >= minimo
     ]
 
     # Âncora: valida as hipóteses contra as resoluções REAIS antes de usar
@@ -753,7 +891,19 @@ def main(argv: list[str] | None = None) -> int:
     relatorio: dict[str, Any] = {
         "gravacao": {
             "arquivos": len(reader.files),
+            "arquivos_disponiveis": reader.arquivos_disponiveis,
+            "fatia": {
+                "desde": desde.isoformat() if desde else None,
+                "ate": ate.isoformat() if ate else None,
+                "nota": (
+                    "Fatia de hora (M2.5 tarefa 6). Com --desde/--ate o "
+                    "relatorio descreve SO a fatia: `janelas_conhecidas` e os "
+                    "agregados nao sao os da gravacao inteira. Somar fatias "
+                    "exige agregacao incremental — ver docs/RUNBOOK_VPS.md §7.1."
+                ),
+            },
             "linhas_corrompidas": reader.corrompidas,
+            "arquivos_ilegiveis": reader.arquivos_ilegiveis,
             "snapshots_de_descoberta": index.n_snapshots,
             "janelas_conhecidas": len(janelas),
             "janelas_com_resolucao": len(resolvidas),
@@ -765,16 +915,25 @@ def main(argv: list[str] | None = None) -> int:
             "divergencia_topo_book": index.integridade.resumo(),
             "offset_relogio_ms": index.relogio.resumo(),
             "janelas_invalidadas": sorted(
-                j.slug
-                for j in janelas
-                if index.integridade.token_corrompido(j.token_up)
-                or index.integridade.token_corrompido(j.token_down)
+                slug
+                for slug, marca in qualidade_por_slug.items()
+                if marca == "baixa"
             ),
+            "janelas_por_qualidade": {
+                marca: sum(1 for m in qualidade_por_slug.values() if m == marca)
+                for marca in QUALIDADES
+            },
+            "qualidade_minima_aplicada": args.qualidade_minima,
             "nota": (
-                "Divergência entre o topo que o servidor afirma e o topo que "
-                "reconstruímos. Acima do limiar, a janela sai do backtest: "
-                "número calculado sobre livro furado é pior que número "
-                "nenhum, porque parece bom."
+                "Divergencia entre o topo que o servidor afirma e o topo que "
+                "reconstruimos. `janelas_por_qualidade` e o corte que importa: "
+                "a janela herda a PIOR marca dos seus dois tokens, e "
+                "`--qualidade-minima` decide onde cortar. Numero calculado "
+                "sobre livro furado e pior que numero nenhum, porque parece "
+                "bom — mas reprovar por um tick de divergencia (o gate do "
+                "M2.2) zerou 200 de 200 janelas reais medindo corrida entre "
+                "`best_bid_ask` e `price_change`. Criterios em VEREDITO_M2 "
+                "§2c, escritos antes dos numeros."
             ),
         },
         "ancora": {**validacao, "usada_no_backtest": escolhida.value},
@@ -782,6 +941,12 @@ def main(argv: list[str] | None = None) -> int:
             **report.to_dict(),
             "janelas_avaliaveis": len(integras),
             "janelas_excluidas_por_integridade": len(resolvidas) - len(integras),
+            "janelas_avaliaveis_por_qualidade": {
+                marca: sum(
+                    1 for j in integras if qualidade_por_slug.get(j.slug) == marca
+                )
+                for marca in QUALIDADES
+            },
         },
         "sensibilidade_latencia": sensibilidade_latencia(
             integras, index.streams, threshold=args.threshold
