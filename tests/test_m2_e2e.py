@@ -134,7 +134,8 @@ def test_cli_completo(gravacao, tmp_path, capsys, monkeypatch):
     # exercitada em vez de só documentada.
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     destino = tmp_path / "relatorio.json"
-    assert main([str(gravacao), "--json", str(destino)]) == 0
+    # o `--json` é RELATIVO à raiz; o destino absoluto acima é só para ler
+    assert main([str(gravacao), "--json", "relatorio.json"]) == 0
     relatorio = json.loads(destino.read_text())
     for chave in ("gravacao", "ancora", "backtest", "sensibilidade_latencia",
                   "curva_de_edge", "medicoes"):
@@ -280,50 +281,65 @@ def test_validacao_de_caminhos(tmp_path, gravacao, monkeypatch):
     with pytest.raises(ValueError, match="não encontrada"):
         caminho_de_leitura(str(tmp_path / "nada"))
 
-    ok = caminho_de_escrita(str(tmp_path / "rel.json"))
+    ok = caminho_de_escrita("rel.json")
     assert ok.is_absolute() and ok.suffix == ".json"
-    with pytest.raises(ValueError, match=r"\.json"):
-        caminho_de_escrita(str(tmp_path / "rel.txt"))
+    assert ok.parent == tmp_path.resolve()
+    with pytest.raises(ValueError, match="inválido"):
+        caminho_de_escrita("rel.txt")
     with pytest.raises(ValueError, match="não existe"):
-        caminho_de_escrita(str(tmp_path / "sem" / "esse" / "dir" / "rel.json"))
+        caminho_de_escrita("sem/esse/dir/rel.json")
     # destino que existe e É um diretório (com sufixo .json, para passar da
     # checagem anterior e chegar nesta)
     (tmp_path / "engano.json").mkdir()
     with pytest.raises(ValueError, match="é um diretório"):
-        caminho_de_escrita(str(tmp_path / "engano.json"))
+        caminho_de_escrita("engano.json")
 
 
 def test_cli_recusa_saida_invalida(gravacao, tmp_path, monkeypatch):
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
-    assert main([str(gravacao), "--json", str(tmp_path / "x.txt")]) == 2
+    assert main([str(gravacao), "--json", "x.txt"]) == 2
 
 
-def test_saida_nao_escapa_da_raiz_permitida(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "hostil",
+    [
+        "/etc/cron.d/evil.json",          # raiz absoluta
+        "../fora.json",                   # travessia simples
+        "relatorios/../../fora.json",     # travessia no meio
+        "~/x.json",                       # expansão de home
+        "$(whoami).json",                 # substituição de shell
+        "rel.json\x00.txt",               # byte nulo
+    ],
+)
+def test_saida_hostil_nunca_chega_ao_disco(tmp_path, monkeypatch, hostil):
     """Sufixo certo e diretório-pai existente NÃO bastam.
 
-    `--json /etc/cron.d/qualquer.json` passa nas duas conferências antigas. O
-    que barra é a CONTENÇÃO: o caminho resolvido tem de ficar dentro da raiz
-    permitida. O argumento vem de fora do programa — de uma pessoa com
-    pressa, de um script, de um agente —, e um relatório escrito em lugar
-    inesperado some sem ninguém notar.
+    `--json /etc/cron.d/qualquer.json` passa nas duas conferências antigas: o
+    arquivo termina em .json e `/etc/cron.d` existe. O argumento vem de fora
+    do programa — de uma pessoa com pressa, de um script, de um agente — e um
+    relatório escrito em lugar inesperado some sem ninguém notar.
+
+    A defesa é montar o caminho a partir de uma RAIZ confiável depois de
+    validar o argumento contra um padrão fixo, em vez de conferir um caminho
+    já montado com a string de fora. Assim o valor externo não chega ao
+    sistema de arquivos em forma nenhuma.
     """
     from pulsearb.backtest.__main__ import caminho_de_escrita
 
-    raiz = tmp_path / "raiz"
-    raiz.mkdir()
-    fora = tmp_path / "fora"
-    fora.mkdir()
-    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(raiz))
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    with pytest.raises(ValueError):
+        caminho_de_escrita(hostil)
 
-    assert caminho_de_escrita(str(raiz / "rel.json")).is_absolute()
 
-    # irmão da raiz: existe, tem sufixo .json, e ainda assim é recusado
-    with pytest.raises(ValueError, match="fora da raiz permitida"):
-        caminho_de_escrita(str(fora / "rel.json"))
+def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
+    from pulsearb.backtest.__main__ import caminho_de_escrita
 
-    # travessia com `..` é resolvida ANTES da conferência, então não escapa
-    with pytest.raises(ValueError, match="fora da raiz permitida"):
-        caminho_de_escrita(str(raiz / ".." / "fora" / "rel.json"))
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    (tmp_path / "relatorios").mkdir()
+
+    for nome in ("rel.json", "./rel.json", "relatorios/2026-08-20-13.json"):
+        destino = caminho_de_escrita(nome)
+        assert destino.is_relative_to(tmp_path.resolve()), nome
 
 
 def test_raiz_de_saida_padrao_e_o_diretorio_de_trabalho(monkeypatch):

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
@@ -108,31 +109,52 @@ def raiz_de_saida() -> Path:
     return Path.cwd().resolve()
 
 
+#: Forma aceita para o `--json`: caminho RELATIVO, segmentos de letras,
+#: dígitos, `-`, `_` e `.`, separados por `/`, terminando em `.json`. Sem raiz
+#: absoluta, sem `..`, sem `~`, sem caractere exótico.
+#:
+#: É uma lista de permissões, e é de propósito. Conferir o caminho DEPOIS de
+#: montá-lo ("ele caiu dentro da raiz?") funciona, mas continua entregando a
+#: string de fora ao sistema de arquivos; a análise de fluxo do SonarCloud
+#: aponta isso e está certa em apontar. Validar ANTES contra um padrão fixo e
+#: só então montar o caminho a partir de uma raiz confiável não deixa o valor
+#: externo chegar ao disco em forma nenhuma.
+PADRAO_SAIDA = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
+
+
 def caminho_de_escrita(bruto: str) -> Path:
-    """Valida um caminho de SAÍDA vindo da linha de comando.
+    """Monta o caminho de SAÍDA a partir da raiz permitida.
 
-    Exige que o caminho fique DENTRO da raiz permitida, tenha sufixo .json e
-    diretório-pai existente. Um relatório de backtest escrito em local
-    inesperado é pior que um erro: some sem ninguém notar.
+    O argumento é lido como caminho **relativo à raiz** (`--json
+    relatorio.json`, `--json relatorios/2026-08-20-13.json`), nunca como
+    caminho absoluto. Para gravar em outro lugar, mude a RAIZ com
+    `PULSEARB_BACKTEST_OUTPUT_ROOT` — assim o destino é sempre uma decisão
+    explícita de quem roda, e não um efeito colateral do argumento.
 
-    A contenção é verificada sobre o caminho já resolvido, antes de qualquer
-    acesso ao disco — `..` e symlink no meio do caminho não escapam dela.
+    Um relatório de backtest escrito em local inesperado é pior que um erro:
+    some sem ninguém notar.
     """
-    caminho = Path(bruto).expanduser().resolve(strict=False)
-    if caminho.suffix != ".json":
-        raise ValueError(f"o relatório precisa terminar em .json: {caminho}")
-    raiz = raiz_de_saida()
-    if not caminho.is_relative_to(raiz):
+    relativo = bruto.strip().removeprefix("./")
+    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
         raise ValueError(
-            f"saída fora da raiz permitida: {caminho}\n"
-            f"raiz atual: {raiz}\n"
-            f"para gravar em outro lugar, defina {ENV_RAIZ_DE_SAIDA}."
+            f"nome de saída inválido: {bruto!r}\n"
+            "esperado: caminho relativo terminando em .json, com letras, "
+            "dígitos, '-', '_' e '.' (ex.: relatorios/2026-08-20-13.json).\n"
+            f"para gravar em outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
         )
-    if not caminho.parent.is_dir():
-        raise ValueError(f"diretório de saída não existe: {caminho.parent}")
-    if caminho.is_dir():
-        raise ValueError(f"o destino é um diretório: {caminho}")
-    return caminho
+    raiz = raiz_de_saida()
+    caminho = raiz / relativo
+    # Cinto e suspensório: o padrão acima já exclui `..` e raiz absoluta, mas
+    # a raiz vem de variável de ambiente e pode conter symlink. A contenção
+    # depois de resolver custa uma syscall e fecha esse resto.
+    resolvido = caminho.resolve(strict=False)
+    if not resolvido.is_relative_to(raiz.resolve(strict=False)):
+        raise ValueError(f"saída fora da raiz permitida: {resolvido}")
+    if not resolvido.parent.is_dir():
+        raise ValueError(f"diretório de saída não existe: {resolvido.parent}")
+    if resolvido.is_dir():
+        raise ValueError(f"o destino é um diretório: {resolvido}")
+    return resolvido
 
 
 # Quanto tempo ANTES da abertura da janela o book do token ainda interessa.
@@ -727,9 +749,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         help=(
-            "grava o relatorio completo neste arquivo (.json, dentro do "
-            "diretorio de trabalho). Para outra raiz, defina "
-            "PULSEARB_BACKTEST_OUTPUT_ROOT."
+            "caminho RELATIVO para o relatorio completo, terminando em "
+            ".json (ex.: relatorios/2026-08-20-13.json). A raiz e o "
+            "diretorio de trabalho; para outra, defina "
+            "PULSEARB_BACKTEST_OUTPUT_ROOT. Caminho absoluto e recusado."
         ),
     )
     # LIMITES DE MEMÓRIA — defaults dimensionados para a VPS de 1 GB e

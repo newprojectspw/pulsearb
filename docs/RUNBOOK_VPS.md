@@ -463,19 +463,26 @@ de book. Subir o teto não resolve; **fatiar resolve**, porque as janelas de
 5m/15m vivem dentro de uma hora:
 
 ```bash
+mkdir -p relatorios
 for h in $(seq -w 0 23); do
-  python -m pulsearb.backtest data/recordings     --desde 20260820$h --ate 20260820$h     --limite-por-token 20000     --json relatorios/2026-08-20-$h.json
+  python -m pulsearb.backtest data/recordings \
+    --desde 20260820$h --ate 20260820$h \
+    --limite-por-token 20000 \
+    --json relatorios/2026-08-20-$h.json
 done
 ```
 
-> **Onde o `--json` pode gravar.** O caminho de saída fica contido no
-> **diretório de trabalho**. Sufixo `.json` e diretório-pai existente não
-> impedem `--json /etc/cron.d/qualquer.json`; a contenção impede, e é
-> verificada sobre o caminho já resolvido, então `..` e symlink no meio não
-> escapam. Para gravar em outra raiz, defina
-> `PULSEARB_BACKTEST_OUTPUT_ROOT=/caminho/permitido` — de propósito, em vez de
-> o programa aceitar qualquer destino em silêncio. Os exemplos deste runbook
-> usam caminhos relativos e não precisam de nada.
+> **Onde o `--json` pode gravar.** O argumento é um caminho **relativo** a
+> uma raiz confiável — o diretório de trabalho, por padrão. Caminho absoluto
+> é recusado, e `..`, `~` e caractere de shell também: o nome é validado
+> contra um padrão fixo ANTES de virar caminho, e só então montado a partir
+> da raiz.
+>
+> Sufixo `.json` e diretório-pai existente não bastariam: `/etc/cron.d/x.json`
+> passa nos dois. Para gravar em outro lugar, mude a RAIZ —
+> `PULSEARB_BACKTEST_OUTPUT_ROOT=/caminho/permitido`, e aí `--json rel.json`
+> grava lá. Assim o destino é sempre decisão explícita de quem roda. Os
+> exemplos deste runbook usam caminhos relativos e não precisam de nada.
 
 O seletor lê **uma hora a mais de cada lado**, porque o nome do arquivo é
 aproximação da hora do evento — sem essa margem, uma janela que abre às 13:58
