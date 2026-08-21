@@ -402,6 +402,30 @@ confira `gravacao.memoria.pior_resolucao_ms`: com os limites soltos ele deve
 ficar **abaixo de 150** e os quatro cenários de latência voltam a ser
 distinguíveis.
 
+### A varredura da âncora (M2.4) — em que horas rodar
+
+A validação da âncora agora tem duas camadas: as hipóteses nomeadas
+(referência) e a **varredura de τ** (`ancora.varredura_tau`), que testa
+A(τ) = stream em `abertura + τ` para τ ∈ [−180s, +180s], em aritmética
+inteira 1e18 e no relógio do servidor.
+
+Regras de amostra:
+
+- **Use as horas em que o recorder já estava vivo em TODA abertura** — da
+  20h de 2026-08-19 em diante. Na hora de subida, as primeiras janelas
+  abrem antes do stream existir e caem em `janelas_sem_cobertura_do_stream`.
+- A amostra cresce **~26 janelas/hora**. O critério de sucesso do
+  VEREDITO_M2 pede ≥ 100 janelas com cobertura: **~4 horas de gravação**.
+- O que decide está em `ancora.varredura_tau`:
+
+| Campo | Leitura |
+|---|---|
+| `regiao_viavel_100pct` | os τ que explicam TODAS as janelas. Vazio com amostra grande = a família A(τ) não é a âncora. |
+| `final_media_60s` vs `final_stream_no_fechamento` | qual definição de TWAP final domina. Se a segunda vencer, a média-de-TWAP que o projeto usava era parte do erro. |
+| `grade_tau_phi.melhor_celula` | a resposta quando o problema está no LADO DO FINAL. |
+| `falhas_inexplicaveis` | janelas que NENHUM ponto do stream explica. Não-vazio e recorrente = fonte de liquidação fora do nosso stream = critério de falha da fundação (VEREDITO_M2). |
+| `janelas_sem_cobertura_do_stream` | quanto da amostra foi descartado por lacuna — se for grande, olhe as quedas do RTDS antes de concluir qualquer coisa. |
+
 ### O que olhar no relatório
 
 O relatório imprime o que foi retido e o que foi descartado em
