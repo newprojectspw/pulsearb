@@ -78,22 +78,8 @@ def _iter_file(path: Path) -> Iterator[tuple[ReplayRecord, bool]]:
     """
     opener = gzip.open if path.suffix == ".gz" else open
     try:
-        handle = opener(path, "rb")  # type: ignore[operator]
-    except ERROS_DE_FLUXO as erro:
-        yield (_ilegivel(path, erro), True)
-        return
-    try:
-        with handle:
-            while True:
-                try:
-                    line = handle.readline()
-                except ERROS_DE_FLUXO as erro:
-                    # Quebra no meio do fluxo: o que já saiu vale, o que vem
-                    # depois não existe mais.
-                    yield (_ilegivel(path, erro), True)
-                    return
-                if not line:
-                    return
+        with opener(path, "rb") as handle:  # type: ignore[operator]
+            for line in handle:
                 if not line.strip():
                     continue
                 try:
@@ -118,6 +104,9 @@ def _iter_file(path: Path) -> Iterator[tuple[ReplayRecord, bool]]:
                         True,
                     )
     except ERROS_DE_FLUXO as erro:
+        # Quebra do fluxo (ou arquivo que nem abre): o que já saiu vale, o
+        # que vem depois não existe mais. O `with` fecha o arquivo em
+        # qualquer saída, inclusive esta.
         yield (_ilegivel(path, erro), True)
 
 

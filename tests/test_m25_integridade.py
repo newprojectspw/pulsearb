@@ -21,13 +21,13 @@ from pulsearb.analysis.integrity import (
 )
 from pulsearb.replay.reader import RecordingReader
 
-TOKEN = "tok"
+ASSET = "tok"
 
 
 def _book(ts_ms: int, bid: str = "0.49", ask: str = "0.51") -> dict:
     return {
         "event_type": "book",
-        "asset_id": TOKEN,
+        "asset_id": ASSET,
         "timestamp": str(ts_ms),
         "bids": [{"price": bid, "size": "100"}],
         "asks": [{"price": ask, "size": "100"}],
@@ -49,7 +49,7 @@ def _delta(
         "timestamp": str(ts_ms),
         "price_changes": [
             {
-                "asset_id": TOKEN,
+                "asset_id": ASSET,
                 "price": price,
                 "size": size,
                 "side": side,
@@ -63,7 +63,7 @@ def _delta(
 def _bba(ts_ms: int, best_bid: str, best_ask: str) -> dict:
     return {
         "event_type": "best_bid_ask",
-        "asset_id": TOKEN,
+        "asset_id": ASSET,
         "timestamp": str(ts_ms),
         "best_bid": best_bid,
         "best_ask": best_ask,
@@ -101,7 +101,7 @@ def test_alinhamento_por_carimbo_desfaz_divergencia_de_corrida():
 
     assert bruto["divergencias"] == 1, "a conta antiga TEM de acusar — é o bug"
     assert alinhado["divergencias"] == 0, "a conta nova não pode acusar corrida"
-    assert monitor.qualidade_do_token(TOKEN) == "alta"
+    assert monitor.qualidade_do_token(ASSET) == "alta"
 
 
 def test_alinhamento_nao_esconde_perda_de_verdade():
@@ -161,7 +161,7 @@ def test_lado_esvaziado_por_delta_e_truncagem_nao_corrupcao():
 
     resumo = monitor.resumo()
     assert resumo["lado_vazio"]["por_causa"] == {"esvaziado_por_delta": 1}
-    assert monitor.qualidade_do_token(TOKEN) != "baixa"
+    assert monitor.qualidade_do_token(ASSET) != "baixa"
 
 
 def test_lado_vazio_desde_o_snapshot_tambem_nao_invalida():
@@ -178,7 +178,7 @@ def test_lado_vazio_desde_o_snapshot_tambem_nao_invalida():
 
     resumo = monitor.resumo()
     assert resumo["lado_vazio"]["por_causa"] == {"vazio_desde_o_snapshot": 1}
-    assert monitor.qualidade_do_token(TOKEN) != "baixa"
+    assert monitor.qualidade_do_token(ASSET) != "baixa"
 
 
 def test_token_sem_snapshot_nenhum_e_baixa():
@@ -197,7 +197,7 @@ def test_token_sem_snapshot_nenhum_e_baixa():
     resumo = monitor.resumo()
     assert resumo["divergencias"] == 0, "ausência de livro não é divergência"
     assert resumo["lado_vazio"]["sem_livro_por_causa"]["sem_snapshot"] > 0
-    assert monitor.qualidade_do_token(TOKEN) == "baixa"
+    assert monitor.qualidade_do_token(ASSET) == "baixa"
 
 
 def test_perda_conhecida_conta_tempo_sem_livro_e_o_resync_estanca():
@@ -208,7 +208,7 @@ def test_perda_conhecida_conta_tempo_sem_livro_e_o_resync_estanca():
                best_bid="0.49", best_ask="0.51"),
         2_000_000_000,
     )
-    monitor.marcar_perda(TOKEN)
+    monitor.marcar_perda(ASSET)
     monitor.observar(
         _delta(3000, price="0.49", size="10", side="BUY",
                best_bid="0.49", best_ask="0.51"),
@@ -248,8 +248,8 @@ def test_um_tick_isolado_nao_condena_o_token():
     monitor.finalizar()
 
     assert monitor.divergencias == 1, "a divergência é DETECTADA"
-    assert monitor.token_corrompido(TOKEN) is False, "mas não condena"
-    assert monitor.qualidade_do_token(TOKEN) == "alta"
+    assert monitor.token_corrompido(ASSET) is False, "mas não condena"
+    assert monitor.qualidade_do_token(ASSET) == "alta"
 
 
 def test_divergencia_relevante_mas_efemera_nao_e_persistente():
@@ -271,7 +271,7 @@ def test_divergencia_relevante_mas_efemera_nao_e_persistente():
 
     resumo = monitor.resumo()
     assert resumo["criterio_de_invalidacao"]["divergencias_persistentes"] == 0
-    assert monitor.qualidade_do_token(TOKEN) == "alta"
+    assert monitor.qualidade_do_token(ASSET) == "alta"
 
 
 def test_divergencia_relevante_e_persistente_condena():
@@ -288,8 +288,8 @@ def test_divergencia_relevante_e_persistente_condena():
 
     resumo = monitor.resumo()
     assert resumo["criterio_de_invalidacao"]["divergencias_persistentes"] == 1
-    assert monitor.qualidade_do_token(TOKEN) == "baixa"
-    assert monitor.token_corrompido(TOKEN) is True
+    assert monitor.qualidade_do_token(ASSET) == "baixa"
+    assert monitor.token_corrompido(ASSET) is True
 
 
 def test_magnitude_critica_condena_sem_esperar_fracao():
@@ -313,7 +313,7 @@ def test_magnitude_critica_condena_sem_esperar_fracao():
     monitor.finalizar()
 
     # fração de tempo minúscula — e ainda assim baixa
-    assert monitor.qualidade_do_token(TOKEN) == "baixa"
+    assert monitor.qualidade_do_token(ASSET) == "baixa"
 
 
 def test_k_nunca_desce_abaixo_de_dois_ticks():
@@ -345,7 +345,7 @@ def test_as_tres_marcas_existem_e_sao_ordenadas_por_fracao_de_tempo():
                 ts * 1_000_000,
             )
         monitor.finalizar()
-        return monitor.qualidade_do_token(TOKEN)
+        return monitor.qualidade_do_token(ASSET)
 
     assert _monitor(1300, 1_000_000) == "alta"     # 300 ms em 1000 s
     assert _monitor(1600, 100_000) == "media"      # 600 ms em 100 s
@@ -405,7 +405,7 @@ def _gz(path: Path, linhas: int, ts_base: int) -> None:
                 "ts_mono_ns": ts_base + i,
                 "ts_wall_ns": ts_base + i,
                 "fonte": "poly_ws",
-                "payload": {"event_type": "book", "asset_id": TOKEN},
+                "payload": {"event_type": "book", "asset_id": ASSET},
             }
         )
         + b"\n"
@@ -476,9 +476,9 @@ def test_topo_e_conferido_depois_de_toda_a_mensagem_nao_a_cada_nivel():
         "price_changes": [
             # insere o novo topo primeiro: o estado intermediário tem 0.49 E
             # 0.50, e o topo intermediário (0.50) até coincide...
-            {"asset_id": TOKEN, "price": "0.50", "size": "100", "side": "BUY",
+            {"asset_id": ASSET, "price": "0.50", "size": "100", "side": "BUY",
              "best_bid": "0.50", "best_ask": "0.51"},
-            {"asset_id": TOKEN, "price": "0.49", "size": "0", "side": "BUY",
+            {"asset_id": ASSET, "price": "0.49", "size": "0", "side": "BUY",
              "best_bid": "0.50", "best_ask": "0.51"},
         ],
     }
@@ -498,9 +498,9 @@ def test_topo_e_conferido_depois_de_toda_a_mensagem_nao_a_cada_nivel():
         "event_type": "price_change",
         "timestamp": "4000",
         "price_changes": [
-            {"asset_id": TOKEN, "price": "0.49", "size": "0", "side": "BUY",
+            {"asset_id": ASSET, "price": "0.49", "size": "0", "side": "BUY",
              "best_bid": "0.50", "best_ask": "0.51"},
-            {"asset_id": TOKEN, "price": "0.50", "size": "100", "side": "BUY",
+            {"asset_id": ASSET, "price": "0.50", "size": "100", "side": "BUY",
              "best_bid": "0.50", "best_ask": "0.51"},
         ],
     }
@@ -509,7 +509,7 @@ def test_topo_e_conferido_depois_de_toda_a_mensagem_nao_a_cada_nivel():
 
     assert achados == [], "o estado intermediário não é o estado do servidor"
     assert monitor.divergencias == 0
-    assert monitor.qualidade_do_token(TOKEN) == "alta"
+    assert monitor.qualidade_do_token(ASSET) == "alta"
 
 
 def test_uma_mensagem_pode_tocar_dois_tokens_e_cada_um_e_conferido():

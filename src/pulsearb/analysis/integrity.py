@@ -49,6 +49,7 @@ alinhada é acumulada por dentro, para o relatório.
 
 from __future__ import annotations
 
+import math
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -222,7 +223,7 @@ class _Populacao:
 
     def registrar(self, magnitude: float, motivo_vazio: str | None) -> None:
         self.divergencias += 1
-        if magnitude == float("inf"):
+        if math.isinf(magnitude):
             self.lados_vazios += 1
             self.por_motivo_vazio[motivo_vazio or "desconhecido"] += 1
             return
@@ -278,8 +279,11 @@ class _EstadoDoToken:
     )
     #: lado → (ts_ms de início, maior magnitude) da divergência relevante aberta
     abertas: dict[str, tuple[float, float]] = field(default_factory=dict)
-    ts_primeiro_ms: float = 0.0
-    ts_ultimo_ms: float = 0.0
+    #: `None` = ainda não observado. Zero NÃO serve de sentinela aqui: um
+    #: carimbo legítimo de 0 seria indistinguível de "nunca vi este token", e
+    #: a comparação com 0.0 em ponto flutuante é frágil por natureza.
+    ts_primeiro_ms: float | None = None
+    ts_ultimo_ms: float | None = None
     ts_max_servidor_ms: float = 0.0
     ms_divergentes: float = 0.0
     persistentes: int = 0
@@ -294,16 +298,21 @@ class _EstadoDoToken:
     #: token que ficou 200 ms sem livro no começo da vida não é o mesmo
     #: que um que passou a janela inteira sem.
     ms_sem_livro: float = 0.0
-    sem_livro_desde: float = 0.0
+    #: `None` = há livro. Mesmo motivo da sentinela acima.
+    sem_livro_desde: float | None = None
     teve_snapshot: bool = False
 
     def marcar_tempo(self, ts_ms: float) -> None:
-        if self.ts_primeiro_ms == 0.0:
+        if self.ts_primeiro_ms is None:
             self.ts_primeiro_ms = ts_ms
-        self.ts_ultimo_ms = max(self.ts_ultimo_ms, ts_ms)
+        self.ts_ultimo_ms = (
+            ts_ms if self.ts_ultimo_ms is None else max(self.ts_ultimo_ms, ts_ms)
+        )
 
     @property
     def ms_observados(self) -> float:
+        if self.ts_primeiro_ms is None or self.ts_ultimo_ms is None:
+            return 0.0
         return max(0.0, self.ts_ultimo_ms - self.ts_primeiro_ms)
 
     @property
@@ -328,14 +337,14 @@ class _EstadoDoToken:
             return 0.0
         return (self.ms_divergentes + self.ms_sem_livro) / janela
 
-    def abrir_sem_livro(self, carimbo: float) -> None:
-        if self.sem_livro_desde == 0.0:
+    def abrir_sem_livro(self, carimbo: float | None) -> None:
+        if carimbo is not None and self.sem_livro_desde is None:
             self.sem_livro_desde = carimbo
 
-    def fechar_sem_livro(self, carimbo: float) -> None:
-        if self.sem_livro_desde != 0.0:
+    def fechar_sem_livro(self, carimbo: float | None) -> None:
+        if self.sem_livro_desde is not None and carimbo is not None:
             self.ms_sem_livro += max(0.0, carimbo - self.sem_livro_desde)
-            self.sem_livro_desde = 0.0
+            self.sem_livro_desde = None
 
 
 @dataclass
@@ -694,7 +703,7 @@ class MonitorDeIntegridade:
             if alinhado:
                 self.divergencias_por_token[asset_id] += 1
                 estado.divergencias += 1
-                if magnitude == float("inf"):
+                if math.isinf(magnitude):
                     if MOTIVOS_DE_LADO_VAZIO.get(motivo or "", True):
                         estado.abrir_sem_livro(carimbo)
                     else:
@@ -749,7 +758,7 @@ class MonitorDeIntegridade:
         mercado por tempo suficiente para eu confiar num preço de entrada?".
         """
         estado = self.estados.get(asset_id)
-        if estado is None or estado.ts_ultimo_ms == 0.0:
+        if estado is None or estado.ts_ultimo_ms is None:
             return "sem_dado"
         if not estado.teve_snapshot:
             # Nunca recebeu livro inicial: não há reconstrução para julgar.
