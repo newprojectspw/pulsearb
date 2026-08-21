@@ -50,7 +50,7 @@ no relatório também.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -114,6 +114,28 @@ class ParametrosDeReward:
             fator_desconto=fator_desconto,
             cadencia_s=cadencia_s,
         )
+
+
+#: Os campos que uma janela precisa ter para a simulação de reward existir.
+CHAVES_DE_REWARD = ("rewards_daily_rate", "rewards_max_spread", "rewards_min_size")
+
+
+def _motivo_sem_pool(meta: dict[str, Any]) -> str:
+    """Por que esta janela ficou de fora da conta de reward.
+
+    A ordem das perguntas é a ordem em que `do_mercado` desiste, para o motivo
+    reportado ser o motivo real e não o primeiro que der match.
+    """
+    if not meta:
+        return "sem_reward_meta"
+    taxa = _numero(meta.get("rewards_daily_rate"))
+    if taxa is None:
+        return "sem_taxa_diaria"
+    if taxa <= 0:
+        return "taxa_diaria_zero"
+    if _numero(meta.get("rewards_max_spread")) is None:
+        return "sem_max_spread"
+    return "desconhecido"
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,12 +342,24 @@ def simular(
     sensibilidade: dict[str, dict[str, float]] = defaultdict(dict)
     competicao: dict[str, list[float]] = defaultdict(list)
     janelas_com_pool = 0
+    motivos: Counter[str] = Counter()
+    presentes: Counter[str] = Counter()
+    ausentes: Counter[str] = Counter()
 
     for janela in janelas:
-        base = ParametrosDeReward.do_mercado(
-            getattr(janela, "reward_meta", None) or {}, cadencia_s=cadencia_s
-        )
+        meta = getattr(janela, "reward_meta", None) or {}
+        base = ParametrosDeReward.do_mercado(meta, cadencia_s=cadencia_s)
         if base is None:
+            # M2.6 BUG 5: `janelas_com_pool_de_reward: 0` saía sem dizer por
+            # quê, e zero silencioso é indistinguível de bug. Cada recusa
+            # passa a nomear a causa, e os valores vistos vão junto — se o
+            # campo mudou de nome no fio, é aqui que aparece.
+            motivos[_motivo_sem_pool(meta)] += 1
+            for chave in CHAVES_DE_REWARD:
+                if meta.get(chave) is not None:
+                    presentes[chave] += 1
+                else:
+                    ausentes[chave] += 1
             continue
         janelas_com_pool += 1
         recortes = _recortes(janela)
@@ -353,6 +387,26 @@ def simular(
                 )
 
     saida["janelas_com_pool_de_reward"] = janelas_com_pool
+    saida["janelas_sem_pool_de_reward"] = {
+        "total": sum(motivos.values()),
+        "por_motivo": dict(motivos),
+        "campos_presentes": dict(presentes),
+        "campos_ausentes": dict(ausentes),
+        "nota": (
+            "M2.6 BUG 5. A cadeia do dado esta INTEIRA e foi conferida: a "
+            "descoberta guarda `raw_gamma`, o recorder extrai "
+            "`rewards_daily_rate` de `clobRewards` (somando as fontes, "
+            "API_NOTES 12.8) mais `rewardsMinSize`/`rewardsMaxSpread`, e o "
+            "backtest le os tres para `reward_meta`. Entao zero janela com "
+            "pool NAO e campo que ninguem le. Sobram duas leituras, e "
+            "`por_motivo` separa as duas: `sem_taxa_diaria` em massa quer "
+            "dizer que os mercados updown gravados nao participam do "
+            "programa de rewards — que e um ACHADO sobre o programa, nao um "
+            "defeito nosso, e derruba a rota maker como fonte de receita "
+            "nestes mercados. Ja `sem_max_spread` com taxa presente quer "
+            "dizer campo faltando na Gamma, e ai a conta e recuperavel."
+        ),
+    }
     saida["por_ordem"] = {
         nome: {recorte: r.to_dict() for recorte, r in sorted(recortes.items())}
         for nome, recortes in sorted(por_ordem.items())

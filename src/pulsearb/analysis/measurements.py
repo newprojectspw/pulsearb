@@ -22,6 +22,7 @@ from collections import defaultdict
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook
+from pulsearb.engine.fees import fee_pp_por_share
 
 # Faixas que DEFINEM a hipótese do tick (API_NOTES 13.3a). Ficam nomeadas
 # porque não são números de conveniência: mudar qualquer uma muda o que
@@ -238,6 +239,12 @@ def medir_atraso_liquidacao(
 
 
 # ---------------------------------------------------------------- M2.E.3
+#: Profundidade mínima a 3 ticks (p50, USDC) para a estratégia escalar.
+#: Vem de docs/VEREDITO_M2.md, regra 5 das "Regras de decisão", escrita
+#: antes de qualquer número — não é limiar ajustado ao resultado.
+PROFUNDIDADE_MINIMA_USDC = 200.0
+
+
 def medir_profundidade(
     amostras: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -265,13 +272,40 @@ def medir_profundidade(
         if isinstance(hora, int):
             por_hora[hora].append(d3)
 
+    tabela = {
+        duracao: {"1tick_usdc": _dist(v["1tick"]), "3ticks_usdc": _dist(v["3ticks"])}
+        for duracao, v in sorted(por_duracao.items())
+    }
+    # O critério do VEREDITO_M2 §"Regras de decisão" é p50 de 3 ticks ≥ 200
+    # USDC. Ele estava escrito no documento e ausente do relatório, o que
+    # obrigava quem lia a lembrar do número e fazer a comparação de cabeça —
+    # e uma duração reprovada passava como só mais uma linha da tabela.
+    veredito_por_duracao = {}
+    for duracao, dados in tabela.items():
+        p50 = (dados.get("3ticks_usdc") or {}).get("p50")
+        veredito_por_duracao[duracao] = {
+            "p50_3ticks_usdc": p50,
+            "minimo_exigido_usdc": PROFUNDIDADE_MINIMA_USDC,
+            "passa": None if p50 is None else bool(p50 >= PROFUNDIDADE_MINIMA_USDC),
+        }
+    aprovadas = sorted(d for d, v in veredito_por_duracao.items() if v["passa"])
     return {
-        "por_duracao": {
-            duracao: {"1tick_usdc": _dist(v["1tick"]), "3ticks_usdc": _dist(v["3ticks"])}
-            for duracao, v in sorted(por_duracao.items())
-        },
+        "por_duracao": tabela,
         "por_hora_utc_3ticks": {
             str(hora): _dist(valores) for hora, valores in sorted(por_hora.items())
+        },
+        "criterio_do_veredito": {
+            "minimo_p50_3ticks_usdc": PROFUNDIDADE_MINIMA_USDC,
+            "por_duracao": veredito_por_duracao,
+            "duracoes_aprovadas": aprovadas,
+            "nota": (
+                "Criterio de VEREDITO_M2: p50 de profundidade a 3 ticks >= "
+                f"{PROFUNDIDADE_MINIMA_USDC:g} USDC, senao a estrategia nao "
+                "escala. Medido em 4h reais: 5m e 15m REPROVAM (137 e 79 "
+                "USDC) e so a duracao de 1h passa (204). Isso restringe onde "
+                "vale operar antes mesmo de existir edge — e e um limite de "
+                "CAPACIDADE, que edge nenhum resolve."
+            ),
         },
         "nota": (
             "Capacidade da estratégia: o p50 de 3ticks é o teto realista por "
@@ -436,11 +470,88 @@ def _primeiro_book(timelines: list[Any], ts_ns: int) -> Any:
 
 
 # ---------------------------------------------------------------- M2.2 B.3
+#: Preço em que a taxa dinâmica do taker é máxima: p·(1−p) é máximo em 0,50
+#: (API_NOTES §5). É o pior caso para quem atravessa e o melhor caso para o
+#: rebate de quem foi executado — usar o pico deixa a comparação otimista de
+#: propósito, e ainda assim ela não decide a favor do maker.
+PRECO_DE_TAXA_MAXIMA = 0.50
+
+
+def _rebate_vs_markout(
+    *,
+    fee_rebate_rate: float,
+    fee_rate: float,
+    fee_exponent: float,
+    markout: dict[str, Any],
+    horizonte: str,
+) -> dict[str, Any]:
+    """A comparação que decide se a rota maker paga o próprio custo.
+
+    As duas grandezas vivem na MESMA unidade — centavos por share — e por isso
+    podem ser subtraídas. É a única conta do bloco que não depende da fórmula
+    de rewards não verificada (API_NOTES §15), então é a que se pode olhar
+    com confiança hoje:
+
+        rebate por share = fee_rebate_rate × taxa_do_taker(p)
+        custo por share  = |markout médio| (adverse selection)
+
+    A ressalva que impede ler isto como lucro: **o rebate só existe quando
+    alguém nos executa**, e ser executado depende da fila, que este backtest
+    não modela (API_NOTES §15). O markout, ao contrário, foi MEDIDO sobre
+    execuções reais. Ou seja, o lado do custo é observado e o lado da receita
+    é um teto.
+    """
+    # `fee_rate`/`fee_exponent` vêm do DADO gravado, como tudo que é
+    # parâmetro de mercado neste projeto. Sem eles a conta não sai — e não
+    # sair é melhor que sair com um `r` inventado.
+    if not fee_rate:
+        return {
+            "indisponivel": (
+                "sem fee_rate no dado gravado: a taxa do taker e parametro de "
+                "mercado e nao tem default neste projeto."
+            )
+        }
+    taxa_no_pico = fee_pp_por_share(
+        PRECO_DE_TAXA_MAXIMA, rate=fee_rate, exponent=fee_exponent
+    )
+    rebate_centavos = fee_rebate_rate * taxa_no_pico * 100.0
+    tabela = markout.get("markout_centavos_por_share") or {}
+    geral = (tabela.get("geral") or {}).get(horizonte) or {}
+    markout_centavos = geral.get("media")
+    custo = abs(markout_centavos) if isinstance(markout_centavos, (int, float)) else None
+    return {
+        "preco_de_referencia": PRECO_DE_TAXA_MAXIMA,
+        "taxa_do_taker_centavos_por_share": round(taxa_no_pico * 100.0, 4),
+        "fee_rebate_rate": fee_rebate_rate,
+        "rebate_centavos_por_share": round(rebate_centavos, 4),
+        "markout_centavos_por_share": markout_centavos,
+        "horizonte": horizonte,
+        "execucoes_medidas": geral.get("n"),
+        "saldo_centavos_por_share": (
+            round(rebate_centavos - custo, 4) if custo is not None else None
+        ),
+        "leitura": (
+            "As duas grandezas estao em centavos por share e sao subtraiveis. "
+            "Em p=0,50 a taxa do taker e maxima, entao o rebate aqui e o TETO "
+            "do que o maker recebe por share executada. O markout e o custo "
+            "de adverse selection MEDIDO sobre execucoes reais. Se as duas "
+            "forem da mesma ordem, a rota maker se paga na melhor hipotese e "
+            "nao sobra margem — e isso ANTES da fila. "
+            "RESSALVA QUE MUDA A CONTA: o rebate so existe quando alguem nos "
+            "executa, e a probabilidade de execucao depende da posicao na "
+            "fila, que este backtest NAO modela (API_NOTES 15). O custo e "
+            "observado; a receita e um teto."
+        ),
+    }
+
+
 def conta_do_maker(
     *,
     rewards: dict[str, Any],
     markout: dict[str, Any],
     fee_rebate_rate: float,
+    fee_rate: float = 0.0,
+    fee_exponent: float = 1.0,
     volume_taker_usdc: float = 0.0,
     horizonte_markout: str = "5s",
 ) -> dict[str, Any]:
@@ -481,6 +592,13 @@ def conta_do_maker(
 
     return {
         "por_ordem_e_recorte": dict(sorted(por_recorte.items())),
+        "rebate_vs_markout": _rebate_vs_markout(
+            fee_rebate_rate=fee_rebate_rate,
+            fee_rate=fee_rate,
+            fee_exponent=fee_exponent,
+            markout=markout,
+            horizonte=horizonte_markout,
+        ),
         "formula": (
             "resultado = rewards + rebate(fee_rebate_rate * taxa dos takers que "
             "nos executam) - custo_de_markout - taxa(0 para maker) "

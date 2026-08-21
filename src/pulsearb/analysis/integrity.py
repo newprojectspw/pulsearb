@@ -59,6 +59,7 @@ from pulsearb.feeds.poly_ws import (
     EVENT_BOOK,
     EVENT_PRICE_CHANGE,
     MudancaDePreco,
+    forma_do_book,
     forma_do_price_change,
     iter_mudancas,
 )
@@ -383,6 +384,20 @@ class MonitorDeIntegridade:
     #: havia reconstrução'. Contá-las como divergência foi o que encheu o
     #: relatório do M2.2 com 2,7 milhões de 'lado vazio'.
     sem_livro_por_causa: Counter[str] = field(default_factory=Counter)
+    #: M2.6 BUG 4: com que par de chaves os snapshots de livro chegaram, e
+    #: quantos níveis traziam. `vazio_desde_o_snapshot` em massa é OU o
+    #: servidor mandando o lado vazio, OU o nome do campo mudando — e as
+    #: duas coisas produzem o mesmo zero. Só isto separa as duas.
+    formas_de_book: Counter[str] = field(default_factory=Counter)
+    books_observados: int = 0
+    books_com_bid_vazio: int = 0
+    books_com_ask_vazio: int = 0
+    niveis_bid: list[float] = field(default_factory=list)
+    niveis_ask: list[float] = field(default_factory=list)
+    #: atraso, em ms, de eventos cujo carimbo do servidor veio ANTES do
+    #: maior já visto para o token. É o que dimensiona o buffer de
+    #: reordenação do leitor (M2.6 BUG 4.3).
+    atrasos_de_carimbo_ms: list[float] = field(default_factory=list)
 
     # ------------------------------------------------------ compatibilidade
     # Estes três eram atributos na versão do M2.2 e são lidos pelo recorder e
@@ -430,26 +445,7 @@ class MonitorDeIntegridade:
         carimbo = _carimbo_ms(evento, ts_ns)
 
         if tipo == EVENT_BOOK:
-            asset_id = evento.get("asset_id")
-            if isinstance(asset_id, str):
-                estado = self._estado(asset_id)
-                self._resolver_pendentes(asset_id, estado, carimbo)
-                if carimbo < estado.ts_max_servidor_ms:
-                    # Snapshot mais VELHO que o estado que já temos. Ele é
-                    # autoritativo para o instante dele, não para agora:
-                    # aplicá-lo rebobinaria o livro e a corrupção seria nossa.
-                    # Conta e ignora.
-                    estado.snapshots_fora_de_ordem += 1
-                    return []
-                estado.livro.aplicar_snapshot(evento)
-                estado.livro.ts_ns = ts_ns
-                estado.com_snapshot = True
-                estado.teve_snapshot = True
-                estado.aguardando_resync = False
-                estado.marcar_tempo(carimbo)
-                estado.fechar_sem_livro(carimbo)
-                estado.ts_max_servidor_ms = max(estado.ts_max_servidor_ms, carimbo)
-                self._anotar_historico(estado, carimbo)
+            self._observar_book(evento, ts_ns, carimbo)
             return []
 
         if tipo == EVENT_PRICE_CHANGE:
@@ -520,6 +516,7 @@ class MonitorDeIntegridade:
                 # seria comparar contra um livro do futuro. Conta e cala.
                 if carimbo < estado.ts_max_servidor_ms:
                     estado.deltas_fora_de_ordem += 1
+                    self._anotar_atraso(estado, carimbo)
                     fora_de_ordem.add(mudanca.asset_id)
             estado.livro.aplicar(mudanca)
             estado.livro.ts_ns = ts_ns
@@ -551,6 +548,49 @@ class MonitorDeIntegridade:
                 )
             )
         return achados
+
+    def _observar_book(
+        self, evento: dict[str, Any], ts_ns: int, carimbo: float
+    ) -> None:
+        """Snapshot de livro: mede a forma, mede a profundidade, e aplica.
+
+        A medição vem ANTES do `isinstance` do asset_id de propósito: um
+        snapshot sem token identificável não entra no livro, mas a forma dele
+        ainda é dado — e é justamente o evento malformado que interessa
+        contar (M2.6 BUG 4).
+        """
+        self.formas_de_book[forma_do_book(evento)] += 1
+        self.books_observados += 1
+        bids = _niveis(evento.get("bids"))
+        asks = _niveis(evento.get("asks"))
+        if not bids:
+            self.books_com_bid_vazio += 1
+        if not asks:
+            self.books_com_ask_vazio += 1
+        _amostrar(self.niveis_bid, len(bids), self.books_observados)
+        _amostrar(self.niveis_ask, len(asks), self.books_observados)
+
+        asset_id = evento.get("asset_id")
+        if not isinstance(asset_id, str):
+            return
+        estado = self._estado(asset_id)
+        self._resolver_pendentes(asset_id, estado, carimbo)
+        if carimbo < estado.ts_max_servidor_ms:
+            # Snapshot mais VELHO que o estado que já temos. Ele é
+            # autoritativo para o instante dele, não para agora: aplicá-lo
+            # rebobinaria o livro e a corrupção seria nossa. Conta e ignora.
+            estado.snapshots_fora_de_ordem += 1
+            self._anotar_atraso(estado, carimbo)
+            return
+        estado.livro.aplicar_snapshot(evento)
+        estado.livro.ts_ns = ts_ns
+        estado.com_snapshot = True
+        estado.teve_snapshot = True
+        estado.aguardando_resync = False
+        estado.marcar_tempo(carimbo)
+        estado.fechar_sem_livro(carimbo)
+        estado.ts_max_servidor_ms = max(estado.ts_max_servidor_ms, carimbo)
+        self._anotar_historico(estado, carimbo)
 
     def marcar_perda(self, asset_id: str) -> None:
         """Perda CONHECIDA (fila cheia, reconexão): o livro deixa de valer.
@@ -592,6 +632,21 @@ class MonitorDeIntegridade:
             estado = _EstadoDoToken()
             self.estados[asset_id] = estado
         return estado
+
+    def _anotar_atraso(self, estado: _EstadoDoToken, carimbo: float) -> None:
+        """Quanto este evento chegou atrasado, no eixo do SERVIDOR.
+
+        Dimensiona o buffer de reordenação do leitor: ele ordena por
+        `ts_mono_ns` (chegada), e a desordem que sobra é a do carimbo. Sem
+        esta medida, "o buffer é insuficiente" é palpite.
+        """
+        atraso = estado.ts_max_servidor_ms - carimbo
+        if atraso > 0:
+            _amostrar(
+                self.atrasos_de_carimbo_ms,
+                atraso,
+                len(self.atrasos_de_carimbo_ms) + 1,
+            )
 
     @staticmethod
     def _anotar_historico(estado: _EstadoDoToken, carimbo: float) -> None:
@@ -799,6 +854,92 @@ class MonitorDeIntegridade:
             return "sem_dado"
         return min(conhecidas, key=lambda m: ORDEM_QUALIDADE[m])
 
+    def _resumo_dos_books(self) -> dict[str, Any]:
+        """O que os snapshots de livro traziam de verdade (M2.6 BUG 4).
+
+        Responde a duas perguntas com uma medição só:
+
+        1. **A forma está certa?** `formas` diz com que par de chaves o
+           servidor manda os lados. Qualquer coisa fora de `bids+asks` explica
+           `vazio_desde_o_snapshot` em massa sem que exista lado vazio nenhum
+           — seria o defeito do `price_change` (API_NOTES 6.1b) de novo.
+        2. **Quantos níveis reter?** Os percentis de níveis POR LADO no evento
+           cru. O p99 é a resposta direta a "quantos níveis fazem o lado vazio
+           por truncagem cair abaixo de 1%" — abaixo do p99, 1% dos snapshots
+           já chega com menos níveis do que se quer reter.
+        """
+        bids = sorted(self.niveis_bid)
+        asks = sorted(self.niveis_ask)
+        recomendado = max(
+            int(_percentil(bids, 99) or 0), int(_percentil(asks, 99) or 0)
+        )
+        return {
+            "eventos": self.books_observados,
+            "formas": dict(self.formas_de_book),
+            "com_bid_vazio": self.books_com_bid_vazio,
+            "com_ask_vazio": self.books_com_ask_vazio,
+            "niveis_por_lado": {
+                "bid": {
+                    "p50": _percentil(bids, 50),
+                    "p90": _percentil(bids, 90),
+                    "p99": _percentil(bids, 99),
+                    "max": max(bids) if bids else None,
+                },
+                "ask": {
+                    "p50": _percentil(asks, 50),
+                    "p90": _percentil(asks, 90),
+                    "p99": _percentil(asks, 99),
+                    "max": max(asks) if asks else None,
+                },
+            },
+            "niveis_recomendados_por_lado": recomendado or None,
+            "nota": (
+                "M2.6 BUG 4. ATENCAO A PREMISSA: `--niveis-por-lado` NAO "
+                "influencia `vazio_desde_o_snapshot`. Aquele flag trunca o "
+                "`BookTimeline` da passada 2; este monitor le o evento CRU na "
+                "passada 1, com todos os niveis. Entao lado vazio aqui e o "
+                "evento gravado parseando vazio — ou porque veio vazio, ou "
+                "porque a chave tem outro nome (veja `formas`). "
+                "`niveis_recomendados_por_lado` e o p99 dos niveis vistos: e "
+                "a recomendacao para `--niveis-por-lado`, que afeta o "
+                "SIMULADOR de fills, nao este contador."
+            ),
+        }
+
+    def _resumo_da_desordem(
+        self, deltas: int, snapshots: int
+    ) -> dict[str, Any]:
+        """Quanto o carimbo do servidor chega fora de ordem, e o que fazer.
+
+        O leitor ordena por `ts_mono_ns` (chegada local) com um buffer
+        limitado; o que sobra é desordem de CARIMBO, que buffer nenhum
+        conserta — são eixos diferentes. Medir a magnitude é o que separa
+        "aumentar o buffer resolve" de "não resolve".
+        """
+        atrasos = sorted(self.atrasos_de_carimbo_ms)
+        return {
+            "deltas": deltas,
+            "snapshots": snapshots,
+            "atraso_ms": {
+                "p50": _percentil(atrasos, 50),
+                "p90": _percentil(atrasos, 90),
+                "p99": _percentil(atrasos, 99),
+                "max": round(max(atrasos), 3) if atrasos else None,
+            },
+            "amostras": len(atrasos),
+            "nota": (
+                "M2.6 BUG 4.3. `atraso_ms` e quanto o carimbo do servidor "
+                "veio atras do maior ja visto NAQUELE token. Se o p99 for de "
+                "poucas centenas de ms, a desordem e do FIO (o servidor "
+                "publica fora de ordem) e aumentar o buffer de reordenacao "
+                "do leitor nao muda nada — ele ordena por chegada local, "
+                "outro eixo. Se for de dezenas de segundos, ha reordenacao "
+                "grosseira e o buffer merece revisao. O leitor ja conta "
+                "`fora_de_ordem` no eixo dele; os dois numeros respondem "
+                "perguntas diferentes e nao devem ser somados."
+            ),
+        }
+
     def resumo(self) -> dict[str, Any]:
         alinhado = self.por_carimbo.resumo(self.tick_mercado)
         bruto = self.por_chegada.resumo(self.tick_mercado)
@@ -878,6 +1019,8 @@ class MonitorDeIntegridade:
                     "janelas medindo corrida, nao corrupcao."
                 ),
             },
+            "snapshots_de_livro": self._resumo_dos_books(),
+            "desordem_de_carimbo": self._resumo_da_desordem(fora_de_ordem, snapshots_fora),
             "qualidade_dos_tokens": dict(contagem_qualidade),
             "tokens_divergentes": len(self.divergencias_por_token),
             "tokens_corrompidos": sorted(
@@ -900,6 +1043,19 @@ class MonitorDeIntegridade:
                 "`alinhamento.por_chegada_local` para comparacao."
             ),
         }
+
+
+def _amostrar(reservatorio: list[float], valor: float, total: int) -> None:
+    """Reservatório em rodízio, com teto. Determinístico de propósito.
+
+    O replay precisa reproduzir o mesmo relatório duas vezes; amostragem
+    aleatória quebraria isso. Ao encher, substitui em rodízio — preserva a
+    cauda recente sem crescer sem limite em 72h de gravação.
+    """
+    if len(reservatorio) < MAX_MAGNITUDES:
+        reservatorio.append(float(valor))
+    else:
+        reservatorio[total % MAX_MAGNITUDES] = float(valor)
 
 
 def _carimbo_ms(evento: dict[str, Any], ts_ns: int) -> float:

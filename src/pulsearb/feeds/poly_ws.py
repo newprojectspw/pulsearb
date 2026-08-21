@@ -242,6 +242,43 @@ def forma_do_price_change(payload: dict[str, Any]) -> str:
     return "__sem_lista__"
 
 
+#: Nomes plausíveis para os dois lados de um snapshot de livro. `bids`/`asks`
+#: é o que o SDK documenta; os demais entram porque o `price_change` já provou
+#: que o fio usa nomes que o SDK não menciona (API_NOTES 6.1b), e descobrir
+#: isso pela segunda vez por dedução custou um marco inteiro.
+CHAVES_DE_LADO = (
+    ("bids", "asks"),
+    ("buys", "sells"),
+    ("bid", "ask"),
+    ("b", "a"),
+)
+
+
+def forma_do_book(payload: dict[str, Any]) -> str:
+    """Com que par de chaves este snapshot de livro veio.
+
+    Existe pelo mesmo motivo que `forma_do_price_change`: quando o evento não
+    parseia, a diferença entre "o servidor mandou o lado vazio" e "o servidor
+    mandou o lado com outro nome" é a diferença entre um achado de mercado e
+    um defeito nosso — e as duas coisas produzem exatamente o mesmo zero.
+    """
+    achadas = [
+        f"{compra}+{venda}"
+        for compra, venda in CHAVES_DE_LADO
+        if isinstance(payload.get(compra), list) or isinstance(payload.get(venda), list)
+    ]
+    if not achadas:
+        # Nenhum par conhecido: reporta as chaves que o evento REALMENTE tem,
+        # para que o nome novo apareça no relatório em vez de virar silêncio.
+        outras = sorted(
+            chave
+            for chave, valor in payload.items()
+            if isinstance(valor, list) and valor and isinstance(valor[0], dict)
+        )
+        return f"__desconhecida__:{','.join(outras)}" if outras else "__sem_lista__"
+    return "+".join(achadas) if len(achadas) > 1 else achadas[0]
+
+
 def tokens_do_evento(evento: dict[str, Any]) -> set[str]:
     """Todos os tokens que um evento do CLOB toca.
 

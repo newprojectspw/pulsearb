@@ -8,7 +8,7 @@ número feio — é para isso que o M2 existe.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,10 +77,27 @@ class BacktestReport:
     sinais_abaixo_do_minimo: int = 0
     sinais_nao_preenchiveis: int = 0
     janelas_avaliadas: int = 0
+    #: bucket → instantes em que ALGUM lado passou do threshold, contados
+    #: mesmo depois de a janela já ter operado. É a medição que responde ao
+    #: BUG 2 do M2.6: `por_bucket_tempo` mostra onde se OPEROU, e como a v1
+    #: entra uma vez por janela e varre o stream da abertura para o
+    #: fechamento, ela opera onde chega primeiro — não onde o sinal é melhor.
+    #: Comparar os dois separa "o sinal não existe aqui" de "o simulador
+    #: nunca chegou aqui".
+    oportunidades_por_bucket: Counter[str] = field(default_factory=Counter)
+    #: bucket → janelas distintas com ao menos uma oportunidade
+    janelas_com_oportunidade: dict[str, set[str]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
         self.trades.append(trade)
+
+    def add_oportunidade(self, bucket: str, slug: str) -> None:
+        """Um instante em que o gatilho dispararia, tenha operado ou não."""
+        self.oportunidades_por_bucket[bucket] += 1
+        self.janelas_com_oportunidade[bucket].add(slug)
 
     def add_calibration(self, bucket: str, prob_up: float, resolveu_up: bool) -> None:
         """Calibração é medida sobre TODAS as previsões, não só as negociadas.
@@ -175,6 +192,31 @@ class BacktestReport:
             "por_ativo": self._grupo(lambda t: t.asset),
             "por_duracao": self._grupo(lambda t: f"{t.duracao_s}s"),
             "por_bucket_tempo": self._grupo(lambda t: t.bucket_tempo),
+            "oportunidades_por_bucket": {
+                bucket: {
+                    "instantes_com_sinal": self.oportunidades_por_bucket[bucket],
+                    "janelas_distintas": len(self.janelas_com_oportunidade[bucket]),
+                    "trades": sum(
+                        1 for t in self.trades if t.bucket_tempo == bucket
+                    ),
+                }
+                for bucket in sorted(
+                    set(self.oportunidades_por_bucket)
+                    | {t.bucket_tempo for t in self.trades}
+                )
+            },
+            "oportunidades_nota": (
+                "M2.6 BUG 2. `instantes_com_sinal` conta TODO instante em que "
+                "algum lado passou do threshold, inclusive depois de a janela "
+                "ja ter operado; `trades` conta onde a entrada realmente "
+                "caiu. A v1 entra UMA vez por janela e varre o stream da "
+                "abertura para o fechamento, entao ela opera no primeiro "
+                "instante elegivel — que por construcao esta no comeco, no "
+                "bucket >240s. Se `instantes_com_sinal` for alto nos buckets "
+                "calibrados e `trades` for ~0 la, o gatilho nao esta "
+                "escolhendo o bucket ruim: ele nunca chega no bom. Use "
+                "--tempo-restante-max para forcar a faixa."
+            ),
             "calibracao": {
                 bucket: {
                     "n": entry.n,

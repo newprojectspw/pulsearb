@@ -294,6 +294,112 @@ recorder real drena uma fila e escreve quase ordenado. O detector condenava um
 livro que só estava embaralhado pela fixture. A fixture foi corrigida para
 escrever em ordem cronológica; o detector estava certo.
 
+### 2d. O primeiro PnL real, e por que ele não valia (M2.6)
+
+A primeira rodada com PnL sobre gravação real (4h, 2026-08-20 12h–15h UTC,
+130 janelas resolvidas, 70 avaliáveis) deu **−7,01 USDC em 48 trades**,
+retorno de −4,7%. O número foi descartado, e por dois motivos que se somam.
+
+**O simulador ignorava a âncora que ele mesmo havia verificado.** No mesmo
+relatório:
+
+```
+ancora.usada_no_backtest: "ultimo_antes"            (taxa_acerto 0,9020)
+ancora.varredura_tau...regiao_viavel_100pct: [[-11, 10]]   (τ=0 → 1.0, 92/92)
+```
+
+A varredura confirmava a âncora com 100% sobre 92 janelas — segunda
+confirmação independente — e o simulador operava com uma hipótese que erra
+uma janela em dez. Todo o PnL saiu de resoluções parcialmente erradas. Desde
+o M2.6 a fonte é a âncora verificada (API_NOTES §13.8); as hipóteses nomeadas
+continuam no relatório como referência histórica e não decidem nada.
+
+**O gatilho operava onde o modelo não sabe.** A calibração por tempo restante:
+
+| bucket | n | erro |
+|---|---|---|
+| 240–120s | 4.769 | **−0,008** |
+| 120–60s | 2.470 | −0,030 |
+| <30s | 1.289 | −0,051 |
+| 60–30s | 1.309 | −0,065 |
+| **>240s** | 9.309 | **−0,240** |
+
+E 46 dos 48 trades caíram em `>240s`. O modelo é quase perfeito em 240–120s e
+foi usado quase só onde degenera.
+
+**A causa não é a que parece.** A leitura tentadora é "o sinal só existe no
+começo da janela". A medição diz o contrário: a instrumentação nova conta
+`instantes_com_sinal` por bucket, independentemente de se operou, e o bucket
+calibrado tem **mais** sinal que o bucket onde os trades caem, com **zero**
+trades. A explicação é estrutural: a v1 entra **uma vez por janela** e varre o
+stream da abertura para o fechamento, então opera no primeiro instante
+elegível — que por construção está no começo. O gatilho não escolhe o bucket
+ruim; ele nunca chega no bom.
+
+Daí `--tempo-restante-max`, e daí o relatório passar a trazer as duas rodadas
+lado a lado sempre: reportar só a restrita esconderia o custo da restrição
+(menos trades, menos capital movimentado), e reportar só a irrestrita foi o
+que produziu o número de cima.
+
+### 2e. Três zeros que eram indistinguíveis de bug (M2.6)
+
+Um zero silencioso é a pior saída possível de uma medição: parece resultado.
+Os três do relatório real agora nomeiam a causa.
+
+**`janelas_com_pool_de_reward: 0`.** A cadeia do dado foi conferida inteira e
+está correta — a descoberta guarda `raw_gamma`, o recorder extrai
+`rewards_daily_rate` de `clobRewards` somando as fontes (§12.8) mais
+`rewardsMinSize`/`rewardsMaxSpread`, e o backtest lê os três. Então não é
+campo que ninguém lê. Sobram duas leituras, e o relatório passa a separá-las:
+`sem_taxa_diaria` em massa significa que os mercados updown **não participam
+do programa de rewards** — o que é um achado sobre o programa, não um defeito
+nosso, e derruba a rota maker como fonte de receita nestes mercados. Já
+`sem_max_spread` com taxa presente seria campo faltando, e aí a conta é
+recuperável.
+
+**`vazio_desde_o_snapshot: 1.777.814` (99% do lado vazio).** A premissa de
+que isso era truncagem de níveis está **errada**, e vale registrar porque a
+correção seria no lugar errado: `--niveis-por-lado` trunca o `BookTimeline` da
+passada 2, enquanto o monitor de integridade lê o evento **cru** na passada 1,
+com todos os níveis. Subir o flag não mexe nesse contador. Lado vazio ali é o
+evento gravado *parseando* vazio — ou porque veio vazio, ou porque a chave tem
+outro nome, que é o defeito do `price_change` (§6.1b) de novo. As duas
+produzem o mesmo zero e têm consertos opostos, então o relatório passa a
+trazer `snapshots_de_livro.formas`, que diz com que par de chaves o servidor
+manda os lados. A recomendação de `--niveis-por-lado` sai do p99 de níveis
+observados, medido no mesmo bloco.
+
+**`gaps: rtds silencio 837s`.** Silêncio sem escopo não diz o que consertar. O
+keepalive do M2.1 resolveu a *queda* de conexão; silêncio sem queda é outro
+fenômeno. O relatório passa a separar: silêncio da **conexão inteira** (o
+servidor parou de publicar) de silêncio **só do tópico** com outros tópicos
+chegando na mesma conexão — que é assinatura caducando, e o conserto é
+reassinar periodicamente no recorder. `suspeita_de_assinatura_caducada > 0` é
+o gatilho dessa correção, que fica **pendente para a próxima janela de
+manutenção** (a gravação em curso não pode ser interrompida).
+
+### 2f. O que o M2.6 preserva como resultado bom
+
+**Markout medido:** 30.763 execuções, média de **−0,33 centavos/share em 5s**
+(−0,16 em 1s). Custo de adverse selection pequeno.
+
+**A conta que isso permite fechar**, agora explícita no relatório
+(`rota_maker.conta_fechada.rebate_vs_markout`): em p = 0,50 a taxa do taker é
+máxima (1,75 c/share), e o rebate de 20% dá **0,35 c/share** — mesma ordem de
+grandeza do markout. Ou seja, na melhor hipótese a rota maker se paga e não
+sobra margem. **E isso antes da fila:** o rebate só existe quando alguém nos
+executa, e a probabilidade de execução depende da posição na fila, que este
+backtest não modela (§15). O custo é observado; a receita é um teto.
+
+**Atraso de liquidação:** TWAP p50 145,9s contra 336,5s do horário — 2,3× mais
+lento. Capital preso, medido.
+
+**Profundidade a 3 ticks (p50):** 137 USDC (300s), 79 (900s), 204 (3600s). O
+critério deste documento exige ≥ 200, então **5m e 15m reprovam e só a duração
+de 1h passa**. O critério passou a sair no relatório
+(`medicoes.profundidade.criterio_do_veredito`) em vez de depender de quem lê
+lembrar do número. É um limite de **capacidade**, e edge nenhum o resolve.
+
 ### 3. A hipótese do tick nos extremos foi REFUTADA
 
 A primeira gravação real produziu **zero trades** — os seis bugs do M2.1 —, mas
