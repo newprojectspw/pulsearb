@@ -16,6 +16,7 @@ Nada de "assumir que preencheu ao melhor preço". Nada de fee constante.
 from __future__ import annotations
 
 from bisect import bisect_left
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -212,6 +213,31 @@ def edge_liquido(
     return prob - preco - fee - buffer
 
 
+def _instantes_da_janela(
+    janela: WindowState,
+    stream: list[tuple[int, float]],
+    vol: RealizedVol,
+    twap: TwapTracker,
+) -> Iterator[tuple[int, float, float]]:
+    """Os instantes do stream que pertencem à janela, já com tempo restante.
+
+    Os estimadores são alimentados AQUI, e não no laço de decisão, porque
+    `vol` e `twap` precisam ver todo tick de dentro da janela — inclusive os
+    que não geram decisão nenhuma. Separar o "quais instantes contam" do "o
+    que fazer em cada um" deixa o laço de decisão com uma responsabilidade
+    só, e põe a regra de fronteira num lugar com nome.
+    """
+    for ts_ns, preco_spot in stream:
+        if ts_ns < janela.open_ts_ns or ts_ns > janela.close_ts_ns:
+            continue
+        vol.update(preco_spot, ts_ns)
+        twap.update(preco_spot, ts_ns)
+        seconds_left = (janela.close_ts_ns - ts_ns) / 1e9
+        if seconds_left <= 0:
+            continue
+        yield ts_ns, preco_spot, seconds_left
+
+
 class BacktestRunner:
     """Roda um cenário sobre um conjunto de janelas já montadas."""
 
@@ -245,15 +271,9 @@ class BacktestRunner:
         latencia_ns = int(cfg.latencia_ms * 1e6)
         ja_operou = False
 
-        for ts_ns, preco_spot in stream:
-            if ts_ns < janela.open_ts_ns or ts_ns > janela.close_ts_ns:
-                continue
-            vol.update(preco_spot, ts_ns)
-            twap.update(preco_spot, ts_ns)
-            seconds_left = (janela.close_ts_ns - ts_ns) / 1e9
-            if seconds_left <= 0:
-                continue
-
+        for ts_ns, preco_spot, seconds_left in _instantes_da_janela(
+            janela, stream, vol, twap
+        ):
             est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
 
             # Calibração: medida em TODA previsão, não só onde se operou.
