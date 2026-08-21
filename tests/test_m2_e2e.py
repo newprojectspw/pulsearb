@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from tests.synthetic import gerar_gravacao
@@ -126,9 +127,15 @@ def test_sensibilidade_de_latencia_roda_os_quatro_cenarios(indexado):
     assert set(tabela) == {"150ms", "300ms", "600ms", "1000ms"}
 
 
-def test_cli_completo(gravacao, tmp_path, capsys):
+def test_cli_completo(gravacao, tmp_path, capsys, monkeypatch):
+    # O relatório sai fora do diretório de trabalho, que é justamente o que a
+    # contenção de `caminho_de_escrita` barra. Dizer a raiz de propósito é o
+    # caminho previsto — e passar por ele aqui mantém a saída de emergência
+    # exercitada em vez de só documentada.
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     destino = tmp_path / "relatorio.json"
-    assert main([str(gravacao), "--json", str(destino)]) == 0
+    # o `--json` é RELATIVO à raiz; o destino absoluto acima é só para ler
+    assert main([str(gravacao), "--json", "relatorio.json"]) == 0
     relatorio = json.loads(destino.read_text())
     for chave in ("gravacao", "ancora", "backtest", "sensibilidade_latencia",
                   "curva_de_edge", "medicoes"):
@@ -265,29 +272,82 @@ def test_cli_recusa_gravacao_inexistente(tmp_path):
     assert main([str(tmp_path / "nao-existe")]) == 2
 
 
-def test_validacao_de_caminhos(tmp_path, gravacao):
+def test_validacao_de_caminhos(tmp_path, gravacao, monkeypatch):
     """Caminhos vindos da CLI são resolvidos e validados antes de qualquer I/O."""
     from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
 
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     assert caminho_de_leitura(str(gravacao)).is_absolute()
     with pytest.raises(ValueError, match="não encontrada"):
         caminho_de_leitura(str(tmp_path / "nada"))
 
-    ok = caminho_de_escrita(str(tmp_path / "rel.json"))
+    ok = caminho_de_escrita("rel.json")
     assert ok.is_absolute() and ok.suffix == ".json"
-    with pytest.raises(ValueError, match=r"\.json"):
-        caminho_de_escrita(str(tmp_path / "rel.txt"))
+    assert ok.parent == tmp_path.resolve()
+    with pytest.raises(ValueError, match="inválido"):
+        caminho_de_escrita("rel.txt")
     with pytest.raises(ValueError, match="não existe"):
-        caminho_de_escrita(str(tmp_path / "sem" / "esse" / "dir" / "rel.json"))
+        caminho_de_escrita("sem/esse/dir/rel.json")
     # destino que existe e É um diretório (com sufixo .json, para passar da
     # checagem anterior e chegar nesta)
     (tmp_path / "engano.json").mkdir()
     with pytest.raises(ValueError, match="é um diretório"):
-        caminho_de_escrita(str(tmp_path / "engano.json"))
+        caminho_de_escrita("engano.json")
 
 
-def test_cli_recusa_saida_invalida(gravacao, tmp_path):
-    assert main([str(gravacao), "--json", str(tmp_path / "x.txt")]) == 2
+def test_cli_recusa_saida_invalida(gravacao, tmp_path, monkeypatch):
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    assert main([str(gravacao), "--json", "x.txt"]) == 2
+
+
+@pytest.mark.parametrize(
+    "hostil",
+    [
+        "/etc/cron.d/evil.json",          # raiz absoluta
+        "../fora.json",                   # travessia simples
+        "relatorios/../../fora.json",     # travessia no meio
+        "~/x.json",                       # expansão de home
+        "$(whoami).json",                 # substituição de shell
+        "rel.json\x00.txt",               # byte nulo
+    ],
+)
+def test_saida_hostil_nunca_chega_ao_disco(tmp_path, monkeypatch, hostil):
+    """Sufixo certo e diretório-pai existente NÃO bastam.
+
+    `--json /etc/cron.d/qualquer.json` passa nas duas conferências antigas: o
+    arquivo termina em .json e `/etc/cron.d` existe. O argumento vem de fora
+    do programa — de uma pessoa com pressa, de um script, de um agente — e um
+    relatório escrito em lugar inesperado some sem ninguém notar.
+
+    A defesa é montar o caminho a partir de uma RAIZ confiável depois de
+    validar o argumento contra um padrão fixo, em vez de conferir um caminho
+    já montado com a string de fora. Assim o valor externo não chega ao
+    sistema de arquivos em forma nenhuma.
+    """
+    from pulsearb.backtest.__main__ import caminho_de_escrita
+
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    with pytest.raises(ValueError):
+        caminho_de_escrita(hostil)
+
+
+def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
+    from pulsearb.backtest.__main__ import caminho_de_escrita
+
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    (tmp_path / "relatorios").mkdir()
+
+    for nome in ("rel.json", "./rel.json", "relatorios/2026-08-20-13.json"):
+        destino = caminho_de_escrita(nome)
+        assert destino.is_relative_to(tmp_path.resolve()), nome
+
+
+def test_raiz_de_saida_padrao_e_o_diretorio_de_trabalho(monkeypatch):
+    """Sem env, a raiz é o cwd — que é o que o runbook usa."""
+    from pulsearb.backtest.__main__ import raiz_de_saida
+
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    assert raiz_de_saida() == Path.cwd().resolve()
 
 
 def test_cli_recusa_gravacao_sem_snapshot(tmp_path, capsys):

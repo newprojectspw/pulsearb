@@ -22,12 +22,40 @@ primeira amostra tinha 30 pontos de folga e errou):
 
 - **media_60s**: média dos pontos do stream nos últimos 60s da janela — a
   definição que o projeto vinha usando. Repare que o stream JÁ é um TWAP de
-  60s: esta média é um TWAP de TWAP, com memória efetiva de ~2 minutos. Se a
-  varredura mostrar que ela é pior que a outra, a definição antiga era parte
-  do erro.
+  60s: esta média é um TWAP de TWAP, com memória efetiva de ~2 minutos.
+  **SUPERADA — a varredura respondeu.**
 - **stream_no_fechamento**: o valor do stream em `fechamento + φ` — o que a
   Chainlink publica como TWAP dos últimos 60s, sem re-suavização nossa.
   φ = 0 na varredura fina; a grade conjunta (τ, φ) varre o resto.
+  **VENCEDORA — é esta.**
+
+## O RESULTADO (2026-08-21, 152 janelas de gravação real)
+
+```
+final_stream_no_fechamento -> consistência 1.0 em τ ∈ [-1, 0, 1, 2]
+final_media_60s            -> teto de 0,9648, nenhum τ chega a 1.0
+```
+
+A âncora é o valor do stream **na abertura**; o final é o mesmo stream **no
+fechamento**. A região de 4 segundos é a cadência do feed (~0,86s p50), ou
+seja, a precisão máxima que o dado permite — não frouxidão do método.
+
+**Corolário permanente, e é o achado mais caro do M2:** *não calcule média de
+60s nenhuma*. O tópico `crypto_prices_twap_sixty` **já é** a média da
+Chainlink, entregue pronta. Os 3,5% que faltavam à `final_media_60s` eram a
+NOSSA conta errando — reamostragem, borda de janela e arredondamento por cima
+de um número que já vinha certo.
+
+As duas famílias continuam sendo varridas de propósito: a perdedora fica no
+relatório como controle. Uma varredura que só testa a hipótese vencedora não
+prova nada, e o dia em que a `media_60s` empatar com a outra é o dia de
+desconfiar da gravação. Ver `docs/API_NOTES.md` §13.8.
+
+As hipóteses NOMEADAS (`primeiro_depois`, `mais_proximo`, `interpolado`) estão
+igualmente **superadas**: acertavam ~79% porque liam o stream na vizinhança
+certa da abertura, e erravam no lado do FECHAMENTO — todas usavam o TWAP
+recalculado como final. Seguem no relatório como referência histórica, sem uso
+em decisão.
 
 PRECISÃO É REGRA, não detalhe: uma das falhas reais tem gap de 0,019 em
 ~2096,78 — a 9ª casa decimal relativa, onde float64 já mistura arredondamento
@@ -183,8 +211,11 @@ def varrer(
             "phi_s": [PHI_MIN_S, PHI_MAX_S, GRADE_PASSO_S],
             "idade_max_do_ponto_ms": IDADE_MAX_MS,
         },
-        # As duas definições de final lado a lado: se `stream_no_fechamento`
-        # dominar, a média-de-TWAP que o projeto usava era parte do erro.
+        # As duas definições de final lado a lado. RESPONDIDO em 2026-08-21:
+        # `stream_no_fechamento` deu 1.0 sobre 152 janelas e `media_60s` não
+        # passou de 0,9648 — a média-de-TWAP que o projeto usava ERA parte do
+        # erro. A perdedora continua sendo calculada como controle: se um dia
+        # as duas empatarem, o suspeito é a gravação.
         "final_media_60s": resultado_media,
         "final_stream_no_fechamento": resultado_stream,
         "grade_tau_phi": grade,

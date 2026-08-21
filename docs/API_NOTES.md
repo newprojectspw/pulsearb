@@ -419,6 +419,26 @@ cada delta, o servidor está dizendo o topo autoritativo a cada mudança. Isso
 torna a validação cruzada do livro reconstruído gratuita e contínua, não só
 nos eventos `best_bid_ask` (M2.2 A.2).
 
+##### O que `best_bid`/`best_ask` descrevem — corrigido no M2.5
+
+**Eles descrevem o livro DEPOIS de toda a mensagem, não depois de cada
+mudança de nível.** Uma mensagem `price_change` traz uma LISTA, e as entradas
+dela repetem o mesmo `best_bid`/`best_ask`: é um só topo, o final.
+
+A leitura errada custou caro. O M2.2 conferia o topo depois de cada entrada da
+lista, comparando contra estados intermediários que **nunca existiram no
+servidor**. Quando a mensagem move o topo um nível — insere o novo, remove o
+antigo — o estado do meio fica exatamente **um tick** fora, e a ordem das
+entradas decide se aparece ou não.
+
+É a assinatura do relatório de produção: `p50 = 10 ticks de 0,001` = **0,01** =
+um tick de mercado, em 4.023.803 divergências sobre 117 milhões de
+comparações. Não era perda de delta; era a nossa forma de conferir.
+
+Regra: **aplique a mensagem inteira, agrupando por `asset_id` (uma mensagem
+pode tocar mais de um token), e só então compare uma vez por token.**
+Regressão em `tests/test_m25_integridade.py`.
+
 #### 6.1c. A forma REAL do `market_resolved` `[CAPTURADO em produção, 2026-08-19]`
 
 Mesma família do 6.1b, agora com captura de verdade. Linha integral da
@@ -771,15 +791,15 @@ Para **5m, 15m e 4h** (btc e eth): **streams TWAP de 60 segundos da Chainlink**
 > O tópico `crypto_prices_twap_thirty` existe no protocolo mas não corresponde
 > a nenhum mercado observado.
 
-### 12.4. Regra de resolução (texto capturado) `[VERIFICADO ao vivo, semântica PENDENTE]`
+### 12.4. Regra de resolução (texto capturado) `[VERIFICADO ao vivo — semântica RESOLVIDA em 13.8]`
 
 **Up** se o TWAP do intervalo do título ≥ preço no início do intervalo; senão
 **Down**. **Empate resolve Up.**
 
-A semântica exata da âncora de abertura ("preço no início do intervalo" é o
-TWAP no instante de abertura? o último update antes? o primeiro depois?) fica
-**PENDENTE — validar empiricamente no M2**: gravar o stream e comparar com as
-resoluções reais.
+A semântica exata da âncora ficou PENDENTE aqui de 2026-08-16 a 2026-08-21 e
+foi **resolvida por engenharia reversa** — âncora e valor final são o **mesmo
+stream `crypto_prices_twap_sixty`**, lidos na abertura e no fechamento, sem
+recálculo de média nenhum. Evidência e método em **§13.8**.
 
 ### 12.5. Tick e mínimo `[VERIFICADO ao vivo]`
 
@@ -1100,6 +1120,56 @@ quem tem heartbeat de aplicação desliga explicitamente, e só esse. Além diss
 o motivo de cada queda passou a ser registrado (`close_code`, `close_reason`,
 `close_origem`) e o relatório do recorder traz `quedas_por_feed` — "caiu" sem
 código é indistinguível de "caiu por bug nosso".
+### 13.8. A âncora e o valor de liquidação das janelas TWAP `[VERIFICADO 2026-08-21]`
+
+Esta seção fecha a pendência aberta em 12.4 ("semântica PENDENTE") e substitui
+qualquer palpite anterior sobre como a janela TWAP resolve.
+
+**O fato, em uma linha:**
+
+> Janela TWAP (5m/15m/4h) resolve **Up** se o valor do stream RTDS
+> `crypto_prices_twap_sixty` **no instante do fechamento** for **≥** o valor
+> do **mesmo stream no instante da abertura**. Empate resolve **Up**.
+
+**Método — engenharia reversa, não leitura de documentação.** A Polymarket
+não publica a âncora. Cada resolução observada impõe uma desigualdade sobre
+ela (Up ⇒ final ≥ âncora; Down ⇒ final < âncora), e a varredura do M2.4
+(`src/pulsearb/analysis/anchor_sweep.py`) testa a família A(τ) = stream em
+`abertura + τ`, com τ ∈ [−180 s, +180 s], contra todas as resoluções ao mesmo
+tempo. Um τ errado é derrubado por qualquer janela discordante.
+
+**Evidência:** 6h de gravação real (2026-08-20, 10h–15h UTC), **152 janelas
+elegíveis**:
+
+| Família do valor final | Melhor consistência |
+|---|---|
+| `final_stream_no_fechamento` | **1.0** — τ ∈ [−1, 0, +1, +2] |
+| `final_media_60s` (média recalculada por nós) | 0,9648 — nenhum τ chega a 1.0 |
+
+O critério de aceitação estava escrito antes da varredura (≥ 98% sobre ≥ 100
+janelas, `VEREDITO_M2.md` §2b). Deu 100% sobre 152.
+
+**A largura de 4 s da região viável é do FEED, não do método.** A cadência
+medida do RTDS é ~0,86 s (p50, §13.1). Entre τ = −1 e τ = +2 não existe outro
+ponto no stream para discordar. É a precisão máxima que o dado permite;
+gravar mais horas não estreita.
+
+**Consequência de implementação, obrigatória:**
+
+> **Não calcule média de 60 s. Nenhuma.** O tópico
+> `crypto_prices_twap_sixty` **já é** a média de 60 s da Chainlink, entregue
+> pronta. Recalculá-la sobre os nossos próprios pontos foi o que produziu os
+> 3,5% de erro da família `final_media_60s`: reamostragem, borda de janela e
+> arredondamento por cima de um número que já vinha certo. O valor de
+> liquidação e a âncora saem do stream **do jeito que chegam**.
+
+**Precisão:** a comparação é feita em **inteiro e18**
+(`payload.full_accuracy_value`), nunca em float. Um caso real de ETH em
+~2096 decidiu por **1 wei** — a 21ª casa relativa, que `float64` colapsa em
+empate. Ver §12.7 sobre os campos cujo significado não foi confirmado:
+`full_accuracy_value` **está** confirmado, `value` (float) só serve para
+exibição.
+
 
 ---
 

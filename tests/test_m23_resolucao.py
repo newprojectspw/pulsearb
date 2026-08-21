@@ -290,31 +290,40 @@ def _linha_poly(ts_ns: int, payload: dict) -> dict:
 def _gravacao_com_livro_corrompido(tmp_path: Path) -> Path:
     """Descoberta + resolução REAL + livro que diverge do topo afirmado.
 
-    O delta afirma um topo (0.90) incompatível com o livro reconstruído
-    (0.49) — magnitude 0.41, muito acima do limiar de invalidação (0.01).
+    Os deltas afirmam um topo (0.90) incompatível com o livro reconstruído
+    (0.49) — magnitude 0.41 — e afirmam isso por **10 segundos seguidos**.
     A janela fica com resultado E com livro condenado, que é exatamente o
     estado das 26 janelas da rodada real.
+
+    A duração é essencial desde o M2.5: uma divergência instantânea é corrida
+    entre `best_bid_ask` e `price_change`, e não invalida mais nada (foi o
+    que reprovou 200 de 200 janelas reais). Corrupção de verdade PERSISTE, e
+    é isso que a fixture precisa reproduzir para continuar significando o que
+    o nome dela diz.
     """
     caminho = _gravacao(tmp_path)
     base = int(LINHA_REAL["ts_wall_ns"]) - 240 * 10**9
-    with gzip.open(caminho, "ab") as handle:
-        for linha in (
+    linhas = [
+        _linha_poly(
+            base,
+            {
+                "event_type": "book",
+                "asset_id": TOKEN_VENCEDOR,
+                "timestamp": str(base // 10**6),
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.51", "size": "100"}],
+            },
+        )
+    ]
+    for segundo in range(1, 11):
+        ts = base + segundo * 10**9
+        linhas.append(
             _linha_poly(
-                base,
-                {
-                    "event_type": "book",
-                    "asset_id": TOKEN_VENCEDOR,
-                    "timestamp": str(base // 10**6),
-                    "bids": [{"price": "0.49", "size": "100"}],
-                    "asks": [{"price": "0.51", "size": "100"}],
-                },
-            ),
-            _linha_poly(
-                base + 10**9,
+                ts,
                 {
                     "event_type": "price_change",
                     "market": CONDITION_ID,
-                    "timestamp": str((base + 10**9) // 10**6),
+                    "timestamp": str(ts // 10**6),
                     "price_changes": [
                         {
                             "asset_id": TOKEN_VENCEDOR,
@@ -326,8 +335,10 @@ def _gravacao_com_livro_corrompido(tmp_path: Path) -> Path:
                         }
                     ],
                 },
-            ),
-        ):
+            )
+        )
+    with gzip.open(caminho, "ab") as handle:
+        for linha in linhas:
             handle.write(orjson.dumps(linha) + b"\n")
     return caminho
 

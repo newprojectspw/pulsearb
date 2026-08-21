@@ -444,6 +444,66 @@ E o bloco `integridade`, que decide se o resto do relatório vale alguma coisa:
 | `janelas_invalidadas` | janelas que saíram do backtest por livro furado — se for a maioria, o número agregado não significa nada |
 | `formas_de_price_change` | qual formato o servidor usa de fato (API_NOTES 6.1b). É a resposta que a primeira gravação não deu. |
 | `offset_relogio_ms.p50` | teto do erro de relógio; dezenas de ms é normal, segundos não |
+| `janelas_por_qualidade` | o corte que importa (M2.5): `alta`/`media`/`baixa`/`sem_dado`. Se `baixa` for a maioria, olhe ANTES `alinhamento.*_fora_de_ordem` — livro embaralhado não é livro furado |
+| `alinhamento.por_chegada_local` vs `por_carimbo_do_servidor` | se as duas contas baterem, a desordem local não era a causa das divergências. Se a primeira for muito maior, era |
+| `lado_vazio.por_causa` | `esvaziado_por_delta` alto = suba `--niveis-book`, não é corrupção |
+
+### 7.1. Gravação grande demais para uma passada só
+
+72h dão ~24 GB. A passada 2 do backtest (reconstrução dos books) não cabe numa
+máquina comum com o teto de snapshots que a análise exige — o relatório diz
+quanto custaria em `gravacao.memoria.projecao_de_pico`:
+
+```
+teto por token × tokens de interesse × níveis × 2 lados
+```
+
+Com ~3.700 tokens em 72h e `--limite-por-token 20000`, são dezenas de GiB só
+de book. Subir o teto não resolve; **fatiar resolve**, porque as janelas de
+5m/15m vivem dentro de uma hora:
+
+```bash
+mkdir -p relatorios
+for h in $(seq -w 0 23); do
+  python -m pulsearb.backtest data/recordings \
+    --desde 20260820$h --ate 20260820$h \
+    --limite-por-token 20000 \
+    --json relatorios/2026-08-20-$h.json
+done
+```
+
+> **Onde o `--json` pode gravar.** O argumento é um caminho **relativo** a
+> uma raiz confiável — o diretório de trabalho, por padrão. Caminho absoluto
+> é recusado, e `..`, `~` e caractere de shell também: o nome é validado
+> contra um padrão fixo ANTES de virar caminho, e só então montado a partir
+> da raiz.
+>
+> Sufixo `.json` e diretório-pai existente não bastariam: `/etc/cron.d/x.json`
+> passa nos dois. Para gravar em outro lugar, mude a RAIZ —
+> `PULSEARB_BACKTEST_OUTPUT_ROOT=/caminho/permitido`, e aí `--json rel.json`
+> grava lá. Assim o destino é sempre decisão explícita de quem roda. Os
+> exemplos deste runbook usam caminhos relativos e não precisam de nada.
+
+O seletor lê **uma hora a mais de cada lado**, porque o nome do arquivo é
+aproximação da hora do evento — sem essa margem, uma janela que abre às 13:58
+perderia o book do começo.
+
+**O que ainda falta, e é a parte honesta:** cada fatia produz um relatório
+próprio. Somar os relatórios exige **agregação incremental** — trivial para os
+contadores (linhas, divergências, janelas por qualidade), correto por soma
+ponderada para as médias, e **não trivial para percentis e para a varredura de
+τ**, que precisam da amostra inteira. O caminho proposto, quando isso virar
+gargalo de verdade:
+
+1. cada fatia grava, além do relatório, um **estado parcial** (contadores
+   brutos + reservatório de magnitudes + as janelas resolvidas com âncora e
+   final em e18);
+2. um passo de `merge` soma os contadores, funde os reservatórios e roda a
+   varredura de τ **uma vez** sobre a união das janelas — que é barata,
+   porque é uma lista de janelas, não de books.
+
+A varredura de τ, aliás, já é imune ao problema: ela consome stream RTDS e
+resoluções, nunca o book. As 152 janelas do M2.4 saíram sem tocar na passada 2.
 
 ## 8. Parar
 

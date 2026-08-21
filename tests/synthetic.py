@@ -277,8 +277,22 @@ def gerar_gravacao(
                 )
             )
 
+    # ORDEM CRONOLÓGICA, e não a ordem em que este gerador constrói as
+    # listas. O recorder real drena uma fila: as linhas saem quase ordenadas
+    # por `ts_mono_ns`, com inversões de milissegundos entre feeds. Este
+    # gerador montava por TIPO de evento — todos os books da janela, depois
+    # todos os deltas —, o que produzia inversões de até 300 segundos.
+    #
+    # Isso não era detalhe de arrumação: o `RecordingReader` tem um buffer de
+    # reordenação de 5.000 registros, dimensionado para milissegundos, e uma
+    # inversão de 300 s passa por ele intacta. O resultado era o backtest
+    # reconstruindo o livro a partir do ÚLTIMO snapshot da janela e depois
+    # aplicando os deltas do começo por cima — e o monitor de integridade
+    # (corretamente) condenando um livro que só estava embaralhado pela
+    # fixture. 19% dos registros saíam fora de ordem.
+    linhas_ordenadas = sorted(linhas, key=lambda b: orjson.loads(b)["ts_mono_ns"])
     with gzip.open(destino, "wb", compresslevel=1) as handle:
-        for linha in linhas:
+        for linha in linhas_ordenadas:
             handle.write(linha + b"\n")
     return destino
 
