@@ -177,6 +177,26 @@ class BacktestConfig:
     buffer_slippage: float = 0.0      # já modelado pelo book; fica em 0
     exigir_fill_completo: bool = True  # FOK: parcial não conta (M4)
     exigir_vol_calibrada: bool = True
+    # M2.6 BUG 2: faixa de tempo restante em que se PODE operar. `None` nos
+    # dois = sem restrição, que é o comportamento até o M2.5.
+    #
+    # Por que isto existe: a calibração medida sobre 4h reais tem erro de
+    # −0,008 no bucket 240–120s e −0,240 em >240s, e 46 dos 48 trades caíram
+    # em >240s. O modelo é quase perfeito onde quase não opera. A faixa
+    # permite operar onde ele sabe, em vez de onde ele chega primeiro.
+    tempo_restante_min_s: float | None = None
+    tempo_restante_max_s: float | None = None
+
+    def na_faixa(self, seconds_left: float) -> bool:
+        """Este instante está na faixa de tempo restante autorizada?"""
+        if self.tempo_restante_max_s is not None and (
+            seconds_left > self.tempo_restante_max_s
+        ):
+            return False
+        return not (
+            self.tempo_restante_min_s is not None
+            and seconds_left < self.tempo_restante_min_s
+        )
 
 
 def edge_liquido(
@@ -258,14 +278,62 @@ class BacktestRunner:
             # Calibração: medida em TODA previsão, não só onde se operou.
             report.add_calibration(est.bucket_tempo, est.prob_up, janela.resolveu_up)
 
-            if ja_operou or (cfg.exigir_vol_calibrada and not est.confiavel):
+            if cfg.exigir_vol_calibrada and not est.confiavel:
                 continue
 
-            trade = self._tentar_entrada(janela, est, ts_ns, latencia_ns, report)
+            candidatos = self._candidatos_com_edge(janela, est, ts_ns)
+            if candidatos:
+                # Contado ANTES de qualquer gate de execução: a pergunta aqui
+                # é "o sinal existiu neste instante?", não "operamos?".
+                report.add_oportunidade(est.bucket_tempo, janela.slug)
+
+            if ja_operou or not candidatos or not cfg.na_faixa(seconds_left):
+                continue
+
+            trade = self._tentar_entrada(
+                janela, est, ts_ns, latencia_ns, report, candidatos
+            )
             if trade is not None:
                 report.add_trade(trade)
                 # v1 segura até a resolução: uma entrada por janela.
                 ja_operou = True
+
+    def _candidatos_com_edge(
+        self, janela: WindowState, est: Any, ts_ns: int
+    ) -> list[tuple[bool, str, float]]:
+        """Lados cujo edge líquido passa do threshold NESTE instante.
+
+        Só o SINAL: não olha latência, fill, nem tamanho mínimo. Separar isto
+        da execução é o que permite contar oportunidade mesmo depois de a
+        janela já ter operado (M2.6 BUG 2) sem duplicar a regra do gatilho em
+        dois lugares — que é como as duas contas passariam a divergir.
+
+        A ordem é preservada (Up antes de Down) porque a execução depende
+        dela: se o Up não preenche, a tentativa cai para o Down.
+        """
+        cfg = self.config
+        # Os dois lados: comprar Up a P(Up), ou Down a 1−P(Up).
+        saida: list[tuple[bool, str, float]] = []
+        for lado_up, token, prob in (
+            (True, janela.token_up, est.prob_up),
+            (False, janela.token_down, 1.0 - est.prob_up),
+        ):
+            timeline = janela.books.get(token)
+            if timeline is None:
+                continue
+            book_sinal = timeline.at(ts_ns)
+            if book_sinal is None or book_sinal.best_ask is None:
+                continue
+            edge = edge_liquido(
+                prob=prob,
+                preco=book_sinal.best_ask,
+                fee_rate=janela.fee_rate,
+                fee_exponent=janela.fee_exponent,
+                buffer=cfg.buffer_slippage,
+            )
+            if edge >= cfg.threshold_edge:
+                saida.append((lado_up, token, prob))
+        return saida
 
     def _tentar_entrada(
         self,
@@ -274,29 +342,12 @@ class BacktestRunner:
         ts_ns: int,
         latencia_ns: int,
         report: BacktestReport,
+        candidatos: list[tuple[bool, str, float]],
     ) -> Trade | None:
         cfg = self.config
-        # Os dois lados: comprar Up a P(Up), ou Down a 1−P(Up).
-        candidatos = (
-            (True, janela.token_up, est.prob_up),
-            (False, janela.token_down, 1.0 - est.prob_up),
-        )
         for lado_up, token, prob in candidatos:
             timeline = janela.books.get(token)
             if timeline is None:
-                continue
-            book_sinal = timeline.at(ts_ns)
-            if book_sinal is None or book_sinal.best_ask is None:
-                continue
-
-            edge = edge_liquido(
-                prob=prob,
-                preco=book_sinal.best_ask,
-                fee_rate=janela.fee_rate,
-                fee_exponent=janela.fee_exponent,
-                buffer=cfg.buffer_slippage,
-            )
-            if edge < cfg.threshold_edge:
                 continue
 
             report.sinais_gerados += 1

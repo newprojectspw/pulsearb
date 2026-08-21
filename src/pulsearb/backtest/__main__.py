@@ -21,7 +21,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
+from pulsearb.analysis.anchor_sweep import (
+    IDADE_MAX_MS,
+    JanelaResolvida,
+    StreamE18,
+    ancora_verificada,
+    valor_final,
+    varrer,
+    veredito_da_ancora,
+)
 from pulsearb.analysis.integrity import (
     ORDEM_QUALIDADE,
     QUALIDADES,
@@ -48,10 +56,13 @@ from pulsearb.backtest.runner import (
     sensibilidade_latencia,
     varredura_de_threshold,
 )
+
+# As hipóteses nomeadas continuam importadas porque continuam sendo
+# REPORTADAS — como referência histórica. `compute_anchor` saiu do
+# caminho de decisão no M2.6 e não é mais importada: a âncora do
+# backtest vem de `ancora_verificada`.
 from pulsearb.engine.anchor import (
-    AnchorHypothesis,
     WindowOutcome,
-    compute_anchor,
     evaluate_hypotheses,
     report_anchor_validation,
 )
@@ -241,6 +252,14 @@ class RecordingIndex:
         # o fio e o disco.
         self.integridade = MonitorDeIntegridade()
         self.relogio = MonitorDeRelogio()
+        # M2.6 BUG 3: silêncios do RTDS, com escopo. Guarda só os
+        # silêncios (poucos), nunca a série de carimbos inteira.
+        self._silencios: list[dict[str, Any]] = []
+        self._ultimo_rtds_ns = 0
+        self._ultimo_twap_ns: dict[str, int] = {}
+        self._eventos_rtds = 0
+        self._eventos_no_ultimo_twap: dict[str, int] = {}
+        self._topicos_rtds: Counter[str] = Counter()
         # M2.2 B.2: execuções observadas, por token.
         self.trades: dict[str, list[tuple[int, float, float, str]]] = defaultdict(list)
 
@@ -308,9 +327,54 @@ class RecordingIndex:
 
     def _on_rtds(self, record: ReplayRecord) -> None:
         tick = parse_rtds_event(record.payload, record.ts_mono_ns, record.ts_wall_ns)
-        # Preço-verdade das janelas TWAP é o twap_sixty; o spot entra para o
-        # jogo horário via bookTicker/kline, tratado à parte.
+        # M2.6 BUG 3.2: o silêncio é detectado aqui, no fluxo, em vez de
+        # depois sobre a série — porque a pergunta não é só "quanto tempo
+        # ficou mudo", é "MUDOU O QUÊ". Se durante o silêncio do twap_sixty
+        # continuaram chegando eventos de OUTRO tópico na mesma conexão,
+        # então a conexão estava viva e o que caducou foi a assinatura
+        # daquele tópico. Se nada chegou, a conexão inteira emudeceu.
+        # As duas causas têm consertos opostos, e o relatório do M2.5 não
+        # tinha como distingui-las.
+        self._eventos_rtds += 1
+        if tick is not None:
+            self._topicos_rtds[tick.topic] += 1
+        if (
+            self._ultimo_rtds_ns
+            and record.ts_wall_ns - self._ultimo_rtds_ns > SILENCIO_MIN_NS
+        ):
+            self._silencios.append(
+                {
+                    "inicio_ns": self._ultimo_rtds_ns,
+                    "fim_ns": record.ts_wall_ns,
+                    "duracao_s": round(
+                        (record.ts_wall_ns - self._ultimo_rtds_ns) / 1e9, 2
+                    ),
+                    "escopo": "conexao_inteira",
+                    "topico_que_voltou": tick.topic if tick else None,
+                }
+            )
+        self._ultimo_rtds_ns = record.ts_wall_ns
+
         if tick is not None and tick.topic == TOPIC_TWAP_60:
+            anterior = self._ultimo_twap_ns.get(tick.asset)
+            if anterior and record.ts_wall_ns - anterior > SILENCIO_MIN_NS:
+                # Silêncio DESTE ativo. Se o contador global de eventos RTDS
+                # andou no intervalo, a conexão estava viva.
+                andou = self._eventos_rtds - self._eventos_no_ultimo_twap.get(
+                    tick.asset, 0
+                )
+                self._silencios.append(
+                    {
+                        "inicio_ns": anterior,
+                        "fim_ns": record.ts_wall_ns,
+                        "duracao_s": round((record.ts_wall_ns - anterior) / 1e9, 2),
+                        "escopo": "topico_do_ativo",
+                        "asset": tick.asset,
+                        "eventos_rtds_durante": andou - 1,
+                    }
+                )
+            self._ultimo_twap_ns[tick.asset] = record.ts_wall_ns
+            self._eventos_no_ultimo_twap[tick.asset] = self._eventos_rtds
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
             valor = _e18_do_payload(record.payload)
             if valor is not None and tick.src_timestamp_ms > 0:
@@ -511,6 +575,49 @@ class RecordingIndex:
         }
 
     # ---------------------------------------------------------------- memória
+    def silencio_do_rtds(self) -> dict[str, Any]:
+        """Os silêncios do feed-verdade, com escopo e leitura (M2.6 BUG 3.2).
+
+        O keepalive do M2.1 resolveu a QUEDA de conexão. Silêncio sem queda é
+        outro fenômeno, e este bloco existe para nomeá-lo em vez de deixá-lo
+        como "gaps: rtds silencio 837s" no relatório.
+        """
+        por_escopo: Counter[str] = Counter()
+        for silencio in self._silencios:
+            por_escopo[str(silencio["escopo"])] += 1
+        conexao = [s for s in self._silencios if s["escopo"] == "conexao_inteira"]
+        topico = [s for s in self._silencios if s["escopo"] == "topico_do_ativo"]
+        # A separação que decide o conserto: silêncio do tópico COM eventos
+        # de outros tópicos chegando = a conexão estava viva.
+        assinatura_caducou = [s for s in topico if (s.get("eventos_rtds_durante") or 0) > 0]
+        return {
+            "eventos_rtds": self._eventos_rtds,
+            "topicos": dict(self._topicos_rtds),
+            "limiar_de_silencio_s": SILENCIO_MIN_NS / 1e9,
+            "silencios": len(self._silencios),
+            "por_escopo": dict(por_escopo),
+            "maior_s": round(
+                max((float(s["duracao_s"]) for s in self._silencios), default=0.0), 2
+            ),
+            "total_s": round(
+                sum(float(s["duracao_s"]) for s in self._silencios), 2
+            ),
+            "silencios_da_conexao_inteira": conexao[:20],
+            "silencios_so_do_topico": topico[:20],
+            "suspeita_de_assinatura_caducada": len(assinatura_caducou),
+            "leitura": (
+                "CONEXAO INTEIRA muda = o servidor parou de publicar (ou o "
+                "caminho ate ele caiu sem fechar o socket). TOPICO DO ATIVO "
+                "mudo COM `eventos_rtds_durante` > 0 = a conexao estava viva "
+                "recebendo outros topicos, logo o que caducou foi a "
+                "ASSINATURA daquele topico — e o conserto e no recorder "
+                "(reassinar periodicamente), nao no keepalive. "
+                "`suspeita_de_assinatura_caducada` > 0 e o gatilho para essa "
+                "correcao. ATENCAO: o recorder NAO pode ser alterado com "
+                "gravacao em curso; ver docs/RUNBOOK_VPS.md."
+            ),
+        }
+
     def uso_de_memoria(self) -> dict[str, Any]:
         """O que foi retido e o que foi descartado — o relatório precisa dizer."""
         retidos = sum(len(t.ts) for t in self.books.values())
@@ -709,6 +816,20 @@ def _rebate_medio(janelas: list[WindowState]) -> float:
     return sum(taxas) / len(taxas) if taxas else 0.0
 
 
+def _medio_do_dado(janelas: list[WindowState], campo: str) -> float:
+    """Média de um parâmetro de mercado lido das janelas. 0 se ninguém tem.
+
+    Mesmo princípio de `_rebate_medio`: parâmetro de mercado vem do dado
+    gravado, nunca de constante no código. Zero é o sinal de "não sei", e
+    quem consome decide o que fazer com ele — em vez de receber um default
+    plausível que some no meio de uma conta.
+    """
+    valores = [
+        float(getattr(j, campo)) for j in janelas if getattr(j, campo, None)
+    ]
+    return sum(valores) / len(valores) if valores else 0.0
+
+
 def _duracao_do_slug(slug: str) -> int:
     if "-up-or-down-" in slug:
         return 3600
@@ -716,6 +837,25 @@ def _duracao_do_slug(slug: str) -> int:
         if sufixo in slug:
             return segundos
     return TOKEN_DURACAO_PADRAO
+
+
+#: Saída do backtest quando a âncora verificada deixa de explicar as
+#: resoluções. Código próprio (não 1, não 2) para que um laço de shell
+#: consiga distinguir "deu erro de uso" de "a plataforma mudou a regra".
+CODIGO_ANCORA_INVALIDA = 3
+
+#: Teto de tempo restante dos buckets em que o modelo TEM calibração.
+#: Medido sobre 4h reais (2026-08-20 12h–15h): erro de −0,008 em
+#: 240–120s e −0,240 em >240s. Não é escolha de gosto — é a fronteira
+#: onde o modelo passa a errar 24 pontos de probabilidade.
+TEMPO_CALIBRADO_MAX_S = 240.0
+
+#: A partir de quanto tempo sem evento do RTDS isso vira "silêncio".
+#: A cadência medida é ~0,86s (p50, API_NOTES §13.1); 30s são ~35 vezes
+#: isso — folgado o bastante para não confundir respiro de rede com
+#: parada, e curto o bastante para pegar as lacunas de 14 e 17 minutos
+#: que apareceram em 4h de gravação real.
+SILENCIO_MIN_NS = 30 * 10**9
 
 
 def _hora_utc(bruto: str | None) -> datetime | None:
@@ -835,6 +975,29 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="fim da fatia, mesmo formato de --desde (inclusivo).",
     )
+    # M2.6 BUG 2: faixa de tempo restante em que se pode operar.
+    parser.add_argument(
+        "--tempo-restante-max",
+        dest="tempo_restante_max",
+        type=float,
+        default=None,
+        help=(
+            "so opera quando faltarem ATE X segundos para o fechamento. A "
+            "calibracao real mede erro de -0,008 em 240-120s contra -0,240 em "
+            ">240s: restringir a faixa e operar onde o modelo sabe. Sem o "
+            "flag, opera em qualquer instante (comportamento ate o M2.5)."
+        ),
+    )
+    parser.add_argument(
+        "--tempo-restante-min",
+        dest="tempo_restante_min",
+        type=float,
+        default=None,
+        help=(
+            "so opera quando faltarem PELO MENOS X segundos. Util para sair "
+            "do fim da janela, onde o book afina e o fill fica caro."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -939,19 +1102,110 @@ def main(argv: list[str] | None = None) -> int:
         dict(index.streams_e18),
     )
 
-    # A âncora usada no backtest é a hipótese sobrevivente; havendo empate,
-    # o default explícito (e o relatório diz que foi default).
-    sobreviventes = [h for h, s in scores.items() if s.sobreviveu]
-    escolhida = sobreviventes[0] if sobreviventes else AnchorHypothesis.ULTIMO_ANTES
+    # ---------------------------------------------------------------- âncora
+    # M2.6: a âncora deixou de ser hipótese. Até o M2.5 o simulador operava
+    # com a hipótese sobrevivente (`ultimo_antes`, ~90% de acerto), enquanto a
+    # varredura no MESMO relatório dizia 100% para τ=0 — ou seja, o PnL saía
+    # de resoluções que sabíamos parcialmente erradas. Agora a fonte é a
+    # âncora VERIFICADA (API_NOTES §13.8): valor do stream `twap_sixty` no
+    # instante da abertura, eixo de carimbo do SERVIDOR, inteiro e18.
+    #
+    # As hipóteses nomeadas continuam sendo calculadas e reportadas — como
+    # REFERÊNCIA HISTÓRICA, para que a diferença entre o que se supunha e o
+    # que se mediu continue visível. Nenhuma delas decide coisa alguma.
+    series_e18 = {
+        asset: StreamE18(amostras) for asset, amostras in index.streams_e18.items()
+    }
+    lacunas_na_abertura: list[str] = []
+    lacunas_no_fechamento: list[str] = []
+    sem_stream: list[str] = []
     for janela in resolvidas:
-        janela.ancora = compute_anchor(
-            escolhida, index.streams.get(janela.asset, []), janela.open_ts_ns
-        )
+        serie = series_e18.get(janela.asset)
+        if serie is None:
+            sem_stream.append(janela.slug)
+            continue
+        abertura_e18 = ancora_verificada(serie, janela.open_ts_ns // 1_000_000)
+        if abertura_e18 is None:
+            # BUG 3 do M2.6: lacuna do RTDS no instante da abertura. A âncora
+            # fica `None` e o runner pula a janela — mas isso precisa ser
+            # CONTADO, senão a exclusão vira número que some.
+            lacunas_na_abertura.append(janela.slug)
+            continue
+        if valor_final(serie, janela.close_ts_ns // 1_000_000) is None:
+            # O fechamento em lacuna não estraga a âncora, mas estraga a
+            # calibração: o modelo é medido contra um desfecho cujo
+            # preço-verdade não foi gravado.
+            lacunas_no_fechamento.append(janela.slug)
+            continue
+        # e18 → float só aqui, e só para o modelo de probabilidade. A decisão
+        # Up/Down inteira mora na varredura; esta conversão não decide nada.
+        janela.ancora = abertura_e18 / 1e18
 
+    veredito_ancora = veredito_da_ancora(validacao["varredura_tau"])
+    validacao["veredito_da_varredura"] = veredito_ancora
+    # O veredito do topo passa a ser o da VARREDURA. O texto antigo dizia
+    # "NENHUMA hipótese sobreviveu" no mesmo relatório em que a varredura
+    # marcava 100% — dois vereditos contraditórios sobre a mesma pergunta.
+    validacao["veredito_das_hipoteses_historico"] = validacao["veredito"]
+    validacao["veredito"] = veredito_ancora["veredito"]
+    validacao["lacunas_do_stream"] = {
+        "janelas_com_abertura_em_lacuna": len(lacunas_na_abertura),
+        "janelas_com_fechamento_em_lacuna": len(lacunas_no_fechamento),
+        "janelas_sem_stream_do_ativo": len(sem_stream),
+        "idade_maxima_da_amostra_ms": IDADE_MAX_MS,
+        "exemplos": {
+            "abertura": sorted(lacunas_na_abertura)[:10],
+            "fechamento": sorted(lacunas_no_fechamento)[:10],
+        },
+        "nota": (
+            "M2.6 BUG 3. Janela cujo instante critico cai em silencio do RTDS "
+            "sai do backtest de fills: sem preco-verdade naquele instante a "
+            "ancora seria um valor velho, e o PnL sairia de uma comparacao "
+            "que nunca aconteceu. `idade_maxima_da_amostra_ms` e o que define "
+            "'lacuna' — amostra mais velha que isso nao descreve o instante."
+        ),
+    }
+
+    cfg_base = {
+        "threshold_edge": args.threshold,
+        "latencia_ms": args.latencia_ms,
+    }
+    restricao_pedida = (
+        args.tempo_restante_max is not None or args.tempo_restante_min is not None
+    )
     runner = BacktestRunner(
-        BacktestConfig(threshold_edge=args.threshold, latencia_ms=args.latencia_ms)
+        BacktestConfig(
+            **cfg_base,
+            tempo_restante_min_s=args.tempo_restante_min,
+            tempo_restante_max_s=args.tempo_restante_max,
+        )
     )
     report = runner.run(integras, index.streams)
+
+    # M2.6 BUG 2.3: as duas rodadas lado a lado, sempre. Reportar só a
+    # restrita esconderia o custo da restrição (menos trades, menos capital
+    # movimentado); reportar só a irrestrita foi o que produziu 46 de 48
+    # trades no bucket com 24pp de erro de calibração. Quem lê precisa dos
+    # dois números para julgar a troca.
+    #
+    # A comparação roda mesmo sem `--tempo-restante-max`: aí a faixa é a dos
+    # buckets calibrados (≤240s), que é a recomendação que sai da medição.
+    faixa_comparada = (
+        args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
+    )
+    if restricao_pedida:
+        report_livre = BacktestRunner(BacktestConfig(**cfg_base)).run(
+            integras, index.streams
+        )
+        comparacao = {"irrestrito": report_livre.to_dict(), "restrito": report.to_dict()}
+    else:
+        report_restrito = BacktestRunner(
+            BacktestConfig(**cfg_base, tempo_restante_max_s=faixa_comparada)
+        ).run(integras, index.streams)
+        comparacao = {
+            "irrestrito": report.to_dict(),
+            "restrito": report_restrito.to_dict(),
+        }
 
     relatorio: dict[str, Any] = {
         "gravacao": {
@@ -974,6 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
             "janelas_com_resolucao": len(resolvidas),
             "resolucoes": index.resolucoes_resumo(janelas),
             "gaps": index.gaps,
+            "silencio_do_rtds": index.silencio_do_rtds(),
             "memoria": index.uso_de_memoria(),
         },
         "integridade": {
@@ -1001,7 +1256,15 @@ def main(argv: list[str] | None = None) -> int:
                 "§2c, escritos antes dos numeros."
             ),
         },
-        "ancora": {**validacao, "usada_no_backtest": escolhida.value},
+        "ancora": {
+            **validacao,
+            "usada_no_backtest": "stream_twap_sixty_na_abertura",
+            "usada_no_backtest_nota": (
+                "Ancora VERIFICADA (API_NOTES 13.8), nao mais a hipotese "
+                "sobrevivente. `por_hipotese` fica como referencia historica: "
+                "nenhuma hipotese nomeada decide coisa alguma desde o M2.6."
+            ),
+        },
         "backtest": {
             **report.to_dict(),
             "janelas_avaliaveis": len(integras),
@@ -1012,6 +1275,26 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for marca in QUALIDADES
             },
+            "faixa_de_tempo_restante": {
+                "min_s": args.tempo_restante_min,
+                "max_s": args.tempo_restante_max,
+                "aplicada": restricao_pedida,
+            },
+        },
+        "faixa_de_tempo": {
+            "faixa_restrita_s": faixa_comparada,
+            "comparacao": comparacao,
+            "nota": (
+                "M2.6 BUG 2. `irrestrito` opera em qualquer instante; "
+                "`restrito` so opera com <= faixa_restrita_s de tempo "
+                "restante. A faixa default da comparacao e "
+                f"{TEMPO_CALIBRADO_MAX_S:g}s porque e onde a calibracao "
+                "medida em 4h reais tem erro de -0,008, contra -0,240 em "
+                ">240s. Compare `resumo.pnl_liquido_usdc` e "
+                "`resumo.hit_rate` dos dois: se o restrito for melhor com "
+                "MENOS trades, o gatilho estava operando onde o modelo nao "
+                "sabe. Veja tambem `oportunidades_por_bucket` de cada um."
+            ),
         },
         "sensibilidade_latencia": sensibilidade_latencia(
             integras, index.streams, threshold=args.threshold
@@ -1066,6 +1349,8 @@ def main(argv: list[str] | None = None) -> int:
             rewards=rewards,
             markout=relatorio["medicoes"]["markout"],
             fee_rebate_rate=_rebate_medio(integras),
+            fee_rate=_medio_do_dado(integras, "fee_rate"),
+            fee_exponent=_medio_do_dado(integras, "fee_exponent") or 1.0,
         ),
         "aviso": (
             "NADA aqui envia ordem. É simulação sobre gravação. A fórmula de "
@@ -1079,6 +1364,31 @@ def main(argv: list[str] | None = None) -> int:
     if destino is not None:
         destino.write_text(saida, encoding="utf-8")
         print(f"\nrelatório gravado em {destino}", file=sys.stderr)
+
+    # M2.6 BUG 1.4: a âncora deixar de explicar as resoluções seria MUDANÇA DE
+    # REGRA da plataforma — o tipo de coisa que não pode passar em silêncio
+    # num relatório de 3.000 linhas que ninguém lê inteiro. O relatório é
+    # gravado do mesmo jeito (o dado é útil para diagnosticar), mas o comando
+    # grita no stderr e sai com código próprio, para que um laço de shell
+    # pare em vez de seguir acumulando fatias sobre uma âncora morta.
+    if veredito_ancora["alerta"]:
+        print(
+            "\n" + "=" * 70 + "\n"
+            "ALERTA: A ÂNCORA VERIFICADA NÃO EXPLICA MAIS AS RESOLUÇÕES\n"
+            + "=" * 70 + "\n"
+            + veredito_ancora["alerta"]
+            + "\n\n"
+            f"  tau verificado........: {veredito_ancora['tau_verificado_s']}s\n"
+            f"  consistencia medida...: "
+            f"{veredito_ancora['consistencia_do_tau_verificado']}\n"
+            f"  regiao de 100%........: "
+            f"{veredito_ancora['regiao_viavel_100pct'] or 'NENHUMA'}\n"
+            f"  janelas elegiveis.....: {veredito_ancora['janelas_elegiveis']}\n\n"
+            "Referencia: docs/API_NOTES.md 13.8 · docs/VEREDITO_M2.md 2b\n"
+            + "=" * 70,
+            file=sys.stderr,
+        )
+        return CODIGO_ANCORA_INVALIDA
     return 0
 
 

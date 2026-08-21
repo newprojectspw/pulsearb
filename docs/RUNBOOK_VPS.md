@@ -505,6 +505,43 @@ gargalo de verdade:
 A varredura de τ, aliás, já é imune ao problema: ela consome stream RTDS e
 resoluções, nunca o book. As 152 janelas do M2.4 saíram sem tocar na passada 2.
 
+
+## 7.2 Pendência para a PRÓXIMA janela de manutenção do recorder
+
+**Não aplicar com gravação em curso.** Qualquer mudança no recorder invalida a
+gravação que estiver rodando; esta lista existe para que a correção não se
+perca até haver janela.
+
+### Reassinatura periódica do RTDS (M2.6 BUG 3)
+
+Em 4h de gravação real houve dois silêncios do feed-verdade — **837s e
+1023s**, 14 e 17 minutos. O keepalive do M2.1 (§13.7 do API_NOTES) resolveu a
+*queda* de conexão; silêncio **sem** queda é outro fenômeno, e o socket
+continuava aberto.
+
+Antes de mexer, **rode o backtest e leia o diagnóstico**, que agora existe:
+
+```bash
+python -m pulsearb.backtest data/recordings --json rel.json
+# gravacao.silencio_do_rtds:
+#   por_escopo: {"conexao_inteira": N, "topico_do_ativo": M}
+#   suspeita_de_assinatura_caducada: K
+```
+
+O número que decide é `suspeita_de_assinatura_caducada` — silêncio de um
+tópico **enquanto outros tópicos chegavam na mesma conexão**:
+
+- **K > 0** → a conexão estava viva e a **assinatura caducou**. Correção:
+  reassinar periodicamente (ou renovar ao detectar silêncio do tópico), no
+  recorder. É a hipótese que o silêncio sem queda favorece.
+- **K = 0, silêncios de `conexao_inteira`** → o servidor parou de publicar.
+  Não há correção nossa; o que cabe é registrar e excluir as janelas afetadas,
+  que o backtest já faz.
+
+As janelas cujo instante crítico cai em silêncio já saem do backtest de fills
+e vão contadas em `ancora.lacunas_do_stream` — o dado ruim não entra na conta
+enquanto a correção não vier.
+
 ## 8. Parar
 
 ```bash

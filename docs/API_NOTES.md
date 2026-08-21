@@ -1138,8 +1138,21 @@ ela (Up ⇒ final ≥ âncora; Down ⇒ final < âncora), e a varredura do M2.4
 `abertura + τ`, com τ ∈ [−180 s, +180 s], contra todas as resoluções ao mesmo
 tempo. Um τ errado é derrubado por qualquer janela discordante.
 
-**Evidência:** 6h de gravação real (2026-08-20, 10h–15h UTC), **152 janelas
-elegíveis**:
+**Evidência (duas confirmações independentes):**
+
+| Gravação | Janelas elegíveis | τ=0 |
+|---|---|---|
+| 2026-08-20 10h–15h (M2.4) | 152 | **1.0** |
+| 2026-08-20 12h–15h (M2.6) | 92 | **1.0** |
+
+A segunda não é repetição da primeira: rodou sobre outro recorte, com o
+pipeline já corrigido pelo M2.5, e reproduziu o mesmo τ. Desde o M2.6 o
+backtest **usa** esta âncora em vez da hipótese sobrevivente — e confere a
+cada rodada que τ=0 continua explicando 100% das resoluções, saindo com
+código 3 e alarme no stderr quando não explicar (seria mudança de regra da
+plataforma).
+
+Detalhe da primeira medição, 6h de gravação real, **152 janelas elegíveis**:
 
 | Família do valor final | Melhor consistência |
 |---|---|

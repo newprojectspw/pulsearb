@@ -376,14 +376,29 @@ def test_zero_amostras_na_ancora_nao_vira_falsificacao(tmp_path):
 
     Com zero janelas avaliadas todas as hipóteses têm total_avaliado = 0 e
     `sobreviveu` False — o texto antigo declarava falsificação em cima do
-    vazio. O veredito agora distingue os dois casos.
+    vazio. O veredito distingue os dois casos.
+
+    Desde o M2.6 há DUAS camadas de veredito, e ambas precisam se calar sem
+    amostra: a da varredura (que decide) e a das hipóteses nomeadas (que só
+    fica de referência histórica). Foi a contradição entre elas que motivou o
+    BUG 1 do M2.6 — a varredura marcando 100% enquanto o topo do relatório
+    dizia "NENHUMA hipótese sobreviveu".
     """
     rel = _rodar_backtest(_gravacao(tmp_path, com_resolucao=False))
 
     assert rel["gravacao"]["janelas_com_resolucao"] == 0
     assert rel["ancora"]["janelas_alimentadas"] == 0
-    assert rel["ancora"]["veredito"].startswith("SEM DADO")
-    assert "sobreviveu" not in rel["ancora"]["veredito"]
+    # a que decide
+    assert rel["ancora"]["veredito"].startswith("SEM AMOSTRA")
+    assert rel["ancora"]["veredito_da_varredura"]["confirmada"] is None
+    assert rel["ancora"]["veredito_da_varredura"]["alerta"] is None
+    # a histórica
+    assert rel["ancora"]["veredito_das_hipoteses_historico"].startswith("SEM DADO")
+    for texto in (
+        rel["ancora"]["veredito"],
+        rel["ancora"]["veredito_das_hipoteses_historico"],
+    ):
+        assert "sobreviveu" not in texto
 
 
 def test_eventos_redundantes_sao_deduplicados_e_contados(tmp_path):

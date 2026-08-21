@@ -99,15 +99,23 @@ def gerar_gravacao(
         token_up = f"{indice}0000000000000000000000000000001"
         token_down = f"{indice}0000000000000000000000000000002"
 
-        # --- verdade sintética: âncora = último valor com ts <= abertura
+        # --- verdade sintética: a âncora VERIFICADA (API_NOTES §13.8)
+        #
+        # Âncora e valor final são leituras do MESMO stream — na abertura e no
+        # fechamento — e nenhuma média é recalculada. O `crypto_prices_twap_sixty`
+        # já É a média de 60s da Chainlink; refazer a conta por cima dela foi o
+        # erro que o M2.5 mediu (a família `final_media_60s` nunca passou de
+        # 96,5%, contra 100% da leitura direta).
+        #
+        # Esta fixture codificava a regra refutada até o M2.6, e o alarme novo
+        # do backtest a denunciou: τ=0 explicava só 89% das janelas sintéticas.
+        # Um gerador que contradiz o fato verificado transforma todo teste de
+        # ponta a ponta num teste da regra errada.
         abertura_ns = int(janela_inicio * 1e9)
         fecho_ns = int(janela_fim * 1e9)
-        antes = [p for ts, p in serie if ts <= abertura_ns]
-        ancora = antes[-1]
-        corte = fecho_ns - TWAP_WINDOW_S * 10**9
-        janela_twap = [p for ts, p in serie if corte <= ts <= fecho_ns]
-        twap_final = sum(janela_twap) / len(janela_twap)
-        resolveu_up = twap_final >= ancora
+        ancora = next(p for ts, p in reversed(serie) if ts <= abertura_ns)
+        final = next(p for ts, p in reversed(serie) if ts <= fecho_ns)
+        resolveu_up = final >= ancora   # empate = Up, como no mercado
 
         # --- snapshots de descoberta, um por 30s de janela
         for offset in range(0, duracao_s, 30):

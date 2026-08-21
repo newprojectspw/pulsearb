@@ -396,3 +396,121 @@ def _e18_str(valor: int) -> str:
     sinal = "-" if valor < 0 else ""
     inteiro, fracao = divmod(abs(valor), E18)
     return f"{sinal}{inteiro}.{fracao:018d}"
+
+
+# ─────────────────────────────── M2.6: a âncora deixou de ser hipótese
+
+#: Abaixo disto, a varredura não tem amostra para afirmar nem para desmentir.
+#: Não é um número mágico: com poucas janelas resolvidas, um τ errado pode
+#: acertar 100% por sorte, e o silêncio da varredura seria lido como alarme.
+MINIMO_JANELAS_VEREDITO = 20
+
+#: O τ da âncora verificada (API_NOTES §13.8): o valor do stream no instante
+#: da abertura, sem deslocamento.
+TAU_VERIFICADO_S = 0
+
+
+def ancora_verificada(
+    serie: StreamE18, abertura_ms: int, *, idade_max_ms: int = IDADE_MAX_MS
+) -> int | None:
+    """A âncora que a varredura confirmou, em inteiro e18.
+
+    É o valor do stream `crypto_prices_twap_sixty` no instante da ABERTURA,
+    no eixo de carimbo do SERVIDOR — a definição registrada em API_NOTES
+    §13.8, confirmada duas vezes de forma independente (1.0 sobre 152 janelas
+    no M2.4; 1.0 sobre 92 no M2.6).
+
+    `None` quer dizer **lacuna do stream no instante da abertura**, e não
+    "zero": a última amostra é velha demais para descrever aquele instante.
+    Devolver o valor velho seria inventar âncora, e a janela inteira sairia
+    errada sem ninguém notar.
+    """
+    return serie.em(abertura_ms, idade_max_ms=idade_max_ms)
+
+
+def valor_final(
+    serie: StreamE18, fechamento_ms: int, *, idade_max_ms: int = IDADE_MAX_MS
+) -> int | None:
+    """O valor de liquidação: o MESMO stream no instante do fechamento.
+
+    Existe como função separada da âncora só para o nome dizer o que é. A
+    simetria é o achado: âncora e final são leituras do mesmo stream, e
+    **nenhuma média é recalculada** — o feed já entrega a média da Chainlink
+    pronta (API_NOTES §13.8).
+    """
+    return serie.em(fechamento_ms, idade_max_ms=idade_max_ms)
+
+
+def veredito_da_ancora(
+    varredura: dict[str, Any], *, minimo_janelas: int = MINIMO_JANELAS_VEREDITO
+) -> dict[str, Any]:
+    """A varredura confirma a âncora verificada, ou a plataforma mudou?
+
+    Este é o alarme que o M2.6 pede: a âncora deixou de ser hipótese e virou
+    fato registrado, então o backtest a usa direto. Mas usar sem conferir
+    seria trocar uma suposição por outra — e uma mudança de regra da
+    plataforma passaria calada, com o PnL saindo bonito e errado.
+
+    A conferência é a mesma varredura, lida ao contrário: em vez de procurar
+    qual τ explica as resoluções, pergunta se **τ=0 continua explicando
+    todas**. Se não, o alerta é ruidoso de propósito.
+    """
+    fino = varredura.get("final_stream_no_fechamento") or {}
+    curva = fino.get("curva") or {}
+    regiao = fino.get("regiao_viavel_100pct") or []
+    elegiveis = int(varredura.get("janelas_elegiveis") or 0)
+    consistencia = curva.get(str(TAU_VERIFICADO_S))
+
+    base = {
+        "tau_verificado_s": TAU_VERIFICADO_S,
+        "consistencia_do_tau_verificado": consistencia,
+        "regiao_viavel_100pct": regiao,
+        "janelas_elegiveis": elegiveis,
+        "minimo_para_veredito": minimo_janelas,
+        "referencia": "docs/API_NOTES.md §13.8",
+    }
+
+    if elegiveis < minimo_janelas:
+        return {
+            **base,
+            "confirmada": None,
+            "alerta": None,
+            "veredito": (
+                f"SEM AMOSTRA: {elegiveis} janelas elegiveis, abaixo do minimo "
+                f"de {minimo_janelas}. A ancora verificada segue em uso — "
+                "ausencia de amostra nao e desmentido —, mas esta gravacao nao "
+                "a confirma nem a contradiz."
+            ),
+        }
+
+    if consistencia is not None and consistencia >= 1.0:
+        return {
+            **base,
+            "confirmada": True,
+            "alerta": None,
+            "veredito": (
+                f"CONFIRMADA: tau=0 explica 100% das {elegiveis} janelas "
+                "elegiveis. A ancora usada no backtest e a verificada "
+                "(valor do stream twap_sixty na abertura, API_NOTES 13.8)."
+            ),
+        }
+
+    # Daqui para baixo é alarme. Duas formas, e a diferença importa para o
+    # diagnóstico: nenhum τ funciona (o modelo do jogo mudou) ou outro τ
+    # funciona (a âncora deslocou no tempo).
+    if regiao:
+        alerta = (
+            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das resolucoes, "
+            f"mas a regiao de 100% existe em {regiao}. A ancora parece ter se "
+            "deslocado no tempo. NAO opere com o resultado deste backtest ate "
+            "reconfirmar a ancora e atualizar API_NOTES 13.8."
+        )
+    else:
+        alerta = (
+            f"MUDANCA DE REGRA: nenhum tau explica 100% das {elegiveis} "
+            "janelas elegiveis, e tau=0 explica "
+            f"{consistencia}. Nem a ancora verificada nem qualquer "
+            "deslocamento dela reproduzem as resolucoes — o jogo pode ter "
+            "mudado de fonte. NAO opere com o resultado deste backtest."
+        )
+    return {**base, "confirmada": False, "alerta": alerta, "veredito": alerta}
