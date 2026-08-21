@@ -254,26 +254,7 @@ class BacktestRunner:
             if seconds_left <= 0:
                 continue
 
-            if janela.jogo == "twap":
-                locked_mean, locked_weight = twap.locked_mean_and_weight(seconds_left)
-                est = prob_up_twap(
-                    ancora=janela.ancora,
-                    spot=preco_spot,
-                    seconds_left=seconds_left,
-                    sigma_1s=vol.sigma_1s,
-                    locked_mean=locked_mean,
-                    locked_weight=locked_weight,
-                    twap_atual=twap.current_twap,
-                    vol_ready=vol.ready,
-                )
-            else:
-                est = prob_up_hourly(
-                    open_price=janela.ancora,
-                    spot=preco_spot,
-                    seconds_left=seconds_left,
-                    sigma_1s=vol.sigma_1s,
-                    vol_ready=vol.ready,
-                )
+            est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
 
             # Calibração: medida em TODA previsão, não só onde se operou.
             report.add_calibration(est.bucket_tempo, est.prob_up, janela.resolveu_up)
@@ -297,6 +278,41 @@ class BacktestRunner:
                 report.add_trade(trade)
                 # v1 segura até a resolução: uma entrada por janela.
                 ja_operou = True
+
+    @staticmethod
+    def _estimar(
+        janela: WindowState,
+        twap: TwapTracker,
+        vol: RealizedVol,
+        preco_spot: float,
+        seconds_left: float,
+    ) -> Any:
+        """A probabilidade do modelo neste instante, pelo jogo da janela.
+
+        Os dois jogos são fisicamente diferentes (§13.4 do API_NOTES): o TWAP
+        tem fração da média já travada nos últimos 60s; o horário compara
+        contra o preço de abertura do candle. Só a escolha entre eles mora
+        aqui — o resto do laço não precisa saber qual é.
+        """
+        if janela.jogo == "twap":
+            locked_mean, locked_weight = twap.locked_mean_and_weight(seconds_left)
+            return prob_up_twap(
+                ancora=janela.ancora,
+                spot=preco_spot,
+                seconds_left=seconds_left,
+                sigma_1s=vol.sigma_1s,
+                locked_mean=locked_mean,
+                locked_weight=locked_weight,
+                twap_atual=twap.current_twap,
+                vol_ready=vol.ready,
+            )
+        return prob_up_hourly(
+            open_price=janela.ancora,
+            spot=preco_spot,
+            seconds_left=seconds_left,
+            sigma_1s=vol.sigma_1s,
+            vol_ready=vol.ready,
+        )
 
     def _candidatos_com_edge(
         self, janela: WindowState, est: Any, ts_ns: int

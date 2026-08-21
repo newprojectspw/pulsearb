@@ -270,7 +270,8 @@ def test_relatorio_traz_as_duas_rodadas_lado_a_lado(tmp_path, monkeypatch, capsy
     comparacao = rel["faixa_de_tempo"]["comparacao"]
     assert set(comparacao) == {"irrestrito", "restrito"}
     for lado in comparacao.values():
-        assert "resumo" in lado and "por_bucket_tempo" in lado
+        assert "resumo" in lado
+        assert "por_bucket_tempo" in lado
     # a restrita não opera no bucket descalibrado
     assert ">240s" not in comparacao["restrito"]["por_bucket_tempo"]
 

@@ -445,37 +445,7 @@ class MonitorDeIntegridade:
         carimbo = _carimbo_ms(evento, ts_ns)
 
         if tipo == EVENT_BOOK:
-            asset_id = evento.get("asset_id")
-            self.formas_de_book[forma_do_book(evento)] += 1
-            self.books_observados += 1
-            bids = _niveis(evento.get("bids"))
-            asks = _niveis(evento.get("asks"))
-            if not bids:
-                self.books_com_bid_vazio += 1
-            if not asks:
-                self.books_com_ask_vazio += 1
-            _amostrar(self.niveis_bid, len(bids), self.books_observados)
-            _amostrar(self.niveis_ask, len(asks), self.books_observados)
-            if isinstance(asset_id, str):
-                estado = self._estado(asset_id)
-                self._resolver_pendentes(asset_id, estado, carimbo)
-                if carimbo < estado.ts_max_servidor_ms:
-                    # Snapshot mais VELHO que o estado que já temos. Ele é
-                    # autoritativo para o instante dele, não para agora:
-                    # aplicá-lo rebobinaria o livro e a corrupção seria nossa.
-                    # Conta e ignora.
-                    estado.snapshots_fora_de_ordem += 1
-                    self._anotar_atraso(estado, carimbo)
-                    return []
-                estado.livro.aplicar_snapshot(evento)
-                estado.livro.ts_ns = ts_ns
-                estado.com_snapshot = True
-                estado.teve_snapshot = True
-                estado.aguardando_resync = False
-                estado.marcar_tempo(carimbo)
-                estado.fechar_sem_livro(carimbo)
-                estado.ts_max_servidor_ms = max(estado.ts_max_servidor_ms, carimbo)
-                self._anotar_historico(estado, carimbo)
+            self._observar_book(evento, ts_ns, carimbo)
             return []
 
         if tipo == EVENT_PRICE_CHANGE:
@@ -578,6 +548,49 @@ class MonitorDeIntegridade:
                 )
             )
         return achados
+
+    def _observar_book(
+        self, evento: dict[str, Any], ts_ns: int, carimbo: float
+    ) -> None:
+        """Snapshot de livro: mede a forma, mede a profundidade, e aplica.
+
+        A medição vem ANTES do `isinstance` do asset_id de propósito: um
+        snapshot sem token identificável não entra no livro, mas a forma dele
+        ainda é dado — e é justamente o evento malformado que interessa
+        contar (M2.6 BUG 4).
+        """
+        self.formas_de_book[forma_do_book(evento)] += 1
+        self.books_observados += 1
+        bids = _niveis(evento.get("bids"))
+        asks = _niveis(evento.get("asks"))
+        if not bids:
+            self.books_com_bid_vazio += 1
+        if not asks:
+            self.books_com_ask_vazio += 1
+        _amostrar(self.niveis_bid, len(bids), self.books_observados)
+        _amostrar(self.niveis_ask, len(asks), self.books_observados)
+
+        asset_id = evento.get("asset_id")
+        if not isinstance(asset_id, str):
+            return
+        estado = self._estado(asset_id)
+        self._resolver_pendentes(asset_id, estado, carimbo)
+        if carimbo < estado.ts_max_servidor_ms:
+            # Snapshot mais VELHO que o estado que já temos. Ele é
+            # autoritativo para o instante dele, não para agora: aplicá-lo
+            # rebobinaria o livro e a corrupção seria nossa. Conta e ignora.
+            estado.snapshots_fora_de_ordem += 1
+            self._anotar_atraso(estado, carimbo)
+            return
+        estado.livro.aplicar_snapshot(evento)
+        estado.livro.ts_ns = ts_ns
+        estado.com_snapshot = True
+        estado.teve_snapshot = True
+        estado.aguardando_resync = False
+        estado.marcar_tempo(carimbo)
+        estado.fechar_sem_livro(carimbo)
+        estado.ts_max_servidor_ms = max(estado.ts_max_servidor_ms, carimbo)
+        self._anotar_historico(estado, carimbo)
 
     def marcar_perda(self, asset_id: str) -> None:
         """Perda CONHECIDA (fila cheia, reconexão): o livro deixa de valer.

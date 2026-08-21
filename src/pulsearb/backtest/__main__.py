@@ -858,6 +858,71 @@ TEMPO_CALIBRADO_MAX_S = 240.0
 SILENCIO_MIN_NS = 30 * 10**9
 
 
+def montar_ancoras(
+    resolvidas: list[WindowState], streams_e18: dict[str, list[tuple[int, int]]]
+) -> dict[str, Any]:
+    """Preenche `janela.ancora` com a âncora VERIFICADA e conta as lacunas.
+
+    M2.6 BUG 1: até o M2.5 o simulador operava com a hipótese sobrevivente
+    (`ultimo_antes`, ~90% de acerto), enquanto a varredura no MESMO relatório
+    dizia 100% para τ=0 — ou seja, o PnL saía de resoluções que sabíamos
+    parcialmente erradas. Agora a fonte é a âncora VERIFICADA (API_NOTES
+    §13.8): valor do stream `twap_sixty` no instante da abertura, eixo de
+    carimbo do SERVIDOR, inteiro e18.
+
+    As hipóteses nomeadas continuam sendo calculadas e reportadas — como
+    REFERÊNCIA HISTÓRICA, para que a diferença entre o que se supunha e o que
+    se mediu continue visível. Nenhuma delas decide coisa alguma.
+
+    Devolve o bloco `lacunas_do_stream` do relatório (M2.6 BUG 3).
+    """
+    series_e18 = {
+        asset: StreamE18(amostras) for asset, amostras in streams_e18.items()
+    }
+    lacunas_na_abertura: list[str] = []
+    lacunas_no_fechamento: list[str] = []
+    sem_stream: list[str] = []
+    for janela in resolvidas:
+        serie = series_e18.get(janela.asset)
+        if serie is None:
+            sem_stream.append(janela.slug)
+            continue
+        abertura_e18 = ancora_verificada(serie, janela.open_ts_ns // 1_000_000)
+        if abertura_e18 is None:
+            # Lacuna do RTDS no instante da abertura. A âncora fica `None` e o
+            # runner pula a janela — mas isso precisa ser CONTADO, senão a
+            # exclusão vira número que some.
+            lacunas_na_abertura.append(janela.slug)
+            continue
+        if valor_final(serie, janela.close_ts_ns // 1_000_000) is None:
+            # O fechamento em lacuna não estraga a âncora, mas estraga a
+            # calibração: o modelo é medido contra um desfecho cujo
+            # preço-verdade não foi gravado.
+            lacunas_no_fechamento.append(janela.slug)
+            continue
+        # e18 → float só aqui, e só para o modelo de probabilidade. A decisão
+        # Up/Down inteira mora na varredura; esta conversão não decide nada.
+        janela.ancora = abertura_e18 / 1e18
+
+    return {
+        "janelas_com_abertura_em_lacuna": len(lacunas_na_abertura),
+        "janelas_com_fechamento_em_lacuna": len(lacunas_no_fechamento),
+        "janelas_sem_stream_do_ativo": len(sem_stream),
+        "idade_maxima_da_amostra_ms": IDADE_MAX_MS,
+        "exemplos": {
+            "abertura": sorted(lacunas_na_abertura)[:10],
+            "fechamento": sorted(lacunas_no_fechamento)[:10],
+        },
+        "nota": (
+            "M2.6 BUG 3. Janela cujo instante critico cai em silencio do RTDS "
+            "sai do backtest de fills: sem preco-verdade naquele instante a "
+            "ancora seria um valor velho, e o PnL sairia de uma comparacao "
+            "que nunca aconteceu. `idade_maxima_da_amostra_ms` e o que define "
+            "'lacuna' — amostra mais velha que isso nao descreve o instante."
+        ),
+    }
+
+
 def _hora_utc(bruto: str | None) -> datetime | None:
     """`YYYYMMDDHH`, `YYYY-MM-DD`, ou ISO completo. Sempre UTC.
 
@@ -1113,33 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
     # As hipóteses nomeadas continuam sendo calculadas e reportadas — como
     # REFERÊNCIA HISTÓRICA, para que a diferença entre o que se supunha e o
     # que se mediu continue visível. Nenhuma delas decide coisa alguma.
-    series_e18 = {
-        asset: StreamE18(amostras) for asset, amostras in index.streams_e18.items()
-    }
-    lacunas_na_abertura: list[str] = []
-    lacunas_no_fechamento: list[str] = []
-    sem_stream: list[str] = []
-    for janela in resolvidas:
-        serie = series_e18.get(janela.asset)
-        if serie is None:
-            sem_stream.append(janela.slug)
-            continue
-        abertura_e18 = ancora_verificada(serie, janela.open_ts_ns // 1_000_000)
-        if abertura_e18 is None:
-            # BUG 3 do M2.6: lacuna do RTDS no instante da abertura. A âncora
-            # fica `None` e o runner pula a janela — mas isso precisa ser
-            # CONTADO, senão a exclusão vira número que some.
-            lacunas_na_abertura.append(janela.slug)
-            continue
-        if valor_final(serie, janela.close_ts_ns // 1_000_000) is None:
-            # O fechamento em lacuna não estraga a âncora, mas estraga a
-            # calibração: o modelo é medido contra um desfecho cujo
-            # preço-verdade não foi gravado.
-            lacunas_no_fechamento.append(janela.slug)
-            continue
-        # e18 → float só aqui, e só para o modelo de probabilidade. A decisão
-        # Up/Down inteira mora na varredura; esta conversão não decide nada.
-        janela.ancora = abertura_e18 / 1e18
+    lacunas = montar_ancoras(resolvidas, dict(index.streams_e18))
 
     veredito_ancora = veredito_da_ancora(validacao["varredura_tau"])
     validacao["veredito_da_varredura"] = veredito_ancora
@@ -1148,23 +1187,7 @@ def main(argv: list[str] | None = None) -> int:
     # marcava 100% — dois vereditos contraditórios sobre a mesma pergunta.
     validacao["veredito_das_hipoteses_historico"] = validacao["veredito"]
     validacao["veredito"] = veredito_ancora["veredito"]
-    validacao["lacunas_do_stream"] = {
-        "janelas_com_abertura_em_lacuna": len(lacunas_na_abertura),
-        "janelas_com_fechamento_em_lacuna": len(lacunas_no_fechamento),
-        "janelas_sem_stream_do_ativo": len(sem_stream),
-        "idade_maxima_da_amostra_ms": IDADE_MAX_MS,
-        "exemplos": {
-            "abertura": sorted(lacunas_na_abertura)[:10],
-            "fechamento": sorted(lacunas_no_fechamento)[:10],
-        },
-        "nota": (
-            "M2.6 BUG 3. Janela cujo instante critico cai em silencio do RTDS "
-            "sai do backtest de fills: sem preco-verdade naquele instante a "
-            "ancora seria um valor velho, e o PnL sairia de uma comparacao "
-            "que nunca aconteceu. `idade_maxima_da_amostra_ms` e o que define "
-            "'lacuna' — amostra mais velha que isso nao descreve o instante."
-        ),
-    }
+    validacao["lacunas_do_stream"] = lacunas
 
     cfg_base = {
         "threshold_edge": args.threshold,
