@@ -2,7 +2,7 @@
 
 **Status: PENDENTE DE DADO. Nenhum veredito pode ser emitido ainda.**
 
-Data: 2026-08-16 · atualizado 2026-08-19 (M2.1 e M2.2)
+Data: 2026-08-16 · atualizado 2026-08-21 (M2.4)
 
 ---
 
@@ -67,6 +67,57 @@ Antes disso (t > 60s), o modelo degenera para "para onde o preço vai andar",
 que é onde o book é mais eficiente e o ruído domina. **A hipótese a testar é
 que o edge, se existir, está concentrado nos buckets `60-30s` e `<30s`** — e é
 por isso que a calibração é reportada por bucket, nunca agregada.
+
+### 2b. A âncora não é nenhuma das hipóteses nomeadas — e o M2.4 a caça por varredura
+
+Primeira validação real (26 janelas resolvidas, ~14 determináveis, hora 19h de
+2026-08-19): as melhores hipóteses nomeadas (`primeiro_depois`,
+`mais_proximo`, `interpolado`) acertaram **11/14 ≈ 79%** — longe demais do
+acaso para ser coincidência, longe demais de 100% para ser a âncora. E as 3
+falhas são AS MESMAS janelas em todas as hipóteses: **erro sistemático, não
+ruído**. Numa delas (`btc-updown-15m-1787166900`) a previsão Up tinha 30
+pontos de folga e resolveu Down — ou a âncora não é tick próximo da abertura,
+ou o nosso "TWAP final" não é o valor de liquidação.
+
+O M2.4 troca o palpite por engenharia reversa: cada resolução impõe uma
+desigualdade sobre a âncora (Up ⇒ TWAP_final ≥ A; Down ⇒ TWAP_final < A,
+empate = Up), e a varredura testa a família A(τ) = stream em `abertura + τ`
+com τ ∈ [−180s, +180s], mais a grade conjunta (τ, φ) para o lado do
+fechamento.
+
+#### Critérios do M2.4 — escritos ANTES de rodar a varredura
+
+**SUCESSO (âncora identificada):** existe τ (ou célula τ, φ) com consistência
+**≥ 98%** sobre **≥ 100 janelas** com cobertura completa do stream.
+
+Por que 98 e 100, e não outros números:
+
+- **98%, não 100%:** a consistência perfeita seria o ideal teórico, mas a
+  amostra real carrega janelas com lacuna de stream fina demais para o nosso
+  detector de cobertura pegar (reconexões de segundos) e possíveis empates
+  mal-carimbados. Exigir 100% deixaria uma única janela suja vetar a âncora
+  certa. 2 falhas em 100 é o orçamento para esse lixo residual.
+- **98% separa de verdade:** um τ errado com a taxa observada de ~79% tem
+  probabilidade da ordem de 10⁻⁸ de marcar 98/100 (binomial). Não há como um
+  impostor passar por sorte.
+- **N = 100, não 26:** com 26 janelas, 98% = no máx. 0 falhas e o intervalo
+  de confiança da taxa é largo demais (±8pp). ~26 janelas/hora ⇒ 100 janelas
+  são ~4h de gravação — barato, e suficiente para o intervalo cair a ±3pp.
+
+**FALHA DA FUNDAÇÃO:** nenhum τ consistente **E** existem janelas cujo
+resultado NENHUM ponto do stream em `[abertura−180s, abertura+180s]` poderia
+explicar (min/max do stream não cobrem o lado exigido pela desigualdade).
+Nesse caso a fonte de liquidação **não é o nosso stream**, o modelo TWAP
+endgame perde a premissa central, e **precisa ser refundado antes de qualquer
+72h virar veredito** — gravar mais não conserta premissa errada.
+
+**Resultado intermediário (provável):** τ com consistência alta mas < 98%, ou
+região viável instável entre horas. Leitura: a âncora é da família testada mas
+o alinhamento fino (cadência do stream, arredondamento e18, atraso de
+publicação) come as pontas — investigar as falhas UMA A UMA antes de subir N.
+
+As hipóteses nomeadas continuam no relatório como referência; a varredura vem
+além delas, nunca no lugar.
 
 ### 3. A hipótese do tick nos extremos foi REFUTADA
 

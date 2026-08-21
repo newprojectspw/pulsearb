@@ -15,9 +15,11 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
 from pulsearb.analysis.integrity import MonitorDeIntegridade, MonitorDeRelogio
 from pulsearb.analysis.measurements import (
     conta_do_maker,
@@ -135,6 +137,11 @@ class RecordingIndex:
         self.limite_por_token = limite_por_token
         self.niveis_retidos = niveis_retidos
         self.streams: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        # M2.4: o MESMO stream, mas em inteiros na escala 1e18 do Chainlink e
+        # no eixo do carimbo do SERVIDOR (ms). É o que a varredura de τ usa:
+        # a decisão Up/Down não pode passar por float (uma falha real tem gap
+        # na 9ª casa relativa), e o alinhamento não pode usar a chegada local.
+        self.streams_e18: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self.books: dict[str, BookTimeline] = {}
         self.book_atual: dict[str, OrderBook] = {}
         self.snapshots: list[dict[str, Any]] = []   # compactado: ver _on_discovery
@@ -238,6 +245,11 @@ class RecordingIndex:
         # jogo horário via bookTicker/kline, tratado à parte.
         if tick is not None and tick.topic == TOPIC_TWAP_60:
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
+            valor = _e18_do_payload(record.payload)
+            if valor is not None and tick.src_timestamp_ms > 0:
+                self.streams_e18[tick.asset].append(
+                    (int(tick.src_timestamp_ms), valor)
+                )
 
     def _on_poly_meta(self, record: ReplayRecord) -> None:
         """Resoluções + integridade. O livro pesado fica para a passada 2.
@@ -527,6 +539,38 @@ def _discordam(a: Resolucao, b: Resolucao) -> bool:
     return bool(ra and rb and ra != rb)
 
 
+def _e18_do_payload(bruto: Any) -> int | None:
+    """O valor do tick em INTEIRO na escala 1e18, sem passar por float.
+
+    Preferência: `full_accuracy_value` (string inteira já escalada — o campo
+    que o SDK também prefere). Fallback: `value` decimal, convertido de forma
+    EXATA via Decimal — `int(float(x) * 1e18)` erraria os últimos dígitos,
+    que são exatamente os que a varredura de τ existe para enxergar.
+    """
+    if not isinstance(bruto, dict):
+        return None
+    payload = bruto.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    fav = payload.get("full_accuracy_value")
+    if isinstance(fav, str):
+        try:
+            return int(fav)
+        except ValueError:
+            pass
+    valor = payload.get("value")
+    if isinstance(valor, (int, str)) and not isinstance(valor, bool):
+        try:
+            return int(Decimal(str(valor)).scaleb(18))
+        except (InvalidOperation, ValueError):
+            return None
+    if isinstance(valor, float):
+        # Float já perdeu os dígitos finais na origem; converter é criar
+        # precisão falsa. Melhor ponto nenhum que ponto mentiroso.
+        return None
+    return None
+
+
 def _numero_bruto(valor: Any) -> float | None:
     """O CLOB manda número ora como int, ora como string decimal."""
     if isinstance(valor, bool) or valor is None:
@@ -675,6 +719,22 @@ def main(argv: list[str] | None = None) -> int:
     scores = evaluate_hypotheses(outcomes)
     validacao = report_anchor_validation(scores)
     validacao["janelas_alimentadas"] = len(outcomes)
+    # M2.4: as hipóteses nomeadas ficam como referência; a varredura de τ vem
+    # além delas — engenharia reversa em inteiros e18, eixo do servidor.
+    validacao["varredura_tau"] = varrer(
+        [
+            JanelaResolvida(
+                slug=j.slug,
+                asset=j.asset,
+                abertura_ms=j.open_ts_ns // 1_000_000,
+                fechamento_ms=j.close_ts_ns // 1_000_000,
+                resolveu_up=bool(j.resolveu_up),
+            )
+            for j in resolvidas
+            if j.jogo == "twap"
+        ],
+        dict(index.streams_e18),
+    )
 
     # A âncora usada no backtest é a hipótese sobrevivente; havendo empate,
     # o default explícito (e o relatório diz que foi default).
