@@ -514,3 +514,155 @@ def test_serie_completa_nao_acusa_silencio_final(tmp_path):
     cobertura = index.stream_de_ancora()["cobertura_da_gravacao"]["por_ativo"]["btc"]
     assert cobertura["fracao_da_gravacao"] > 0.95
     assert cobertura["silencio_final_s"] < 5
+
+
+# ─────────── M2.10: o M2.9 consertou metade, e o rótulo apontava o conserto errado
+
+
+def _gravacao_com_rtds_que_para(tmp_path, *, para_em_s, dura_s, ativos=("btc", "eth")):
+    """RTDS onde a CONEXÃO INTEIRA emudece e não volta.
+
+    Diferente de `_gravacao_com_twap_que_para`: aqui nenhum tópico
+    sobrevive. É a forma da gravação de 2026-08-22, onde os 8 ativos
+    emudeceram dentro de 1 s um do outro — e o relatório acusou 7
+    assinaturas caducadas.
+
+    O `retardatario_s` reproduz o detalhe que enganava o detector: um
+    evento avulso logo depois do último tick do twap, que fazia
+    `eventos_rtds_durante` sair maior que zero para uma conexão morta.
+    """
+    import gzip
+
+    import orjson
+
+    base = 1_787_000_000
+    linhas = []
+    for i in range(dura_s):
+        ts = base + i
+        ns = ts * 10**9
+        if i >= para_em_s:
+            continue
+        for pos, asset in enumerate(ativos):
+            linhas.append(
+                {
+                    "ts_mono_ns": ns + pos,
+                    "ts_wall_ns": ns + pos,
+                    "fonte": "rtds",
+                    "payload": {
+                        "topic": "crypto_prices_twap_sixty",
+                        "payload": {
+                            "symbol": f"{asset}/usd",
+                            "timestamp": ts * 1000,
+                            "full_accuracy_value": str((60_000 + i) * 10**18),
+                        },
+                    },
+                }
+            )
+    # O RETARDATÁRIO: um único evento de outro tópico logo após o último
+    # tick do twap. É o que fazia `eventos_rtds_durante > 0` e produzia o
+    # diagnóstico errado.
+    ns_retardatario = (base + para_em_s) * 10**9 + 500
+    linhas.append(
+        {
+            "ts_mono_ns": ns_retardatario,
+            "ts_wall_ns": ns_retardatario,
+            "fonte": "rtds",
+            "payload": {
+                "topic": "crypto_prices",
+                "payload": {
+                    "symbol": "btcusdt",
+                    "timestamp": (base + para_em_s) * 1000,
+                    "value": 60_000.0,
+                },
+            },
+        }
+    )
+    # Um evento NÃO-rtds no fim, para a gravação ter duração além do
+    # silêncio sem que isso venha do próprio feed que morreu.
+    fim_ns = (base + dura_s) * 10**9
+    linhas.append(
+        {
+            "ts_mono_ns": fim_ns,
+            "ts_wall_ns": fim_ns,
+            "fonte": "gap",
+            "payload": {"fonte": "poly_ws", "tipo": "marcador", "duracao_s": 0.0},
+        }
+    )
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+    return caminho
+
+
+def test_conexao_que_emudece_ate_o_fim_tambem_e_detectada(tmp_path):
+    """O M2.9 consertou o escopo do TÓPICO e deixou o da CONEXÃO cego.
+
+    O flush do M2.9 percorre só `_ultimo_twap_ns`. O detector de
+    `conexao_inteira` continuava fechando silêncio apenas quando chegava o
+    evento seguinte — que, numa conexão que morre e não volta, nunca chega.
+
+    É o escopo que decide o conserto: tópico mudo pede reassinatura no
+    recorder, conexão muda pede keepalive/reconexão. Cego nesse escopo, o
+    relatório aponta o conserto errado.
+    """
+    index = _indexar(
+        _gravacao_com_rtds_que_para(tmp_path, para_em_s=300, dura_s=900)
+    )
+    bloco = index.silencio_do_rtds()
+
+    conexao = bloco["silencios_da_conexao_inteira"]
+    assert conexao, "silêncio da conexão até o fim continua invisível"
+    assert conexao[0]["ate_o_fim_da_gravacao"] is True
+    assert conexao[0]["duracao_s"] > 500
+
+
+def test_conexao_morta_nao_vira_assinatura_caducada(tmp_path):
+    """O rótulo errado da gravação de 2026-08-22.
+
+    `eventos_rtds_durante > 0` sozinho não sustenta "a conexão estava
+    viva": para um silêncio que vai até o fim, o campo conta eventos de
+    QUALQUER tópico e QUALQUER ativo depois do último tick. Um único
+    retardatário fazia uma conexão morta parecer viva, e o relatório
+    mandava consertar a reassinatura quando o problema era a conexão.
+    """
+    index = _indexar(
+        _gravacao_com_rtds_que_para(tmp_path, para_em_s=300, dura_s=900)
+    )
+    bloco = index.silencio_do_rtds()
+
+    # o retardatário está lá, e é justamente o que enganava
+    ate_o_fim = [
+        s for s in bloco["silencios_so_do_topico"] if s.get("ate_o_fim_da_gravacao")
+    ]
+    assert ate_o_fim, "o silêncio do tópico deveria continuar sendo detectado"
+    assert ate_o_fim[0]["eventos_rtds_durante"] > 0
+
+    # ...e ainda assim NÃO é assinatura caducada: a conexão ficou muda dentro
+    # do intervalo, então as duas explicações são indistinguíveis.
+    assert bloco["suspeita_de_assinatura_caducada"] == 0
+
+
+def test_total_s_e_uniao_e_nao_soma(tmp_path):
+    """`total_s` de 14.476,91 s numa gravação de 3.600 s não é duração.
+
+    Os silêncios são por (escopo, ativo) e se sobrepõem. Somar contava o
+    mesmo intervalo uma vez por ativo — e o campo deixava de responder a
+    única pergunta que alguém faz ao lê-lo: quanto tempo fiquei sem
+    preço-verdade?
+    """
+    index = _indexar(
+        _gravacao_com_rtds_que_para(
+            tmp_path, para_em_s=300, dura_s=900, ativos=("btc", "eth", "sol", "xrp")
+        )
+    )
+    bloco = index.silencio_do_rtds()
+
+    # 4 ativos + a conexão emudecem no mesmo instante: são 5 silêncios...
+    assert bloco["silencios"] >= 5
+    soma = sum(float(s["duracao_s"]) for s in index._silencios)
+    # ...cuja soma estoura a gravação inteira, e a união não.
+    assert soma > 900, "o cenário precisa ter sobreposição para o teste valer"
+    assert bloco["total_s"] <= 900
+    assert bloco["total_s"] > 500
+    assert bloco["total_s_por_escopo"]["topico_do_ativo"] <= 900
