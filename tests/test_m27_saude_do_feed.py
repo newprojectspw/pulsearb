@@ -86,9 +86,10 @@ async def test_watchdog_derruba_conexao_viva_e_muda():
     Ping/pong prova que o cano está aberto; não prova que a água passa.
     """
     feed = _feed(sem_dados_timeout_s=0.05)
+    ws = _WsMudo()
 
     with pytest.raises(SilencioDeDados):
-        await _consumir(feed, _WsMudo())
+        await _consumir(feed, ws)
 
     assert feed.watchdog_reconexoes == 1
 

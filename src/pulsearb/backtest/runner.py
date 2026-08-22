@@ -299,13 +299,12 @@ class BacktestRunner:
                 # é "o sinal existiu neste instante?", não "operamos?".
                 report.add_oportunidade(est.bucket_tempo, janela.slug)
 
-            if not candidatos or not cfg.na_faixa(seconds_left):
-                continue
-            if entradas >= cfg.max_entradas_por_janela:
-                continue
-            if ultima_entrada_ns and (
-                ts_ns - ultima_entrada_ns
-            ) < cfg.intervalo_min_entre_entradas_s * 1e9:
+            if not candidatos or not self._pode_entrar(
+                seconds_left=seconds_left,
+                entradas=entradas,
+                ultima_entrada_ns=ultima_entrada_ns,
+                ts_ns=ts_ns,
+            ):
                 continue
 
             trade = self._tentar_entrada(
@@ -315,6 +314,36 @@ class BacktestRunner:
                 report.add_trade(trade)
                 entradas += 1
                 ultima_entrada_ns = ts_ns
+
+    def _pode_entrar(
+        self,
+        *,
+        seconds_left: float,
+        entradas: int,
+        ultima_entrada_ns: int,
+        ts_ns: int,
+    ) -> bool:
+        """Este instante está autorizado a virar entrada?
+
+        Três regras, todas do M2.6/M2.7, e todas sobre QUANDO se pode operar —
+        nenhuma sobre se o sinal é bom, que é pergunta de
+        `_candidatos_com_edge`:
+
+        1. a faixa de tempo restante (o modelo só tem calibração dentro dela);
+        2. o teto de entradas por janela;
+        3. o espaçamento mínimo — ticks consecutivos com sinal são a MESMA
+           oportunidade vista de novo, e contá-los como novas somaria a mesma
+           aposta repetida.
+        """
+        cfg = self.config
+        if not cfg.na_faixa(seconds_left):
+            return False
+        if entradas >= cfg.max_entradas_por_janela:
+            return False
+        return not (
+            ultima_entrada_ns
+            and (ts_ns - ultima_entrada_ns) < cfg.intervalo_min_entre_entradas_s * 1e9
+        )
 
     @staticmethod
     def _estimar(
