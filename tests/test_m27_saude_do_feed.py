@@ -209,3 +209,57 @@ def test_base_sem_subclasse_nao_reassina_nada():
     inventar um frame."""
     base = ReconnectingFeed(name="t", url="ws://x", user_agent="u")
     assert asyncio.run(base._reassinar(object())) is None
+
+
+# ──────────────────── M2.10: um ativo vivo mascarava os outros sete
+
+
+def test_um_ativo_vivo_nao_pode_mascarar_os_outros():
+    """O ponto cego que a gravação de 2026-08-22 tornou concreto.
+
+    `idade_por_topico` reduz os ativos pelo MENOR tempo. Com btc tickando e
+    os outros sete mudos, o tópico aparecia jovem e nada era reassinado —
+    enquanto a cobertura por ativo do M2.9 media metade da gravação sem
+    preço-verdade para esses sete.
+    """
+    feed = _feed(topico_mudo_s=15.0)
+    feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 1.0)
+    for asset in ("eth", "sol", "xrp", "doge", "bnb", "hype", "zec"):
+        feed.last_tick_by_key[(TOPIC_TWAP_60, asset)] = _tick(TOPIC_TWAP_60, 90.0)
+
+    # a visão por tópico continua dizendo que está tudo novo...
+    assert feed.idade_por_topico()[TOPIC_TWAP_60] < 2.0
+    # ...e é justamente por isso que a decisão não pode usá-la
+    motivo = feed._reassinatura_urgente()
+    assert motivo is not None, "sete ativos mudos passaram despercebidos"
+    assert "+6 outro(s)" in motivo, f"deveria contar todos os mudos: {motivo}"
+
+
+def test_todos_os_ativos_frescos_nao_disparam():
+    """O caso são: nenhum par (tópico, ativo) atrasado, nada a fazer.
+
+    Importa porque a visão por par é mais estrita que a por tópico — se ela
+    disparasse à toa, trocaríamos um falso negativo caro por um falso
+    positivo constante.
+    """
+    feed = _feed(topico_mudo_s=15.0)
+    for asset in ("btc", "eth", "sol"):
+        feed.last_tick_by_key[(TOPIC_TWAP_60, asset)] = _tick(TOPIC_TWAP_60, 2.0)
+        feed.last_tick_by_key[(TOPIC_BINANCE, asset)] = _tick(TOPIC_BINANCE, 2.0)
+
+    assert feed._reassinatura_urgente() is None
+
+
+def test_topico_nao_assinado_nao_dispara_reassinatura():
+    """Só os tópicos que ASSINAMOS podem estar caducando.
+
+    Um par velho de tópico que não pedimos não é sintoma de assinatura
+    caducada, e reassinar por causa dele mascararia a causa real.
+    """
+    feed = _feed(topico_mudo_s=15.0)
+    feed.last_tick_by_key[("topico_que_nao_assinamos", "btc")] = _tick(
+        "topico_que_nao_assinamos", 900.0
+    )
+    feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 1.0)
+
+    assert feed._reassinatura_urgente() is None

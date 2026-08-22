@@ -191,15 +191,53 @@ class RtdsFeed(ReconnectingFeed):
         Antes do primeiro tick de um tópico não há o que julgar: `None`. Uma
         assinatura que nunca entregou nada é problema de conexão, e disso
         cuida o watchdog.
+
+        M2.10 — a visão por tópico tinha um ponto cego que a gravação de
+        2026-08-22 tornou concreto: `idade_por_topico` reduz os ativos pelo
+        MENOR tempo, então **um ativo vivo mascara os outros sete**. O tópico
+        aparecia jovem enquanto btc, eth e mais seis não davam sinal, e a
+        cobertura por ativo do M2.9 media exatamente essa metade faltante.
+        A urgência passa a ser julgada por (tópico, ativo).
+
+        Ser mais estrito produz mais reassinaturas do que a visão por
+        tópico — e isso é aceitável de propósito: reenviar a assinatura é um
+        frame de texto idempotente (ver `_reassinar`), enquanto o falso
+        NEGATIVO custou metade de uma gravação. Só se julga par que já
+        entregou pelo menos um tick; ativo que nunca falou é problema de
+        conexão, e disso cuida o watchdog.
         """
         if not self.topico_mudo_s:
             return None
-        idades = self.idade_por_topico()
-        for topico in self.TOPICOS_ASSINADOS:
-            idade = idades.get(topico)
-            if idade is not None and idade > self.topico_mudo_s:
-                return f"{topico} mudo ha {idade:.1f}s (limiar {self.topico_mudo_s}s)"
-        return None
+        idades = self.idade_por_topico_e_ativo()
+        assinados = set(self.TOPICOS_ASSINADOS)
+        mudos = sorted(
+            (idade, topico, asset)
+            for (topico, asset), idade in idades.items()
+            if topico in assinados and idade > self.topico_mudo_s
+        )
+        if not mudos:
+            return None
+        pior = mudos[-1]
+        quantos = f" (+{len(mudos) - 1} outro(s))" if len(mudos) > 1 else ""
+        return (
+            f"{pior[1]}/{pior[2]} mudo ha {pior[0]:.1f}s "
+            f"(limiar {self.topico_mudo_s}s){quantos}"
+        )
+
+    def idade_por_topico_e_ativo(
+        self, agora_mono_ns: int | None = None
+    ) -> dict[tuple[str, str], float]:
+        """Segundos desde a última mensagem de cada par (tópico, ativo).
+
+        M2.10. É a visão que `idade_por_topico` perde ao reduzir pelo menor
+        valor. O relatório continua mostrando a visão por tópico porque ela
+        é legível; quem DECIDE reassinar usa esta.
+        """
+        agora = agora_mono_ns if agora_mono_ns is not None else time.monotonic_ns()
+        return {
+            chave: round((agora - tick.ts_mono_ns) / 1e9, 3)
+            for chave, tick in self.last_tick_by_key.items()
+        }
 
     def idade_por_topico(self, agora_mono_ns: int | None = None) -> dict[str, float]:
         """Segundos desde a última mensagem de cada tópico.
