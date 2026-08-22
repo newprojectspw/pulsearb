@@ -322,9 +322,17 @@ async def test_topico_que_volta_zera_a_escalada():
     Se o tópico volta, a contagem reinicia — senão uma gravação longa
     acumularia tentativas de horas diferentes e derrubaria a conexão por
     causa de um silêncio já resolvido.
+
+    O LIMIAR PRECISA SER MUITO MAIOR QUE O PASSO, e não é detalhe de gosto.
+    Com os dois iguais, o tópico que acabou de voltar já aparece atrasado na
+    verificação seguinte — dorme-se `passo`, e a idade vira `passo` + o que a
+    máquina cobrar de overhead. Assim escrito, este teste passava no Linux
+    (onde o `round(..., 3)` da idade mascarava o excesso) e falhava no macOS,
+    onde o overhead é maior. Aqui o limiar é 100× o passo: o tópico que
+    voltou tem 1 s de folga contra os 0,15 s que o teste dura.
     """
     feed = _feed(
-        topico_mudo_s=0.01,
+        topico_mudo_s=1.0,
         reassinatura_intervalo_s=3600.0,
         reassinaturas_ate_derrubar=3,
     )
