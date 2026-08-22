@@ -628,12 +628,52 @@ class RecordingIndex:
                         - self._eventos_no_ultimo_twap.get(asset, 0),
                     }
                 )
+        # M2.10: o M2.9 consertou METADE. O flush acima percorre so
+        # `_ultimo_twap_ns` — escopo `topico_do_ativo`. O detector de
+        # `conexao_inteira` (ver `_on_rtds`) continuava fechando silencio so
+        # quando chegava o evento seguinte, entao a conexao que emudece e nao
+        # volta seguia invisivel. E justamente o escopo que decide o
+        # conserto: topico mudo pede reassinatura no recorder, conexao muda
+        # pede keepalive/reconexao. Sem este flush o relatorio aponta o
+        # conserto errado — foi o que aconteceu na gravacao de 2026-08-22.
+        if self._ultimo_rtds_ns:
+            ocioso_ns = self._ultimo_record_ns - self._ultimo_rtds_ns
+            if ocioso_ns > SILENCIO_MIN_NS:
+                self._silencios.append(
+                    {
+                        "inicio_ns": self._ultimo_rtds_ns,
+                        "fim_ns": self._ultimo_record_ns,
+                        "duracao_s": round(ocioso_ns / 1e9, 2),
+                        "escopo": "conexao_inteira",
+                        "topico_que_voltou": None,
+                        "ate_o_fim_da_gravacao": True,
+                    }
+                )
         por_escopo = Counter(str(s["escopo"]) for s in self._silencios)
         conexao = [s for s in self._silencios if s["escopo"] == "conexao_inteira"]
         topico = [s for s in self._silencios if s["escopo"] == "topico_do_ativo"]
         # A separação que decide o conserto: silêncio do tópico COM eventos
         # de outros tópicos chegando = a conexão estava viva.
-        assinatura_caducou = [s for s in topico if (s.get("eventos_rtds_durante") or 0) > 0]
+        #
+        # M2.10: `eventos_rtds_durante > 0` sozinho NAO sustenta essa
+        # conclusao. Para um silencio que vai ate o fim, o contador e o total
+        # de eventos RTDS menos a contagem no ultimo tick daquele ativo —
+        # qualquer topico, qualquer ativo. Na gravacao de 2026-08-22 os 8
+        # ativos emudeceram dentro de 1s um do outro e o campo veio com 1
+        # evento para o btc: o relatorio acusou 7 assinaturas caducadas
+        # quando o que houve foi a conexao inteira parando. Um evento
+        # retardatario nao e conexao viva.
+        #
+        # O teste que sustenta a inferencia e a AUSENCIA de silencio de
+        # conexao sobreposto: se a conexao ficou muda em qualquer trecho
+        # deste silencio, nao da para afirmar que ela estava viva e que o que
+        # caducou foi a assinatura.
+        assinatura_caducou = [
+            s
+            for s in topico
+            if (s.get("eventos_rtds_durante") or 0) > 0
+            and not _tem_sobreposicao(s, conexao)
+        ]
         return {
             "eventos_rtds": self._eventos_rtds,
             "topicos": dict(self._topicos_rtds),
@@ -643,19 +683,38 @@ class RecordingIndex:
             "maior_s": round(
                 max((float(s["duracao_s"]) for s in self._silencios), default=0.0), 2
             ),
-            "total_s": round(
-                sum(float(s["duracao_s"]) for s in self._silencios), 2
-            ),
+            # M2.10: UNIAO, nao soma. Os silencios sao por (escopo, ativo) e
+            # se sobrepoem: quando os 8 ativos emudecem juntos, somar as
+            # oito duracoes contava o MESMO intervalo oito vezes. Na
+            # gravacao de 2026-08-22 isso produziu `total_s` de 14.476,91s
+            # numa gravacao de 3.600s — um numero que nao pode ser lido como
+            # duracao, e que some com a leitura obvia ("quanto tempo fiquei
+            # sem preco-verdade?"). A uniao responde essa pergunta.
+            "total_s": _duracao_da_uniao_s(self._silencios),
+            "total_s_por_escopo": {
+                escopo: _duracao_da_uniao_s(
+                    [s for s in self._silencios if s["escopo"] == escopo]
+                )
+                for escopo in sorted(por_escopo)
+            },
             "silencios_da_conexao_inteira": conexao[:20],
             "silencios_so_do_topico": topico[:20],
             "suspeita_de_assinatura_caducada": len(assinatura_caducou),
             "leitura": (
                 "CONEXAO INTEIRA muda = o servidor parou de publicar (ou o "
-                "caminho ate ele caiu sem fechar o socket). TOPICO DO ATIVO "
-                "mudo COM `eventos_rtds_durante` > 0 = a conexao estava viva "
-                "recebendo outros topicos, logo o que caducou foi a "
-                "ASSINATURA daquele topico — e o conserto e no recorder "
-                "(reassinar periodicamente), nao no keepalive. "
+                "caminho ate ele caiu sem fechar o socket), e o conserto e "
+                "keepalive/reconexao. TOPICO DO ATIVO mudo COM "
+                "`eventos_rtds_durante` > 0 E SEM silencio de conexao "
+                "sobreposto = a conexao estava viva recebendo outros "
+                "topicos, logo o que caducou foi a ASSINATURA daquele topico "
+                "— e ai o conserto e no recorder (reassinar periodicamente). "
+                "M2.10: a sobreposicao entrou na regra porque o contador "
+                "sozinho mentia. Ele conta eventos de QUALQUER topico e "
+                "QUALQUER ativo depois do ultimo tick, entao um retardatario "
+                "fazia uma conexao morta parecer viva — em 2026-08-22 foram "
+                "7 assinaturas acusadas com a conexao inteira parada. "
+                "`total_s` e UNIAO dos intervalos, nao soma: silencios "
+                "simultaneos de 8 ativos sao um intervalo, nao oito. "
                 "`suspeita_de_assinatura_caducada` > 0 e o gatilho para essa "
                 "correcao. ATENCAO: o recorder NAO pode ser alterado com "
                 "gravacao em curso; ver docs/RUNBOOK_VPS.md."
@@ -1069,6 +1128,54 @@ TEMPO_CALIBRADO_MAX_S = 240.0
 #: parada, e curto o bastante para pegar as lacunas de 14 e 17 minutos
 #: que apareceram em 4h de gravação real.
 SILENCIO_MIN_NS = 30 * 10**9
+
+
+def _tem_sobreposicao(
+    silencio: dict[str, Any], outros: list[dict[str, Any]]
+) -> bool:
+    """Algum dos `outros` cobre parte do intervalo de `silencio`?
+
+    M2.10. É o teste que sustenta — ou derruba — a inferência de assinatura
+    caducada. Dizer "a conexão estava viva, logo caducou a assinatura deste
+    tópico" exige que a conexão não tenha ficado muda DENTRO do silêncio do
+    tópico. Se ficou, as duas explicações são indistinguíveis, e a honesta é
+    não escolher.
+    """
+    inicio = int(silencio.get("inicio_ns") or 0)
+    fim = int(silencio.get("fim_ns") or 0)
+    return any(
+        int(o.get("inicio_ns") or 0) < fim and int(o.get("fim_ns") or 0) > inicio
+        for o in outros
+    )
+
+
+def _duracao_da_uniao_s(silencios: list[dict[str, Any]]) -> float:
+    """Quanto tempo esteve coberto por ALGUM destes silêncios, em segundos.
+
+    M2.10. Somar as durações conta o mesmo intervalo uma vez por ativo
+    quando todos emudecem juntos — e foi assim que uma gravação de 3.600s
+    reportou 14.476,91s de silêncio. A união responde a pergunta que
+    alguém realmente faz ao ler o campo: *quanto tempo eu fiquei sem
+    preço-verdade?*
+    """
+    intervalos = sorted(
+        (int(s.get("inicio_ns") or 0), int(s.get("fim_ns") or 0))
+        for s in silencios
+        if int(s.get("fim_ns") or 0) > int(s.get("inicio_ns") or 0)
+    )
+    total_ns = 0
+    fim_corrente = None
+    inicio_corrente = 0
+    for inicio, fim in intervalos:
+        if fim_corrente is None or inicio > fim_corrente:
+            if fim_corrente is not None:
+                total_ns += fim_corrente - inicio_corrente
+            inicio_corrente, fim_corrente = inicio, fim
+        elif fim > fim_corrente:
+            fim_corrente = fim
+    if fim_corrente is not None:
+        total_ns += fim_corrente - inicio_corrente
+    return round(total_ns / 1e9, 2)
 
 
 def montar_ancoras(
