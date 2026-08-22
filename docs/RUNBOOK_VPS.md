@@ -506,41 +506,86 @@ A varredura de τ, aliás, já é imune ao problema: ela consome stream RTDS e
 resoluções, nunca o book. As 152 janelas do M2.4 saíram sem tocar na passada 2.
 
 
-## 7.2 Pendência para a PRÓXIMA janela de manutenção do recorder
+## 7.2 Deploy do M2.7 — a gravação SERÁ parada
 
-**Não aplicar com gravação em curso.** Qualquer mudança no recorder invalida a
-gravação que estiver rodando; esta lista existe para que a correção não se
-perca até haver janela.
+Diferente dos marcos anteriores, o M2.7 muda o recorder. A gravação em curso
+precisa ser parada, e a nova só começa depois da hora de teste passar.
 
-### Reassinatura periódica do RTDS (M2.6 BUG 3)
+### O que mudou, e por quê
 
-Em 4h de gravação real houve dois silêncios do feed-verdade — **837s e
-1023s**, 14 e 17 minutos. O keepalive do M2.1 (§13.7 do API_NOTES) resolveu a
-*queda* de conexão; silêncio **sem** queda é outro fenômeno, e o socket
-continuava aberto.
+8h de gravação mediram **163.195 s de silêncio** do feed-verdade — dois
+fenômenos distintos, dois mecanismos:
 
-Antes de mexer, **rode o backtest e leia o diagnóstico**, que agora existe:
+| Fenômeno | Medido | Mecanismo |
+|---|---|---|
+| Tópico mudo, conexão viva | 48 casos | reassinatura ao detectar silêncio (`rtds_topico_mudo_s`, 15 s) |
+| Conexão inteira muda | 6 casos, maior 3.796 s | watchdog por ausência de dados (`rtds_sem_dados_timeout_s`, 30 s) |
+
+Nenhum cobre o outro: o watchdog conta **qualquer** mensagem e não enxerga um
+tópico caducando enquanto o outro chega; a reassinatura não derruba conexão
+morta. A reassinatura periódica (`rtds_reassinatura_intervalo_s`, 300 s) é
+seguro barato, não o mecanismo principal — a aritmética não fecha sem a
+reação: 6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de 60 s/h.
+
+### Sequência
 
 ```bash
-python -m pulsearb.backtest data/recordings --json rel.json
-# gravacao.silencio_do_rtds:
-#   por_escopo: {"conexao_inteira": N, "topico_do_ativo": M}
-#   suspeita_de_assinatura_caducada: K
+# 1. parar a gravação em curso
+sudo systemctl stop pulsearb-recorder
+sudo systemctl status pulsearb-recorder     # confirmar 'inactive (dead)'
+
+# 2. atualizar e reinstalar
+cd ~/pulsearb
+git pull
+.venv/bin/pip install -e .
+
+# 3. UMA HORA de teste — não pule
+.venv/bin/python -m pulsearb.recorder --duration 1h
+
+# 4. conferir a meta de aceite (ver abaixo) ANTES da gravação longa
 ```
 
-O número que decide é `suspeita_de_assinatura_caducada` — silêncio de um
-tópico **enquanto outros tópicos chegavam na mesma conexão**:
+### A meta de aceite, e onde lê-la
 
-- **K > 0** → a conexão estava viva e a **assinatura caducou**. Correção:
-  reassinar periodicamente (ou renovar ao detectar silêncio do tópico), no
-  recorder. É a hipótese que o silêncio sem queda favorece.
-- **K = 0, silêncios de `conexao_inteira`** → o servidor parou de publicar.
-  Não há correção nossa; o que cabe é registrar e excluir as janelas afetadas,
-  que o backtest já faz.
+**Silêncio total abaixo de 60 s na hora de teste** (a medição que motivou o
+marco deu ~20.400 s/h).
 
-As janelas cujo instante crítico cai em silêncio já saem do backtest de fills
-e vão contadas em `ancora.lacunas_do_stream` — o dado ruim não entra na conta
-enquanto a correção não vier.
+Duas fontes, e a diferença entre elas é informação:
+
+```bash
+# (a) o que o recorder ACHA que aconteceu — teto calculado dos eventos que
+#     os mecanismos detectaram
+jq '.saude_do_rtds' relatorio_do_recorder.json
+
+# (b) a AUTORIDADE — lê os carimbos da gravação, não depende de o mecanismo
+#     ter percebido
+.venv/bin/python -m pulsearb.backtest data/recordings --json teste.json
+jq '.gravacao.silencio_do_rtds | {total_s, silencios, por_escopo,
+    suspeita_de_assinatura_caducada}' teste.json
+```
+
+Se **(a) disser que a meta foi atingida e (b) disser que não**, existe uma
+terceira causa de silêncio que nenhum dos dois mecanismos cobre — e ela é o
+próximo achado, não um detalhe. Não inicie a gravação longa nesse caso.
+
+### Se a meta não for atingida
+
+Não afrouxe o limiar. Os números para olhar, nesta ordem:
+
+1. `saude_do_rtds.reconexoes_por_watchdog` alto → a conexão morre muito;
+   olhar `quedas_por_feed` para o `close_code`
+2. `reassinaturas_por_silencio_de_topico` alto e o silêncio continua → a
+   reassinatura não está sendo aceita pelo servidor; capturar a resposta
+3. os dois em zero e o silêncio continua → a terceira causa; o escopo em
+   `silencio_do_rtds.por_escopo` diz se é conexão ou tópico
+
+### Só então
+
+```bash
+sudo systemctl start pulsearb-recorder
+sudo systemctl status pulsearb-recorder
+# e a verificação pós-start da §5.1, que continua obrigatória
+```
 
 ## 8. Parar
 

@@ -730,6 +730,13 @@ class RecordingIndex:
                 "rewards_min_size": meta.get("rewards_min_size"),
                 "rewards_max_spread": meta.get("rewards_max_spread"),
                 "tick_size": meta.get("tick_size"),
+                # M2.7: o cru da lista de rewards, para o relatório distinguir
+                # "não participa" de "expirou" de "erramos a chave".
+                "rewards_bruto": meta.get("rewards_bruto"),
+                # A duração vem da JANELA, não do snapshot: o recorder não
+                # grava esse campo, e `meta.get` devolveria None sempre —
+                # o que faria a tabela por duração sair inteira em "?".
+                "duracao_s": janela.duracao_s,
             }
             janela.trades = sorted(
                 self.trades.get(token_up, []) + self.trades.get(token_down, [])
@@ -1063,6 +1070,29 @@ def main(argv: list[str] | None = None) -> int:
             "do fim da janela, onde o book afina e o fill fica caro."
         ),
     )
+    # M2.7 tarefa 3: mais de uma entrada por janela.
+    parser.add_argument(
+        "--max-entradas-por-janela",
+        dest="max_entradas",
+        type=int,
+        default=1,
+        help=(
+            "quantas entradas a v1 pode fazer por janela. Default 1 "
+            "(comportamento ate o M2.6), que produziu 18 trades sobre 1.617 "
+            "instantes com sinal — longe dos 200 que o VEREDITO exige."
+        ),
+    )
+    parser.add_argument(
+        "--intervalo-entre-entradas",
+        dest="intervalo_entradas",
+        type=float,
+        default=30.0,
+        help=(
+            "espacamento minimo entre entradas, em segundos. Ticks "
+            "consecutivos com sinal sao a MESMA oportunidade vista de novo; "
+            "sem espacamento o PnL somaria a mesma aposta repetida."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1192,6 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg_base = {
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
+        "max_entradas_por_janela": max(1, args.max_entradas),
+        "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
     }
     restricao_pedida = (
         args.tempo_restante_max is not None or args.tempo_restante_min is not None
@@ -1229,6 +1261,28 @@ def main(argv: list[str] | None = None) -> int:
             "irrestrito": report.to_dict(),
             "restrito": report_restrito.to_dict(),
         }
+
+    # M2.7 tarefa 3: entrada unica x multipla, lado a lado, SEMPRE — e as
+    # duas dentro da faixa calibrada, que e a configuracao que produziu o
+    # primeiro PnL positivo do projeto. Comparar entrada multipla no regime
+    # irrestrito misturaria duas mudancas numa medicao so.
+    faixa_para_entradas = (
+        args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
+    )
+    cfg_entradas = {
+        "threshold_edge": args.threshold,
+        "latencia_ms": args.latencia_ms,
+        "tempo_restante_max_s": faixa_para_entradas,
+        "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+    }
+    comparacao_entradas = {
+        f"max_{n}_entradas": BacktestRunner(
+            BacktestConfig(**cfg_entradas, max_entradas_por_janela=n)
+        )
+        .run(integras, index.streams)
+        .to_dict()
+        for n in (1, 3, 10)
+    }
 
     relatorio: dict[str, Any] = {
         "gravacao": {
@@ -1303,6 +1357,22 @@ def main(argv: list[str] | None = None) -> int:
                 "max_s": args.tempo_restante_max,
                 "aplicada": restricao_pedida,
             },
+        },
+        "entradas_por_janela": {
+            "faixa_aplicada_s": faixa_para_entradas,
+            "intervalo_minimo_s": max(0.0, args.intervalo_entradas),
+            "comparacao": comparacao_entradas,
+            "nota": (
+                "M2.7 tarefa 3. A v1 entrava UMA vez por janela: 18 trades "
+                "sobre 1.617 instantes com sinal em 240-120s, contra os 200 "
+                "trades que o VEREDITO_M2 exige para decidir. As tres "
+                "versoes rodam na MESMA faixa calibrada, entao a unica "
+                "variavel e o numero de entradas. Olhe pnl_liquido_usdc E "
+                "max_drawdown_usdc juntos: mais entradas comprando o mesmo "
+                "movimento aumenta o PnL e o risco na mesma proporcao, e ai "
+                "nao houve ganho nenhum — so alavancagem. O default segue 1; "
+                "mudar exige numero, nao intuicao."
+            ),
         },
         "faixa_de_tempo": {
             "faixa_restrita_s": faixa_comparada,

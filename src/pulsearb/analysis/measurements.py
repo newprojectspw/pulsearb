@@ -136,13 +136,44 @@ def medir_mudanca_de_tick(
         ),
         "mudancas_detectadas": len(mudancas),
         "afinamentos": len(afinou),
-        "seconds_left_no_afinamento": _dist(tempos),
+        "seconds_left_no_afinamento": _dist([x for x in tempos if x >= 0]),
+        "afinamentos_apos_o_fechamento": _apos_o_fechamento(tempos),
         "preco_no_afinamento": _dist(precos),
         "afinamentos_com_preco_extremo": len(extremos),
         "afinamentos_com_preco_equilibrado": len(equilibrados),
         "hipotese_extremos": _veredito_extremos(precos, extremos, equilibrados),
-        "relacao_com_tempo_restante": _veredito_tempo(tempos, len(afinou)),
+        "relacao_com_tempo_restante": _veredito_tempo(
+            [x for x in tempos if x >= 0], len(afinou)
+        ),
         "exemplos": mudancas[:20],
+    }
+
+
+def _apos_o_fechamento(tempos: list[float]) -> dict[str, Any]:
+    """Afinamentos observados DEPOIS do fim da janela (M2.7 tarefa 4.1).
+
+    `min: -2,1586` no relatório real. Não é erro de fronteira: o recorder
+    continua assinando a janela depois do `endDate` porque a resolução ainda
+    não chegou — é a carência de resolução, medida em 145,9s de p50 no jogo
+    TWAP (M2.6). Enquanto ela dura, a descoberta segue observando o mercado e
+    `_seconds_left = fim − agora` fica negativo, corretamente.
+
+    O que estava errado era MISTURAR essas observações com as de dentro da
+    janela na estatística: elas puxam o `min` para negativo e sujam a
+    pergunta "o tick afina perto do fim?", que só faz sentido dentro da
+    janela. Agora saem contadas à parte — e a contagem é informação útil por
+    si só, porque tick que muda depois do fechamento não afeta entrada
+    nenhuma.
+    """
+    negativos = [x for x in tempos if x < 0]
+    return {
+        "n": len(negativos),
+        "segundos_apos_o_fim": _dist([abs(x) for x in negativos]),
+        "nota": (
+            "Observacoes de tick com _seconds_left < 0: a janela ja fechou e a "
+            "resolucao ainda nao chegou (carencia de liquidacao). Sao "
+            "legitimas e ficam FORA da estatistica de dentro da janela."
+        ),
     }
 
 
@@ -301,10 +332,21 @@ def medir_profundidade(
             "nota": (
                 "Criterio de VEREDITO_M2: p50 de profundidade a 3 ticks >= "
                 f"{PROFUNDIDADE_MINIMA_USDC:g} USDC, senao a estrategia nao "
-                "escala. Medido em 4h reais: 5m e 15m REPROVAM (137 e 79 "
-                "USDC) e so a duracao de 1h passa (204). Isso restringe onde "
-                "vale operar antes mesmo de existir edge — e e um limite de "
-                "CAPACIDADE, que edge nenhum resolve."
+                "escala. E um limite de CAPACIDADE, que edge nenhum resolve. "
+                "\n"
+                "M2.7 — a amostra de 8h (madrugada UTC) mediu 100 (5m), 32 "
+                "(15m), 48 (1h) e 23,5 (4h): NENHUMA duracao passa, contra "
+                "137/79/204 medidos nas 4h da tarde. A queda NAO pode ser "
+                "artefato das lacunas do RTDS: profundidade sai do book do "
+                "CLOB, e as lacunas medidas sao do feed-verdade — feeds "
+                "diferentes, conexoes diferentes. As duas explicacoes que "
+                "sobram sao hora de baixa liquidez e amostra pequena, e "
+                "`por_hora_utc_3ticks` responde as duas: ele traz `n` por "
+                "hora, entao da para ver se a queda acompanha o horario e se "
+                "cada hora tem amostra suficiente para o p50 significar algo. "
+                "Comparar duas janelas de horario diferente sem olhar esse "
+                "bloco e comparar liquidez de madrugada com liquidez de "
+                "tarde."
             ),
         },
         "nota": (

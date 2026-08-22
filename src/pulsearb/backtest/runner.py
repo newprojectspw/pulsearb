@@ -187,6 +187,16 @@ class BacktestConfig:
     # permite operar onde ele sabe, em vez de onde ele chega primeiro.
     tempo_restante_min_s: float | None = None
     tempo_restante_max_s: float | None = None
+    # M2.7 BUG/tarefa 3: quantas entradas a v1 pode fazer por janela. 1 é o
+    # comportamento até o M2.6 — e é o que produziu 18 trades sobre 1.617
+    # instantes com sinal, muito abaixo dos 200 que o VEREDITO_M2 exige.
+    max_entradas_por_janela: int = 1
+    # Espaçamento mínimo entre entradas. NÃO é um botão de gosto: ticks
+    # consecutivos com sinal são a MESMA oportunidade observada de novo, não
+    # oportunidades novas. Sem espaçamento, uma janela com sinal contínuo
+    # viraria centenas de trades sobre o mesmo movimento — e o PnL somaria a
+    # mesma aposta repetida como se fossem independentes.
+    intervalo_min_entre_entradas_s: float = 30.0
 
     def na_faixa(self, seconds_left: float) -> bool:
         """Este instante está na faixa de tempo restante autorizada?"""
@@ -269,7 +279,8 @@ class BacktestRunner:
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
-        ja_operou = False
+        entradas = 0
+        ultima_entrada_ns = 0
 
         for ts_ns, preco_spot, seconds_left in _instantes_da_janela(
             janela, stream, vol, twap
@@ -288,7 +299,13 @@ class BacktestRunner:
                 # é "o sinal existiu neste instante?", não "operamos?".
                 report.add_oportunidade(est.bucket_tempo, janela.slug)
 
-            if ja_operou or not candidatos or not cfg.na_faixa(seconds_left):
+            if not candidatos or not cfg.na_faixa(seconds_left):
+                continue
+            if entradas >= cfg.max_entradas_por_janela:
+                continue
+            if ultima_entrada_ns and (
+                ts_ns - ultima_entrada_ns
+            ) < cfg.intervalo_min_entre_entradas_s * 1e9:
                 continue
 
             trade = self._tentar_entrada(
@@ -296,8 +313,8 @@ class BacktestRunner:
             )
             if trade is not None:
                 report.add_trade(trade)
-                # v1 segura até a resolução: uma entrada por janela.
-                ja_operou = True
+                entradas += 1
+                ultima_entrada_ns = ts_ns
 
     @staticmethod
     def _estimar(

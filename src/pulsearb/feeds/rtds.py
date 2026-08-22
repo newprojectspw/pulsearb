@@ -13,6 +13,7 @@ Protocolo verificado em docs/API_NOTES.md seções 6.2 e 12.3:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,10 @@ def _as_float(value: Any) -> float | None:
 class RtdsFeed(ReconnectingFeed):
     """Feed do RTDS: assina binance + twap60 para os ativos configurados."""
 
+    #: Os tópicos que este feed assina, e portanto os que devem estar
+    #: chegando. Ficar mudo além do limiar é sinal de assinatura caducada.
+    TOPICOS_ASSINADOS = (TOPIC_BINANCE, TOPIC_TWAP_60)
+
     def __init__(
         self,
         *,
@@ -130,8 +135,10 @@ class RtdsFeed(ReconnectingFeed):
         assets: list[str],
         on_tick: Any = None,  # Callable[[PriceTick], None] | None
         on_event: OnEvent | None = None,
+        topico_mudo_s: float | None = None,
         **kwargs: Any,
     ) -> None:
+        self.topico_mudo_s = topico_mudo_s
         super().__init__(name="rtds", url=url, user_agent=user_agent, on_event=on_event, **kwargs)
         self.assets = [a.lower() for a in assets]
         self.on_tick = on_tick
@@ -155,6 +162,61 @@ class RtdsFeed(ReconnectingFeed):
 
     async def _on_connected(self, ws: websockets.ClientConnection) -> None:
         await self.send_frame(self.subscribe_frame(), ws)
+
+    async def _reassinar(self, ws: websockets.ClientConnection) -> None:
+        """Reenvia a assinatura. É o mesmo frame do `_on_connected`.
+
+        M2.7: em 8h de gravação real, **48 tópicos ficaram mudos com a conexão
+        viva**, recebendo outros tópicos — a assinatura caduca do lado do
+        servidor e nada avisa. O `subscribe` do RTDS é idempotente pelo
+        protocolo (assinar o que já está assinado não duplica entrega), então
+        reenviar é barato e seguro.
+
+        Se algum dia o servidor passar a duplicar, a dedup por
+        (tópico, ativo, timestamp) que já existe para a redundância de
+        conexões (M2.2 A.5) absorve — mas isso apareceria em
+        `rtds_duplicadas` no relatório, e não em silêncio.
+        """
+        await self.send_frame(self.subscribe_frame(), ws)
+
+    def _reassinatura_urgente(self) -> str | None:
+        """Algum tópico assinado ficou mudo além do limiar?
+
+        Esta é a resposta ao fenômeno medido: 48 tópicos mudos em 8h com a
+        conexão viva. O watchdog da base não pega, porque ele conta QUALQUER
+        mensagem — e o outro tópico continuava chegando. Só a visão por
+        tópico enxerga, e a reação é reassinar, não derrubar: derrubar a
+        conexão custaria o tópico que ainda estava são.
+
+        Antes do primeiro tick de um tópico não há o que julgar: `None`. Uma
+        assinatura que nunca entregou nada é problema de conexão, e disso
+        cuida o watchdog.
+        """
+        if not self.topico_mudo_s:
+            return None
+        idades = self.idade_por_topico()
+        for topico in self.TOPICOS_ASSINADOS:
+            idade = idades.get(topico)
+            if idade is not None and idade > self.topico_mudo_s:
+                return f"{topico} mudo ha {idade:.1f}s (limiar {self.topico_mudo_s}s)"
+        return None
+
+    def idade_por_topico(self, agora_mono_ns: int | None = None) -> dict[str, float]:
+        """Segundos desde a última mensagem de cada tópico.
+
+        `last_message_age_seconds` da base conta QUALQUER mensagem, então não
+        enxerga um tópico caducando enquanto o outro continua chegando — que
+        é exatamente a falha que este marco conserta. Esta é a visão por
+        tópico, e é ela que o relatório do recorder precisa mostrar.
+        """
+        agora = agora_mono_ns if agora_mono_ns is not None else time.monotonic_ns()
+        idades: dict[str, float] = {}
+        for (topico, _asset), tick in self.last_tick_by_key.items():
+            idade = (agora - tick.ts_mono_ns) / 1e9
+            anterior = idades.get(topico)
+            if anterior is None or idade < anterior:
+                idades[topico] = idade
+        return {topico: round(idade, 3) for topico, idade in sorted(idades.items())}
 
     async def _handle_message(self, event: FeedEvent) -> None:
         tick = parse_rtds_event(event.parsed, event.ts_mono_ns, event.ts_wall_ns)

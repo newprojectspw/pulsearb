@@ -101,26 +101,89 @@ def parse_duration(text: str) -> float:
     return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
 
 
+#: Onde a Gamma pode pôr a lista de rewards. `clobRewards` é o que se viu ao
+#: vivo (§12.8); `rewards_config` é o nome no SDK. Aceitar os dois custa uma
+#: linha; apostar no errado custou o marco inteiro no `price_change` (§6.1b).
+CHAVES_DE_LISTA_DE_REWARD = ("clobRewards", "rewards_config", "rewardsConfig")
+
+#: E como cada entrada pode chamar a taxa diária.
+CHAVES_DE_TAXA_DIARIA = (
+    "rewardsDailyRate",
+    "rewards_daily_rate",
+    "dailyRate",
+    "daily_rate",
+    "totalDailyRate",
+    "total_daily_rate",
+)
+
+
+def _lista_de_rewards(gamma: dict[str, Any]) -> tuple[str | None, list[Any]]:
+    """A lista de rewards e sob que chave ela veio."""
+    for chave in CHAVES_DE_LISTA_DE_REWARD:
+        bruto = gamma.get(chave)
+        if isinstance(bruto, list):
+            return chave, bruto
+    return None, []
+
+
 def _taxa_diaria_de_reward(gamma: dict[str, Any]) -> float | None:
-    """Soma as taxas diárias de `clobRewards` (VERIFICADO ao vivo, 12.8).
+    """Soma as taxas diárias da lista de rewards (VERIFICADO ao vivo, 12.8).
 
     É lista porque um mercado pode ter mais de uma fonte de reward (nativa e
     patrocinada, que o CLOB expõe como `native_daily_rate` e
     `sponsored_daily_rate`). Somar é o que corresponde ao `total_daily_rate`.
+
+    M2.7: passou a aceitar as grafias alternativas da lista E da taxa. A
+    gravação de 8h trouxe 199 janelas com `rewardsMinSize` e
+    `rewardsMaxSpread` PRESENTES e taxa diária ausente — o que é estranho
+    para mercado que não participa do programa, e é exatamente a assinatura
+    de leitor procurando a chave errada. Aceitar as variantes não decide a
+    questão sozinho: `forma_dos_rewards` conta qual apareceu de fato, e o
+    array cru vai gravado para que a próxima rodada resolva sem palpite.
     """
-    bruto = gamma.get("clobRewards")
-    if not isinstance(bruto, list):
-        return None
+    _, bruto = _lista_de_rewards(gamma)
     total = 0.0
     achou = False
     for item in bruto:
         if not isinstance(item, dict):
             continue
-        taxa = _numero(item.get("rewardsDailyRate"))
-        if taxa is not None:
-            total += taxa
-            achou = True
+        for chave in CHAVES_DE_TAXA_DIARIA:
+            taxa = _numero(item.get(chave))
+            if taxa is not None:
+                total += taxa
+                achou = True
+                break
     return total if achou else None
+
+
+def _forma_dos_rewards(gamma: dict[str, Any]) -> dict[str, Any]:
+    """O que a Gamma REALMENTE mandou sobre reward, sem interpretação.
+
+    M2.7 tarefa 2. Três explicações produzem o mesmo `rewards_daily_rate:
+    None`, e elas têm consertos opostos:
+
+    1. **o mercado não participa** — a lista nem existe;
+    2. **o nosso leitor erra a chave** — a lista existe e as entradas usam um
+       nome de campo que não procurávamos (o defeito do `price_change` de
+       novo, §6.1b);
+    3. **o programa expirou para aquela janela** — a lista existe, tem taxa, e
+       tem `start_date`/`end_date` fora do intervalo da janela.
+
+    Nenhuma das três era distinguível na gravação anterior, porque
+    `raw_gamma` nunca chegava ao disco: só três campos derivados chegavam. Sem
+    o array cru gravado, a pergunta não tem resposta — e foi por isso que ela
+    não teve resposta.
+    """
+    chave, bruto = _lista_de_rewards(gamma)
+    entradas: list[dict[str, Any]] = [i for i in bruto if isinstance(i, dict)]
+    return {
+        "chave_da_lista": chave,
+        "n_entradas": len(entradas),
+        "chaves_das_entradas": sorted({k for item in entradas for k in item}),
+        # O array CRU, do jeito que veio. É ele que carrega start_date/
+        # end_date e permite decidir entre "expirou" e "não participa".
+        "entradas": entradas[:4],
+    }
 
 
 def _numero(valor: Any) -> float | None:
@@ -177,6 +240,10 @@ def market_snapshot(
         # numerador e a janela sai da conta em vez de receber um default
         # inventado.
         "rewards_daily_rate": _taxa_diaria_de_reward(market.raw_gamma),
+        # M2.7: o CRU da lista de rewards. Sem ele, "sem_taxa_diaria" é
+        # indistinguível entre não participar, expirar, e o nosso leitor
+        # errar a chave — ver `_forma_dos_rewards`.
+        "rewards_bruto": _forma_dos_rewards(market.raw_gamma),
         "uma_reward": market.raw_gamma.get("umaReward"),
         "best_bid": market.raw_gamma.get("bestBid"),
         "best_ask": market.raw_gamma.get("bestAsk"),
@@ -209,6 +276,10 @@ class Recorder:
                 stale_after_seconds=settings.feeds.stale_after_seconds_twap,
                 reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
                 reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+                # M2.7: os dois mecanismos contra a cegueira do feed-verdade.
+                sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
+                topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
+                reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
             )
             for indice in range(max(1, settings.feeds.rtds_conexoes))
         ]
@@ -675,6 +746,64 @@ class Recorder:
             "tokens_aguardando_resync": len(self.a_resincronizar),
         }
 
+    #: Meta de aceite do M2.7: silêncio total do feed-verdade abaixo disto
+    #: por hora de gravação. A medição que motivou o marco deu 163.195s em
+    #: 8h — ou seja, ~20.400s/h. Sessenta segundos são 0,017% da hora.
+    META_SILENCIO_S_POR_HORA = 60.0
+
+    def saude_do_rtds(self, duracao_s: float) -> dict[str, Any]:
+        """Os dois mecanismos do M2.7, medidos — e a meta, conferida.
+
+        Sem este bloco a correção seria uma promessa: "reassinamos" e
+        "reconectamos" sem número nenhum são exatamente o tipo de afirmação
+        que a gravação de 8h desmentiu. Aqui saem as contagens e o veredito
+        contra a meta, no relatório do próprio recorder.
+        """
+        horas = max(duracao_s / 3600.0, 1e-9)
+        feeds = [f for nome, f in self._feed_by_name.items() if nome.startswith("rtds")]
+        reassinaturas = sum(f.reassinaturas for f in feeds)
+        por_silencio = sum(f.reassinaturas_por_silencio for f in feeds)
+        watchdog = sum(f.watchdog_reconexoes for f in feeds)
+        erros = sum(f.reassinaturas_com_erro for f in feeds)
+        # Custo em segundos de cegueira que os mecanismos ADMITEM: cada
+        # disparo do watchdog custa até o seu timeout; cada reassinatura por
+        # silêncio custa até o limiar de tópico mudo. É um TETO do silêncio
+        # causado pelas falhas que sabemos ter acontecido — não substitui a
+        # medição do backtest sobre a gravação, que é a autoridade.
+        teto_watchdog = watchdog * max(
+            (f.sem_dados_timeout_s or 0.0) for f in feeds
+        ) if feeds else 0.0
+        teto_topico = por_silencio * max(
+            (getattr(f, "topico_mudo_s", 0.0) or 0.0) for f in feeds
+        ) if feeds else 0.0
+        teto_total = teto_watchdog + teto_topico
+        return {
+            "conexoes": len(feeds),
+            "reassinaturas": reassinaturas,
+            "reassinaturas_por_silencio_de_topico": por_silencio,
+            "reassinaturas_com_erro": erros,
+            "reconexoes_por_watchdog": watchdog,
+            "idade_por_topico_s": [
+                f.idade_por_topico() for f in feeds if hasattr(f, "idade_por_topico")
+            ],
+            "silencio_admitido_s": round(teto_total, 1),
+            "silencio_admitido_s_por_hora": round(teto_total / horas, 1),
+            "meta_s_por_hora": self.META_SILENCIO_S_POR_HORA,
+            "meta_atingida": teto_total / horas <= self.META_SILENCIO_S_POR_HORA,
+            "nota": (
+                "M2.7 tarefa 1. `silencio_admitido_s` e um TETO calculado dos "
+                "eventos que os mecanismos detectaram: cada reconexao por "
+                "watchdog custa ate o timeout dele, cada reassinatura por "
+                "silencio custa ate o limiar de topico mudo. NAO substitui a "
+                "medicao real — a autoridade e `gravacao.silencio_do_rtds` do "
+                "backtest sobre a gravacao, que le os carimbos e nao depende "
+                "de o mecanismo ter percebido. Se este teto disser que a meta "
+                "foi atingida e o backtest disser que nao, existe uma terceira "
+                "causa de silencio que nenhum dos dois mecanismos cobre, e ela "
+                "e o proximo achado."
+            ),
+        }
+
     def redundancia_resumo(self) -> dict[str, Any]:
         """Quanto cada conexão do RTDS de fato acrescentou (M2.2 A.5).
 
@@ -782,6 +911,7 @@ class Recorder:
             },
             "gaps": resumo_gaps(self.trackers, duracao),
             "redundancia_rtds": self.redundancia_resumo(),
+            "saude_do_rtds": self.saude_do_rtds(duracao),
         }
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()

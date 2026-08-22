@@ -400,6 +400,57 @@ de 1h passa**. O critério passou a sair no relatório
 (`medicoes.profundidade.criterio_do_veredito`) em vez de depender de quem lê
 lembrar do número. É um limite de **capacidade**, e edge nenhum o resolve.
 
+### 2g. Dois sinais positivos, e por que ainda não valem (M2.7)
+
+**A restrição de faixa funciona.** 8h reais (2026-08-22 04h–11h UTC), âncora
+verificada, mesmas janelas, mudando só *quando* opera:
+
+| | trades | PnL | hit | drawdown |
+|---|---|---|---|---|
+| irrestrito | 18 | −4,79 | 0,556 | −9,81 |
+| `--tempo-restante-max 240` | 18 | **+10,41** | **0,833** | −2,94 |
+
+É o primeiro PnL positivo do projeto, e não vem de mais operações — vem das
+mesmas 18, colocadas onde o modelo tem calibração. **Mas 18 trades não
+decidem nada:** o critério deste documento pede 200, e continua pedindo.
+
+**Os rewards existem, só não onde procurávamos.** Duas janelas com pool,
+ambas de 14400 s (4h); 199 sem, todas por `sem_taxa_diaria`. Na melhor ordem
+medida, 13,2 USDC/hora de receita com fatia média de 24%. Isso reabre a rota
+maker — num mercado específico e sobre **duas** janelas.
+
+**O que impede decidir os dois: a gravação está cega.** Nas mesmas 8 horas,
+163.195 s de silêncio do feed-verdade, 184 de 254 janelas com a abertura em
+lacuna, e a varredura da âncora perdendo 75% da amostra. Nenhum dos dois
+sinais pode ser confirmado nem descartado com dado assim — por isso o M2.7 é
+um marco de captação, e não de estratégia.
+
+### 2h. A entrada múltipla é alavancagem, não edge (M2.7)
+
+A v1 entra uma vez por janela: 18 trades sobre 1.617 instantes com sinal na
+faixa calibrada. O caminho óbvio para os 200 trades seria entrar mais vezes.
+Medido, na mesma faixa e com espaçamento mínimo de 30 s:
+
+| entradas máx. | trades | PnL | hit | drawdown |
+|---|---|---|---|---|
+| 1 | 37 | +0,10 | 0,595 | −12,1 |
+| 3 | 103 | +22,68 | 0,631 | −24,6 |
+| 10 | 187 | −16,82 | 0,562 | −71,1 |
+
+*(amostra sintética — os valores absolutos não dizem nada sobre edge; a forma
+da curva diz.)*
+
+O PnL sobe de 1 para 3 e **o drawdown sobe junto**; de 3 para 10 o PnL vira
+negativo e o drawdown sextuplica. Comprar o mesmo movimento mais vezes é
+alavancagem: multiplica ganho e perda na mesma proporção, e não cria edge
+nenhum. O espaçamento mínimo não é botão de gosto — sem ele, ticks
+consecutivos com sinal seriam contados como oportunidades independentes e o
+PnL somaria a mesma aposta repetida.
+
+**O default segue 1.** Chegar aos 200 trades por entrada múltipla seria
+inflar a amostra, não medir mais mercado. O caminho honesto é gravar mais
+tempo — que é exatamente o que o M2.7 destrava.
+
 ### 3. A hipótese do tick nos extremos foi REFUTADA
 
 A primeira gravação real produziu **zero trades** — os seis bugs do M2.1 —, mas
