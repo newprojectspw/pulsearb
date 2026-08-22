@@ -119,12 +119,19 @@ do primeiro dólar real.
 
 ---
 
-## Segurança (antes de qualquer credencial existir)
+## Segurança e infraestrutura (antes de qualquer credencial existir)
 
 | # | Item | Estado |
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
+| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ⬜ não existe `.github/` no repositório |
+
+Sobre 5.3: o único check que aparece nos PRs é o SonarCloud, que vem do
+GitHub App e faz análise estática — **não executa a suíte**. Hoje os 384
+testes só rodam na máquina de quem está editando. Para um projeto que vai
+mexer com dinheiro real, "passou no meu ambiente" não é verificação: um
+commit que quebre o backtest chega ao `main` com o quality gate verde.
 
 ---
 
