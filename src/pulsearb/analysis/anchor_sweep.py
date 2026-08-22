@@ -162,6 +162,46 @@ def _consistente(
     return (lado_up == resolveu_up, empate)
 
 
+def _distribuicao_no_span(
+    elegiveis_ms: list[int], todas_ms: list[int], *, quartis: int = 4
+) -> dict[str, Any]:
+    """Onde, ao longo da gravação, caíram as janelas elegíveis.
+
+    M2.10 item 6. É o que separa **amostra pequena** de **amostra
+    enviesada**, e os dois pedem consertos diferentes: pequena se resolve
+    gravando mais, enviesada não.
+
+    Na gravação de 2026-08-22 as 8 elegíveis estavam todas na primeira
+    metade — porque o stream morreu na metade — e isso só apareceu porque
+    alguém cruzou os slugs na mão. Concentração num pedaço do span quer
+    dizer que o resto da gravação não contribuiu, e aí "8 janelas" não é uma
+    amostra de 8 momentos do mercado.
+    """
+    if not todas_ms:
+        return {"quartis": {}, "nota": "sem janelas"}
+    inicio, fim = min(todas_ms), max(todas_ms)
+    span = fim - inicio
+    contagem = {f"q{i + 1}": 0 for i in range(quartis)}
+    for ts in elegiveis_ms:
+        indice = 0 if span <= 0 else min(int((ts - inicio) * quartis / span), quartis - 1)
+        contagem[f"q{indice + 1}"] += 1
+    ocupados = sum(1 for v in contagem.values() if v)
+    return {
+        "quartis": contagem,
+        "quartis_com_janela": ocupados,
+        "span_das_janelas_s": round(span / 1000.0, 1),
+        "concentrada": bool(elegiveis_ms) and ocupados <= max(1, quartis // 2),
+        "nota": (
+            "Quartis do span coberto pelas janelas conhecidas. "
+            "`concentrada` true = as elegiveis vieram de metade ou menos da "
+            "gravacao, entao a amostra e ENVIESADA no tempo e nao apenas "
+            "pequena — gravar mais do mesmo jeito nao conserta. Na gravacao "
+            "de 2026-08-22 as 8 elegiveis estavam todas na primeira metade, "
+            "porque o stream da ancora morreu aos 30 min."
+        ),
+    }
+
+
 def varrer(
     janelas: list[JanelaResolvida],
     streams: dict[str, list[tuple[int, int]]],
@@ -206,6 +246,15 @@ def varrer(
         "janelas_recebidas": len(janelas),
         "janelas_elegiveis": len(elegiveis),
         "janelas_sem_cobertura_do_stream": sem_cobertura,
+        # M2.10 item 6: amostra pequena e amostra ENVIESADA pedem consertos
+        # diferentes, e so a distribuicao no tempo separa as duas. Na
+        # gravacao de 2026-08-22 as 8 elegiveis estavam todas na primeira
+        # metade — o stream morreu na metade — e isso so apareceu porque
+        # alguem cruzou os slugs na mao.
+        "distribuicao_das_elegiveis": _distribuicao_no_span(
+            [j.abertura_ms for j, *_ in elegiveis],
+            [j.abertura_ms for j in janelas],
+        ),
         "grade": {
             "tau_s": [tau_min_s, tau_max_s, passo_s],
             "phi_s": [PHI_MIN_S, PHI_MAX_S, GRADE_PASSO_S],
@@ -441,8 +490,33 @@ def valor_final(
     return serie.em(fechamento_ms, idade_max_ms=idade_max_ms)
 
 
+def _porque_caiu(
+    recebidas: int, sem_cobertura: int, pior_fracao: float | None
+) -> str:
+    """A frase que liga 'poucas elegiveis' a 'o stream estava morto'.
+
+    M2.10 item 5. Sem ela o leitor procura a explicacao no mercado, que e
+    onde ela nao esta.
+    """
+    if not sem_cobertura:
+        return ""
+    frase = (
+        f" CAUSA: {sem_cobertura} de {recebidas} janelas cairam por AUSENCIA "
+        "DE STREAM da ancora, nao por nada do mercado."
+    )
+    if isinstance(pior_fracao, (int, float)):
+        frase += (
+            f" O pior ativo teve {pior_fracao:.1%} da gravacao coberta — "
+            "gravar mais horas so ajuda se a captacao estiver sa."
+        )
+    return frase
+
+
 def veredito_da_ancora(
-    varredura: dict[str, Any], *, minimo_janelas: int = MINIMO_JANELAS_VEREDITO
+    varredura: dict[str, Any],
+    *,
+    minimo_janelas: int = MINIMO_JANELAS_VEREDITO,
+    cobertura: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A varredura confirma a âncora verificada, ou a plataforma mudou?
 
@@ -461,11 +535,24 @@ def veredito_da_ancora(
     elegiveis = int(varredura.get("janelas_elegiveis") or 0)
     consistencia = curva.get(str(TAU_VERIFICADO_S))
 
+    # M2.10 item 5: por que as janelas caíram fica NO veredito.
+    # "SEM AMOSTRA: 8 janelas elegiveis" sem dizer que 20 morreram por falta
+    # de stream convida a explicar o numero pelo mercado — e foi o que
+    # aconteceu numa conversa real, onde a geometria das janelas virou
+    # explicacao antes de ser desmentida. A causa estava no relatorio, em
+    # outro bloco, e ninguem cruzou os dois.
+    sem_cobertura = int(varredura.get("janelas_sem_cobertura_do_stream") or 0)
+    recebidas = int(varredura.get("janelas_recebidas") or 0)
+    pior_fracao = (cobertura or {}).get("pior_fracao_coberta")
     base = {
         "tau_verificado_s": TAU_VERIFICADO_S,
         "consistencia_do_tau_verificado": consistencia,
         "regiao_viavel_100pct": regiao,
         "janelas_elegiveis": elegiveis,
+        "janelas_recebidas": recebidas,
+        "janelas_sem_cobertura_do_stream": sem_cobertura,
+        "pior_fracao_coberta": pior_fracao,
+        "distribuicao_das_elegiveis": varredura.get("distribuicao_das_elegiveis"),
         "minimo_para_veredito": minimo_janelas,
         "referencia": "docs/API_NOTES.md §13.8",
     }
@@ -480,6 +567,7 @@ def veredito_da_ancora(
                 f"de {minimo_janelas}. A ancora verificada segue em uso — "
                 "ausencia de amostra nao e desmentido —, mas esta gravacao nao "
                 "a confirma nem a contradiz."
+                + _porque_caiu(recebidas, sem_cobertura, pior_fracao)
             ),
         }
 

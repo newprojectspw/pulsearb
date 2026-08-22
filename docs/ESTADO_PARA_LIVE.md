@@ -52,6 +52,23 @@ negociáveis depois do resultado.
 o próprio critério 1.2 diz que abaixo de 200 é ruído. **1.5 é teto de
 capacidade: edge nenhum resolve.**
 
+**Ressalva do M2.10 sobre o critério 1.1.** Na gravação real os seis
+thresholds da grade (0,01 a 0,12) deram os **mesmos** 11 trades e o **mesmo**
+PnL: o modelo previa ~0,83 de probabilidade contra um book perto de 0,50,
+então a entrada já nascia com edge acima do teto da grade. O limiar nunca
+excluiu sinal nenhum, e o `melhor_threshold: 0.01` publicado era desempate de
+`max()`, não escolha.
+
+O relatório agora diz isso em `curva_de_edge.threshold_mordeu`. Enquanto ele
+for `false`, **avaliar 1.1 é medir outra coisa** — o resultado não carrega
+informação sobre threshold. Antes de concluir qualquer coisa sobre limiar de
+entrada, subir a grade com `--thresholds`.
+
+Vale reparar no que essa degenerescência também insinua: um modelo que
+discorda do book em ~33 pontos de probabilidade, sistematicamente, contra
+participantes que viram o mesmo dado no mesmo segundo. Isso é grande demais
+para ser edge e merece explicação antes de virar veredito.
+
 ### SÓ MAKER VIÁVEL — exige as 5
 
 | # | Critério | Exigido | Medido (1 h real) | |
@@ -125,13 +142,30 @@ do primeiro dólar real.
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
-| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ⬜ não existe `.github/` no repositório |
+| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ⬜ escrito e **provado**, bloqueado no quality gate |
 
 Sobre 5.3: o único check que aparece nos PRs é o SonarCloud, que vem do
-GitHub App e faz análise estática — **não executa a suíte**. Hoje os 384
-testes só rodam na máquina de quem está editando. Para um projeto que vai
-mexer com dinheiro real, "passou no meu ambiente" não é verificação: um
-commit que quebre o backtest chega ao `main` com o quality gate verde.
+GitHub App e faz análise estática — **não executa a suíte**. Os testes só
+rodam na máquina de quem está editando, e um commit que quebre o backtest
+chega ao `main` com o quality gate verde. Para um projeto que vai mexer com
+dinheiro real, "passou no meu ambiente" não é verificação.
+
+O workflow existe e **funcionou**: rodou no PR #19 e passou, com `ruff` limpo
+e 395 testes verdes no servidor. Ele roda os mesmos alvos do `make check`
+(`ruff check src tests scripts` + `pytest`) e instala o extra `analise` junto
+com `dev` de propósito — sem pyarrow o teste de `replay/columnar.py` cai num
+`importorskip` e some do relatório, e a CI passaria rodando menos testes que
+a máquina do desenvolvedor.
+
+**Por que ainda está ⬜:** o SonarCloud reprovou o PR com
+`C Security Rating on New Code`, e o único arquivo novo analisável por regra
+de segurança era esse workflow. Adicionar `permissions: contents: read`
+(menor privilégio para o `GITHUB_TOKEN`) **não** resolveu, e o ambiente de
+desenvolvimento não alcança `sonarcloud.io` para ler qual regra é. O workflow
+saiu deste PR para não segurar o trabalho do analisador, e volta num PR
+próprio quando o achado estiver em mãos. Hipótese seguinte, não testada:
+supply-chain — `actions/checkout@v5` e `actions/setup-python@v6` não fixadas
+por commit SHA.
 
 ---
 

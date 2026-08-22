@@ -260,6 +260,11 @@ class RecordingIndex:
         self._ultimo_twap_ns: dict[str, int] = {}
         self._eventos_rtds = 0
         self._eventos_no_ultimo_twap: dict[str, int] = {}
+        # M2.10 item 2: eventos de topicos != twap_sixty, e o snapshot desse
+        # contador no ultimo tick de cada ativo. E o denominador correto da
+        # inferencia "a conexao estava viva".
+        self._eventos_de_outros_topicos = 0
+        self._outros_topicos_no_ultimo_twap: dict[str, int] = {}
         self._topicos_rtds: Counter[str] = Counter()
         # M2.8: quantos ticks do twap chegaram, e quantos NAO viraram
         # ponto da serie e18 — o descarte que a ancora sofre calada.
@@ -353,6 +358,13 @@ class RecordingIndex:
         self._eventos_rtds += 1
         if tick is not None:
             self._topicos_rtds[tick.topic] += 1
+            # M2.10 item 2: o contador que SUSTENTA a inferência. O total de
+            # eventos RTDS não serve — ele inclui o próprio twap de outros
+            # ativos, e um retardatário qualquer fazia uma conexão morta
+            # parecer viva. O que prova "a conexão estava viva" é evento de
+            # OUTRO tópico chegando na mesma conexão durante o silêncio.
+            if tick.topic != TOPIC_TWAP_60:
+                self._eventos_de_outros_topicos += 1
         if (
             self._ultimo_rtds_ns
             and record.ts_wall_ns - self._ultimo_rtds_ns > SILENCIO_MIN_NS
@@ -379,6 +391,10 @@ class RecordingIndex:
                 andou = self._eventos_rtds - self._eventos_no_ultimo_twap.get(
                     tick.asset, 0
                 )
+                outros = (
+                    self._eventos_de_outros_topicos
+                    - self._outros_topicos_no_ultimo_twap.get(tick.asset, 0)
+                )
                 self._silencios.append(
                     {
                         "inicio_ns": anterior,
@@ -387,10 +403,15 @@ class RecordingIndex:
                         "escopo": "topico_do_ativo",
                         "asset": tick.asset,
                         "eventos_rtds_durante": andou - 1,
+                        "eventos_de_outros_topicos_durante": outros,
+                        "base_da_contagem": BASE_DA_CONTAGEM,
                     }
                 )
             self._ultimo_twap_ns[tick.asset] = record.ts_wall_ns
             self._eventos_no_ultimo_twap[tick.asset] = self._eventos_rtds
+            self._outros_topicos_no_ultimo_twap[tick.asset] = (
+                self._eventos_de_outros_topicos
+            )
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
             # M2.8: o descarte aqui era SILENCIOSO, e e o que explica
             # "janelas com abertura em lacuna" numa gravacao com ZERO
@@ -626,6 +647,11 @@ class RecordingIndex:
                         "ate_o_fim_da_gravacao": True,
                         "eventos_rtds_durante": self._eventos_rtds
                         - self._eventos_no_ultimo_twap.get(asset, 0),
+                        "eventos_de_outros_topicos_durante": (
+                            self._eventos_de_outros_topicos
+                            - self._outros_topicos_no_ultimo_twap.get(asset, 0)
+                        ),
+                        "base_da_contagem": BASE_DA_CONTAGEM,
                     }
                 )
         # M2.10: o M2.9 consertou METADE. O flush acima percorre so
@@ -668,12 +694,19 @@ class RecordingIndex:
         # conexao sobreposto: se a conexao ficou muda em qualquer trecho
         # deste silencio, nao da para afirmar que ela estava viva e que o que
         # caducou foi a assinatura.
+        #
+        # M2.10 item 2 (refinamento): o contador passou a ser
+        # `eventos_de_outros_topicos_durante` — evento de topico != twap na
+        # MESMA conexao, dentro do intervalo. E o unico que sustenta "a
+        # conexao estava viva". `eventos_rtds_durante` fica no relatorio como
+        # referencia, mas nao decide mais nada.
         assinatura_caducou = [
             s
             for s in topico
-            if (s.get("eventos_rtds_durante") or 0) > 0
+            if (s.get("eventos_de_outros_topicos_durante") or 0) > 0
             and not _tem_sobreposicao(s, conexao)
         ]
+        coincidentes = _agrupar_coincidentes(topico)
         return {
             "eventos_rtds": self._eventos_rtds,
             "topicos": dict(self._topicos_rtds),
@@ -699,7 +732,13 @@ class RecordingIndex:
             },
             "silencios_da_conexao_inteira": conexao[:20],
             "silencios_so_do_topico": topico[:20],
+            # M2.10 item 4: oito ativos emudecendo dentro de 1s sao UM evento.
+            # Listar oito entradas separadas empurra o leitor para a hipotese
+            # de assinatura por ativo, que e a errada.
+            "eventos_coincidentes": coincidentes,
+            "janela_de_coincidencia_s": JANELA_COINCIDENCIA_NS / 1e9,
             "suspeita_de_assinatura_caducada": len(assinatura_caducou),
+            "base_da_contagem_da_suspeita": BASE_DA_CONTAGEM,
             "leitura": (
                 "CONEXAO INTEIRA muda = o servidor parou de publicar (ou o "
                 "caminho ate ele caiu sem fechar o socket), e o conserto e "
@@ -1130,6 +1169,79 @@ TEMPO_CALIBRADO_MAX_S = 240.0
 SILENCIO_MIN_NS = 30 * 10**9
 
 
+#: M2.10 item 4. Silêncios que começam dentro desta janela um do outro são
+#: tratados como UM evento. 5 s: os oito ativos da gravação de 2026-08-22
+#: emudeceram dentro de 1,0 s, e uma janela dessa ordem separa "pararam
+#: juntos" de "pararam em momentos diferentes" sem depender de sorte no
+#: agendamento do publicador.
+JANELA_COINCIDENCIA_NS = 5 * 10**9
+
+#: O que `eventos_de_outros_topicos_durante` conta. Vai no próprio campo
+#: porque a inferência inteira depende de qual população foi contada — foi
+#: exatamente aí que o diagnóstico de 2026-08-22 se perdeu.
+BASE_DA_CONTAGEM = (
+    "eventos RTDS de topicos != crypto_prices_twap_sixty, na mesma conexao, "
+    "dentro do intervalo do silencio. NAO inclui o proprio twap de outros "
+    "ativos: quando os oito param juntos, o twap alheio nao prova conexao "
+    "viva. `eventos_rtds_durante` (populacao antiga, qualquer topico e "
+    "qualquer ativo) fica no relatorio para comparacao e nao decide nada."
+)
+
+
+def _agrupar_coincidentes(
+    silencios: list[dict[str, Any]],
+    *,
+    janela_ns: int = JANELA_COINCIDENCIA_NS,
+) -> list[dict[str, Any]]:
+    """Silêncios que começam quase juntos são um evento só.
+
+    M2.10 item 4. Na gravação de 2026-08-22 os oito ativos emudeceram entre
+    16:29:49,87 (zec) e 16:29:50,83 (doge) — 0,96 s de dispersão. O relatório
+    listava oito silêncios separados, e ler oito linhas com oito nomes de
+    ativo empurra para a hipótese de assinatura caducando por ativo, que é a
+    errada: oito assinaturas não caducam dentro do mesmo segundo.
+
+    As entradas individuais continuam em `silencios_so_do_topico`; isto é uma
+    visão por cima, não uma substituição.
+    """
+    ordenados = sorted(silencios, key=lambda s: int(s.get("inicio_ns") or 0))
+    grupos: list[list[dict[str, Any]]] = []
+    for silencio in ordenados:
+        inicio = int(silencio.get("inicio_ns") or 0)
+        if grupos and inicio - int(grupos[-1][0].get("inicio_ns") or 0) <= janela_ns:
+            grupos[-1].append(silencio)
+        else:
+            grupos.append([silencio])
+    saida = []
+    for grupo in grupos:
+        if len(grupo) < 2:
+            continue
+        inicios = [int(s.get("inicio_ns") or 0) for s in grupo]
+        fins = [int(s.get("fim_ns") or 0) for s in grupo]
+        saida.append(
+            {
+                "inicio_ns": min(inicios),
+                "fim_ns": max(fins),
+                "ativos": sorted(
+                    {str(s.get("asset")) for s in grupo if s.get("asset")}
+                ),
+                "quantos_ativos": len({s.get("asset") for s in grupo}),
+                "dispersao_do_inicio_s": round((max(inicios) - min(inicios)) / 1e9, 3),
+                "ate_o_fim_da_gravacao": all(
+                    bool(s.get("ate_o_fim_da_gravacao")) for s in grupo
+                ),
+                "leitura": (
+                    "Ativos que emudeceram dentro da janela de coincidencia. "
+                    "Dispersao de poucos segundos com muitos ativos NAO e "
+                    "assinatura caducando por ativo — assinaturas nao caducam "
+                    "em bloco. Aponta para uma causa acima do ativo: a "
+                    "conexao, o publicador, ou o caminho ate ele."
+                ),
+            }
+        )
+    return saida
+
+
 def _tem_sobreposicao(
     silencio: dict[str, Any], outros: list[dict[str, Any]]
 ) -> bool:
@@ -1523,7 +1635,12 @@ def main(argv: list[str] | None = None) -> int:
     # que se mediu continue visível. Nenhuma delas decide coisa alguma.
     lacunas = montar_ancoras(resolvidas, dict(index.streams_e18))
 
-    veredito_ancora = veredito_da_ancora(validacao["varredura_tau"])
+    # M2.10 item 5: a cobertura entra NO veredito. A causa de "8 elegiveis"
+    # estava no relatorio, noutro bloco, e ninguem cruzou os dois.
+    veredito_ancora = veredito_da_ancora(
+        validacao["varredura_tau"],
+        cobertura=(index.stream_de_ancora() or {}).get("cobertura_da_gravacao"),
+    )
     validacao["veredito_da_varredura"] = veredito_ancora
     # O veredito do topo passa a ser o da VARREDURA. O texto antigo dizia
     # "NENHUMA hipótese sobreviveu" no mesmo relatório em que a varredura
