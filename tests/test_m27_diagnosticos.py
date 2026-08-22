@@ -715,3 +715,248 @@ def test_curva_que_separa_resultados_e_comparacao_de_verdade():
     assert curva["threshold_mordeu"] is True
     assert curva["resultados_distintos"] == 3
     assert curva["melhor_threshold"] == 0.12
+
+
+# ─────────── M2.10 ciclo 2: a forma exata da gravação de 2026-08-22
+
+
+OITO_ATIVOS = ("bnb", "btc", "doge", "eth", "hype", "sol", "xrp", "zec")
+
+
+def _gravacao_forma_2026_08_22(
+    tmp_path, *, para_em_s=300, dura_s=900, outro_topico_sobrevive=False
+):
+    """Oito ativos do twap emudecendo dentro de 1 s, e não voltando.
+
+    Reproduz a forma medida: zec às 16:29:49,87 e doge às 16:29:50,83 —
+    0,96 s de dispersão entre o primeiro e o último. `crypto_prices` para
+    junto (o caso real) ou sobrevive (o contraste), conforme o parâmetro.
+    """
+    import gzip
+
+    import orjson
+
+    base = 1_787_000_000
+    linhas = []
+    for i in range(dura_s):
+        ts = base + i
+        ns = ts * 10**9
+        for pos, asset in enumerate(OITO_ATIVOS):
+            # o último tick de cada ativo cai espalhado dentro de ~0,9 s
+            desloca_ns = pos * 120_000_000
+            if i < para_em_s:
+                linhas.append(
+                    {
+                        "ts_mono_ns": ns + desloca_ns,
+                        "ts_wall_ns": ns + desloca_ns,
+                        "fonte": "rtds",
+                        "payload": {
+                            "topic": "crypto_prices_twap_sixty",
+                            "payload": {
+                                "symbol": f"{asset}/usd",
+                                "timestamp": ts * 1000,
+                                "full_accuracy_value": str((60_000 + i) * 10**18),
+                            },
+                        },
+                    }
+                )
+        if i < para_em_s or outro_topico_sobrevive:
+            linhas.append(
+                {
+                    "ts_mono_ns": ns + 950_000_000,
+                    "ts_wall_ns": ns + 950_000_000,
+                    "fonte": "rtds",
+                    "payload": {
+                        "topic": "crypto_prices",
+                        "payload": {
+                            "symbol": "btcusdt",
+                            "timestamp": ts * 1000,
+                            "value": 60_000.0 + i,
+                        },
+                    },
+                }
+            )
+    fim_ns = (base + dura_s) * 10**9
+    linhas.append(
+        {
+            "ts_mono_ns": fim_ns,
+            "ts_wall_ns": fim_ns,
+            "fonte": "gap",
+            "payload": {"fonte": "poly_ws", "tipo": "marcador", "duracao_s": 0.0},
+        }
+    )
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+    return caminho
+
+
+def test_item2_conexao_morta_zera_a_suspeita_de_assinatura(tmp_path):
+    """ITEM 2. O denominador passa a ser o que sustenta a inferência.
+
+    `eventos_rtds_durante` conta qualquer tópico e qualquer ativo — inclusive
+    o próprio twap dos outros sete, que não prova conexão viva quando todos
+    param juntos. O campo novo conta só evento de OUTRO tópico na mesma
+    conexão, dentro do intervalo.
+    """
+    bloco = _indexar(_gravacao_forma_2026_08_22(tmp_path)).silencio_do_rtds()
+
+    terminais = [
+        s for s in bloco["silencios_so_do_topico"] if s.get("ate_o_fim_da_gravacao")
+    ]
+    assert terminais, "os silêncios terminais precisam continuar sendo detectados"
+
+    # O contador ANTIGO enxerga muitos eventos — o twap dos outros sete
+    # ativos entra na conta e infla a impressão de "conexão viva".
+    antigo = max(s["eventos_rtds_durante"] for s in terminais)
+    novo = max(s["eventos_de_outros_topicos_durante"] for s in terminais)
+    assert antigo > novo, f"o denominador novo tem de ser mais estrito ({antigo} vs {novo})"
+
+    # O NOVO enxerga só o retardatário: reproduz o `eventos_rtds_durante: 1`
+    # do btc na gravação real. Um evento avulso NÃO é conexão viva — e é
+    # exatamente por isso que a contagem sozinha nunca ia bastar.
+    assert novo <= 1
+    assert all(s["base_da_contagem"] for s in terminais)
+
+    # Quem derruba a inferência é o silêncio da CONEXÃO se sobrepondo (item
+    # 1): se a conexão ficou muda dentro do intervalo, as duas explicações
+    # são indistinguíveis e a honesta é não escolher.
+    assert bloco["silencios_da_conexao_inteira"], "faltou o silêncio de conexão"
+    assert bloco["suspeita_de_assinatura_caducada"] == 0
+
+
+def test_item2_conexao_viva_ainda_acusa_assinatura_caducada(tmp_path):
+    """ITEM 2, o contraste: assinatura caducando de verdade continua visível.
+
+    Sem isto o conserto seria só desligar o alarme.
+    """
+    bloco = _indexar(
+        _gravacao_forma_2026_08_22(tmp_path, outro_topico_sobrevive=True)
+    ).silencio_do_rtds()
+
+    terminais = [
+        s for s in bloco["silencios_so_do_topico"] if s.get("ate_o_fim_da_gravacao")
+    ]
+    assert all(s["eventos_de_outros_topicos_durante"] > 0 for s in terminais)
+    assert bloco["suspeita_de_assinatura_caducada"] == len(terminais)
+
+
+def test_item3_total_s_bate_com_a_uniao_e_nao_com_a_soma(tmp_path):
+    """ITEM 3. Oito silêncios sobrepostos de ~600 s somam ~4.800 s."""
+    index = _indexar(_gravacao_forma_2026_08_22(tmp_path))
+    bloco = index.silencio_do_rtds()
+
+    soma = sum(float(s["duracao_s"]) for s in index._silencios)
+    assert soma > 3_000, "o cenário precisa ter sobreposição"
+    assert bloco["total_s"] <= 900, "total_s não pode passar da gravação"
+    assert 550 <= bloco["total_s"] <= 900
+
+
+def test_item4_oito_ativos_em_um_segundo_viram_um_evento(tmp_path):
+    """ITEM 4. Listar oito linhas empurra para a hipótese errada.
+
+    Oito assinaturas não caducam dentro do mesmo segundo. Agrupar torna isso
+    legível sem esconder as entradas individuais.
+    """
+    bloco = _indexar(_gravacao_forma_2026_08_22(tmp_path)).silencio_do_rtds()
+
+    eventos = bloco["eventos_coincidentes"]
+    assert len(eventos) == 1, f"esperado um evento coincidente, veio {len(eventos)}"
+    evento = eventos[0]
+    assert evento["quantos_ativos"] == 8
+    assert set(evento["ativos"]) == set(OITO_ATIVOS)
+    assert evento["dispersao_do_inicio_s"] < 1.5
+    assert evento["ate_o_fim_da_gravacao"] is True
+    # as entradas individuais continuam acessíveis
+    assert len(bloco["silencios_so_do_topico"]) >= 8
+
+
+def test_item4_silencios_distantes_nao_sao_agrupados():
+    """ITEM 4, o contraste: eventos separados no tempo continuam separados."""
+    from pulsearb.backtest.__main__ import _agrupar_coincidentes
+
+    longe = [
+        {"inicio_ns": 0, "fim_ns": 10**9, "asset": "btc"},
+        {"inicio_ns": 600 * 10**9, "fim_ns": 700 * 10**9, "asset": "eth"},
+    ]
+    assert _agrupar_coincidentes(longe) == []
+
+
+def test_item5_veredito_diz_por_que_as_janelas_cairam():
+    """ITEM 5. "SEM AMOSTRA: 8 elegiveis" sem a causa convida a inventá-la.
+
+    Numa conversa real isso levou a explicar o número pela geometria das
+    janelas — hipótese errada, registrada como conclusão antes de ser
+    desmentida. A causa estava no relatório, em outro bloco, e ninguém
+    cruzou os dois.
+    """
+    from pulsearb.analysis.anchor_sweep import veredito_da_ancora
+
+    veredito = veredito_da_ancora(
+        {
+            "janelas_recebidas": 28,
+            "janelas_elegiveis": 8,
+            "janelas_sem_cobertura_do_stream": 20,
+            "final_stream_no_fechamento": {"curva": {"0": 0.875}, "regiao_viavel_100pct": []},
+        },
+        cobertura={"pior_fracao_coberta": 0.4969},
+    )
+
+    texto = veredito["veredito"]
+    assert "SEM AMOSTRA" in texto
+    assert "CAUSA" in texto, "o veredito precisa dizer por que as janelas caíram"
+    assert "20" in texto and "28" in texto
+    assert "49.7%" in texto or "49,7" in texto or "AUSENCIA DE STREAM" in texto
+    assert veredito["janelas_sem_cobertura_do_stream"] == 20
+    assert veredito["pior_fracao_coberta"] == 0.4969
+
+
+def test_item5_sem_perda_por_stream_nao_inventa_causa():
+    """ITEM 5, o contraste: amostra pequena com captação sã não ganha desculpa."""
+    from pulsearb.analysis.anchor_sweep import veredito_da_ancora
+
+    veredito = veredito_da_ancora(
+        {
+            "janelas_recebidas": 8,
+            "janelas_elegiveis": 8,
+            "janelas_sem_cobertura_do_stream": 0,
+            "final_stream_no_fechamento": {"curva": {"0": 1.0}, "regiao_viavel_100pct": []},
+        },
+        cobertura={"pior_fracao_coberta": 0.99},
+    )
+
+    assert "CAUSA" not in veredito["veredito"]
+
+
+def test_item6_distribuicao_denuncia_amostra_concentrada():
+    """ITEM 6. Amostra pequena e amostra ENVIESADA pedem consertos diferentes.
+
+    As 8 elegíveis da gravação real estavam todas na primeira metade, porque
+    o stream morreu aos 30 min. Gravar mais do mesmo jeito não conserta isso.
+    """
+    from pulsearb.analysis.anchor_sweep import _distribuicao_no_span
+
+    base = 1_787_000_000_000
+    todas = [base + i * 300_000 for i in range(12)]   # 12 janelas no span
+    primeira_metade = todas[:4]                        # elegíveis só no começo
+
+    dist = _distribuicao_no_span(primeira_metade, todas)
+
+    assert dist["concentrada"] is True
+    assert dist["quartis"]["q1"] + dist["quartis"]["q2"] == 4
+    assert dist["quartis"]["q3"] == 0
+    assert dist["quartis"]["q4"] == 0
+
+
+def test_item6_distribuicao_espalhada_nao_acusa_vies():
+    """ITEM 6, o contraste: elegíveis por toda a gravação não são enviesadas."""
+    from pulsearb.analysis.anchor_sweep import _distribuicao_no_span
+
+    base = 1_787_000_000_000
+    todas = [base + i * 300_000 for i in range(12)]
+
+    dist = _distribuicao_no_span(todas, todas)
+
+    assert dist["concentrada"] is False
+    assert dist["quartis_com_janela"] == 4
