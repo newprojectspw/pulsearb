@@ -181,3 +181,111 @@ def test_espacamento_minimo_e_padrao_nao_zero():
     Sem espaçamento, o PnL somaria a mesma aposta repetida como se fossem
     apostas independentes."""
     assert BacktestConfig().intervalo_min_entre_entradas_s > 0
+
+
+# ─────────── M2.8: a serie da ancora pode ficar rala com o feed sadio
+
+
+def test_descarte_da_serie_e18_e_contado_por_causa(tmp_path):
+    """O achado da hora de teste do M2.7: ZERO silêncio do RTDS e ainda
+    assim 12 janelas com "abertura em lacuna".
+
+    Não é contradição — são duas séries. `streams` (float) aceita qualquer
+    tick; `streams_e18`, que é a que a âncora usa, recusa o tick sem valor
+    exato e o tick sem carimbo numérico. Recusar está certo; recusar em
+    silêncio é que escondia a causa.
+    """
+    import gzip
+
+    import orjson
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.replay.reader import RecordingReader
+
+    def _rtds(ts_s, payload):
+        ns = int(ts_s * 10**9)
+        return {
+            "ts_mono_ns": ns,
+            "ts_wall_ns": ns,
+            "fonte": "rtds",
+            "payload": {"topic": "crypto_prices_twap_sixty", "payload": payload},
+        }
+
+    base = 1_787_000_000
+    linhas = [
+        # bom: full_accuracy_value + timestamp numérico
+        _rtds(base, {
+            "symbol": "btc/usd",
+            "timestamp": base * 1000,
+            "full_accuracy_value": str(60_000 * 10**18),
+        }),
+        # ruim: sem full_accuracy_value, `value` FLOAT
+        _rtds(base + 1, {
+            "symbol": "btc/usd",
+            "timestamp": (base + 1) * 1000,
+            "value": 60_001.5,
+        }),
+        # ruim: valor exato, mas timestamp que não é número
+        _rtds(base + 2, {
+            "symbol": "btc/usd",
+            "timestamp": "nao-numerico",
+            "full_accuracy_value": str(60_002 * 10**18),
+        }),
+    ]
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    bloco = index.stream_de_ancora()
+
+    assert bloco["ticks_twap_vistos"] == 3
+    # só o primeiro virou ponto utilizável pela âncora
+    assert bloco["pontos_na_serie_e18"] == {"btc": 1}
+    assert bloco["descartados"]["sem_valor_exato"] == 1
+    assert bloco["descartados"]["sem_carimbo_do_servidor"] == 1
+    assert bloco["fracao_descartada"] > 0.6
+
+
+def test_serie_densa_nao_descarta_nada(tmp_path):
+    """O caso são: nenhum descarte, e a fração fica em zero."""
+    import gzip
+
+    import orjson
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.replay.reader import RecordingReader
+
+    base = 1_787_000_000
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for i in range(10):
+            ns = int((base + i) * 10**9)
+            handle.write(
+                orjson.dumps(
+                    {
+                        "ts_mono_ns": ns,
+                        "ts_wall_ns": ns,
+                        "fonte": "rtds",
+                        "payload": {
+                            "topic": "crypto_prices_twap_sixty",
+                            "payload": {
+                                "symbol": "btc/usd",
+                                "timestamp": (base + i) * 1000,
+                                "full_accuracy_value": str((60_000 + i) * 10**18),
+                            },
+                        },
+                    }
+                )
+                + b"\n"
+            )
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    bloco = index.stream_de_ancora()
+
+    assert bloco["descartados_total"] == 0
+    assert bloco["fracao_descartada"] == 0.0
+    assert bloco["pontos_na_serie_e18"]["btc"] == 10
