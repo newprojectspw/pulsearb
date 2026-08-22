@@ -341,3 +341,47 @@ def test_markout_ausente_continua_dizendo_ausente():
 
     assert bloco["markout_centavos_por_share"] is None
     assert bloco["saldo_centavos_por_share"] is None
+
+
+def test_cadencia_separa_serie_densa_de_serie_rala_no_tempo():
+    """M2.8: 1.687 pontos numa hora e ZERO descartes — e ainda assim 12 de 28
+    janelas sem âncora.
+
+    A hipótese do descarte foi refutada pelo dado. Sobra o que este teste
+    mede: o que importa para `em()` não é quantos PONTOS a série tem, é
+    quantos CARIMBOS DISTINTOS e como eles se espaçam. Uma série pode ser
+    densa em pontos e rala em tempo — o republicador reenvia o mesmo valor da
+    Chainlink com o mesmo `timestamp`, e a TWAP on-chain atualiza no ritmo
+    dela.
+    """
+    from pulsearb.backtest.__main__ import _cadencia_da_serie
+
+    base = 1_787_000_000_000
+    # 60 pontos, mas só 4 instantes distintos, espaçados de 30 s
+    serie = [
+        (base + bloco * 30_000, 60_000 * 10**18 + bloco)
+        for bloco in range(4)
+        for _ in range(15)
+    ]
+    bloco = _cadencia_da_serie(serie)
+
+    assert bloco["pontos"] == 60
+    assert bloco["carimbos_distintos"] == 4
+    assert bloco["repeticoes_do_mesmo_carimbo"] == 56
+    assert bloco["intervalo_s"]["max"] == 30.0
+    # 30 s > IDADE_MAX_MS (10 s): toda janela que abrir num desses buracos
+    # fica sem âncora, com o feed perfeitamente saudável
+    assert bloco["buracos_acima_da_idade_maxima"] == 3
+
+
+def test_serie_com_cadencia_boa_nao_tem_buraco():
+    from pulsearb.backtest.__main__ import _cadencia_da_serie
+
+    base = 1_787_000_000_000
+    serie = [(base + i * 2_000, 60_000 * 10**18 + i) for i in range(100)]
+    bloco = _cadencia_da_serie(serie)
+
+    assert bloco["carimbos_distintos"] == 100
+    assert bloco["repeticoes_do_mesmo_carimbo"] == 0
+    assert bloco["intervalo_s"]["p50"] == 2.0
+    assert bloco["buracos_acima_da_idade_maxima"] == 0

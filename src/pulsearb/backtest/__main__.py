@@ -18,6 +18,7 @@ import sys
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -662,7 +663,17 @@ class RecordingIndex:
         pontos = {asset: len(serie) for asset, serie in self.streams_e18.items()}
         return {
             "ticks_twap_vistos": self._twap_vistos,
+            "ativos_no_stream": sorted(self.streams_e18),
             "pontos_na_serie_e18": pontos,
+            # Todos os ativos, e nao so os que operamos: descobrir que o
+            # stream carrega OITO ativos (e nao dois) foi o que explicou a
+            # cadencia por ativo ser 2,13s e nao os 0,86s do API_NOTES 13.1
+            # — aquele numero e agregado, nao por ativo.
+            "cadencia_por_ativo": {
+                asset: _cadencia_da_serie(serie)
+                for asset, serie in sorted(self.streams_e18.items())
+            },
+            "idade_maxima_da_amostra_ms": IDADE_MAX_MS,
             "descartados": dict(self._e18_descartados),
             "descartados_total": descartados,
             "fracao_descartada": round(descartados / vistos, 6),
@@ -819,6 +830,56 @@ def _discordam(a: Resolucao, b: Resolucao) -> bool:
     ra = (a.winning_outcome or "").strip().lower()
     rb = (b.winning_outcome or "").strip().lower()
     return bool(ra and rb and ra != rb)
+
+
+def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
+    """A cadência REAL da série e18 de um ativo, no eixo do servidor.
+
+    M2.8 — o que a hora de teste obrigou a medir. A hipótese de que a série
+    estava rala por descarte foi REFUTADA (`fracao_descartada: 0.0`), e ainda
+    assim 12 de 28 janelas ficaram com a abertura sem âncora. Sobra uma
+    explicação testável: `em()` recusa a amostra mais velha que
+    `IDADE_MAX_MS`, e o que importa não é quantos PONTOS a série tem, é
+    quantos CARIMBOS DISTINTOS ela tem e como eles se espaçam.
+
+    Se o RTDS republica o mesmo valor da Chainlink várias vezes com o MESMO
+    `timestamp` — o que é plausível, porque a TWAP on-chain atualiza no ritmo
+    dela e não no ritmo do republicador —, a série pode ter 1.687 pontos e
+    poucas centenas de instantes distintos, com buracos de dezenas de
+    segundos entre eles. Densa em pontos, rala em tempo.
+
+    `maior_intervalo_s` acima de `IDADE_MAX_MS/1000` é a prova: qualquer
+    janela que abra dentro de um buraco desses fica sem âncora, com o feed
+    perfeitamente saudável.
+    """
+    if not serie:
+        return {"pontos": 0}
+    carimbos = sorted({ts for ts, _ in serie})
+    if len(carimbos) < 2:
+        return {"pontos": len(serie), "carimbos_distintos": len(carimbos)}
+    intervalos = [(b - a) / 1000.0 for a, b in pairwise(carimbos)]
+    ordenados = sorted(intervalos)
+    span = (carimbos[-1] - carimbos[0]) / 1000.0
+    return {
+        "pontos": len(serie),
+        "carimbos_distintos": len(carimbos),
+        "repeticoes_do_mesmo_carimbo": len(serie) - len(carimbos),
+        "janela_coberta_s": round(span, 1),
+        "intervalo_s": {
+            "p50": round(_percentil_simples(ordenados, 50), 3),
+            "p90": round(_percentil_simples(ordenados, 90), 3),
+            "p99": round(_percentil_simples(ordenados, 99), 3),
+            "max": round(ordenados[-1], 3),
+        },
+        "buracos_acima_da_idade_maxima": sum(
+            1 for i in intervalos if i * 1000 > IDADE_MAX_MS
+        ),
+    }
+
+
+def _percentil_simples(ordenados: list[float], pct: float) -> float:
+    rank = max(1, min(len(ordenados), int(-(-pct * len(ordenados) // 100))))
+    return ordenados[rank - 1]
 
 
 def _e18_do_payload(bruto: Any) -> int | None:

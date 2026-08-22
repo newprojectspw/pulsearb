@@ -1203,9 +1203,17 @@ nunca parecia parada. Só a idade **por tópico** enxerga.
 Defesa em duas camadas (M2.7), com os dois limiares dimensionados sobre a
 cadência medida de ~0,86 s p50 / 2,47 s p99 (§13.1):
 
-- `rtds_sem_dados_timeout_s` = 30 s (~12× o p99) → derruba e reconecta
-- `rtds_topico_mudo_s` = 15 s (~6× o p99) → **reassina**, não derruba:
-  derrubar custaria o tópico que ainda estava são
+- `rtds_sem_dados_timeout_s` = 30 s → derruba e reconecta
+- `rtds_topico_mudo_s` = 15 s → **reassina**, não derruba: derrubar custaria
+  o tópico que ainda estava são
+
+> **Correção de 2026-08-22 sobre a cadência.** Os 0,86 s da §13.1 são
+> AGREGADOS, e a hora de teste mostrou por quê: o stream carrega **oito
+> ativos** (btc, eth, sol, xrp, doge, bnb, hype, zec), não dois — a
+> assinatura não filtra símbolo de propósito (§6.2). Numa hora vieram 13.500
+> ticks de `twap_sixty`, ~1.687 por ativo, ou seja **2,13 s por ativo**. Os
+> dois limiares seguem válidos (15 s ≈ 7× e 30 s ≈ 14× a cadência por
+> ativo), mas justificá-los com "12× o p99" era usar o número errado.
 - `rtds_reassinatura_intervalo_s` = 300 s → seguro barato, não o mecanismo
   principal (6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de
   60 s/h — o relógio sozinho não fecha a conta)
