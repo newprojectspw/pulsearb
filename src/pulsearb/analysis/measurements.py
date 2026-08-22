@@ -471,7 +471,7 @@ def medir_markout(
                 sem_referencia += 1
                 continue
             for recorte in (
-                "total",
+                RECORTE_GERAL,
                 f"duracao={janela.duracao_s}s",
                 f"hora_utc={hora:02d}",
                 f"distancia_ticks={min(distancia_ticks, 5)}",
@@ -518,6 +518,10 @@ def _primeiro_book(timelines: list[Any], ts_ns: int) -> Any:
 #: propósito, e ainda assim ela não decide a favor do maker.
 PRECO_DE_TAXA_MAXIMA = 0.50
 
+#: O recorte "tudo junto" da tabela de markout. Constante, e nao string
+#: solta, para que produtor e consumidor nao possam divergir de novo.
+RECORTE_GERAL = "total"
+
 
 def _rebate_vs_markout(
     *,
@@ -558,7 +562,13 @@ def _rebate_vs_markout(
     )
     rebate_centavos = fee_rebate_rate * taxa_no_pico * 100.0
     tabela = markout.get("markout_centavos_por_share") or {}
-    geral = (tabela.get("geral") or {}).get(horizonte) or {}
+    # M2.8: a chave e "total", nao "geral". O nome errado fazia
+    # `markout_centavos_por_share` e `saldo_centavos_por_share` sairem NULL
+    # em silencio — justamente na conta que eu tinha apontado como a unica
+    # confiavel do bloco, porque nao depende da formula de rewards nao
+    # verificada. Um `.get` que erra a chave devolve None com a mesma cara de
+    # "nao ha dado", e foi assim que passou.
+    geral = (tabela.get(RECORTE_GERAL) or {}).get(horizonte) or {}
     markout_centavos = geral.get("media")
     custo = abs(markout_centavos) if isinstance(markout_centavos, (int, float)) else None
     return {

@@ -289,3 +289,55 @@ def test_serie_densa_nao_descarta_nada(tmp_path):
     assert bloco["descartados_total"] == 0
     assert bloco["fracao_descartada"] == 0.0
     assert bloco["pontos_na_serie_e18"]["btc"] == 10
+
+
+def test_rebate_vs_markout_encontra_a_tabela_de_verdade():
+    """M2.8: eu tinha errado a chave, e o erro saía como `null`.
+
+    `_rebate_vs_markout` procurava o recorte "geral"; o produtor grava
+    "total". Um `.get` que erra a chave devolve `None` com exatamente a mesma
+    cara de "não há dado" — e era a conta que eu havia apontado como a única
+    confiável do bloco, porque não depende da fórmula de rewards não
+    verificada.
+
+    O teste amarra produtor e consumidor pela MESMA constante, que é o que
+    impede os dois de divergirem de novo.
+    """
+    from pulsearb.analysis.measurements import RECORTE_GERAL, conta_do_maker
+
+    saida = conta_do_maker(
+        rewards={},
+        markout={
+            "markout_centavos_por_share": {
+                RECORTE_GERAL: {"5s": {"media": -0.59, "n": 9153}}
+            }
+        },
+        fee_rebate_rate=0.2,
+        fee_rate=0.07,
+        fee_exponent=1.0,
+    )
+    bloco = saida["rebate_vs_markout"]
+
+    assert bloco["markout_centavos_por_share"] == -0.59
+    assert bloco["execucoes_medidas"] == 9153
+    # rebate 0,35 c/share contra custo 0,59 → a rota maker não se paga
+    assert bloco["rebate_centavos_por_share"] == 0.35
+    assert bloco["saldo_centavos_por_share"] == round(0.35 - 0.59, 4)
+    assert bloco["saldo_centavos_por_share"] < 0
+
+
+def test_markout_ausente_continua_dizendo_ausente():
+    """A defesa contra o remédio: sem tabela, `None` continua sendo `None` —
+    e não um zero que pareceria saldo neutro."""
+    from pulsearb.analysis.measurements import conta_do_maker
+
+    bloco = conta_do_maker(
+        rewards={},
+        markout={},
+        fee_rebate_rate=0.2,
+        fee_rate=0.07,
+        fee_exponent=1.0,
+    )["rebate_vs_markout"]
+
+    assert bloco["markout_centavos_por_share"] is None
+    assert bloco["saldo_centavos_por_share"] is None
