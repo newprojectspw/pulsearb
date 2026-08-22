@@ -1218,6 +1218,32 @@ cadência medida de ~0,86 s p50 / 2,47 s p99 (§13.1):
   principal (6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de
   60 s/h — o relógio sozinho não fecha a conta)
 
+### 13.9b. O silêncio que dura até o FIM era invisível `[CORRIGIDO no M2.9]`
+
+A hora de teste do M2.7 zerou o silêncio do RTDS — **0 s contra 163.195 s** —
+e mesmo assim 12 de 28 janelas ficaram sem âncora. Três hipóteses caíram pelo
+dado antes de a certa aparecer:
+
+| Hipótese | Refutada por |
+|---|---|
+| a série e18 descarta pontos em silêncio | `fracao_descartada: 0.0` |
+| a série é rala em tempo (carimbos repetidos) | `repeticoes_do_mesmo_carimbo: 0`, cadência p50 de 1 s |
+| **a série simplesmente ACABA na metade** | `janela_coberta_s: 1790` de uma hora ✅ |
+
+O `twap_sixty` parou aos ~30 min e **não voltou**. As 12 janelas sem âncora
+são exatamente as que abrem depois do último carimbo da série.
+
+**Por que o detector de silêncio disse zero.** Ele só fecha um silêncio
+quando chega o evento **seguinte**, para medir a duração. Se o tópico emudece
+e nunca mais volta, esse evento não existe — e o silêncio mais importante da
+gravação, o que mata todo o resto dela, era o único que não aparecia. Um
+detector que enxerga todo silêncio menos o último é pior que nenhum.
+
+**Densidade não é cobertura.** O trecho que existia estava impecável: cadência
+de 1 s, zero descarte, zero buraco acima da idade máxima. Todos os
+diagnósticos anteriores olhavam só o trecho que existe. `cobertura_da_gravacao`
+compara a série com o span da gravação e é o número que faltava.
+
 ### 13.10. `clobRewards` nunca chegava ao disco `[CORRIGIDO no M2.7]`
 
 O recorder lia `raw_gamma` em memória e gravava apenas campos **derivados**,

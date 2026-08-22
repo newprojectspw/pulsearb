@@ -385,3 +385,132 @@ def test_serie_com_cadencia_boa_nao_tem_buraco():
     assert bloco["repeticoes_do_mesmo_carimbo"] == 0
     assert bloco["intervalo_s"]["p50"] == 2.0
     assert bloco["buracos_acima_da_idade_maxima"] == 0
+
+
+# ─────────── M2.9: o silêncio que dura até o FIM era invisível
+
+
+def _gravacao_com_twap_que_para(tmp_path, *, para_em_s, dura_s):
+    """RTDS onde o twap_sixty emudece na metade e NÃO volta.
+
+    `crypto_prices` continua o tempo todo — é o que faz o silêncio ser do
+    TÓPICO e não da conexão, e é o que o watchdog de dados não pega.
+    """
+    import gzip
+
+    import orjson
+
+    base = 1_787_000_000
+    linhas = []
+    for i in range(dura_s):
+        ts = base + i
+        ns = ts * 10**9
+        if i < para_em_s:
+            linhas.append(
+                {
+                    "ts_mono_ns": ns,
+                    "ts_wall_ns": ns,
+                    "fonte": "rtds",
+                    "payload": {
+                        "topic": "crypto_prices_twap_sixty",
+                        "payload": {
+                            "symbol": "btc/usd",
+                            "timestamp": ts * 1000,
+                            "full_accuracy_value": str((60_000 + i) * 10**18),
+                        },
+                    },
+                }
+            )
+        # o outro tópico NUNCA para
+        linhas.append(
+            {
+                "ts_mono_ns": ns + 1,
+                "ts_wall_ns": ns + 1,
+                "fonte": "rtds",
+                "payload": {
+                    "topic": "crypto_prices",
+                    "payload": {
+                        "symbol": "btcusdt",
+                        "timestamp": ts * 1000,
+                        "value": 60_000.0 + i,
+                    },
+                },
+            }
+        )
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+    return caminho
+
+
+def _indexar(caminho):
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.replay.reader import RecordingReader
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    return index
+
+
+def test_silencio_que_dura_ate_o_fim_da_gravacao_e_detectado(tmp_path):
+    """O defeito que a hora de teste expôs.
+
+    O detector só fechava um silêncio quando chegava o evento SEGUINTE. Se o
+    tópico emudece e nunca mais volta, esse evento não existe — e o relatório
+    dizia "0 silêncios" com metade da gravação sem preço-verdade.
+
+    Um detector que enxerga todo silêncio menos o último é pior que nenhum,
+    porque o último é o que mata a gravação inteira.
+    """
+    index = _indexar(
+        _gravacao_com_twap_que_para(tmp_path, para_em_s=300, dura_s=600)
+    )
+    bloco = index.silencio_do_rtds()
+
+    assert bloco["silencios"] >= 1, "o silêncio até o fim continua invisível"
+    ate_o_fim = [
+        s for s in bloco["silencios_so_do_topico"] if s.get("ate_o_fim_da_gravacao")
+    ]
+    assert ate_o_fim, "faltou marcar que o silêncio se estende até o fim"
+    assert ate_o_fim[0]["asset"] == "btc"
+    assert ate_o_fim[0]["duracao_s"] > 250
+    # a conexão estava VIVA: o outro tópico continuou chegando
+    assert ate_o_fim[0]["eventos_rtds_durante"] > 0
+    assert bloco["suspeita_de_assinatura_caducada"] >= 1
+
+
+def test_cobertura_denuncia_serie_que_some_na_metade(tmp_path):
+    """DENSIDADE NÃO É COBERTURA.
+
+    Na hora de teste a série tinha cadência de 1 s, zero descarte e zero
+    buraco acima da idade máxima — impecável no trecho que existia — e cobria
+    metade da gravação. Todos os diagnósticos anteriores olhavam só o trecho
+    que existe.
+    """
+    index = _indexar(
+        _gravacao_com_twap_que_para(tmp_path, para_em_s=300, dura_s=600)
+    )
+    bloco = index.stream_de_ancora()
+
+    # o trecho que existe está impecável...
+    cadencia = bloco["cadencia_por_ativo"]["btc"]
+    assert cadencia["buracos_acima_da_idade_maxima"] == 0
+    assert bloco["fracao_descartada"] == 0.0
+
+    # ...e ainda assim metade da gravação não tem preço-verdade
+    cobertura = bloco["cobertura_da_gravacao"]["por_ativo"]["btc"]
+    assert cobertura["fracao_da_gravacao"] < 0.55
+    assert cobertura["silencio_final_s"] > 250
+
+
+def test_serie_completa_nao_acusa_silencio_final(tmp_path):
+    """O caso são: o tópico vai até o fim e nada é acusado."""
+    index = _indexar(
+        _gravacao_com_twap_que_para(tmp_path, para_em_s=600, dura_s=600)
+    )
+
+    assert index.silencio_do_rtds()["silencios"] == 0
+    cobertura = index.stream_de_ancora()["cobertura_da_gravacao"]["por_ativo"]["btc"]
+    assert cobertura["fracao_da_gravacao"] > 0.95
+    assert cobertura["silencio_final_s"] < 5

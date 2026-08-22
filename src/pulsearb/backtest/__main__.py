@@ -264,6 +264,10 @@ class RecordingIndex:
         # M2.8: quantos ticks do twap chegaram, e quantos NAO viraram
         # ponto da serie e18 — o descarte que a ancora sofre calada.
         self._twap_vistos = 0
+        # M2.9: extremos da gravacao, para detectar silencio que dura ate
+        # o FIM — o caso que o detector do M2.6 nao via.
+        self._primeiro_record_ns = 0
+        self._ultimo_record_ns = 0
         self._e18_descartados: Counter[str] = Counter()
         # M2.2 B.2: execuções observadas, por token.
         self.trades: dict[str, list[tuple[int, float, float, str]]] = defaultdict(list)
@@ -281,6 +285,12 @@ class RecordingIndex:
     def _primeira_passada(self) -> None:
         """Metadados, preço-verdade e resoluções. Ignora o book por completo."""
         for record in self.reader.iter_records():
+            if record.ts_wall_ns > 0:
+                if self._primeiro_record_ns == 0:
+                    self._primeiro_record_ns = record.ts_wall_ns
+                self._ultimo_record_ns = max(
+                    self._ultimo_record_ns, record.ts_wall_ns
+                )
             if record.fonte == "gap" and isinstance(record.payload, dict):
                 self.gaps.append(record.payload)
             elif record.fonte == "discovery_snapshot" and isinstance(record.payload, dict):
@@ -596,9 +606,29 @@ class RecordingIndex:
         outro fenômeno, e este bloco existe para nomeá-lo em vez de deixá-lo
         como "gaps: rtds silencio 837s" no relatório.
         """
-        por_escopo: Counter[str] = Counter()
-        for silencio in self._silencios:
-            por_escopo[str(silencio["escopo"])] += 1
+        # M2.9: o silencio que dura ate o FIM da gravacao era INVISIVEL. O
+        # detector so fecha um silencio quando chega o evento SEGUINTE — e se
+        # o topico emudece e nunca mais volta, esse evento nao existe. Foi
+        # exatamente o que aconteceu na hora de teste: o twap_sixty parou aos
+        # ~30 min e o relatorio disse "0 silencios" com metade da gravacao sem
+        # preco-verdade. Um detector que enxerga todo silencio menos o ultimo
+        # e pior que nenhum, porque o ultimo e o que mata a gravacao inteira.
+        for asset, ultimo in sorted(self._ultimo_twap_ns.items()):
+            ocioso_ns = self._ultimo_record_ns - ultimo
+            if ocioso_ns > SILENCIO_MIN_NS:
+                self._silencios.append(
+                    {
+                        "inicio_ns": ultimo,
+                        "fim_ns": self._ultimo_record_ns,
+                        "duracao_s": round(ocioso_ns / 1e9, 2),
+                        "escopo": "topico_do_ativo",
+                        "asset": asset,
+                        "ate_o_fim_da_gravacao": True,
+                        "eventos_rtds_durante": self._eventos_rtds
+                        - self._eventos_no_ultimo_twap.get(asset, 0),
+                    }
+                )
+        por_escopo = Counter(str(s["escopo"]) for s in self._silencios)
         conexao = [s for s in self._silencios if s["escopo"] == "conexao_inteira"]
         topico = [s for s in self._silencios if s["escopo"] == "topico_do_ativo"]
         # A separação que decide o conserto: silêncio do tópico COM eventos
@@ -674,6 +704,7 @@ class RecordingIndex:
                 for asset, serie in sorted(self.streams_e18.items())
             },
             "idade_maxima_da_amostra_ms": IDADE_MAX_MS,
+            "cobertura_da_gravacao": self._cobertura_da_serie(),
             "descartados": dict(self._e18_descartados),
             "descartados_total": descartados,
             "fracao_descartada": round(descartados / vistos, 6),
@@ -689,6 +720,57 @@ class RecordingIndex:
                 "correto (converter inventaria precisao), mas a consequencia "
                 "precisa aparecer. `sem_carimbo_do_servidor` quer dizer "
                 "`timestamp` que nao e numero, e ai o conserto e no parser."
+            ),
+        }
+
+    def _cobertura_da_serie(self) -> dict[str, Any]:
+        """Quanto da GRAVAÇÃO a série do preço-verdade cobre (M2.9).
+
+        O número que faltava. Na hora de teste a série e18 tinha 1.687 pontos
+        por ativo, cadência de 1 s, **zero** descartes e **zero** buracos
+        acima da idade máxima — tudo saudável. E cobria **1.790 s de uma hora
+        de gravação**: metade. As 12 janelas sem âncora eram exatamente as que
+        abriam depois do último carimbo da série.
+
+        Densidade não é cobertura. Uma série pode ser impecável no trecho que
+        existe e simplesmente não existir na outra metade — e todos os
+        diagnósticos anteriores olhavam só o trecho que existe.
+        """
+        span_ns = self._ultimo_record_ns - self._primeiro_record_ns
+        if span_ns <= 0 or not self.streams_e18:
+            return {"gravacao_s": 0.0}
+        gravacao_s = span_ns / 1e9
+        por_ativo = {}
+        for asset, serie in sorted(self.streams_e18.items()):
+            if not serie:
+                continue
+            carimbos = [ts for ts, _ in serie]
+            coberto = (max(carimbos) - min(carimbos)) / 1000.0
+            # ms do servidor → ns de parede, para comparar os dois eixos
+            fim_ns = max(carimbos) * 1_000_000
+            por_ativo[asset] = {
+                "coberto_s": round(coberto, 1),
+                "fracao_da_gravacao": round(coberto / gravacao_s, 4),
+                "silencio_final_s": round(
+                    max(0.0, (self._ultimo_record_ns - fim_ns) / 1e9), 1
+                ),
+            }
+        pior = min(
+            (v["fracao_da_gravacao"] for v in por_ativo.values()), default=0.0
+        )
+        return {
+            "gravacao_s": round(gravacao_s, 1),
+            "por_ativo": por_ativo,
+            "pior_fracao_coberta": pior,
+            "nota": (
+                "M2.9. DENSIDADE NAO E COBERTURA. `cadencia_por_ativo` olha o "
+                "trecho que EXISTE e pode estar impecavel — cadencia de 1s, "
+                "zero descarte, zero buraco — enquanto a serie simplesmente "
+                "nao existe na outra metade da gravacao. "
+                "`silencio_final_s` alto quer dizer que o topico emudeceu e "
+                "NAO voltou ate o fim do arquivo: toda janela que abrir depois "
+                "disso fica sem ancora. Foi o caso da hora de teste, com "
+                "`fracao_da_gravacao` de 0,50."
             ),
         }
 
