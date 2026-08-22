@@ -125,13 +125,20 @@ do primeiro dólar real.
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
-| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ⬜ não existe `.github/` no repositório |
+| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ `.github/workflows/check.yml` |
 
-Sobre 5.3: o único check que aparece nos PRs é o SonarCloud, que vem do
-GitHub App e faz análise estática — **não executa a suíte**. Hoje os 384
-testes só rodam na máquina de quem está editando. Para um projeto que vai
-mexer com dinheiro real, "passou no meu ambiente" não é verificação: um
-commit que quebre o backtest chega ao `main` com o quality gate verde.
+Sobre 5.3: até aqui o único check que aparecia nos PRs era o SonarCloud, que
+vem do GitHub App e faz análise estática — **não executa a suíte**. Os 384
+testes só rodavam na máquina de quem estava editando, e um commit que
+quebrasse o backtest chegava ao `main` com o quality gate verde. Para um
+projeto que vai mexer com dinheiro real, "passou no meu ambiente" não é
+verificação.
+
+O workflow roda os mesmos alvos do `make check` (`ruff check src tests
+scripts` + `pytest`), e instala o extra `analise` junto com `dev` de
+propósito: sem pyarrow o teste de `replay/columnar.py` cai num
+`importorskip` e some do relatório — a CI passaria rodando menos testes que
+a máquina do desenvolvedor.
 
 ---
 
