@@ -666,3 +666,52 @@ def test_total_s_e_uniao_e_nao_soma(tmp_path):
     assert bloco["total_s"] <= 900
     assert bloco["total_s"] > 500
     assert bloco["total_s_por_escopo"]["topico_do_ativo"] <= 900
+
+
+# ─────────── M2.10: a curva de edge pode não morder, e isso precisa aparecer
+
+
+class _RelatorioFalso:
+    """O mínimo que `curva_de_edge_por_threshold` lê de um BacktestReport."""
+
+    def __init__(self, trades, pnl):
+        self.trades = list(range(trades))
+        self.pnl_liquido = pnl
+        self.hit_rate = 0.5
+
+
+def test_curva_degenerada_avisa_que_o_threshold_nao_mordeu():
+    """O caso da gravação real de 2026-08-22.
+
+    Os seis thresholds — de 0,01 a 0,12 — deram os mesmos 11 trades e o mesmo
+    PnL. O modelo previa ~0,83 contra um book perto de 0,50, então a entrada
+    já nascia com edge acima do teto da grade. `max()` desempatou pelo
+    primeiro e o relatório publicou `melhor_threshold: 0.01` — que se lê como
+    escolha quando é artefato.
+    """
+    from pulsearb.backtest.report import curva_de_edge_por_threshold
+
+    curva = curva_de_edge_por_threshold(
+        {t: _RelatorioFalso(11, 3.3626) for t in (0.01, 0.02, 0.03, 0.05, 0.08, 0.12)}
+    )
+
+    assert curva["threshold_mordeu"] is False
+    assert curva["resultados_distintos"] == 1
+    assert "nao excluiu sinal nenhum" in curva["nota"] or "nunca excluiu" in curva["nota"]
+
+
+def test_curva_que_separa_resultados_e_comparacao_de_verdade():
+    """O contraste: grade que morde continua sendo leitura legítima."""
+    from pulsearb.backtest.report import curva_de_edge_por_threshold
+
+    curva = curva_de_edge_por_threshold(
+        {
+            0.01: _RelatorioFalso(40, 17.218),
+            0.02: _RelatorioFalso(39, 8.9041),
+            0.12: _RelatorioFalso(37, 20.9593),
+        }
+    )
+
+    assert curva["threshold_mordeu"] is True
+    assert curva["resultados_distintos"] == 3
+    assert curva["melhor_threshold"] == 0.12

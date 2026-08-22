@@ -52,6 +52,23 @@ negociáveis depois do resultado.
 o próprio critério 1.2 diz que abaixo de 200 é ruído. **1.5 é teto de
 capacidade: edge nenhum resolve.**
 
+**Ressalva do M2.10 sobre o critério 1.1.** Na gravação real os seis
+thresholds da grade (0,01 a 0,12) deram os **mesmos** 11 trades e o **mesmo**
+PnL: o modelo previa ~0,83 de probabilidade contra um book perto de 0,50,
+então a entrada já nascia com edge acima do teto da grade. O limiar nunca
+excluiu sinal nenhum, e o `melhor_threshold: 0.01` publicado era desempate de
+`max()`, não escolha.
+
+O relatório agora diz isso em `curva_de_edge.threshold_mordeu`. Enquanto ele
+for `false`, **avaliar 1.1 é medir outra coisa** — o resultado não carrega
+informação sobre threshold. Antes de concluir qualquer coisa sobre limiar de
+entrada, subir a grade com `--thresholds`.
+
+Vale reparar no que essa degenerescência também insinua: um modelo que
+discorda do book em ~33 pontos de probabilidade, sistematicamente, contra
+participantes que viram o mesmo dado no mesmo segundo. Isso é grande demais
+para ser edge e merece explicação antes de virar veredito.
+
 ### SÓ MAKER VIÁVEL — exige as 5
 
 | # | Critério | Exigido | Medido (1 h real) | |

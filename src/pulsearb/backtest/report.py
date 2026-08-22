@@ -249,10 +249,42 @@ def curva_de_edge_por_threshold(
         key=lambda kv: kv[1].pnl_liquido if kv[1].trades else -math.inf,
         default=(None, None),
     )
+    # M2.10: a grade pode não MORDER. Na gravação real de 2026-08-22 os seis
+    # thresholds — de 0,01 a 0,12 — deram os mesmos 11 trades e o mesmo PnL
+    # de 3,3626: o modelo previa ~0,83 de probabilidade contra um book perto
+    # de 0,50, então a entrada já nascia com edge acima do teto da grade e
+    # subir o limiar não excluía nada. `max()` desempatou pelo primeiro e o
+    # relatório publicou `melhor_threshold: 0.01`, que se lê como escolha
+    # quando é artefato.
+    #
+    # O criterio 1 do VEREDITO_M2 ("PnL positivo com threshold >= 0,02")
+    # avaliado sobre uma curva degenerada mede outra coisa: o resultado nao
+    # tem informacao nenhuma sobre threshold. Dizer isso e o minimo.
+    distintos = {
+        (len(report.trades), round(report.pnl_liquido, 4))
+        for report in trades_por_threshold.values()
+    }
+    mordeu = len(distintos) > 1
     return {
         "por_threshold": linhas,
         "melhor_threshold": melhor[0],
         "melhor_pnl_usdc": (
             round(melhor[1].pnl_liquido, 4) if melhor[1] is not None else None
+        ),
+        "threshold_mordeu": mordeu,
+        "resultados_distintos": len(distintos),
+        "nota": (
+            "`threshold_mordeu` false = TODOS os thresholds da grade "
+            "produziram o mesmo conjunto de trades e o mesmo PnL, logo o "
+            "limiar nunca excluiu sinal nenhum e `melhor_threshold` e "
+            "desempate de `max()`, nao escolha. Ler a curva como se fosse "
+            "otimizacao seria inventar um resultado. Duas causas possiveis, "
+            "e as duas importam: a grade e baixa demais para este sinal (o "
+            "edge nasce acima de 0,12), ou ha pouco trade e a grade nao tem "
+            "o que separar. Suba a grade com --thresholds antes de concluir "
+            "qualquer coisa sobre limiar de entrada."
+            if not mordeu
+            else "`threshold_mordeu` true = a grade separou resultados, "
+            "entao `melhor_threshold` e comparacao de verdade."
         ),
     }
