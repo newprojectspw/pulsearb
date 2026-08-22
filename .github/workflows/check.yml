@@ -14,6 +14,17 @@ on:
     branches: [main]
   pull_request:
 
+# Menor privilégio para o GITHUB_TOKEN. Sem este bloco o token herda o escopo
+# default do repositório, que pode incluir ESCRITA — e um job que só roda
+# lint e teste não tem por que poder empurrar commit, abrir release ou mexer
+# em issue. Achado real do SonarCloud no PR #19 (Security Rating C).
+#
+# Vale mais aqui do que num projeto qualquer: este repositório vai receber
+# chave privada de carteira no M4. Todo escopo que o CI não precisa é escopo
+# que não pode vazar.
+permissions:
+  contents: read
+
 # Push novo no mesmo branch cancela a execução anterior: o que importa é o
 # último commit, e fila de CI obsoleta só atrasa o resultado que conta.
 concurrency:
