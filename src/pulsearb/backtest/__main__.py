@@ -260,6 +260,10 @@ class RecordingIndex:
         self._eventos_rtds = 0
         self._eventos_no_ultimo_twap: dict[str, int] = {}
         self._topicos_rtds: Counter[str] = Counter()
+        # M2.8: quantos ticks do twap chegaram, e quantos NAO viraram
+        # ponto da serie e18 — o descarte que a ancora sofre calada.
+        self._twap_vistos = 0
+        self._e18_descartados: Counter[str] = Counter()
         # M2.2 B.2: execuções observadas, por token.
         self.trades: dict[str, list[tuple[int, float, float, str]]] = defaultdict(list)
 
@@ -356,6 +360,7 @@ class RecordingIndex:
         self._ultimo_rtds_ns = record.ts_wall_ns
 
         if tick is not None and tick.topic == TOPIC_TWAP_60:
+            self._twap_vistos += 1
             anterior = self._ultimo_twap_ns.get(tick.asset)
             if anterior and record.ts_wall_ns - anterior > SILENCIO_MIN_NS:
                 # Silêncio DESTE ativo. Se o contador global de eventos RTDS
@@ -376,8 +381,16 @@ class RecordingIndex:
             self._ultimo_twap_ns[tick.asset] = record.ts_wall_ns
             self._eventos_no_ultimo_twap[tick.asset] = self._eventos_rtds
             self.streams[tick.asset].append((record.ts_wall_ns, tick.price))
+            # M2.8: o descarte aqui era SILENCIOSO, e e o que explica
+            # "janelas com abertura em lacuna" numa gravacao com ZERO
+            # silencio do RTDS. `streams` (float) fica denso e
+            # `streams_e18` fica ralo — e a ancora usa o segundo.
             valor = _e18_do_payload(record.payload)
-            if valor is not None and tick.src_timestamp_ms > 0:
+            if valor is None:
+                self._e18_descartados["sem_valor_exato"] += 1
+            elif tick.src_timestamp_ms <= 0:
+                self._e18_descartados["sem_carimbo_do_servidor"] += 1
+            else:
                 self.streams_e18[tick.asset].append(
                     (int(tick.src_timestamp_ms), valor)
                 )
@@ -615,6 +628,56 @@ class RecordingIndex:
                 "`suspeita_de_assinatura_caducada` > 0 e o gatilho para essa "
                 "correcao. ATENCAO: o recorder NAO pode ser alterado com "
                 "gravacao em curso; ver docs/RUNBOOK_VPS.md."
+            ),
+        }
+
+    def stream_de_ancora(self) -> dict[str, Any]:
+        """Quantos ticks do TWAP viraram ponto utilizável pela âncora.
+
+        M2.8 — o achado que a hora de teste do M2.7 revelou. A gravação teve
+        **zero** silêncio do RTDS e ainda assim 12 janelas ficaram com a
+        abertura "em lacuna" e 20 de 28 sem cobertura do stream. Não é
+        contradição: são duas séries diferentes.
+
+        `streams` (float) aceita qualquer tick e fica denso. `streams_e18`
+        (inteiro, eixo do carimbo do servidor) — que é a série que a **âncora
+        usa** — descarta o tick em dois casos, e até o M2.8 os dois eram
+        mudos:
+
+        1. `sem_valor_exato`: sem `full_accuracy_value` e com `value` vindo
+           como float. Converter float para e18 seria inventar precisão nos
+           dígitos que a varredura de τ existe justamente para enxergar
+           (§13.8), então o ponto é recusado — corretamente. O que faltava
+           era CONTAR a recusa.
+        2. `sem_carimbo_do_servidor`: `timestamp` que não é número (string,
+           por exemplo — e o CLOB manda timestamp como string em outros
+           eventos, §6.1). Vira 0 e o ponto cai fora.
+
+        Uma taxa de descarte alta aqui explica âncora ausente, janela fora do
+        backtest e varredura sem amostra — tudo de uma vez, e sem que o feed
+        tenha piscado.
+        """
+        descartados = sum(self._e18_descartados.values())
+        vistos = max(self._twap_vistos, 1)
+        pontos = {asset: len(serie) for asset, serie in self.streams_e18.items()}
+        return {
+            "ticks_twap_vistos": self._twap_vistos,
+            "pontos_na_serie_e18": pontos,
+            "descartados": dict(self._e18_descartados),
+            "descartados_total": descartados,
+            "fracao_descartada": round(descartados / vistos, 6),
+            "nota": (
+                "M2.8. A ancora usa a serie e18 (inteira, eixo do servidor), "
+                "nao a serie float. Um tick que chega sadio pelo fio pode nao "
+                "virar ponto da serie e18 — e ate agora isso era silencioso. "
+                "`fracao_descartada` alta com `silencio_do_rtds.total_s` ZERO "
+                "e a explicacao para janela com abertura 'em lacuna' sem que "
+                "o feed tenha piscado: a lacuna e da NOSSA serie, nao do feed. "
+                "`sem_valor_exato` quer dizer que o payload veio sem "
+                "`full_accuracy_value` e com `value` float — recusar e "
+                "correto (converter inventaria precisao), mas a consequencia "
+                "precisa aparecer. `sem_carimbo_do_servidor` quer dizer "
+                "`timestamp` que nao e numero, e ai o conserto e no parser."
             ),
         }
 
@@ -1306,6 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
             "resolucoes": index.resolucoes_resumo(janelas),
             "gaps": index.gaps,
             "silencio_do_rtds": index.silencio_do_rtds(),
+            "stream_de_ancora": index.stream_de_ancora(),
             "memoria": index.uso_de_memoria(),
         },
         "integridade": {

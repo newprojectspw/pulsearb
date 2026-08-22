@@ -181,3 +181,163 @@ def test_espacamento_minimo_e_padrao_nao_zero():
     Sem espaçamento, o PnL somaria a mesma aposta repetida como se fossem
     apostas independentes."""
     assert BacktestConfig().intervalo_min_entre_entradas_s > 0
+
+
+# ─────────── M2.8: a serie da ancora pode ficar rala com o feed sadio
+
+
+def test_descarte_da_serie_e18_e_contado_por_causa(tmp_path):
+    """O achado da hora de teste do M2.7: ZERO silêncio do RTDS e ainda
+    assim 12 janelas com "abertura em lacuna".
+
+    Não é contradição — são duas séries. `streams` (float) aceita qualquer
+    tick; `streams_e18`, que é a que a âncora usa, recusa o tick sem valor
+    exato e o tick sem carimbo numérico. Recusar está certo; recusar em
+    silêncio é que escondia a causa.
+    """
+    import gzip
+
+    import orjson
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.replay.reader import RecordingReader
+
+    def _rtds(ts_s, payload):
+        ns = int(ts_s * 10**9)
+        return {
+            "ts_mono_ns": ns,
+            "ts_wall_ns": ns,
+            "fonte": "rtds",
+            "payload": {"topic": "crypto_prices_twap_sixty", "payload": payload},
+        }
+
+    base = 1_787_000_000
+    linhas = [
+        # bom: full_accuracy_value + timestamp numérico
+        _rtds(base, {
+            "symbol": "btc/usd",
+            "timestamp": base * 1000,
+            "full_accuracy_value": str(60_000 * 10**18),
+        }),
+        # ruim: sem full_accuracy_value, `value` FLOAT
+        _rtds(base + 1, {
+            "symbol": "btc/usd",
+            "timestamp": (base + 1) * 1000,
+            "value": 60_001.5,
+        }),
+        # ruim: valor exato, mas timestamp que não é número
+        _rtds(base + 2, {
+            "symbol": "btc/usd",
+            "timestamp": "nao-numerico",
+            "full_accuracy_value": str(60_002 * 10**18),
+        }),
+    ]
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for linha in linhas:
+            handle.write(orjson.dumps(linha) + b"\n")
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    bloco = index.stream_de_ancora()
+
+    assert bloco["ticks_twap_vistos"] == 3
+    # só o primeiro virou ponto utilizável pela âncora
+    assert bloco["pontos_na_serie_e18"] == {"btc": 1}
+    assert bloco["descartados"]["sem_valor_exato"] == 1
+    assert bloco["descartados"]["sem_carimbo_do_servidor"] == 1
+    assert bloco["fracao_descartada"] > 0.6
+
+
+def test_serie_densa_nao_descarta_nada(tmp_path):
+    """O caso são: nenhum descarte, e a fração fica em zero."""
+    import gzip
+
+    import orjson
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.replay.reader import RecordingReader
+
+    base = 1_787_000_000
+    caminho = tmp_path / "rec.jsonl.gz"
+    with gzip.open(caminho, "wb") as handle:
+        for i in range(10):
+            ns = int((base + i) * 10**9)
+            handle.write(
+                orjson.dumps(
+                    {
+                        "ts_mono_ns": ns,
+                        "ts_wall_ns": ns,
+                        "fonte": "rtds",
+                        "payload": {
+                            "topic": "crypto_prices_twap_sixty",
+                            "payload": {
+                                "symbol": "btc/usd",
+                                "timestamp": (base + i) * 1000,
+                                "full_accuracy_value": str((60_000 + i) * 10**18),
+                            },
+                        },
+                    }
+                )
+                + b"\n"
+            )
+
+    index = RecordingIndex(RecordingReader(caminho))
+    index.build()
+    bloco = index.stream_de_ancora()
+
+    assert bloco["descartados_total"] == 0
+    assert bloco["fracao_descartada"] == 0.0
+    assert bloco["pontos_na_serie_e18"]["btc"] == 10
+
+
+def test_rebate_vs_markout_encontra_a_tabela_de_verdade():
+    """M2.8: eu tinha errado a chave, e o erro saía como `null`.
+
+    `_rebate_vs_markout` procurava o recorte "geral"; o produtor grava
+    "total". Um `.get` que erra a chave devolve `None` com exatamente a mesma
+    cara de "não há dado" — e era a conta que eu havia apontado como a única
+    confiável do bloco, porque não depende da fórmula de rewards não
+    verificada.
+
+    O teste amarra produtor e consumidor pela MESMA constante, que é o que
+    impede os dois de divergirem de novo.
+    """
+    from pulsearb.analysis.measurements import RECORTE_GERAL, conta_do_maker
+
+    saida = conta_do_maker(
+        rewards={},
+        markout={
+            "markout_centavos_por_share": {
+                RECORTE_GERAL: {"5s": {"media": -0.59, "n": 9153}}
+            }
+        },
+        fee_rebate_rate=0.2,
+        fee_rate=0.07,
+        fee_exponent=1.0,
+    )
+    bloco = saida["rebate_vs_markout"]
+
+    assert bloco["markout_centavos_por_share"] == -0.59
+    assert bloco["execucoes_medidas"] == 9153
+    # rebate 0,35 c/share contra custo 0,59 → a rota maker não se paga
+    assert bloco["rebate_centavos_por_share"] == 0.35
+    assert bloco["saldo_centavos_por_share"] == round(0.35 - 0.59, 4)
+    assert bloco["saldo_centavos_por_share"] < 0
+
+
+def test_markout_ausente_continua_dizendo_ausente():
+    """A defesa contra o remédio: sem tabela, `None` continua sendo `None` —
+    e não um zero que pareceria saldo neutro."""
+    from pulsearb.analysis.measurements import conta_do_maker
+
+    bloco = conta_do_maker(
+        rewards={},
+        markout={},
+        fee_rebate_rate=0.2,
+        fee_rate=0.07,
+        fee_exponent=1.0,
+    )["rebate_vs_markout"]
+
+    assert bloco["markout_centavos_por_share"] is None
+    assert bloco["saldo_centavos_por_share"] is None
