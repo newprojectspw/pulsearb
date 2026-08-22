@@ -1182,6 +1182,61 @@ gravar mais horas não estreita.
 empate. Ver §12.7 sobre os campos cujo significado não foi confirmado:
 `full_accuracy_value` **está** confirmado, `value` (float) só serve para
 exibição.
+### 13.9. O feed-verdade emudece de DUAS formas `[MEDIDO 2026-08-22]`
+
+8h de gravação mediram **163.195 s de silêncio** do RTDS. Não é um fenômeno,
+são dois — e o keepalive da §13.7 não cobre nenhum dos dois.
+
+| Forma | Ocorrências | Maior | O que está acontecendo |
+|---|---|---|---|
+| Conexão inteira muda | 6 | 3.796 s | socket ABERTO, ping/pong respondendo, e o servidor parou de publicar |
+| Tópico mudo, conexão viva | 48 | — | a assinatura daquele tópico caduca; os outros continuam chegando |
+
+**Por que o keepalive não pega.** Ping/pong prova que o cano está aberto; não
+prova que a água está passando. `async for message in ws` espera para sempre,
+e o servidor responde PING alegremente enquanto não publica nada.
+
+**Por que um watchdog de dados sozinho não basta.** Ele conta *qualquer*
+mensagem — e nos 48 casos o outro tópico continuava chegando, então a conexão
+nunca parecia parada. Só a idade **por tópico** enxerga.
+
+Defesa em duas camadas (M2.7), com os dois limiares dimensionados sobre a
+cadência medida de ~0,86 s p50 / 2,47 s p99 (§13.1):
+
+- `rtds_sem_dados_timeout_s` = 30 s (~12× o p99) → derruba e reconecta
+- `rtds_topico_mudo_s` = 15 s (~6× o p99) → **reassina**, não derruba:
+  derrubar custaria o tópico que ainda estava são
+- `rtds_reassinatura_intervalo_s` = 300 s → seguro barato, não o mecanismo
+  principal (6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de
+  60 s/h — o relógio sozinho não fecha a conta)
+
+### 13.10. `clobRewards` nunca chegava ao disco `[CORRIGIDO no M2.7]`
+
+O recorder lia `raw_gamma` em memória e gravava apenas campos **derivados**,
+em `snake_case`. Consequências que custaram uma investigação:
+
+1. `grep clobRewards` na gravação retorna **vazio** — e isso é esperado, não
+   um bug. `grep rewards_min_size` encontra. Não há contradição entre o grep
+   vazio e o relatório contar o campo como presente: são nomes diferentes do
+   mesmo dado, um em cada lado da normalização.
+2. Como `clobRewards` não era gravado, `rewards_daily_rate: None` era um beco
+   sem saída. **Três causas produzem esse mesmo `None`**, com consertos
+   opostos: o mercado não participa (a lista não existe); o programa expirou
+   para aquela janela (a lista tem `start_date`/`end_date` fora do intervalo);
+   ou o nosso leitor procura a chave errada (a lista existe com outro nome de
+   campo — o defeito do `price_change`, §6.1b, de novo).
+
+A terceira é a mais provável no dado observado: **199 janelas vieram com
+`rewardsMinSize` e `rewardsMaxSpread` presentes e taxa diária ausente**, o
+que é estranho para mercado que não participa do programa.
+
+Desde o M2.7 o array cru vai gravado em `rewards_bruto`, e o leitor aceita as
+grafias alternativas (`rewards_config`, `dailyRate`, …) **contando qual
+apareceu** em vez de escolher em silêncio.
+
+---
+
+
 
 
 ---

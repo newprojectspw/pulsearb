@@ -12,15 +12,25 @@ Regras do hot path aplicadas aqui:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import websockets
 
 from pulsearb.obs import get_logger
+
+
+class SilencioDeDados(RuntimeError):
+    """Conexão aberta que parou de publicar (M2.7).
+
+    Exceção própria, e não `TimeoutError` genérico, para que o motivo da
+    queda saia nomeado em `close_reasons` — "caiu" sem causa foi o beco sem
+    saída que o M2.1 já tinha custado uma investigação inteira.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,12 @@ class ReconnectingFeed:
     """
 
     #: Quantos motivos de queda guardar. `close_count` conta todas.
+    #: De quanto em quanto tempo o laço de reassinatura acorda para
+    #: verificar se algum tópico emudeceu. Precisa ser bem menor que o
+    #: limiar de tópico mudo, para que a reação não custe um passo
+    #: inteiro além do limiar.
+    PASSO_DE_VERIFICACAO_S = 5.0
+
     MAX_CLOSE_REASONS = 200
 
     def __init__(
@@ -59,6 +75,11 @@ class ReconnectingFeed:
         reconnect_max_seconds: float = 30.0,
         ws_ping_interval: float | None = 20.0,
         ws_ping_timeout: float | None = 20.0,
+        # M2.7: watchdog por AUSÊNCIA DE DADOS. `None` = desligado, que é o
+        # comportamento até o M2.6 — quem quer o watchdog pede por ele.
+        sem_dados_timeout_s: float | None = None,
+        # M2.7: reassinatura periódica. `None` = desligada.
+        reassinatura_intervalo_s: float | None = None,
         on_event: OnEvent | None = None,
     ) -> None:
         self.name = name
@@ -69,6 +90,8 @@ class ReconnectingFeed:
         self.reconnect_max_seconds = reconnect_max_seconds
         self.ws_ping_interval = ws_ping_interval
         self.ws_ping_timeout = ws_ping_timeout
+        self.sem_dados_timeout_s = sem_dados_timeout_s
+        self.reassinatura_intervalo_s = reassinatura_intervalo_s
         self.on_event = on_event
         self.log = get_logger(f"pulsearb.feeds.{name}")
 
@@ -85,6 +108,13 @@ class ReconnectingFeed:
         # padrão de queda aparece nas últimas dezenas tanto quanto em todas.
         self.close_reasons: list[dict[str, Any]] = []
         self.close_count = 0
+        #: reconexões forçadas pelo watchdog de ausência de dados (M2.7)
+        self.watchdog_reconexoes = 0
+        #: reassinaturas periódicas enviadas (M2.7)
+        self.reassinaturas = 0
+        self.reassinaturas_com_erro = 0
+        #: reassinaturas disparadas por tópico mudo, não pelo relógio
+        self.reassinaturas_por_silencio = 0
 
     # ------------------------------------------------------------------ estado
     @property
@@ -146,7 +176,16 @@ class ReconnectingFeed:
                     self.log.info("conectado", url=self.url)
                     await self._on_connected(ws)
                     backoff = self.reconnect_initial_seconds  # conexão boa zera o backoff
-                    await self._receive_loop(ws)
+                    reassinatura = asyncio.create_task(
+                        self._loop_de_reassinatura(ws),
+                        name=f"reassinatura-{self.name}",
+                    )
+                    try:
+                        await self._receive_loop(ws)
+                    finally:
+                        reassinatura.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await reassinatura
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -194,7 +233,7 @@ class ReconnectingFeed:
         return motivo
 
     async def _receive_loop(self, ws: websockets.ClientConnection) -> None:
-        async for message in ws:
+        async for message in self._mensagens(ws):
             ts_mono_ns = time.monotonic_ns()
             ts_wall_ns = time.time_ns()
             raw = message if isinstance(message, bytes) else message.encode()
@@ -213,6 +252,110 @@ class ReconnectingFeed:
                 result = self.on_event(event)
                 if result is not None:
                     await result
+
+    async def _mensagens(
+        self, ws: websockets.ClientConnection
+    ) -> AsyncIterator[str | bytes]:
+        """As mensagens da conexão, com watchdog de AUSÊNCIA DE DADOS (M2.7).
+
+        `async for message in ws` espera para sempre. O keepalive de protocolo
+        do M2.1 mantém o socket vivo — o servidor responde PING —, então uma
+        conexão que parou de PUBLICAR fica aberta e muda indefinidamente, sem
+        erro nenhum. Foi o que a gravação de 8h mediu: **6 silêncios de
+        conexão inteira, o maior de 3.796 segundos**, com o socket aberto o
+        tempo todo.
+
+        Ping/pong prova que o CANO está aberto; não prova que a ÁGUA está
+        passando. O watchdog cobre a segunda pergunta: sem mensagem nenhuma
+        por `sem_dados_timeout_s`, derruba e reconecta.
+
+        Cuidado que o limiar exige: ele conta QUALQUER mensagem, então não
+        pega assinatura de um tópico caducando enquanto outros continuam
+        chegando — para isso existe a reassinatura periódica. Os dois
+        mecanismos cobrem os dois fenômenos medidos, e nenhum cobre o outro.
+        """
+        while True:
+            if self.sem_dados_timeout_s is None:
+                yield await ws.recv()
+                continue
+            try:
+                yield await asyncio.wait_for(
+                    ws.recv(), timeout=self.sem_dados_timeout_s
+                )
+            except TimeoutError as erro:
+                self.watchdog_reconexoes += 1
+                self.log.warning(
+                    "watchdog: conexão viva e MUDA, derrubando para reconectar",
+                    sem_dados_s=self.sem_dados_timeout_s,
+                    idade_ultima_msg_s=round(self.last_message_age_seconds, 2),
+                    watchdog_reconexoes=self.watchdog_reconexoes,
+                )
+                raise SilencioDeDados(
+                    f"{self.name}: sem mensagem por "
+                    f"{self.sem_dados_timeout_s}s com a conexão aberta"
+                ) from erro
+
+    async def _loop_de_reassinatura(self, ws: websockets.ClientConnection) -> None:
+        """Reenvia a assinatura periodicamente enquanto a conexão viver.
+
+        A gravação de 8h mediu **48 casos de tópico mudo com a conexão viva e
+        recebendo outros tópicos** — a assinatura caduca do lado do servidor e
+        nada avisa. Reenviá-la custa um frame de texto de poucos bytes e
+        elimina a classe inteira de falha.
+
+        Erro ao reenviar não derruba a conexão de propósito: se o socket
+        morreu, o laço de recepção descobre e reconecta com o motivo certo;
+        derrubar aqui trocaria um diagnóstico bom por um genérico.
+        """
+        intervalo = self.reassinatura_intervalo_s
+        if not intervalo:
+            return
+        # O relógio sozinho não basta, e a aritmética diz por quê: 48
+        # caducidades em 8h são 6 por hora, e reassinar a cada 300s deixaria
+        # até 300s de cegueira POR caducidade — 1.800s/h contra uma meta de
+        # 60s/h. O intervalo é seguro barato; quem cumpre a meta é a REAÇÃO
+        # ao tópico que emudeceu.
+        passo = min(intervalo, self.PASSO_DE_VERIFICACAO_S)
+        desde_a_ultima = 0.0
+        while True:
+            await asyncio.sleep(passo)
+            desde_a_ultima += passo
+            urgencia = self._reassinatura_urgente()
+            if urgencia is None and desde_a_ultima < intervalo:
+                continue
+            try:
+                await self._reassinar(ws)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.reassinaturas_com_erro += 1
+                self.log.warning(
+                    "reassinatura falhou", erro=f"{type(exc).__name__}: {exc}"
+                )
+                return
+            self.reassinaturas += 1
+            desde_a_ultima = 0.0
+            if urgencia is not None:
+                self.reassinaturas_por_silencio += 1
+                self.log.warning(
+                    "tópico mudo com a conexão viva: reassinando",
+                    motivo=urgencia,
+                    total_por_silencio=self.reassinaturas_por_silencio,
+                )
+            else:
+                self.log.debug("reassinatura periódica", total=self.reassinaturas)
+
+    def _reassinatura_urgente(self) -> str | None:
+        """Há motivo para reassinar AGORA, sem esperar o intervalo?
+
+        Subclasse responde. `None` = nada urgente. A string é o motivo, e vai
+        para o log — "reassinou" sem causa seria o mesmo beco sem saída que
+        "caiu" sem código de close (API_NOTES §13.7).
+        """
+        return None
+
+    async def _reassinar(self, ws: websockets.ClientConnection) -> None:
+        """O que reenviar na reassinatura. Subclasse implementa."""
 
     @staticmethod
     def _parse(raw: bytes) -> Any:

@@ -50,7 +50,7 @@ alinhada é acumulada por dentro, para o relatório.
 from __future__ import annotations
 
 import math
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -101,6 +101,12 @@ MAX_AMOSTRAS = 50
 # (produção mostrou ~21k divergências numa sessão; 72h não podem virar lista
 # sem teto).
 MAX_MAGNITUDES = 50_000
+
+#: Acima desta variação do p50 entre horas, a suspeita deixa de ser
+#: lacuna e passa a ser deriva de relógio. 50 ms são 10x o p50 observado
+#: em operação sã (5 ms) e ainda muito abaixo dos 2s que quebrariam o
+#: modelo endgame (§13.4).
+DERIVA_SUSPEITA_MS = 50.0
 
 # Estados de topo retidos por token para o alinhamento por carimbo. 64 cobre
 # a desordem observada (milissegundos) com folga; o custo é ~64 tuplas por
@@ -1089,18 +1095,33 @@ class MonitorDeRelogio:
     isso o número é lido como teto do erro, não como o erro do relógio.
     """
 
-    __slots__ = ("amostras", "max_amostras", "total")
+    #: Amostras retidas por hora. O suficiente para percentis estáveis
+    #: sem virar lista sem teto numa gravação de 72h.
+    MAX_POR_HORA = 5_000
+
+    __slots__ = ("amostras", "max_amostras", "por_hora", "total")
 
     def __init__(self, max_amostras: int = 20_000) -> None:
         self.amostras: list[float] = []
         self.max_amostras = max_amostras
         self.total = 0
+        # M2.7 tarefa 4.2: o offset agregado por HORA da gravação. Sem o eixo
+        # do tempo, um p99 de 2.535 ms com p50 de 5 ms é ambíguo entre duas
+        # causas com consertos opostos — deriva de relógio (NTP quebrado, que
+        # cresce e move a MEDIANA) e artefato de lacuna (pico isolado quando
+        # as mensagens voltam, com a mediana firme). A série por hora separa
+        # as duas de imediato.
+        self.por_hora: dict[int, list[float]] = defaultdict(list)
 
     def observar(self, carimbo_servidor_ms: float, chegada_wall_ns: int) -> None:
         if carimbo_servidor_ms <= 0:
             return
         self.total += 1
         offset_ms = chegada_wall_ns / 1e6 - carimbo_servidor_ms
+        hora = int(chegada_wall_ns // (3_600 * 10**9))
+        serie = self.por_hora[hora]
+        if len(serie) < self.MAX_POR_HORA:
+            serie.append(offset_ms)
         if len(self.amostras) < self.max_amostras:
             self.amostras.append(offset_ms)
         else:
@@ -1108,6 +1129,38 @@ class MonitorDeRelogio:
             # que preserva a cauda recente sem depender de aleatoriedade
             # (que quebraria a reprodutibilidade do replay).
             self.amostras[self.total % self.max_amostras] = offset_ms
+
+    def _por_hora_resumo(self) -> dict[str, Any]:
+        """p50 e p99 por hora, mais o veredito deriva × artefato."""
+        linhas = {}
+        p50s: list[float] = []
+        for hora in sorted(self.por_hora):
+            ordenadas = sorted(self.por_hora[hora])
+            p50 = _percentil(ordenadas, 50)
+            linhas[str(hora)] = {
+                "n": len(ordenadas),
+                "p50_ms": p50,
+                "p99_ms": _percentil(ordenadas, 99),
+            }
+            if p50 is not None:
+                p50s.append(p50)
+        if len(p50s) < 2:
+            veredito = "sem horas suficientes para separar deriva de artefato"
+        else:
+            variacao = max(p50s) - min(p50s)
+            veredito = (
+                f"p50 varia {variacao:.1f} ms entre as horas. "
+                + (
+                    "MEDIANA ESTAVEL: o p99 alto e artefato de lacuna — quando "
+                    "as mensagens voltam, o carimbo do servidor ja e velho. "
+                    "Nao e deriva de relogio."
+                    if variacao < DERIVA_SUSPEITA_MS
+                    else "MEDIANA MOVENDO: suspeita de DERIVA de relogio (NTP "
+                    "ausente ou quebrado). Ver runbook 4.1 — deriva entra no "
+                    "backtest como se fosse sinal."
+                )
+            )
+        return {"por_hora": linhas, "veredito": veredito}
 
     def resumo(self) -> dict[str, Any]:
         ordenadas = sorted(self.amostras)
@@ -1117,6 +1170,7 @@ class MonitorDeRelogio:
             "p99_ms": _percentil(ordenadas, 99),
             "min_ms": round(min(ordenadas), 3) if ordenadas else None,
             "max_ms": round(max(ordenadas), 3) if ordenadas else None,
+            "deriva": self._por_hora_resumo(),
             "nota": (
                 "chegada_local - carimbo_do_servidor. Inclui latencia de rede, "
                 "então é TETO do erro de relógio, não o erro em si. Valor "

@@ -120,6 +120,32 @@ class ParametrosDeReward:
 CHAVES_DE_REWARD = ("rewards_daily_rate", "rewards_max_spread", "rewards_min_size")
 
 
+def _forma_do_bruto(meta: dict[str, Any]) -> str:
+    """Que forma o `rewards_bruto` gravado tem — a chave do diagnóstico.
+
+    M2.7 tarefa 2. Antes deste marco o recorder gravava só três campos
+    derivados e jogava fora o `raw_gamma`, então `rewards_daily_rate: None`
+    era um beco sem saída: não dava para saber se a lista não existia, se
+    existia com outro nome de campo, ou se existia com vigência expirada.
+
+    `__nao_gravado__` é o que aparece em gravação feita ANTES do M2.7 — e
+    dizer isso é melhor que fingir que a ausência é informação sobre o
+    mercado.
+    """
+    bruto = meta.get("rewards_bruto")
+    if not isinstance(bruto, dict):
+        return "__nao_gravado__"
+    chave = bruto.get("chave_da_lista")
+    if chave is None:
+        return "sem_lista_de_rewards"
+    n = bruto.get("n_entradas") or 0
+    if not n:
+        return f"{chave}:lista_vazia"
+    chaves = bruto.get("chaves_das_entradas") or []
+    tem_data = any("date" in str(k).lower() for k in chaves)
+    return f"{chave}:{n}_entradas{':com_vigencia' if tem_data else ''}"
+
+
 def _motivo_sem_pool(meta: dict[str, Any]) -> str:
     """Por que esta janela ficou de fora da conta de reward.
 
@@ -343,6 +369,9 @@ def simular(
     competicao: dict[str, list[float]] = defaultdict(list)
     janelas_com_pool = 0
     motivos: Counter[str] = Counter()
+    formas: Counter[str] = Counter()
+    duracoes_sem_pool: Counter[str] = Counter()
+    duracoes_com_pool: Counter[str] = Counter()
     presentes: Counter[str] = Counter()
     ausentes: Counter[str] = Counter()
 
@@ -360,8 +389,11 @@ def simular(
                     presentes[chave] += 1
                 else:
                     ausentes[chave] += 1
+            formas[_forma_do_bruto(meta)] += 1
+            duracoes_sem_pool[str(meta.get("duracao_s") or "?")] += 1
             continue
         janelas_com_pool += 1
+        duracoes_com_pool[str(meta.get('duracao_s') or '?')] += 1
         recortes = _recortes(janela)
         for token in (janela.token_up, janela.token_down):
             timeline = janela.books.get(token)
@@ -387,11 +419,14 @@ def simular(
                 )
 
     saida["janelas_com_pool_de_reward"] = janelas_com_pool
+    saida["duracoes_com_pool"] = dict(duracoes_com_pool)
     saida["janelas_sem_pool_de_reward"] = {
         "total": sum(motivos.values()),
         "por_motivo": dict(motivos),
         "campos_presentes": dict(presentes),
         "campos_ausentes": dict(ausentes),
+        "forma_do_rewards_bruto": dict(formas),
+        "duracoes_sem_pool": dict(duracoes_sem_pool),
         "nota": (
             "M2.6 BUG 5. A cadeia do dado esta INTEIRA e foi conferida: a "
             "descoberta guarda `raw_gamma`, o recorder extrai "

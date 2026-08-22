@@ -95,6 +95,11 @@ async def run(settings: Settings, fake_feeds: bool) -> None:
             stale_after_seconds=settings.feeds.stale_after_seconds_twap,
             reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
             reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+            # M2.7: mesma defesa do recorder. O dashboard ao vivo sofria da
+            # mesma cegueira — só não tinha como medi-la.
+            sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
+            topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
+            reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
         )
         poly = PolyMarketWsFeed(
             url=settings.endpoints.clob_market_ws,

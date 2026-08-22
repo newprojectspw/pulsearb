@@ -58,6 +58,30 @@ class FeedSettings(BaseModel):
     # diferença de chegada entre as duas conexões (milissegundos), não a
     # gravação inteira.
     rtds_dedup_janela: int = 20000
+    # ─────────────────────────── M2.7: a gravação estava cega metade do tempo
+    # 8h de gravação real mediram 163.195s de silêncio do RTDS: 48 casos de
+    # tópico mudo com a conexão VIVA e 6 de conexão inteira muda, a maior de
+    # 3.796s. São dois fenômenos distintos, e cada default abaixo ataca um.
+    #
+    # WATCHDOG DE AUSÊNCIA DE DADOS — cobre a conexão inteira muda. O
+    # ping/pong do M2.1 prova que o cano está aberto, não que a água está
+    # passando: o servidor responde PING e a conexão fica aberta e muda para
+    # sempre. 30s são ~12x o p99 de cadência medido (2,47s, API_NOTES 13.1) e
+    # ~35x o p50 — nunca se observou lacuna legítima dessa ordem. O custo de
+    # um falso positivo é uma reconexão (~1s); o de um falso negativo foi
+    # medido em 3.796s de cegueira.
+    rtds_sem_dados_timeout_s: float = 30.0
+    # TÓPICO MUDO — cobre a assinatura caducando. O watchdog acima NÃO pega
+    # este caso, porque conta qualquer mensagem e o outro tópico continuava
+    # chegando. 15s são ~6x o p99 de cadência; com o passo de verificação de
+    # 5s, a reação sai em no máximo 20s.
+    rtds_topico_mudo_s: float = 15.0
+    # REASSINATURA PERIÓDICA — seguro barato, não o mecanismo principal. A
+    # aritmética: 6 caducidades/h x até 300s de cegueira cada seriam 1.800s/h
+    # contra a meta de 60s/h, então o relógio sozinho não cumpre a meta —
+    # quem cumpre é a reação por tópico mudo. Isto cobre a caducidade que não
+    # produz silêncio observável e custa um frame de texto a cada 5 min.
+    rtds_reassinatura_intervalo_s: float = 300.0
 
 
 class RecorderSettings(BaseModel):
