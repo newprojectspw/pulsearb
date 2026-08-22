@@ -466,3 +466,35 @@ def test_indexador_aceita_resolucao_sintetica_da_gamma(tmp_path):
     janelas = index.janelas()
     assert len(janelas) == 1
     assert janelas[0].resolveu_up is True
+
+
+def test_resumo_contem_o_caminho_do_relatorio(tmp_path, monkeypatch):
+    """O `scripts/resumo_m2.py` recebe caminho da CLI — mesma classe do `--json`.
+
+    O M2.5 já tinha contido o caminho de SAÍDA do backtest depois de um
+    achado real do SonarCloud, e a razão registrada lá vale igual aqui:
+    conferir o caminho depois de montá-lo continua entregando a string de
+    fora ao sistema de arquivos. O resumo nasceu fazendo `open(sys.argv[1])`
+    direto e repetiu o defeito.
+    """
+    import importlib.util
+
+    caminho_do_script = Path(__file__).resolve().parents[1] / "scripts" / "resumo_m2.py"
+    spec = importlib.util.spec_from_file_location("resumo_m2", caminho_do_script)
+    resumo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resumo)
+
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    (tmp_path / "ok.json").write_text("{}", encoding="utf-8")
+
+    alvo = resumo.caminho_do_relatorio("ok.json")
+    assert alvo.is_absolute()
+    assert alvo.parent == tmp_path.resolve()
+
+    # absoluto, travessia e sufixo errado não chegam ao disco
+    for ruim in ("/etc/passwd.json", "../fora.json", "ok.txt"):
+        with pytest.raises(SystemExit, match="inválido"):
+            resumo.caminho_do_relatorio(ruim)
+
+    with pytest.raises(SystemExit, match="não encontrado"):
+        resumo.caminho_do_relatorio("nao_existe.json")
