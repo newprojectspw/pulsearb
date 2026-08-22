@@ -263,3 +263,126 @@ def test_topico_nao_assinado_nao_dispara_reassinatura():
     feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 1.0)
 
     assert feed._reassinatura_urgente() is None
+
+
+# ──────── M2.11: reassinar deixou de ser resposta muito antes da tentativa 2.482
+
+
+class _WsQueRegistraClose:
+    """Socket que só anota se foi fechado, e com qual código."""
+
+    def __init__(self):
+        self.fechado_com = None
+
+    async def close(self, code=None, reason=None):
+        self.fechado_com = (code, reason)
+
+
+@pytest.mark.asyncio
+async def test_escalada_derruba_a_conexao_quando_reassinar_nao_adianta():
+    """O achado da gravação de 2026-08-22.
+
+    2.482 reassinaturas, uma a cada 5 s, e a cobertura da série da âncora
+    ficou em 8,1 % em duas horas cheias. O watchdog de ausência de dados
+    nunca disparou porque o socket estava vivo recebendo outro tráfego.
+
+    Reassinar cobre assinatura caducada. Não cobre o servidor que parou de
+    publicar aquele tópico para aquela conexão — e aí insistir é só ruído.
+    """
+    feed = _feed(
+        topico_mudo_s=0.01,
+        reassinatura_intervalo_s=3600.0,
+        reassinaturas_ate_derrubar=3,
+    )
+    feed.PASSO_DE_VERIFICACAO_S = 0.01
+    # o tópico está mudo e NUNCA volta — reassinar não muda nada
+    feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 5.0)
+
+    async def _fingir(_ws):
+        return None
+
+    feed._reassinar = _fingir
+    ws = _WsQueRegistraClose()
+
+    await asyncio.wait_for(feed._loop_de_reassinatura(ws), timeout=2.0)
+
+    assert ws.fechado_com is not None, "a conexão não foi derrubada"
+    codigo, motivo = ws.fechado_com
+    assert codigo == 1012, "1012 (service restart) é o código honesto aqui"
+    assert "mudo" in motivo
+    assert feed.reconexoes_por_escalada == 1
+    # insistiu o suficiente para não ser gatilho nervoso, e parou
+    assert feed.reassinaturas_por_silencio >= 3
+
+
+@pytest.mark.asyncio
+async def test_topico_que_volta_zera_a_escalada():
+    """O contraste que impede a escalada de virar reconexão em looping.
+
+    Se o tópico volta, a contagem reinicia — senão uma gravação longa
+    acumularia tentativas de horas diferentes e derrubaria a conexão por
+    causa de um silêncio já resolvido.
+    """
+    feed = _feed(
+        topico_mudo_s=0.01,
+        reassinatura_intervalo_s=3600.0,
+        reassinaturas_ate_derrubar=3,
+    )
+    feed.PASSO_DE_VERIFICACAO_S = 0.01
+    feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 5.0)
+
+    async def _fingir(_ws):
+        # o tópico VOLTA na primeira reassinatura
+        feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 0.0)
+
+    feed._reassinar = _fingir
+    ws = _WsQueRegistraClose()
+
+    tarefa = asyncio.create_task(feed._loop_de_reassinatura(ws))
+    await asyncio.sleep(0.15)
+    tarefa.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tarefa
+
+    assert ws.fechado_com is None, "derrubou uma conexão que tinha se recuperado"
+    assert feed.reconexoes_por_escalada == 0
+
+
+@pytest.mark.asyncio
+async def test_escalada_desligada_mantem_o_comportamento_do_m27():
+    """`None` = desligada. Quem não pede escalada não a recebe."""
+    feed = _feed(
+        topico_mudo_s=0.01,
+        reassinatura_intervalo_s=3600.0,
+        reassinaturas_ate_derrubar=None,
+    )
+    feed.PASSO_DE_VERIFICACAO_S = 0.01
+    feed.last_tick_by_key[(TOPIC_TWAP_60, "btc")] = _tick(TOPIC_TWAP_60, 5.0)
+
+    async def _fingir(_ws):
+        return None
+
+    feed._reassinar = _fingir
+    ws = _WsQueRegistraClose()
+
+    tarefa = asyncio.create_task(feed._loop_de_reassinatura(ws))
+    await asyncio.sleep(0.1)
+    tarefa.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tarefa
+
+    assert ws.fechado_com is None
+    assert feed.reconexoes_por_escalada == 0
+    assert feed.reassinaturas_por_silencio > 3, "seguiu reassinando sem parar"
+
+
+def test_rotulo_nao_contamina_o_campo_fonte_da_gravacao():
+    """`rotulo` é só para o log.
+
+    Mudar `name` renomearia `fonte` no disco — a gravação inteira passaria a
+    dizer `rtds[0]` e o leitor, que casa por `fonte == "rtds"`, pararia de
+    enxergar o feed-verdade. O rótulo existe justamente para não fazer isso.
+    """
+    feed = _feed(rotulo="rtds[1]")
+    assert feed.name == "rtds"
+    assert feed.rotulo == "rtds[1]"

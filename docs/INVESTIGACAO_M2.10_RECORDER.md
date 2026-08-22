@@ -4,9 +4,15 @@
 diferentes, por dois motivos independentes — e nenhum dos dois é bug de
 medição.**
 
-Nada em `src/pulsearb/recorder/` ou `src/pulsearb/feeds/` foi alterado nesta
-investigação, conforme o escopo do ciclo. As correções propostas ficam
-descritas ao fim, para um ciclo com a gravação parada.
+> **A resposta curta acima envelheceu.** Ela valia com a evidência do dia 22
+> às 20:20. A medição de cobertura por hora, que veio depois, mostrou que a
+> defesa do M2.7 rodou e **não funcionou** — ver a seção final. O texto do
+> meio fica como estava, de propósito: apagar o raciocínio anterior
+> esconderia por que a conclusão mudou.
+
+A investigação original não alterou `recorder/` nem `feeds/`. O **M2.11**
+alterou `feeds/base.py` (escalada e rótulo por conexão) — código escrito e
+testado, **que não pode ser deployado com gravação em curso**.
 
 ## A evidência
 
@@ -142,12 +148,39 @@ zcat pulsearb-20260822-2000.jsonl.gz \
 
 Nenhum destes foi aplicado. Todos são em `feeds/` ou `recorder/`.
 
-| # | Conserto | Por quê |
-|---|---|---|
-| A | `RtdsFeed` recebe um índice e loga como `rtds[0]` / `rtds[1]` | Sem isso não há como atribuir um alarme a uma conexão, e toda investigação recomeça do zero |
-| B | `_reassinatura_urgente` reportar **todos** os tópicos atrasados, não o primeiro | Hoje um alarme sobre `crypto_prices` esconde que o `twap_sixty` também estava mudo |
-| C | Escalada: após N reassinaturas sem tick novo, derrubar o socket e reconectar | Reassinar não revive conexão morta — 2.482 tentativas em ~3,4 h são a prova |
-| D | Contar e reportar os eventos **descartados** por `parse_rtds_event`/filtro de ativo | Hoje eles somem entre o fio e o relógio do detector, e é isso que faz o log parecer mentira |
+| # | Conserto | Estado | Por quê |
+|---|---|---|---|
+| A | Rótulo por conexão no log (`rtds[0]` / `rtds[1]`) | ✅ **M2.11** | Sem isso não há como atribuir um alarme a uma conexão, e toda investigação recomeça do zero |
+| B | `_reassinatura_urgente` reportar todos os tópicos atrasados | ✅ **M2.10** — nomeia o pior par (tópico, ativo) e conta os demais | Um alarme sobre `crypto_prices` escondia que o `twap_sixty` também estava mudo |
+| C | **Escalada**: após N reassinaturas sem tick novo, derrubar o socket | ✅ **M2.11**, testada — ⏳ aguarda deploy | Reassinar não revive conexão morta — 2.482 tentativas são a prova |
+| D | Contar os eventos descartados por `parse_rtds_event`/filtro de ativo | ⬜ | Hoje eles somem entre o fio e o relógio do detector |
+
+### O que a medição de cobertura acrescentou (2026-08-22, 20:20 UTC)
+
+A contagem de `crypto_prices_twap_sixty` por hora fechou a questão do item 0.5
+e reclassificou o conserto C de "proposto" para **necessário**:
+
+| Hora | cobertura da série da âncora |
+|---|---|
+| 15:00 (parcial, 5 min) | 98,7 % |
+| 16:00 | 46,9 % |
+| 17:00 | **8,1 %** |
+| 18:00 | 21,0 % |
+| 19:00 | **8,1 %** |
+| 20:00 (parcial, 17 min) | 114 % |
+| **Total (4 h 22 min)** | **28,5 %** |
+
+O recorder **rodava com o M2.7** e a defesa **não funcionou**: 2.482
+reassinaturas, uma a cada 5 s, e duas horas cheias a 8,1 %. O
+`sem_dados_timeout_s` nunca disparou — não há linha de reconexão no log —,
+logo o socket estava vivo recebendo outro tráfego enquanto o tópico não vinha.
+
+Isso derruba a leitura otimista que eu tinha registrado acima ("os 2.482
+alarmes não são prova de que a defesa falhou"). Eles **são** prova, agora que
+a cobertura foi medida: a defesa rodou, insistiu 2.482 vezes, e a série da
+âncora ficou em 28,5 %. A parte da Causa 1 que continua válida é outra — o
+alarme não é atribuível a uma das duas conexões, e é isso que o conserto A
+resolve.
 
 Fora de escopo, já anotado: `idade_por_topico` (`feeds/rtds.py:205`) reduz os
 ativos do tópico pelo **menor** tempo — um ativo vivo mascara sete mortos.
