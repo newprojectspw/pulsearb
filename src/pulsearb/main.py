@@ -100,6 +100,9 @@ async def run(settings: Settings, fake_feeds: bool) -> None:
             sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
             topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
             reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
+            reassinaturas_ate_derrubar=(
+                settings.feeds.rtds_reassinaturas_ate_derrubar
+            ),
         )
         poly = PolyMarketWsFeed(
             url=settings.endpoints.clob_market_ws,

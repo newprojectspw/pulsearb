@@ -80,6 +80,14 @@ class ReconnectingFeed:
         sem_dados_timeout_s: float | None = None,
         # M2.7: reassinatura periódica. `None` = desligada.
         reassinatura_intervalo_s: float | None = None,
+        # M2.11: ESCALADA. Depois de N reassinaturas urgentes seguidas sem o
+        # tópico voltar, derruba o socket e deixa o laço de reconexão agir.
+        # `None` = desligada (comportamento do M2.7).
+        reassinaturas_ate_derrubar: int | None = None,
+        # M2.11: rótulo da conexão nos logs. NÃO entra em `name`, que vira
+        # `fonte` na gravação — mudar `name` renomearia o campo no disco e
+        # quebraria o leitor.
+        rotulo: str | None = None,
         on_event: OnEvent | None = None,
     ) -> None:
         self.name = name
@@ -92,6 +100,8 @@ class ReconnectingFeed:
         self.ws_ping_timeout = ws_ping_timeout
         self.sem_dados_timeout_s = sem_dados_timeout_s
         self.reassinatura_intervalo_s = reassinatura_intervalo_s
+        self.reassinaturas_ate_derrubar = reassinaturas_ate_derrubar
+        self.rotulo = rotulo or name
         self.on_event = on_event
         self.log = get_logger(f"pulsearb.feeds.{name}")
 
@@ -115,6 +125,11 @@ class ReconnectingFeed:
         self.reassinaturas_com_erro = 0
         #: reassinaturas disparadas por tópico mudo, não pelo relógio
         self.reassinaturas_por_silencio = 0
+        #: M2.11: quedas provocadas pela ESCALADA — reassinatura sem efeito.
+        #: Separado de `watchdog_reconexoes` de propósito: o watchdog cobre
+        #: "não chega NADA", a escalada cobre "chega tudo menos o que eu
+        #: assinei". Somar os dois esconderia qual defesa está trabalhando.
+        self.reconexoes_por_escalada = 0
 
     # ------------------------------------------------------------------ estado
     @property
@@ -317,12 +332,19 @@ class ReconnectingFeed:
         # ao tópico que emudeceu.
         passo = min(intervalo, self.PASSO_DE_VERIFICACAO_S)
         desde_a_ultima = 0.0
+        # M2.11: quantas reassinaturas urgentes SEGUIDAS sem o tópico voltar.
+        sem_efeito = 0
         while True:
             await asyncio.sleep(passo)
             desde_a_ultima += passo
             urgencia = self._reassinatura_urgente()
-            if urgencia is None and desde_a_ultima < intervalo:
-                continue
+            if urgencia is None:
+                # O tópico voltou (ou nunca esteve mudo): a escalada zera.
+                sem_efeito = 0
+                if desde_a_ultima < intervalo:
+                    continue
+            elif await self._escalar_se_sem_efeito(ws, sem_efeito, urgencia):
+                return
             try:
                 await self._reassinar(ws)
             except asyncio.CancelledError:
@@ -336,14 +358,53 @@ class ReconnectingFeed:
             self.reassinaturas += 1
             desde_a_ultima = 0.0
             if urgencia is not None:
+                sem_efeito += 1
                 self.reassinaturas_por_silencio += 1
                 self.log.warning(
                     "tópico mudo com a conexão viva: reassinando",
+                    conexao=self.rotulo,
                     motivo=urgencia,
+                    tentativas_sem_efeito=sem_efeito,
                     total_por_silencio=self.reassinaturas_por_silencio,
                 )
             else:
                 self.log.debug("reassinatura periódica", total=self.reassinaturas)
+
+    async def _escalar_se_sem_efeito(
+        self, ws: websockets.ClientConnection, sem_efeito: int, urgencia: str
+    ) -> bool:
+        """Derruba o socket quando reassinar deixou de ser resposta.
+
+        M2.11 — o achado que a gravação de 2026-08-22 tornou impossível
+        ignorar: **2.482 reassinaturas, uma a cada 5 s, e o tópico não voltou**.
+        A cobertura da série da âncora ficou em 8,1% em duas horas cheias, e o
+        watchdog de ausência de dados nunca disparou porque o socket estava
+        vivo recebendo outro tráfego.
+
+        Reassinar cobre a assinatura que caducou. Não cobre o servidor que
+        parou de publicar AQUELE tópico para AQUELA conexão — e nesse estado
+        insistir é só ruído no log. A resposta que sobra é a mais grosseira e
+        a única que ainda muda alguma coisa: derrubar e reconectar, o que
+        refaz a assinatura do zero, possivelmente contra outro nó.
+
+        Fecha com 1012 (`service restart`), que é o código honesto para
+        "reinicie esta conexão" — e o motivo vai no frame, então
+        `_registrar_queda` do outro lado do laço grava a causa em vez de um
+        `1006` genérico.
+        """
+        limite = self.reassinaturas_ate_derrubar
+        if not limite or sem_efeito < limite:
+            return False
+        self.reconexoes_por_escalada += 1
+        self.log.error(
+            "reassinatura sem efeito: derrubando a conexão",
+            conexao=self.rotulo,
+            motivo=urgencia,
+            tentativas=sem_efeito,
+            total_por_escalada=self.reconexoes_por_escalada,
+        )
+        await ws.close(code=1012, reason="topico mudo apos reassinaturas")
+        return True
 
     def _reassinatura_urgente(self) -> str | None:
         """Há motivo para reassinar AGORA, sem esperar o intervalo?

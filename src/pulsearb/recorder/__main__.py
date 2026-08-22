@@ -280,6 +280,13 @@ class Recorder:
                 sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
                 topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
                 reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
+                # M2.11: escalada, e o rotulo que torna o log atribuivel a
+                # UMA das conexoes. Sem ele as duas logavam identicas e nao
+                # dava para saber qual reclamava.
+                reassinaturas_ate_derrubar=(
+                    settings.feeds.rtds_reassinaturas_ate_derrubar
+                ),
+                rotulo=f"rtds[{indice}]",
             )
             for indice in range(max(1, settings.feeds.rtds_conexoes))
         ]

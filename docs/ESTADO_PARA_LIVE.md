@@ -24,12 +24,39 @@ Gravar mais horas antes disso só produz mais horas meio-cegas.
 | 0.2 | `suspeita_de_assinatura_caducada` não acusa conexão morta | ✅ | M2.10, teste trava; acusava 7 falsos |
 | 0.3 | `total_s` como união, não soma | ✅ | M2.10; dava 14.476 s numa hora de 3.600 s |
 | 0.4 | Reassinatura decide por (tópico, ativo), não por tópico | ✅ | M2.10, teste trava |
-| 0.5 | **Descobrir se o recorder da VPS rodava com o M2.7** | ⬜ | `grep "tópico mudo com a conexão viva: reassinando"` no log |
-| 0.6 | Aplicar 0.4 na VPS (exige parar a gravação) | ⬜ | RUNBOOK_VPS.md |
-| 0.7 | **Uma hora com cobertura > 95 % em todos os ativos** | ⬜ | `gravacao.stream_de_ancora.cobertura_da_gravacao.pior_fracao_coberta` |
-| 0.8 | 72 h de gravação contínua e limpa | ⬜ | mínimo definido no VEREDITO_M2 |
+| 0.5 | **O recorder rodava com o M2.7?** | ✅ **RESPONDIDO: sim, e a defesa NÃO funcionou** | log da VPS: 2.482 reassinaturas, uma a cada 5 s, sem recuperação |
+| 0.6 | **Escalada: derrubar o socket após N reassinaturas sem efeito** | ✅ escrita e testada — ⏳ **aguarda deploy** | M2.11; exige parar a gravação |
+| 0.7 | **Cobertura > 95 % em todos os ativos** | ❌ **28,5 % medidos** | contagem de `crypto_prices_twap_sixty` por hora |
+| 0.8 | 72 h contínuas e limpas | ⬜ | mínimo definido no VEREDITO_M2 |
 
-Última medição de 0.7: **0,4969** — metade da gravação sem preço-verdade.
+### A medição de 0.7 — o feed é INTERMITENTE, não morto
+
+Cadência medida: ~1 tick/s por ativo, 8 ativos ⇒ **8 ticks por segundo de
+gravação** é o esperado.
+
+| Hora (UTC) | twap gravados | span | esperado | cobertura |
+|---|---|---|---|---|
+| 15:00 | 2.368 | 300 s (começou 15:55) | 2.400 | **98,7 %** |
+| 16:00 | 13.500 | 3.600 s | 28.800 | 46,9 % |
+| 17:00 | 2.344 | 3.600 s | 28.800 | **8,1 %** |
+| 18:00 | 6.037 | 3.600 s | 28.800 | 21,0 % |
+| 19:00 | 2.320 | 3.600 s | 28.800 | **8,1 %** |
+| 20:00 | 9.185 | 1.004 s (até 20:16:44) | 8.032 | **114 %** |
+| **Total** | **35.754** | 15.704 s | 125.632 | **28,5 %** |
+
+Ele funciona em rajadas: os 5 primeiros minutos a 99 %, a hora das 20:00 a
+114 %, e duas horas cheias a 8 %.
+
+**A defesa do M2.7 falhou, e agora está provado.** O recorder rodava com ela:
+2.482 reassinaturas, uma a cada 5 s. As horas 17 e 19 ficaram em 8 % mesmo
+assim. O `sem_dados_timeout_s` de 30 s nunca derrubou a conexão — não há
+linha de reconexão no log —, ou seja, **o socket estava vivo recebendo outro
+tráfego** enquanto o tópico não vinha. Reassinar nesse estado não produziu
+efeito nenhum, 2.482 vezes.
+
+Daí o item 0.6: reassinar cobre assinatura caducada; não cobre o servidor que
+parou de publicar aquele tópico para aquela conexão. A resposta que sobra é
+derrubar e reconectar, refazendo a assinatura do zero.
 
 ---
 

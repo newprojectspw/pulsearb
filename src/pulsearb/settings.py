@@ -82,6 +82,14 @@ class FeedSettings(BaseModel):
     # quem cumpre é a reação por tópico mudo. Isto cobre a caducidade que não
     # produz silêncio observável e custa um frame de texto a cada 5 min.
     rtds_reassinatura_intervalo_s: float = 300.0
+    # ESCALADA (M2.11) — quantas reassinaturas urgentes seguidas antes de
+    # derrubar o socket. A gravacao de 2026-08-22 fez 2.482 reassinaturas, uma
+    # a cada 5s, e a cobertura da serie da ancora ficou em 8,1% em duas horas
+    # cheias: reassinar deixou de ser resposta muito antes da tentativa 2.482.
+    # 3 tentativas com passo de 5s = ~15s insistindo, ~30s de cegueira total
+    # somando o limiar de topico mudo. Contra os 997s observados num unico
+    # alarme, e outra ordem de grandeza.
+    rtds_reassinaturas_ate_derrubar: int = 3
 
 
 class RecorderSettings(BaseModel):
