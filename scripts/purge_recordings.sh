@@ -39,7 +39,14 @@ echo "==> comparando $HOST:$ORIGEM com $DESTINO"
 echo
 
 # `stat -c` no GNU (a VPS é Ubuntu). Nome e tamanho, um par por linha.
-remotos=$(ssh "$HOST" "stat -c '%n %s' $ORIGEM/*.jsonl.gz 2>/dev/null" || true)
+#
+# `printf %q` porque o caminho é interpolado AQUI e executado LÁ: sem
+# aspas-por-construção, um diretório com espaço vira dois argumentos do outro
+# lado do ssh, e o glob casa nada. É o SC2029 do shellcheck, e a expansão do
+# lado do cliente é intencional — `$ORIGEM` é configuração desta máquina.
+origem_remota=$(printf %q "$ORIGEM")
+# shellcheck disable=SC2029  # a expansao do lado do cliente e o objetivo
+remotos=$(ssh "$HOST" "stat -c '%n %s' $origem_remota/*.jsonl.gz 2>/dev/null" || true)
 if [ -z "$remotos" ]; then
   echo "nenhuma gravação em $HOST:$ORIGEM"
   exit 0
@@ -91,4 +98,5 @@ fi
 printf '%s\n' "${seguros[@]}" | ssh "$HOST" "xargs -r rm -f --"
 echo "==> apagados de $HOST"
 echo
-ssh "$HOST" "df -h $ORIGEM | tail -1"
+# shellcheck disable=SC2029  # idem: $origem_remota e desta maquina, ja com printf %q
+ssh "$HOST" "df -h $origem_remota | tail -1"
