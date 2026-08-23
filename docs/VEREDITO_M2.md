@@ -168,6 +168,55 @@ sem uso em decisão.
 fração `(60−t)/60` da média final está travada — e travada num número que
 podemos LER, não estimar.
 
+#### O alarme exigia 100% e contradizia este documento `[CORRIGIDO 2026-08-23]`
+
+O alarme do M2.6 — que confere, a cada backtest, se τ=0 ainda explica as
+resoluções — nasceu exigindo consistência **1.0**. Isso contradizia o critério
+de sucesso escrito acima, e a contradição só apareceu quando a amostra ficou
+grande o bastante.
+
+**A medição que forçou a decisão.** 2026-08-23, sobre 5h limpas de 21/08,
+**152 janelas elegíveis**, τ=0 em **0,9934** — UMA discordante. O relatório
+imprimiu `MUDANÇA DE REGRA (...) NÃO opere com o resultado deste backtest`.
+
+A janela: `btc-updown-5m-1787354400`, resolveu Up, e o final ficou **0,162 USD
+abaixo** da âncora num preço de **78.640 USD**.
+
+| Medida | Valor |
+|---|---|
+| Folga relativa | **2,06 ppm** |
+| Em movimento do TWAP-60 do btc (~4 USD/s) | **40 ms** |
+| Em intervalos de amostragem do feed (1,061 s) | **3,75% de UM** |
+| Contra o limiar de "janela apertada" do projeto (2 bps) | **97× mais apertada** |
+
+Nenhum carimbo desta gravação distingue esses dois valores. E τ=0 **continuou
+sendo o argmax** — τ=−1 empatou, dentro da cadência do feed, e nenhum outro
+τ ganhou. Se a âncora tivesse se deslocado, algum τ teria ganhado.
+
+A família perdedora também continuou perdendo: `media_60s` marcou 0,9737
+contra 0,9934 da vencedora. O módulo diz que o dia em que as duas empatarem é
+o dia de desconfiar da gravação — não empataram.
+
+**A propriedade que condena o 1.0 como regra:** exigir consistência perfeita
+torna o alarme **mais provável quanto maior a amostra**. Com 24 janelas o 100%
+sai fácil; com 152, uma janela na navalha é esperada — há ~10 janelas dentro
+de 2 bps nesta amostra. Um detector de regressão que dispara mais com dado
+melhor está invertido.
+
+**Decisão:** o código passa a usar o limiar de **98%** definido acima, com
+`MINIMO_PARA_ORCAMENTO = 100` para avisar quando o N não sustenta o orçamento.
+O teste do M2.6 foi reescrito com este histórico, e 0,79 — a marca das
+hipóteses nomeadas erradas — continua disparando o alarme.
+
+**O alarme não foi desligado, foi calibrado.** Mudança de regra DERRUBA a
+consistência; ela não a arranha em 2 ppm.
+
+E porque §2b manda *"investigar as falhas UMA A UMA antes de subir N"*, o
+relatório passou a trazer `discordantes_em_tau_verificado`: cada janela
+discordante com `folga_e18`, `empate_exato` e `idade_da_ancora_ms` — os três
+números que separam lixo residual de âncora errada. Sem isso a decisão acima
+teria sido palpite.
+
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
 O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por
