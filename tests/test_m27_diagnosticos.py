@@ -960,3 +960,96 @@ def test_item6_distribuicao_espalhada_nao_acusa_vies():
 
     assert dist["concentrada"] is False
     assert dist["quartis_com_janela"] == 4
+
+
+# ─────────── M2.12: "investigar as falhas UMA A UMA" precisava ser possível
+
+
+def _serie_e18(n=400, base=60_000):
+    """Série densa de 1 ponto por segundo, valores crescentes."""
+    return [(1000 * i, (base + i) * 10**18) for i in range(n)]
+
+
+def test_discordante_e_identificada_com_o_numero_de_cada_uma():
+    """`VEREDITO_M2` §2b, para consistência alta mas < 100%:
+
+        "investigar as falhas UMA A UMA antes de subir N"
+
+    Até aqui isso não era possível. O relatório dizia `0.9934` sobre 152
+    janelas e não dizia QUAL discordou — a única leitura disponível era o
+    alarme binário, e a pessoa ficava entre ignorar o alerta e jogar fora a
+    gravação.
+    """
+    from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
+
+    # série sobe; a janela resolveu Down, mas o final está ACIMA da âncora
+    janela = JanelaResolvida(
+        slug="btc-updown-5m-x", asset="btc",
+        abertura_ms=200_000, fechamento_ms=300_000, resolveu_up=False,
+    )
+    saida = varrer([janela], {"btc": _serie_e18()}, tau_min_s=-1, tau_max_s=1)
+
+    assert saida["final_stream_no_fechamento"]["curva"]["0"] == 0.0
+    discordantes = saida["discordantes_em_tau_verificado"]
+    assert len(discordantes) == 1
+
+    d = discordantes[0]
+    assert d["slug"] == "btc-updown-5m-x"
+    assert d["resolveu_up"] is False
+    # os três campos que separam lixo residual de âncora errada
+    assert d["folga_e18"] > 0
+    assert d["empate_exato"] is False
+    assert d["idade_da_ancora_ms"] == 0
+
+
+def test_folga_grande_com_ancora_fresca_nao_e_lixo_residual():
+    """A distinção que a razão agregada esconde.
+
+    §2b orça duas causas de lixo: empate mal-carimbado e lacuna de stream
+    fina. Uma folga de 100 unidades de preço com âncora de idade zero não é
+    nenhuma das duas — é âncora errada, ou a regra mudou.
+    """
+    from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
+
+    janela = JanelaResolvida(
+        slug="btc-updown-5m-x", asset="btc",
+        abertura_ms=200_000, fechamento_ms=300_000, resolveu_up=False,
+    )
+    d = varrer([janela], {"btc": _serie_e18()}, tau_min_s=-1, tau_max_s=1)[
+        "discordantes_em_tau_verificado"
+    ][0]
+
+    assert d["folga_e18"] == 100 * 10**18, "100 unidades de preço"
+    assert d["idade_da_ancora_ms"] == 0
+
+
+def test_sem_discordancia_a_lista_vem_vazia():
+    """O caso são não gera ruído nenhum no relatório."""
+    from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
+
+    # resolveu Up, e a série sobe: o final está acima da âncora, consistente
+    janela = JanelaResolvida(
+        slug="btc-updown-5m-x", asset="btc",
+        abertura_ms=200_000, fechamento_ms=300_000, resolveu_up=True,
+    )
+    saida = varrer([janela], {"btc": _serie_e18()}, tau_min_s=-1, tau_max_s=1)
+
+    assert saida["final_stream_no_fechamento"]["curva"]["0"] == 1.0
+    assert saida["discordantes_em_tau_verificado"] == []
+
+
+def test_a_lista_de_discordantes_tem_teto():
+    """Gravação de 72 h com âncora errada listaria milhares. O relatório é
+    para ser lido, e o teto mantém isso verdadeiro."""
+    from pulsearb.analysis.anchor_sweep import JanelaResolvida, varrer
+
+    janelas = [
+        JanelaResolvida(
+            slug=f"btc-updown-5m-{i}", asset="btc",
+            abertura_ms=200_000, fechamento_ms=300_000, resolveu_up=False,
+        )
+        for i in range(50)
+    ]
+    saida = varrer(janelas, {"btc": _serie_e18()}, tau_min_s=-1, tau_max_s=1)
+
+    assert len(saida["discordantes_em_tau_verificado"]) == 20

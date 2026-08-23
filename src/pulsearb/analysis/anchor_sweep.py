@@ -269,6 +269,12 @@ def varrer(
         "final_stream_no_fechamento": resultado_stream,
         "grade_tau_phi": grade,
         "falhas_inexplicaveis": falhas,
+        # M2.12: as janelas que a ANCORA VERIFICADA (tau=0) nao explica,
+        # com o numero de cada uma. VEREDITO_M2 2b manda investigar as
+        # falhas uma a uma; sem isto so havia a razao agregada.
+        "discordantes_em_tau_verificado": _discordantes_em_tau(
+            elegiveis, TAU_VERIFICADO_S
+        ),
         "nota": (
             "Comparações em inteiros na escala 1e18 do Chainlink; média por "
             "multiplicação cruzada, sem divisão; eixo do tempo = carimbo do "
@@ -368,6 +374,66 @@ def _grade_tau_phi(
                 melhor = celula
     top.sort(key=lambda c: c["consistencia"], reverse=True)
     return {"melhor_celula": melhor, "top": top[:10]}
+
+
+def _discordantes_em_tau(
+    elegiveis: list[tuple[JanelaResolvida, StreamE18, int, int, int | None]],
+    tau: int,
+    *,
+    limite: int = 20,
+) -> list[dict[str, Any]]:
+    """As janelas que τ NÃO explica, uma a uma, com o número de cada.
+
+    `VEREDITO_M2` §2b prescreve, para o caso de consistência alta mas abaixo
+    de 100%: *"investigar as falhas UMA A UMA antes de subir N"*. Até aqui
+    isso não era possível — o relatório dizia `0.9934` e não dizia QUAL
+    janela discordou, então a única leitura disponível era o alarme binário.
+
+    A distinção que estes campos permitem, e que a razão sozinha esconde:
+
+    - **`folga_e18` minúscula** perto do limiar: empate na prática, e a
+      resolução decidiu para um lado que o arredondamento nosso não
+      reproduz. É o "empate mal-carimbado" que §2b orçou.
+    - **`idade_da_ancora_ms` alta**: o ponto do stream usado como âncora já
+      estava velho — lacuna fina demais para o detector de cobertura pegar,
+      o outro caso que §2b orçou.
+    - **`folga_e18` grande com âncora fresca**: aí não é lixo. É a âncora
+      errada, ou a regra mudou.
+
+    Nenhum destes campos afrouxa o alarme. Eles existem para que a pessoa
+    que lê possa fazer o que o documento manda, em vez de escolher entre
+    ignorar o alerta e jogar fora a gravação.
+    """
+    saida: list[dict[str, Any]] = []
+    for janela, stream, _soma, _n, final_stream in elegiveis:
+        instante = janela.abertura_ms + tau * 1000
+        ancora = stream.em(instante)
+        if ancora is None or final_stream is None:
+            continue
+        consistente, empate = _consistente(
+            janela.resolveu_up, final_stream, 1, ancora
+        )
+        if consistente:
+            continue
+        indice = bisect_right(stream.ts, instante)
+        idade = instante - stream.ts[indice - 1] if indice else None
+        saida.append(
+            {
+                "slug": janela.slug,
+                "asset": janela.asset,
+                "resolveu_up": janela.resolveu_up,
+                "ancora_e18": ancora,
+                "final_e18": final_stream,
+                # Distância até virar o lado. Em e18: 10**18 = 1 unidade do
+                # preço, então folga de 10**12 é a 6ª casa decimal.
+                "folga_e18": abs(final_stream - ancora),
+                "empate_exato": empate,
+                "idade_da_ancora_ms": idade,
+            }
+        )
+        if len(saida) >= limite:
+            break
+    return saida
 
 
 def _diagnostico_de_falhas(
