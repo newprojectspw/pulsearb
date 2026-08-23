@@ -126,14 +126,60 @@ def test_nenhum_tau_explicando_e_o_alarme_mais_grave():
     assert "NAO opere" in saida["alerta"]
 
 
-@pytest.mark.parametrize("consistencia", [None, 0.0, 0.99])
-def test_qualquer_coisa_abaixo_de_100pct_dispara(consistencia):
-    """99% não é 100%. Uma janela discordante já falsifica a âncora — foi
-    assim que as hipóteses nomeadas morreram, e o critério não afrouxa
-    agora que a resposta é conveniente."""
+@pytest.mark.parametrize("consistencia", [None, 0.0, 0.5, 0.79, 0.97])
+def test_abaixo_do_orcamento_dispara(consistencia):
+    """Mudança de regra DERRUBA a consistência — é isso que o alarme pega.
+
+    HISTÓRICO, e a razão de este teste ter mudado: ele nasceu no M2.6
+    exigindo 1.0, com o argumento de que "99% não é 100%, e o critério não
+    afrouxa agora que a resposta é conveniente". A desconfiança era certa; o
+    limiar, não. Ele contradizia `VEREDITO_M2` §2b, escrito ANTES de qualquer
+    varredura existir:
+
+        "98%, não 100%: (...) Exigir 100% deixaria uma única janela suja
+         vetar a âncora certa. 2 falhas em 100 é o orçamento para esse lixo
+         residual."
+
+    Em 2026-08-23 o cenário previsto aconteceu, com número: 152 janelas
+    elegíveis sobre 5h limpas, τ=0 em 0,9934, UMA discordante
+    (`btc-updown-5m-1787354400`) errando por 0,162 USD em 78.640 —
+
+        2,06 ppm  ·  40 ms de movimento do TWAP  ·  3,75% de um intervalo
+        de amostragem  ·  97x mais apertada que o limiar de "janela
+        apertada" do próprio projeto
+
+    — e τ=0 continuou sendo o argmax. O relatório mandou NÃO OPERAR sobre
+    isso. O limiar foi alinhado ao documento, não afrouxado por conveniência:
+    0,79 é a marca das hipóteses NOMEADAS erradas, e continua disparando.
+    """
     saida = veredito_da_ancora(_varredura(consistencia, [], 90))
     assert saida["confirmada"] is False
     assert saida["alerta"] is not None
+    assert "NAO opere" in saida["alerta"]
+
+
+@pytest.mark.parametrize("consistencia", [0.98, 0.9934, 0.999])
+def test_dentro_do_orcamento_confirma_com_lixo_residual(consistencia):
+    """O orçamento de `VEREDITO_M2` §2b, agora no código.
+
+    Não é "o alarme foi desligado": é a faixa que o documento reservou para
+    lacuna de stream fina e empate mal-carimbado. Quem lê tem
+    `discordantes_em_tau_verificado` para conferir o número de cada falha.
+    """
+    saida = veredito_da_ancora(_varredura(consistencia, [], 152))
+
+    assert saida["confirmada"] is True
+    assert saida["alerta"] is None
+    assert "LIXO RESIDUAL" in saida["veredito"]
+    assert "NAO opere" not in saida["veredito"]
+
+
+def test_amostra_magra_confirma_mas_avisa_que_o_orcamento_nao_separa():
+    """§2b: "com 26 janelas (...) o intervalo de confiança é largo demais"."""
+    saida = veredito_da_ancora(_varredura(0.98, [], 50))
+
+    assert saida["confirmada"] is True
+    assert "RESSALVA" in saida["veredito"]
 
 
 # ──────────────────────────────────────── BUG 2: a faixa de tempo restante

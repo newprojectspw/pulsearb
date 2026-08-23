@@ -520,6 +520,47 @@ def _e18_str(valor: int) -> str:
 #: acertar 100% por sorte, e o silêncio da varredura seria lido como alarme.
 MINIMO_JANELAS_VEREDITO = 20
 
+#: Consistência mínima para a âncora seguir CONFIRMADA. Vem de VEREDITO_M2
+#: §2b, escrito ANTES de qualquer varredura rodar:
+#:
+#:   "98%, não 100%: a amostra real carrega janelas com lacuna de stream fina
+#:    demais para o nosso detector de cobertura pegar (reconexões de segundos)
+#:    e possíveis empates mal-carimbados. Exigir 100% deixaria uma única
+#:    janela suja vetar a âncora certa. 2 falhas em 100 é o orçamento para
+#:    esse lixo residual."
+#:
+#: O alarme do M2.6 nasceu exigindo 1.0 e ignorou esse orçamento. A decisão
+#: de alinhar o código ao documento foi tomada em 2026-08-23, com medição:
+#:
+#:   152 janelas elegíveis sobre 5h limpas, tau=0 em 0,9934 — UMA discordante,
+#:   `btc-updown-5m-1787354400`, errando por 0,162 USD em 78.640 USD:
+#:
+#:     2,06 ppm de folga relativa
+#:     40 ms de movimento do TWAP-60 do btc (que anda ~4 USD/s)
+#:     3,75% de UM intervalo de amostragem do feed (1,061 s)
+#:     97x mais apertada que o limiar de "janela apertada" do próprio
+#:       projeto (2 bps, engine/anchor.py)
+#:
+#: Nenhum carimbo desta gravação distingue esses dois valores. E tau=0
+#: continuou sendo o argmax: se a âncora tivesse se deslocado, outro tau
+#: ganharia — nenhum ganhou.
+#:
+#: Há ainda uma propriedade que condena o 1.0 como regra: exigir consistência
+#: perfeita torna o alarme MAIS provável quanto MAIOR a amostra. Com 24
+#: janelas o 100% sai fácil; com 152, uma janela na navalha é esperada. Um
+#: detector de regressão que dispara mais com dado melhor está invertido.
+#:
+#: O alarme não foi desligado. Mudança de regra DERRUBA a consistência — as
+#: hipóteses nomeadas erradas marcavam ~79% — e é essa ordem de grandeza que
+#: ele continua pegando.
+LIMIAR_CONSISTENCIA = 0.98
+
+#: N mínimo para o orçamento de 98% separar lixo residual de impostor
+#: (VEREDITO_M2 §2b): "com 26 janelas, 98% = no máx. 0 falhas e o intervalo
+#: de confiança da taxa é largo demais (±8pp)". Abaixo disso a âncora segue
+#: confirmada, mas o veredito diz que o N não sustenta o orçamento.
+MINIMO_PARA_ORCAMENTO = 100
+
 #: O τ da âncora verificada (API_NOTES §13.8): o valor do stream no instante
 #: da abertura, sem deslocamento.
 TAU_VERIFICADO_S = 0
@@ -637,6 +678,19 @@ def veredito_da_ancora(
             ),
         }
 
+    # Quantas janelas discordaram, e não só a razão. "1 de 152" se lê;
+    # "0.9934" precisa de conta mental para virar informação.
+    discordantes = (
+        round((1.0 - consistencia) * elegiveis)
+        if isinstance(consistencia, (int, float))
+        else None
+    )
+    base = {
+        **base,
+        "janelas_discordantes": discordantes,
+        "limiar_de_consistencia": LIMIAR_CONSISTENCIA,
+    }
+
     if consistencia is not None and consistencia >= 1.0:
         return {
             **base,
@@ -649,22 +703,59 @@ def veredito_da_ancora(
             ),
         }
 
+    # A FAIXA DO ORCAMENTO (VEREDITO_M2 2b). Duas causas de lixo residual
+    # estao orcadas ali: lacuna de stream fina demais para o detector de
+    # cobertura, e empate mal-carimbado. Tratar isso como mudanca de regra
+    # e o erro que o proprio documento mandou nao cometer.
+    #
+    # Quem le deve conferir `discordantes_em_tau_verificado`: folga minuscula
+    # ou ancora velha confirmam lixo; folga grande com ancora fresca seria
+    # outra historia, e ai o numero agregado ja teria caido abaixo do limiar.
+    if consistencia is not None and consistencia >= LIMIAR_CONSISTENCIA:
+        magro = elegiveis < MINIMO_PARA_ORCAMENTO
+        return {
+            **base,
+            "confirmada": True,
+            "alerta": None,
+            "veredito": (
+                f"CONFIRMADA COM LIXO RESIDUAL: tau=0 explica {consistencia} "
+                f"das {elegiveis} janelas elegiveis — {discordantes} "
+                f"discordante(s), dentro do orcamento de "
+                f"{LIMIAR_CONSISTENCIA:.0%} que VEREDITO_M2 2b reservou para "
+                "lacuna de stream fina e empate mal-carimbado. NAO e mudanca "
+                "de regra: mudanca de regra DERRUBA a consistencia, nao a "
+                "arranha. Confira `discordantes_em_tau_verificado` para ver "
+                "o numero de cada falha."
+                + (
+                    f" RESSALVA: {elegiveis} janelas estao abaixo das "
+                    f"{MINIMO_PARA_ORCAMENTO} que o criterio pede para o "
+                    "orcamento separar lixo de impostor — o intervalo de "
+                    "confianca ainda e largo."
+                    if magro
+                    else ""
+                )
+            ),
+        }
+
     # Daqui para baixo é alarme. Duas formas, e a diferença importa para o
     # diagnóstico: nenhum τ funciona (o modelo do jogo mudou) ou outro τ
     # funciona (a âncora deslocou no tempo).
     if regiao:
         alerta = (
-            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das resolucoes, "
-            f"mas a regiao de 100% existe em {regiao}. A ancora parece ter se "
-            "deslocado no tempo. NAO opere com o resultado deste backtest ate "
-            "reconfirmar a ancora e atualizar API_NOTES 13.8."
+            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das resolucoes "
+            f"({discordantes} de {elegiveis}), ABAIXO do limiar de "
+            f"{LIMIAR_CONSISTENCIA:.0%}, e a regiao de 100% existe em "
+            f"{regiao}. A ancora parece ter se deslocado no tempo. NAO opere "
+            "com o resultado deste backtest ate reconfirmar a ancora e "
+            "atualizar API_NOTES 13.8."
         )
     else:
         alerta = (
-            f"MUDANCA DE REGRA: nenhum tau explica 100% das {elegiveis} "
-            "janelas elegiveis, e tau=0 explica "
-            f"{consistencia}. Nem a ancora verificada nem qualquer "
-            "deslocamento dela reproduzem as resolucoes — o jogo pode ter "
-            "mudado de fonte. NAO opere com o resultado deste backtest."
+            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das "
+            f"{elegiveis} janelas elegiveis ({discordantes} discordantes), "
+            f"ABAIXO do limiar de {LIMIAR_CONSISTENCIA:.0%}, e nenhum tau "
+            "chega a 100%. Nem a ancora verificada nem qualquer deslocamento "
+            "dela reproduzem as resolucoes — o jogo pode ter mudado de fonte. "
+            "NAO opere com o resultado deste backtest."
         )
     return {**base, "confirmada": False, "alerta": alerta, "veredito": alerta}
