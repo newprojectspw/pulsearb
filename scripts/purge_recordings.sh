@@ -38,15 +38,20 @@ DESTINO="${DESTINO/#\~/$HOME}"
 echo "==> comparando $HOST:$ORIGEM com $DESTINO"
 echo
 
-# `stat -c` no GNU (a VPS é Ubuntu). Nome e tamanho, um par por linha.
+# `stat -c` no GNU (a VPS é Ubuntu). Um par por linha, TAMANHO PRIMEIRO: o
+# nome vem por último porque é o único campo que pode conter espaço, e o
+# `read` lá embaixo entrega todo o resto da linha à última variável. Com o
+# nome na frente, um diretório com espaço faria o tamanho virar pedaço do
+# caminho — silenciosamente, e o arquivo seria classificado errado.
 #
-# `printf %q` porque o caminho é interpolado AQUI e executado LÁ: sem
-# aspas-por-construção, um diretório com espaço vira dois argumentos do outro
-# lado do ssh, e o glob casa nada. É o SC2029 do shellcheck, e a expansão do
-# lado do cliente é intencional — `$ORIGEM` é configuração desta máquina.
-origem_remota=$(printf %q "$ORIGEM")
-# shellcheck disable=SC2029  # a expansao do lado do cliente e o objetivo
-remotos=$(ssh "$HOST" "stat -c '%n %s' $origem_remota/*.jsonl.gz 2>/dev/null" || true)
+# O diretório vai por STDIN, não interpolado no comando. Interpolar
+# (`ssh host "ls $DIR"`) expande aqui e executa lá — é o que se quer, mas
+# custa aspas-por-construção que ninguém acerta. Mandando o valor pelo cano e
+# lendo com `read -r`, o comando remoto fica em aspas simples: nada expande do
+# lado do cliente e o caminho chega inteiro.
+remotos=$(printf '%s\n' "$ORIGEM" \
+  | ssh "$HOST" 'read -r dir; stat -c "%s %n" "$dir"/*.jsonl.gz 2>/dev/null' \
+  || true)
 if [ -z "$remotos" ]; then
   echo "nenhuma gravação em $HOST:$ORIGEM"
   exit 0
@@ -54,7 +59,7 @@ fi
 
 seguros=()
 bytes_a_liberar=0
-while read -r caminho tamanho_remoto; do
+while read -r tamanho_remoto caminho; do
   [ -n "$caminho" ] || continue
   nome=$(basename "$caminho")
   local_="$DESTINO/$nome"
@@ -95,8 +100,11 @@ if [ "$MODO" != "--apagar" ]; then
   exit 0
 fi
 
-printf '%s\n' "${seguros[@]}" | ssh "$HOST" "xargs -r rm -f --"
+# `\0` e `-0`: a lista vai NUL-a-NUL. O `xargs` sem isso separa por espaço em
+# branco, e um caminho com espaço vira dois argumentos de um `rm` — apagando o
+# que não devia. Numa rotina cuja única função é apagar gravação, essa é a
+# linha que não pode errar.
+printf '%s\0' "${seguros[@]}" | ssh "$HOST" 'xargs -0 -r rm -f --'
 echo "==> apagados de $HOST"
 echo
-# shellcheck disable=SC2029  # idem: $origem_remota e desta maquina, ja com printf %q
-ssh "$HOST" "df -h $origem_remota | tail -1"
+printf '%s\n' "$ORIGEM" | ssh "$HOST" 'read -r dir; df -h "$dir" | tail -1'
