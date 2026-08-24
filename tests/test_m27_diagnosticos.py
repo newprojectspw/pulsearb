@@ -6,8 +6,12 @@ respondê-las não era gravado ou não era separado. Cada teste trava uma.
 
 from __future__ import annotations
 
+import random
+
 from pulsearb.analysis.integrity import DERIVA_SUSPEITA_MS, MonitorDeRelogio
 from pulsearb.analysis.measurements import medir_mudanca_de_tick
+from pulsearb.backtest.__main__ import RecordingIndex
+from pulsearb.backtest.report import BacktestReport
 from pulsearb.backtest.runner import BacktestConfig
 from pulsearb.recorder.__main__ import (
     _forma_dos_rewards,
@@ -1069,8 +1073,6 @@ class TestCoberturaDescontaBuraco:
 
     @staticmethod
     def _cobertura(carimbos_ms, gravacao_s):
-        from pulsearb.backtest.__main__ import RecordingIndex
-
         index = RecordingIndex.__new__(RecordingIndex)
         index.streams_e18 = {"btc": [(ts, 1) for ts in carimbos_ms]}
         index._primeiro_record_ns = 0
@@ -1106,10 +1108,6 @@ class TestCalibracaoNaoConfundeBaseComAcuracia:
 
     @staticmethod
     def _medir(gerar, n=20000, semente=7):
-        import random
-
-        from pulsearb.backtest.report import BacktestReport
-
         relatorio = BacktestReport()
         rnd = random.Random(semente)
         for _ in range(n):
@@ -1118,7 +1116,7 @@ class TestCalibracaoNaoConfundeBaseComAcuracia:
         return relatorio.to_dict()["calibracao"]["teste"]
 
     def test_preditor_constante_fica_nao_avaliavel(self):
-        medido = self._medir(lambda rnd: (0.51, rnd.random() < 0.50))
+        medido = self._medir(self._constante)
 
         # O erro antigo o aprovava, e o ECE sozinho TAMBÉM o aprova — ele cai
         # todo numa faixa só. Quem o denuncia é o número de faixas.
@@ -1127,20 +1125,31 @@ class TestCalibracaoNaoConfundeBaseComAcuracia:
         assert medido["faixas_ocupadas"] == 1
         assert medido["calibracao_avaliavel"] is False
 
+    @staticmethod
+    def _bem_calibrado(rnd: random.Random) -> tuple[float, bool]:
+        """Diz p, e o mundo resolve Up com probabilidade p."""
+        prob = rnd.uniform(0.05, 0.95)
+        return prob, rnd.random() < prob
+
+    @staticmethod
+    def _otimista(rnd: random.Random) -> tuple[float, bool]:
+        """Diz p, e o mundo resolve Up com p − 0,15. Viés de 15 pontos."""
+        prob = rnd.uniform(0.2, 0.95)
+        return prob, rnd.random() < max(0.0, prob - 0.15)
+
+    @staticmethod
+    def _constante(rnd: random.Random) -> tuple[float, bool]:
+        """Cospe 0,51 sempre, num mundo que é cara-ou-coroa."""
+        return 0.51, rnd.random() < 0.50
+
     def test_preditor_bem_calibrado_e_avaliavel_e_passa(self):
-        medido = self._medir(
-            lambda rnd: (lambda p: (p, rnd.random() < p))(rnd.uniform(0.05, 0.95))
-        )
+        medido = self._medir(self._bem_calibrado)
 
         assert medido["calibracao_avaliavel"] is True
         assert medido["erro_de_confiabilidade"] < 0.05
 
     def test_preditor_otimista_demais_reprova_no_ece(self):
-        medido = self._medir(
-            lambda rnd: (lambda p: (p, rnd.random() < max(0.0, p - 0.15)))(
-                rnd.uniform(0.2, 0.95)
-            )
-        )
+        medido = self._medir(self._otimista)
 
         assert medido["calibracao_avaliavel"] is True
         assert medido["erro_de_confiabilidade"] > 0.10
