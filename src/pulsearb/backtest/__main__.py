@@ -838,20 +838,47 @@ class RecordingIndex:
         if span_ns <= 0 or not self.streams_e18:
             return {"gravacao_s": 0.0}
         gravacao_s = span_ns / 1e9
+        # Um ponto vale por `IDADE_MAX_MS` e nada além disso: amostra mais
+        # velha que a idade máxima não descreve o instante, e é essa a regra
+        # que o resto do relatório já usa para dizer que uma janela abriu "em
+        # lacuna". A cobertura tem de usar a MESMA régua.
+        idade_max_ms = float(IDADE_MAX_MS)
         por_ativo = {}
         for asset, serie in sorted(self.streams_e18.items()):
             if not serie:
                 continue
-            carimbos = [ts for ts, _ in serie]
-            coberto = (max(carimbos) - min(carimbos)) / 1000.0
-            # ms do servidor → ns de parede, para comparar os dois eixos
-            fim_ns = max(carimbos) * 1_000_000
+            carimbos = sorted(ts for ts, _ in serie)
+            # Soma dos intervalos, cada um limitado à idade máxima. Um buraco
+            # de uma hora entra como 10 s, não como uma hora.
+            coberto_ms = 0.0
+            buracos_ms = 0.0
+            maior_buraco_ms = 0.0
+            for antes, depois in pairwise(carimbos):
+                delta = float(depois - antes)
+                coberto_ms += min(delta, idade_max_ms)
+                if delta > idade_max_ms:
+                    buracos_ms += delta - idade_max_ms
+                    maior_buraco_ms = max(maior_buraco_ms, delta)
+            # O primeiro ponto também cobre o seu próprio intervalo de validade.
+            coberto_ms += idade_max_ms
+            coberto = coberto_ms / 1000.0
+            # ms do servidor → ns de parede, para comparar os dois eixos.
+            # `carimbos` já está ordenado: indexar as pontas evita duas
+            # varreduras completas por ativo, que a 68 mil pontos vezes oito
+            # ativos custam mais de um milhão de comparações à toa.
+            inicio_ns = carimbos[0] * 1_000_000
+            fim_ns = carimbos[-1] * 1_000_000
             por_ativo[asset] = {
                 "coberto_s": round(coberto, 1),
-                "fracao_da_gravacao": round(coberto / gravacao_s, 4),
+                "fracao_da_gravacao": round(min(coberto / gravacao_s, 1.0), 4),
+                "silencio_inicial_s": round(
+                    max(0.0, (inicio_ns - self._primeiro_record_ns) / 1e9), 1
+                ),
                 "silencio_final_s": round(
                     max(0.0, (self._ultimo_record_ns - fim_ns) / 1e9), 1
                 ),
+                "buracos_s": round(buracos_ms / 1000.0, 1),
+                "maior_buraco_s": round(maior_buraco_ms / 1000.0, 1),
             }
         pior = min(
             (v["fracao_da_gravacao"] for v in por_ativo.values()), default=0.0
@@ -868,7 +895,15 @@ class RecordingIndex:
                 "`silencio_final_s` alto quer dizer que o topico emudeceu e "
                 "NAO voltou ate o fim do arquivo: toda janela que abrir depois "
                 "disso fica sem ancora. Foi o caso da hora de teste, com "
-                "`fracao_da_gravacao` de 0,50."
+                "`fracao_da_gravacao` de 0,50. "
+                "M2.13: `coberto_s` e a SOMA dos intervalos, cada um limitado "
+                "a `idade_maxima_da_amostra_ms` — nao o span do primeiro ao "
+                "ultimo carimbo. A conta antiga contava buraco interno como "
+                "coberto: na rodada de 20h ela publicou 1,0 nos oito ativos "
+                "enquanto o mesmo relatorio registrava 3.601 s de silencio de "
+                "conexao inteira. `buracos_s` e `maior_buraco_s` dizem QUANTO "
+                "se perdeu por dentro, e `silencio_inicial_s` fecha a borda "
+                "que faltava — `silencio_final_s` sozinho so via a de tras."
             ),
         }
 

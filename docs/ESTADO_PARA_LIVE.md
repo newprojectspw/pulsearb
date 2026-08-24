@@ -1,12 +1,13 @@
 # ESTADO — o que falta para operar com dinheiro real
 
-**Semáforo de hoje: 🔴 VERMELHO** — mas o bloqueio mudou de lugar. A captação
-foi consertada e **o Bloco 0 fechou**. O que reprova agora é o M2: 26 trades
-contra os 200 exigidos, e a profundidade abaixo do mínimo em toda duração
-medida.
+**Semáforo de hoje: 🟡 AMARELO** — o M2 chegou ao veredito. O TAKER passa em
+**4 dos 5** critérios e reprova só no 1.5, que é **teto de capacidade** e não
+de borda. O MAKER reprova, e por um motivo que nenhum ajuste resolve: 594 das
+599 janelas não têm pool de reward.
 
-Atualizado: 2026-08-23 · fonte dos números: gravação real de 2026-08-22 23:00
-UTC, hora cheia e limpa (`relatorios/hora_2300.json`)
+Atualizado: 2026-08-23 · fonte dos números: **20 horas** de gravação real de
+2026-08-23 (00:00 a 20:00 UTC, hora 01:00 excluída), 568 trades
+(`relatorios/M2_VEREDITO.json`)
 
 > Como ler: **✅** passou com dado real · **❌** medido e reprovado ·
 > **⏳** sem amostra suficiente · **⬜** não existe / não começou.
@@ -87,72 +88,128 @@ derrubar e reconectar, refazendo a assinatura do zero.
 Critérios escritos **antes** dos números, em `VEREDITO_M2.md`. Não são
 negociáveis depois do resultado.
 
-### TAKER VIÁVEL — exige as 5
+Amostra: 20 horas contínuas de 2026-08-23, `pior_fracao_coberta` 1,0 nos oito
+ativos, 794 janelas conhecidas, 568 trades. A rodada levou 2 h 47 min.
 
-Medições da hora 23:00 — a primeira hora limpa (cobertura 99,9 %).
+### TAKER — passa em 4 dos 5
 
-| # | Critério | Exigido | Medido (1 h limpa) | |
+| # | Critério | Exigido | Medido (20 h) | |
 |---|---|---|---|---|
-| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | +4,227 USDC | ⏳ |
-| 1.2 | Número de trades | ≥ 200 | **26** | ❌ |
-| 1.3 | Calibração: erro < 0,05 em ≥ 1 bucket | sim | **0,0098** em `<30s` | ✅ |
-| 1.4 | Positivo também a 600 ms | sim | +4,1807 USDC | ⏳ |
-| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **85,2 (5m) / 140,2 (15m)** | ❌ |
+| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **+102,9227 USDC** | ✅ |
+| 1.2 | Número de trades | ≥ 200 | **568** | ✅ |
+| 1.3 | Calibração: erro < 0,05 em ≥ 1 bucket | sim | 0,0067 em `<30s` | ⚠️ **não avaliado** |
+| 1.4 | Positivo também a 600 ms | sim | **+101,1759 USDC** | ✅ |
+| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **87,8 (5m) · 41,8 (15m) · 31,3 (1h) · 35,7 (4h)** | ❌ |
 
-1.1 e 1.4 ficam ⏳ e não ✅ por dois motivos independentes: 26 trades não
-sustentam sinal de PnL (o próprio 1.2 diz que abaixo de 200 é ruído), e a
-curva de edge continua degenerada — ver a ressalva abaixo.
+**1.1 inverteu de sinal, e o sinal novo se sustenta.** Na amostra de 5 h era
+−41,57; com 20 h deu +102,92. A diferença é tamanho de amostra, não
+arredondamento, e três cortes independentes concordam:
 
-**1.5 é o problema estrutural.** É teto de CAPACIDADE, e edge nenhum resolve.
-Piorou em relação à hora da tarde (121,97 → 85,2 na duração de 5 m), o que é
-consistente com a nota do M2.7 sobre liquidez de madrugada. Nenhuma duração
-medida até hoje passou dos 200 USDC.
+- faixa calibrada (240–120 s): **+91,58** com drawdown **menor** (−43,07
+  contra −60,84)
+- sensibilidade a latência plana: 103,39 (150 ms) → 100,41 (1000 ms)
+- `threshold_mordeu: **true**`, 5 resultados distintos
 
-**A 26 trades por hora, os 200 exigidos saem de ~8 horas limpas.** Isso é o
-que o Bloco 0 ter fechado torna possível — e é só esperar, não consertar.
+**A degenerescência do threshold acabou.** Nas horas isoladas de 22/08 a grade
+inteira dava um resultado só, e isso invalidava a leitura de 1.1. Agora ela
+separa (97,71 a 102,97, melhor em 0,03). O que a grade mostra, porém, é que o
+limiar quase não discrimina: 568 trades passam em todos os patamares. **A
+borda não vem de escolher situações boas — vem de um viés sistemático.** O
+modelo prevê 0,6445 no balde operado e realiza 0,6225; a lucratividade nasce
+dessa diferença contra o preço, não de seleção.
 
-**Ressalva do M2.10 sobre o critério 1.1 — confirmada duas vezes.** Na hora
-23:00, como na hora 16:00 antes dela, `threshold_mordeu: false` com **1
-resultado distinto**: os seis thresholds da grade (0,01 a 0,12) deram os
-**mesmos** trades e o **mesmo** PnL. O modelo previa ~0,83 contra um book
-perto de 0,50,
-então a entrada já nascia com edge acima do teto da grade. O limiar nunca
-excluiu sinal nenhum, e o `melhor_threshold: 0.01` publicado era desempate de
-`max()`, não escolha.
+**1.3 está marcado ⚠️ de propósito, e não ✅.** O `erro` publicado é
+`|prob_média_prevista − freq_realizada|`, e `freq_realizada` é a **taxa-base do
+balde**, não a acurácia da previsão. No balde `<30s`: previu 0,514, realizou
+0,5073 — cara-ou-coroa dos dois lados. Um preditor que cospe 0,51 constante
+tira nota máxima nesse critério. Enquanto a medição for essa, 1.3 não carrega
+informação, e tratá-lo como aprovado seria contar como evidência o que é
+artefato de construção.
 
-O relatório agora diz isso em `curva_de_edge.threshold_mordeu`. Enquanto ele
-for `false`, **avaliar 1.1 é medir outra coisa** — o resultado não carrega
-informação sobre threshold. Antes de concluir qualquer coisa sobre limiar de
-entrada, subir a grade com `--thresholds`.
+**Conserto feito (M2.13):** o relatório agora publica `curva_de_confiabilidade`
+por faixa de probabilidade prevista, mais `erro_de_confiabilidade` (ECE) e
+`faixas_ocupadas`. Medido contra três preditores sintéticos de 20 mil
+observações:
 
-Vale reparar no que essa degenerescência também insinua: um modelo que
-discorda do book em ~33 pontos de probabilidade, sistematicamente, contra
-participantes que viram o mesmo dado no mesmo segundo. Isso é grande demais
-para ser edge e merece explicação antes de virar veredito.
+| Preditor | `erro` (antigo) | ECE | `faixas_ocupadas` |
+|---|---|---|---|
+| constante 0,51 num mundo 50/50 | +0,0051 | **0,0051** | **1** |
+| bem calibrado | −0,0007 | 0,0070 | 18 |
+| otimista em 15 pontos | +0,1487 | **0,1487** | 15 |
 
-### SÓ MAKER VIÁVEL — exige as 5
+**O ECE sozinho não resolve** — o constante passa nele também, porque cai todo
+numa faixa só. Quem o denuncia é `faixas_ocupadas`. Por isso 1.3 virou
+CONJUNÇÃO: `calibracao_avaliavel` (≥ 3 faixas com amostra) **e** ECE abaixo do
+limiar. Com `calibracao_avaliavel` false o critério fica **não avaliado**, que
+não é o mesmo que reprovado. **Falta rodar de novo sobre a gravação para saber
+em que pé o modelo está.**
 
-| # | Critério | Exigido | 16:00 (suja) | 23:00 (limpa) | |
-|---|---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | −0,2395 | **+0,2579** ¢/share | ⏳ |
-| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | −0,5895 | **+0,0921** | ⏳ |
-| 1.8 | Horas de amostra na célula | ≥ 20 h | 1 h | **1 h** | ❌ |
-| 1.9 | Taxa de divergência do livro | < 1 % | 3,27 % | **3,22 %** | ❌ |
-| 1.10 | Fórmula de reward confirmada na doc | sim | não | **não** | ❌ |
+**1.5 é o único critério de borda que reprova, e é o mais duro.** É teto de
+CAPACIDADE. O backtest move 1.651,59 USDC em 568 trades — **2,91 USDC por
+trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 m)
+tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
+fixou antes de existir dado. Nenhuma duração passa.
 
-1.6 e 1.7 **inverteram de sinal** entre as duas horas — de −0,24 para +0,26, e
-de −0,59 para +0,09. Ficam ⏳ e não ✅ exatamente por isso: duas horas que
-discordam do sinal não sustentam veredito nenhum. É o critério 1.8 (≥ 20 h)
-existindo para o que ele existe.
+### MAKER — reprova
 
-**O achado que pode encerrar a rota, agora em DUAS gravações independentes:**
-**0 janelas com pool de reward** — 0 de 24 na hora 16:00, 0 de 28 na hora
-23:00, esta última com 104 janelas conhecidas. `rewards_daily_rate` ausente em
-todas. Se persistir, estes mercados updown não participam do programa de
-rewards, e não há o que ajustar: a rota maker fica sem fonte de receita.
+| # | Critério | Exigido | Medido (20 h) | |
+|---|---|---|---|---|
+| 1.6 | Conta fechada com fator 0,3 | positiva | +0,043 ¢/share (fator 0,5) | ⚠️ margem de 4 centésimos |
+| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,307** | ✅ |
+| 1.8 | Horas de amostra na célula | ≥ 20 h | **40,7 h** | ✅ |
+| 1.9 | Taxa de divergência do livro | < 1 % | **2,89 %** | ❌ |
+| 1.10 | Fórmula de reward confirmada na doc | sim | não | ❌ |
+
+**O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas
+sem pool de reward.** As 5 que têm são todas de 4 h. Em 5 min, 15 min e 1 h
+não há uma sequer. `rewards_daily_rate` ausente, com `rewards_max_spread` e
+`rewards_min_size` presentes — ou seja, o campo existe na Gamma e vem vazio,
+não é campo que ninguém lê. Estes mercados updown **não participam do programa
+de rewards**, e sem pool a rota maker não tem fonte de receita.
+
+O 1.6 positivo (+0,043 ¢/share) não salva: ele sai de `rewards + rebate −
+markout`, e o rebate é um **teto** — só existe quando alguém nos executa, e a
+probabilidade disso depende da posição na fila, que o WS agregado não mostra.
+O relatório diz isso em `limitacao_de_fila`: o viés infla o resultado nas duas
+pontas.
 
 1.10 não pode ser resolvido daqui: `docs.polymarket.com` é inalcançável neste
 ambiente. Precisa de uma máquina que chegue lá.
+
+### A âncora está fechada
+
+| | |
+|---|---|
+| Consistência em τ=0 | **0,9984** |
+| Janelas elegíveis | **640** (de 647 recebidas) |
+| Discordantes | 1 |
+| Quartis | 134 / 168 / 170 / 168 · `concentrada: false` |
+| Família de controle (`media_60s`) | 0,9528 |
+
+Amostra grande, bem espalhada no tempo, e a família perdedora continuou
+perdendo por 4,5 pontos. **Não é mais pergunta em aberto.**
+
+### Um defeito de instrumento achado nesta rodada
+
+`cobertura_da_gravacao` reporta **1,0** em todos os oito ativos, e o mesmo
+relatório registra um silêncio de `conexao_inteira` de **3.601 s**. Os dois não
+podem estar certos.
+
+Neste caso o silêncio é benigno — é o buraco da hora 01:00, que foi excluída de
+propósito (dois dos três fragmentos vieram corrompidos da origem). Por isso
+`suspeita_de_assinatura_caducada` deu 0 e os oito ativos "emudeceram" com
+0,152 s de dispersão: é a borda entre arquivos, não o feed. Mas **a métrica de
+cobertura não descontou o buraco**, e é justamente ela que o veredito da
+âncora consome desde o M2.9.
+
+**Conserto feito (M2.13):** `coberto_s` passou a ser a SOMA dos intervalos,
+cada um limitado a `idade_maxima_da_amostra_ms` — a mesma régua que o resto do
+relatório usa para dizer que uma janela abriu "em lacuna". No caso desta
+rodada a conta nova dá **0,9526** onde a antiga dava 1,0000, e o novo
+`maior_buraco_s` sai em **3.601,0 s**, que bate com o `intervalo_s.max` e com o
+silêncio de conexão inteira de 3.600,67 s. Os números agora concordam entre si.
+O relatório também ganhou `buracos_s` e `silencio_inicial_s` — a borda da
+frente, que só o `silencio_final_s` não via.
 
 ---
 

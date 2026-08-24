@@ -1,12 +1,69 @@
 # VEREDITO M2 — existe edge líquido?
 
-**Status: PENDENTE DE DADO. Nenhum veredito pode ser emitido ainda.**
+**Status: VEREDITO EMITIDO em 2026-08-23 — ver a seção logo abaixo.**
 
-Data: 2026-08-16 · atualizado 2026-08-21 (M2.5)
+Data: 2026-08-16 · atualizado 2026-08-21 (M2.5) · **veredito 2026-08-23**
 
 ---
 
-## O veredito honesto de hoje
+## VEREDITO — 20 horas de mercado real
+
+Amostra: 2026-08-23, 00:00 a 20:00 UTC (hora 01:00 excluída, dois fragmentos
+corrompidos na origem). `pior_fracao_coberta` 1,0 nos oito ativos, 794 janelas
+conhecidas, **568 trades**, 2 h 47 min de processamento.
+Relatório: `relatorios/M2_VEREDITO.json`.
+
+### TAKER — 4 dos 5
+
+| # | Critério | Exigido | Medido | |
+|---|---|---|---|---|
+| 1.1 | PnL líquido @300 ms | positivo | **+102,9227 USDC** | ✅ |
+| 1.2 | Trades | ≥ 200 | **568** | ✅ |
+| 1.3 | Erro de calibração < 0,05 | em ≥ 1 bucket | 0,0067 | ⚠️ não avaliado |
+| 1.4 | PnL líquido @600 ms | positivo | **+101,1759 USDC** | ✅ |
+| 1.5 | Profundidade p50 3 ticks | ≥ 200 USDC | 87,8 / 41,8 / 31,3 / 35,7 | ❌ |
+
+### MAKER — reprova
+
+| # | Critério | Exigido | Medido | |
+|---|---|---|---|---|
+| 1.6 | Conta fechada | positiva | +0,043 ¢/share | ⚠️ |
+| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,307** | ✅ |
+| 1.8 | Horas de amostra | ≥ 20 h | **40,7 h** | ✅ |
+| 1.9 | Divergência do livro | < 1 % | **2,89 %** | ❌ |
+| 1.10 | Fórmula de reward na doc oficial | sim | não | ❌ |
+
+**594 das 599 janelas sem pool de reward** — as 5 que têm são de 4 h. Sem
+pool não há receita de maker nestes mercados, e isso não é ajustável.
+
+### O que este veredito NÃO diz
+
+Três ressalvas que fazem parte do resultado, não são notas de rodapé:
+
+1. **O critério 1.3 não foi avaliado.** O `erro` publicado compara a
+   probabilidade média prevista com a **taxa-base do balde**, não com a
+   acurácia por faixa. Um preditor constante passa. Marcar ✅ seria contar
+   artefato de construção como evidência.
+2. **A borda não vem de seleção.** `threshold_mordeu` virou `true`, mas os 568
+   trades passam em todos os patamares da grade. O lucro nasce de viés
+   sistemático (prevê 0,6445, realiza 0,6225 no balde operado), não de
+   escolher situações boas.
+3. **O 1.5 é teto de capacidade.** +0,18 USDC por trade sobre 2,91 USDC
+   movimentados. O livro tem p50 de 87,77 USDC a 3 ticks na duração mais
+   líquida.
+
+### A âncora
+
+`0,9984` em τ=0 sobre **640 janelas elegíveis**, 1 discordante, quartis
+134/168/170/168, `concentrada: false`. Família de controle (`media_60s`) em
+0,9528. **Fechada.**
+
+---
+
+## O veredito honesto de 2026-08-21 (histórico)
+
+> Esta seção valia antes de a gravação de 20 h existir. Fica como estava, de
+> propósito: apagar o raciocínio anterior esconderia o que mudou com o dado.
 
 **Não sei, e ninguém sabe, porque a gravação de produção ainda não existe.**
 

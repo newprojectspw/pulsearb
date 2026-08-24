@@ -45,9 +45,36 @@ class Trade:
         return self.payout_usdc - self.custo_usdc - self.fee_usdc
 
 
+#: Largura das faixas da curva de confiabilidade. 0,05 dá 20 faixas entre 0
+#: e 1 — fino o bastante para separar um modelo calibrado de um constante, e
+#: grosso o bastante para cada faixa ter amostra.
+LARGURA_DA_FAIXA = 0.05
+
+#: Faixas ocupadas abaixo disto = o preditor não varia o bastante para a
+#: curva de confiabilidade significar alguma coisa. Três é o mínimo que
+#: distingue "varia" de "cospe uma constante com ruído de arredondamento".
+MINIMO_DE_FAIXAS = 3
+
+
+def faixa_de_probabilidade(prob: float) -> str:
+    """Rótulo da faixa de `prob`, no formato `0.60-0.65`."""
+    prob = min(max(prob, 0.0), 1.0)
+    indice = min(int(prob / LARGURA_DA_FAIXA), int(1 / LARGURA_DA_FAIXA) - 1)
+    piso = indice * LARGURA_DA_FAIXA
+    return f"{piso:.2f}-{piso + LARGURA_DA_FAIXA:.2f}"
+
+
 @dataclass
-class CalibrationBucket:
-    bucket: str
+class ContagemDeProbabilidade:
+    """Previsões acumuladas e o que aconteceu com elas.
+
+    Base comum do balde de tempo e da faixa de probabilidade. As duas
+    acumulam a MESMA coisa — quantas previsões, a soma delas, e quantas
+    resolveram Up — e diferem só em como o dado é FATIADO: o balde por
+    tempo restante, a faixa por probabilidade prevista. Manter as três
+    contas em um lugar só evita que uma seja consertada e a outra não.
+    """
+
     n: int = 0
     soma_prob: float = 0.0
     acertos_up: int = 0
@@ -58,12 +85,97 @@ class CalibrationBucket:
 
     @property
     def freq_realizada(self) -> float:
+        """Fração que resolveu Up. NO BALDE isto é a taxa-base, não acurácia.
+
+        Na FAIXA é outra coisa: ali as previsões são todas parecidas entre
+        si, então comparar com `prob_media_prevista` mede calibração de
+        verdade. Mesma conta, significados diferentes — é a razão de a
+        curva de confiabilidade existir.
+        """
         return self.acertos_up / self.n if self.n else float("nan")
 
     @property
-    def erro_calibracao(self) -> float:
-        """Previsto − realizado. Positivo = modelo otimista demais."""
+    def erro(self) -> float:
+        """Previsto − realizado. Positivo = otimista demais."""
         return self.prob_media_prevista - self.freq_realizada
+
+    def somar(self, prob_up: float, resolveu_up: bool) -> None:
+        self.n += 1
+        self.soma_prob += prob_up
+        if resolveu_up:
+            self.acertos_up += 1
+
+
+@dataclass
+class FaixaDeConfiabilidade(ContagemDeProbabilidade):
+    """Uma faixa de probabilidade PREVISTA e o que aconteceu nela."""
+
+    faixa: str = ""
+
+
+@dataclass
+class CalibrationBucket(ContagemDeProbabilidade):
+    bucket: str = ""
+    faixas: dict[str, FaixaDeConfiabilidade] = field(default_factory=dict)
+
+    @property
+    def erro_calibracao(self) -> float:
+        """Previsto − realizado, AGREGADO. NÃO é medida de calibração.
+
+        Aqui `freq_realizada` é a taxa-base do balde, não a acurácia por
+        faixa. Um preditor que cospe uma constante igual à taxa-base tira
+        zero neste número sem saber nada — foi o que a rodada de 20 h
+        expôs: no balde `<30s`, previsto 0,514 contra realizado 0,5073,
+        cara-ou-coroa dos dois lados, e o critério 1.3 do VEREDITO_M2
+        "passou" com 0,0067.
+
+        Fica no relatório porque é barato e diz se o modelo tem viés de
+        nível. Quem decide calibração é `erro_de_confiabilidade`.
+        """
+        return self.erro
+
+    @property
+    def erro_de_confiabilidade(self) -> float:
+        """ECE: média dos |previsto − realizado| por faixa, ponderada por n.
+
+        SOZINHO ELE NÃO BASTA, e isso foi medido, não suposto. Contra três
+        preditores sintéticos de 20 mil observações:
+
+        | preditor | `erro` | ECE | `faixas_ocupadas` |
+        |---|---|---|---|
+        | constante 0,51 num mundo 50/50 | +0,0051 | **0,0051** | **1** |
+        | bem calibrado | −0,0007 | 0,0070 | 18 |
+        | otimista em 15 pontos | +0,1487 | **0,1487** | 15 |
+
+        O constante passa no ECE também: ele cai todo numa faixa só, e
+        dentro dela previsto e realizado quase coincidem. O que o ECE
+        acrescenta é separar o otimista sistemático do bem calibrado — o
+        número antigo já fazia isso, mas por sorte, porque ali o viés de
+        nível e o erro por faixa coincidem.
+
+        Quem denuncia o preditor constante é `faixas_ocupadas`. Por isso
+        o critério é a CONJUNÇÃO: ver `calibracao_avaliavel`.
+        """
+        vivas = [f for f in self.faixas.values() if f.n]
+        total = sum(f.n for f in vivas)
+        if not total:
+            return float("nan")
+        return sum(abs(f.erro) * f.n for f in vivas) / total
+
+    @property
+    def faixas_ocupadas(self) -> int:
+        """Quantas faixas têm amostra. 1 = preditor efetivamente constante."""
+        return sum(1 for f in self.faixas.values() if f.n)
+
+    @property
+    def calibracao_avaliavel(self) -> bool:
+        """O balde tem variação suficiente para o ECE querer dizer algo?
+
+        Sem espalhamento na probabilidade prevista não há curva para medir,
+        e um ECE baixo é artefato de construção. Falso aqui significa
+        **critério 1.3 não avaliado** — que é diferente de reprovado.
+        """
+        return self.faixas_ocupadas >= MINIMO_DE_FAIXAS
 
 
 @dataclass
@@ -106,10 +218,12 @@ class BacktestReport:
         o modelo estava mais confiante.
         """
         entry = self.calibracao.setdefault(bucket, CalibrationBucket(bucket=bucket))
-        entry.n += 1
-        entry.soma_prob += prob_up
-        if resolveu_up:
-            entry.acertos_up += 1
+        entry.somar(prob_up, resolveu_up)
+
+        rotulo = faixa_de_probabilidade(prob_up)
+        entry.faixas.setdefault(
+            rotulo, FaixaDeConfiabilidade(faixa=rotulo)
+        ).somar(prob_up, resolveu_up)
 
     # ------------------------------------------------------------ métricas
     @property
@@ -223,9 +337,46 @@ class BacktestReport:
                     "prob_media_prevista": round(entry.prob_media_prevista, 4),
                     "freq_realizada": round(entry.freq_realizada, 4),
                     "erro": round(entry.erro_calibracao, 4),
+                    "erro_de_confiabilidade": round(
+                        entry.erro_de_confiabilidade, 4
+                    ),
+                    "faixas_ocupadas": entry.faixas_ocupadas,
+                    "calibracao_avaliavel": entry.calibracao_avaliavel,
+                    "curva_de_confiabilidade": {
+                        faixa.faixa: {
+                            "n": faixa.n,
+                            "previsto": round(faixa.prob_media_prevista, 4),
+                            "realizado": round(faixa.freq_realizada, 4),
+                            "erro": round(faixa.erro, 4),
+                        }
+                        for faixa in sorted(
+                            (f for f in entry.faixas.values() if f.n),
+                            key=lambda f: f.faixa,
+                        )
+                    },
                 }
                 for bucket, entry in sorted(self.calibracao.items())
             },
+            "calibracao_nota": (
+                "M2.13. LEIA `erro_de_confiabilidade`, NAO `erro`. O `erro` "
+                "compara a probabilidade media prevista com a TAXA-BASE do "
+                "balde, entao um preditor que cospe uma constante igual a "
+                "taxa-base tira zero sem saber nada. Foi o que a rodada de "
+                "20h expos: no balde `<30s`, previsto 0,514 contra realizado "
+                "0,5073 — cara-ou-coroa dos dois lados — e o criterio 1.3 do "
+                "VEREDITO_M2 'passou' com 0,0067. "
+                "`erro_de_confiabilidade` e o ECE sobre `curva_de_"
+                "confiabilidade`: media dos |previsto - realizado| por faixa "
+                "de probabilidade PREVISTA, ponderada pelo tamanho da faixa. "
+                "MAS O ECE SOZINHO NAO BASTA, e isso foi medido: o preditor "
+                "constante tira 0,0051 nele tambem, porque cai todo numa "
+                "faixa so. Quem o denuncia e `faixas_ocupadas`. "
+                "O criterio 1.3 e a CONJUNCAO: `calibracao_avaliavel` true "
+                "(pelo menos 3 faixas com amostra) E `erro_de_"
+                "confiabilidade` abaixo do limiar. Com `calibracao_avaliavel` "
+                "false o criterio fica NAO AVALIADO — que nao e o mesmo que "
+                "reprovado."
+            ),
         }
 
 
