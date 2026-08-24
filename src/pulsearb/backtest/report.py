@@ -65,10 +65,16 @@ def faixa_de_probabilidade(prob: float) -> str:
 
 
 @dataclass
-class FaixaDeConfiabilidade:
-    """Uma faixa de probabilidade PREVISTA e o que aconteceu nela."""
+class ContagemDeProbabilidade:
+    """Previsões acumuladas e o que aconteceu com elas.
 
-    faixa: str
+    Base comum do balde de tempo e da faixa de probabilidade. As duas
+    acumulam a MESMA coisa — quantas previsões, a soma delas, e quantas
+    resolveram Up — e diferem só em como o dado é FATIADO: o balde por
+    tempo restante, a faixa por probabilidade prevista. Manter as três
+    contas em um lugar só evita que uma seja consertada e a outra não.
+    """
+
     n: int = 0
     soma_prob: float = 0.0
     acertos_up: int = 0
@@ -79,28 +85,38 @@ class FaixaDeConfiabilidade:
 
     @property
     def freq_realizada(self) -> float:
+        """Fração que resolveu Up. NO BALDE isto é a taxa-base, não acurácia.
+
+        Na FAIXA é outra coisa: ali as previsões são todas parecidas entre
+        si, então comparar com `prob_media_prevista` mede calibração de
+        verdade. Mesma conta, significados diferentes — é a razão de a
+        curva de confiabilidade existir.
+        """
         return self.acertos_up / self.n if self.n else float("nan")
 
     @property
     def erro(self) -> float:
+        """Previsto − realizado. Positivo = otimista demais."""
         return self.prob_media_prevista - self.freq_realizada
+
+    def somar(self, prob_up: float, resolveu_up: bool) -> None:
+        self.n += 1
+        self.soma_prob += prob_up
+        if resolveu_up:
+            self.acertos_up += 1
 
 
 @dataclass
-class CalibrationBucket:
-    bucket: str
-    n: int = 0
-    soma_prob: float = 0.0
-    acertos_up: int = 0
+class FaixaDeConfiabilidade(ContagemDeProbabilidade):
+    """Uma faixa de probabilidade PREVISTA e o que aconteceu nela."""
+
+    faixa: str = ""
+
+
+@dataclass
+class CalibrationBucket(ContagemDeProbabilidade):
+    bucket: str = ""
     faixas: dict[str, FaixaDeConfiabilidade] = field(default_factory=dict)
-
-    @property
-    def prob_media_prevista(self) -> float:
-        return self.soma_prob / self.n if self.n else float("nan")
-
-    @property
-    def freq_realizada(self) -> float:
-        return self.acertos_up / self.n if self.n else float("nan")
 
     @property
     def erro_calibracao(self) -> float:
@@ -116,7 +132,7 @@ class CalibrationBucket:
         Fica no relatório porque é barato e diz se o modelo tem viés de
         nível. Quem decide calibração é `erro_de_confiabilidade`.
         """
-        return self.prob_media_prevista - self.freq_realizada
+        return self.erro
 
     @property
     def erro_de_confiabilidade(self) -> float:
@@ -202,19 +218,12 @@ class BacktestReport:
         o modelo estava mais confiante.
         """
         entry = self.calibracao.setdefault(bucket, CalibrationBucket(bucket=bucket))
-        entry.n += 1
-        entry.soma_prob += prob_up
-        if resolveu_up:
-            entry.acertos_up += 1
+        entry.somar(prob_up, resolveu_up)
 
         rotulo = faixa_de_probabilidade(prob_up)
-        faixa = entry.faixas.setdefault(
+        entry.faixas.setdefault(
             rotulo, FaixaDeConfiabilidade(faixa=rotulo)
-        )
-        faixa.n += 1
-        faixa.soma_prob += prob_up
-        if resolveu_up:
-            faixa.acertos_up += 1
+        ).somar(prob_up, resolveu_up)
 
     # ------------------------------------------------------------ métricas
     @property
