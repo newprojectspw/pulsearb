@@ -50,11 +50,13 @@ from pulsearb.backtest.report import curva_de_edge_por_threshold
 from pulsearb.backtest.runner import (
     LIMITE_SNAPSHOTS_PADRAO,
     NIVEIS_RETIDOS_PADRAO,
+    TAMANHOS_PADRAO,
     BacktestConfig,
     BacktestRunner,
     BookTimeline,
     WindowState,
     sensibilidade_latencia,
+    varredura_de_tamanho,
     varredura_de_threshold,
 )
 
@@ -1553,7 +1555,40 @@ def main(argv: list[str] | None = None) -> int:
             "sem espacamento o PnL somaria a mesma aposta repetida."
         ),
     )
+    parser.add_argument(
+        "--varredura-de-tamanho",
+        dest="varredura_de_tamanho",
+        default=None,
+        help=(
+            "lista de tamanhos em shares, separados por virgula, para a curva "
+            "de CAPACIDADE (M2.14) — por exemplo 5,10,25,50,100,200. Cada "
+            "tamanho e uma passada completa do backtest, entao a rodada fica "
+            "N vezes mais longa: fica DESLIGADA por default de proposito. "
+            "Use 'padrao' para a grade padrao. Responde ao criterio 1.5 do "
+            "VEREDITO_M2 medindo direto se a borda por share sobrevive ao "
+            "tamanho, em vez de inferir de um p50 de profundidade."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    tamanhos_da_varredura: tuple[float, ...] = ()
+    if args.varredura_de_tamanho:
+        if args.varredura_de_tamanho.strip().lower() == "padrao":
+            tamanhos_da_varredura = TAMANHOS_PADRAO
+        else:
+            try:
+                tamanhos_da_varredura = tuple(
+                    float(pedaco)
+                    for pedaco in args.varredura_de_tamanho.split(",")
+                    if pedaco.strip()
+                )
+            except ValueError:
+                parser.error(
+                    "--varredura-de-tamanho espera numeros separados por "
+                    f"virgula, ou 'padrao'; recebi {args.varredura_de_tamanho!r}"
+                )
+            if any(t <= 0 for t in tamanhos_da_varredura):
+                parser.error("--varredura-de-tamanho so aceita tamanhos positivos")
 
     try:
         desde = _hora_utc(args.desde)
@@ -1862,6 +1897,19 @@ def main(argv: list[str] | None = None) -> int:
             varredura_de_threshold(
                 integras, index.streams, latencia_ms=args.latencia_ms
             )
+        ),
+        **(
+            {
+                "curva_de_capacidade": varredura_de_tamanho(
+                    integras,
+                    index.streams,
+                    tamanhos=tamanhos_da_varredura,
+                    threshold=args.threshold,
+                    latencia_ms=args.latencia_ms,
+                )
+            }
+            if tamanhos_da_varredura
+            else {}
         ),
         "medicoes": {
             "tick": medir_mudanca_de_tick(
