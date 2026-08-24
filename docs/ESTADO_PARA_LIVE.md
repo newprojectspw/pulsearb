@@ -124,8 +124,25 @@ balde**, não a acurácia da previsão. No balde `<30s`: previu 0,514, realizou
 0,5073 — cara-ou-coroa dos dois lados. Um preditor que cospe 0,51 constante
 tira nota máxima nesse critério. Enquanto a medição for essa, 1.3 não carrega
 informação, e tratá-lo como aprovado seria contar como evidência o que é
-artefato de construção. **Conserto pendente: curva de confiabilidade por
-faixa de probabilidade prevista, não média contra base.**
+artefato de construção.
+
+**Conserto feito (M2.13):** o relatório agora publica `curva_de_confiabilidade`
+por faixa de probabilidade prevista, mais `erro_de_confiabilidade` (ECE) e
+`faixas_ocupadas`. Medido contra três preditores sintéticos de 20 mil
+observações:
+
+| Preditor | `erro` (antigo) | ECE | `faixas_ocupadas` |
+|---|---|---|---|
+| constante 0,51 num mundo 50/50 | +0,0051 | **0,0051** | **1** |
+| bem calibrado | −0,0007 | 0,0070 | 18 |
+| otimista em 15 pontos | +0,1487 | **0,1487** | 15 |
+
+**O ECE sozinho não resolve** — o constante passa nele também, porque cai todo
+numa faixa só. Quem o denuncia é `faixas_ocupadas`. Por isso 1.3 virou
+CONJUNÇÃO: `calibracao_avaliavel` (≥ 3 faixas com amostra) **e** ECE abaixo do
+limiar. Com `calibracao_avaliavel` false o critério fica **não avaliado**, que
+não é o mesmo que reprovado. **Falta rodar de novo sobre a gravação para saber
+em que pé o modelo está.**
 
 **1.5 é o único critério de borda que reprova, e é o mais duro.** É teto de
 CAPACIDADE. O backtest move 1.651,59 USDC em 568 trades — **2,91 USDC por
@@ -183,7 +200,16 @@ propósito (dois dos três fragmentos vieram corrompidos da origem). Por isso
 `suspeita_de_assinatura_caducada` deu 0 e os oito ativos "emudeceram" com
 0,152 s de dispersão: é a borda entre arquivos, não o feed. Mas **a métrica de
 cobertura não descontou o buraco**, e é justamente ela que o veredito da
-âncora consome desde o M2.9. Conserto pendente.
+âncora consome desde o M2.9.
+
+**Conserto feito (M2.13):** `coberto_s` passou a ser a SOMA dos intervalos,
+cada um limitado a `idade_maxima_da_amostra_ms` — a mesma régua que o resto do
+relatório usa para dizer que uma janela abriu "em lacuna". No caso desta
+rodada a conta nova dá **0,9526** onde a antiga dava 1,0000, e o novo
+`maior_buraco_s` sai em **3.601,0 s**, que bate com o `intervalo_s.max` e com o
+silêncio de conexão inteira de 3.600,67 s. Os números agora concordam entre si.
+O relatório também ganhou `buracos_s` e `silencio_inicial_s` — a borda da
+frente, que só o `silencio_final_s` não via.
 
 ---
 

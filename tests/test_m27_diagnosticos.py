@@ -1053,3 +1053,94 @@ def test_a_lista_de_discordantes_tem_teto():
     saida = varrer(janelas, {"btc": _serie_e18()}, tau_min_s=-1, tau_max_s=1)
 
     assert len(saida["discordantes_em_tau_verificado"]) == 20
+
+
+# --------------------------------------------------------------- M2.13
+# Dois defeitos que a rodada de 20 h de 2026-08-23 expôs.
+
+
+class TestCoberturaDescontaBuraco:
+    """`coberto_s` era o span do primeiro ao último carimbo (M2.9).
+
+    Um buraco no meio entrava como coberto. Na rodada de 20 h a métrica
+    publicou 1,0 nos oito ativos enquanto o mesmo relatório registrava
+    3.601 s de silêncio de conexão inteira. Os dois não podiam estar certos.
+    """
+
+    @staticmethod
+    def _cobertura(carimbos_ms, gravacao_s):
+        from pulsearb.backtest.__main__ import RecordingIndex
+
+        index = RecordingIndex.__new__(RecordingIndex)
+        index.streams_e18 = {"btc": [(ts, 1) for ts in carimbos_ms]}
+        index._primeiro_record_ns = 0
+        index._ultimo_record_ns = int(gravacao_s * 1e9)
+        return index._cobertura_da_serie()["por_ativo"]["btc"]
+
+    def test_buraco_de_uma_hora_derruba_a_cobertura(self):
+        # 20 h de cadência de 1 s dentro de um span de 21 h: o buraco de 1 h
+        # é exatamente o que a conta antiga escondia.
+        antes = list(range(0, 10 * 3600 * 1000, 1000))
+        depois = list(range(11 * 3600 * 1000, 21 * 3600 * 1000, 1000))
+        medido = self._cobertura(antes + depois, 75600.0)
+
+        assert medido["fracao_da_gravacao"] < 0.96
+        assert 3600.0 <= medido["maior_buraco_s"] <= 3602.0
+        assert medido["buracos_s"] > 3500.0
+
+    def test_hora_limpa_continua_em_um(self):
+        limpa = list(range(0, 3600 * 1000, 1000))
+        medido = self._cobertura(limpa, 3600.0)
+
+        assert medido["fracao_da_gravacao"] == 1.0
+        assert medido["buracos_s"] == 0.0
+
+
+class TestCalibracaoNaoConfundeBaseComAcuracia:
+    """O `erro` do critério 1.3 comparava previsto com a TAXA-BASE do balde.
+
+    Um preditor constante igual à taxa-base tirava nota máxima sem saber
+    nada. Na rodada de 20 h o balde `<30s` deu 0,0067 com previsto 0,514 e
+    realizado 0,5073 — cara-ou-coroa dos dois lados.
+    """
+
+    @staticmethod
+    def _medir(gerar, n=20000, semente=7):
+        import random
+
+        from pulsearb.backtest.report import BacktestReport
+
+        relatorio = BacktestReport()
+        rnd = random.Random(semente)
+        for _ in range(n):
+            prob, resolveu = gerar(rnd)
+            relatorio.add_calibration("teste", prob, resolveu)
+        return relatorio.to_dict()["calibracao"]["teste"]
+
+    def test_preditor_constante_fica_nao_avaliavel(self):
+        medido = self._medir(lambda rnd: (0.51, rnd.random() < 0.50))
+
+        # O erro antigo o aprovava, e o ECE sozinho TAMBÉM o aprova — ele cai
+        # todo numa faixa só. Quem o denuncia é o número de faixas.
+        assert abs(medido["erro"]) < 0.05
+        assert medido["erro_de_confiabilidade"] < 0.05
+        assert medido["faixas_ocupadas"] == 1
+        assert medido["calibracao_avaliavel"] is False
+
+    def test_preditor_bem_calibrado_e_avaliavel_e_passa(self):
+        medido = self._medir(
+            lambda rnd: (lambda p: (p, rnd.random() < p))(rnd.uniform(0.05, 0.95))
+        )
+
+        assert medido["calibracao_avaliavel"] is True
+        assert medido["erro_de_confiabilidade"] < 0.05
+
+    def test_preditor_otimista_demais_reprova_no_ece(self):
+        medido = self._medir(
+            lambda rnd: (lambda p: (p, rnd.random() < max(0.0, p - 0.15)))(
+                rnd.uniform(0.2, 0.95)
+            )
+        )
+
+        assert medido["calibracao_avaliavel"] is True
+        assert medido["erro_de_confiabilidade"] > 0.10
