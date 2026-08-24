@@ -20,6 +20,7 @@ from pulsearb.backtest.runner import (
     BacktestConfig,
     BacktestRunner,
     sensibilidade_latencia,
+    varredura_de_tamanho,
     varredura_de_threshold,
 )
 from pulsearb.engine.anchor import (
@@ -115,6 +116,52 @@ def test_threshold_alto_reduz_trades(indexado):
         janelas, indexado.streams, thresholds=(0.01, 0.30)
     )
     assert len(varredura[0.30].trades) <= len(varredura[0.01].trades)
+
+
+def test_varredura_de_tamanho_mostra_o_teto_de_capacidade(indexado):
+    """M2.14. O criterio 1.5 reprovou por profundidade; isto mede direto.
+
+    Com FOK, uma ordem que o livro nao comporta e RECUSADA. Entao subir o
+    tamanho tem de reduzir os trades e engordar `sinais_nao_preenchiveis` —
+    e e isso que faz da curva uma medida de capacidade, e nao de borda.
+    """
+    janelas = [j for j in indexado.janelas() if j.resolveu_up is not None]
+    for janela in janelas:
+        janela.ancora = compute_anchor(
+            AnchorHypothesis.ULTIMO_ANTES, indexado.streams["btc"], janela.open_ts_ns
+        )
+    saida = varredura_de_tamanho(
+        janelas, indexado.streams, tamanhos=(5.0, 5_000_000.0)
+    )
+
+    pequeno = saida["por_tamanho"]["5shares"]
+    enorme = saida["por_tamanho"]["5000000shares"]
+
+    assert pequeno["trades"] > 0
+    assert enorme["trades"] == 0
+    assert enorme["sinais_nao_preenchiveis"] > pequeno["sinais_nao_preenchiveis"]
+    assert enorme["pnl_por_share"] is None
+    assert pequeno["pnl_por_share"] is not None
+
+    # O aviso de que a curva e otimista NAO e decorativo: sem fila nem
+    # impacto proprio, o teto medido e sempre mais alto que o real.
+    assert "OTIMISTA" in saida["nota"]
+
+
+def test_varredura_de_tamanho_publica_o_que_decide(indexado):
+    janelas = [j for j in indexado.janelas() if j.resolveu_up is not None]
+    for janela in janelas:
+        janela.ancora = compute_anchor(
+            AnchorHypothesis.ULTIMO_ANTES, indexado.streams["btc"], janela.open_ts_ns
+        )
+    saida = varredura_de_tamanho(janelas, indexado.streams, tamanhos=(5.0, 10.0))
+
+    for linha in saida["por_tamanho"].values():
+        # pnl_por_share e o numero que decide se a borda sobrevive ao tamanho
+        assert "pnl_por_share" in linha
+        assert "sinais_nao_preenchiveis" in linha
+        assert "preco_medio_pago" in linha
+        assert "max_drawdown_usdc" in linha
 
 
 def test_sensibilidade_de_latencia_roda_os_quatro_cenarios(indexado):

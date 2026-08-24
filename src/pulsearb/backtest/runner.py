@@ -32,6 +32,12 @@ LATENCIAS_MS_PADRAO = (150.0, 300.0, 600.0, 1000.0)
 LATENCIA_PADRAO_MS = 300.0
 THRESHOLDS_PADRAO = (0.01, 0.02, 0.03, 0.05, 0.08, 0.12)
 
+#: Tamanhos da varredura de capacidade (M2.14). Começa no mínimo do mercado
+#: (5 shares, API_NOTES 12.5) e dobra até 200, que é o limiar de
+#: profundidade que o VEREDITO_M2 §1.5 exige em USDC — a 0,50 por share,
+#: 200 shares custam ~100 USDC, a ordem de grandeza do p50 medido.
+TAMANHOS_PADRAO = (5.0, 10.0, 25.0, 50.0, 100.0, 200.0)
+
 # Teto de memória do backtest — ver BookTimeline.
 #
 # O custo foi MEDIDO, não estimado: com 5 níveis por lado, cada snapshot
@@ -504,4 +510,101 @@ def varredura_de_threshold(
             BacktestConfig(threshold_edge=threshold, latencia_ms=latencia_ms)
         ).run(janelas, streams)
         for threshold in thresholds
+    }
+
+
+def varredura_de_tamanho(
+    janelas: list[WindowState],
+    streams: dict[str, list[tuple[int, float]]],
+    *,
+    tamanhos: tuple[float, ...] = TAMANHOS_PADRAO,
+    threshold: float = 0.02,
+    latencia_ms: float = LATENCIA_PADRAO_MS,
+) -> dict[str, Any]:
+    """A curva de CAPACIDADE: o que acontece com a borda quando se sobe o tamanho.
+
+    O critério 1.5 do VEREDITO_M2 reprovou por profundidade — p50 de 87,8 USDC
+    a 3 ticks contra os 200 exigidos. Mas 1.5 é um limiar escolhido antes do
+    dado, e o que ele quer proteger é uma coisa só: **a borda por share
+    sobrevive quando se opera de verdade?**
+
+    Isto mede diretamente, em vez de inferir de um p50. Dois efeitos
+    independentes aparecem, e é por isso que os dois são publicados:
+
+    1. `trades` CAI. Com `exigir_fill_completo` (FOK, o default), toda entrada
+       que o livro não comporta é recusada e vai para
+       `sinais_nao_preenchiveis`. Isso é o teto de capacidade se manifestando
+       como oportunidade perdida.
+    2. `pnl_por_share` CAI. As entradas que ainda passam atravessam mais
+       níveis, e o preço médio piora. Isso é o teto se manifestando como
+       margem corroída.
+
+    `pnl_por_share` é o número que decide. Se ele ficar plano de 5 a 200
+    shares, o 1.5 era conservador e a estratégia escala. Se despencar, o
+    limiar estava certo e o teto é real — e aí a curva diz ONDE ele está, que
+    é o que nenhum p50 sozinho responde.
+
+    NÃO modela fila nem impacto de mercado além do book gravado: comprar 200
+    shares move o livro para os próximos participantes, e a gravação não sabe
+    disso. A curva é, portanto, OTIMISTA — o teto real é mais baixo que o
+    medido aqui, nunca mais alto.
+    """
+    saida: dict[str, Any] = {}
+    for tamanho in tamanhos:
+        report = BacktestRunner(
+            BacktestConfig(
+                threshold_edge=threshold,
+                latencia_ms=latencia_ms,
+                shares_por_trade=tamanho,
+            )
+        ).run(janelas, streams)
+
+        shares = sum(t.shares for t in report.trades)
+        saida[f"{tamanho:.0f}shares"] = {
+            "shares_pedidas": tamanho,
+            "trades": len(report.trades),
+            "sinais_gerados": report.sinais_gerados,
+            "sinais_nao_preenchiveis": report.sinais_nao_preenchiveis,
+            "sinais_abaixo_do_minimo": report.sinais_abaixo_do_minimo,
+            "shares_preenchidas": round(shares, 2),
+            "preco_medio_pago": (
+                round(
+                    sum(t.preco_pago * t.shares for t in report.trades) / shares, 6
+                )
+                if shares
+                else None
+            ),
+            "pnl_liquido_usdc": round(report.pnl_liquido, 4),
+            "pnl_medio_por_trade": (
+                round(report.pnl_liquido / len(report.trades), 5)
+                if report.trades
+                else None
+            ),
+            "pnl_por_share": round(report.pnl_liquido / shares, 6) if shares else None,
+            "capital_movimentado_usdc": round(
+                sum(t.custo_usdc for t in report.trades), 2
+            ),
+            "fees_pagas_usdc": round(sum(t.fee_usdc for t in report.trades), 4),
+            "hit_rate": round(report.hit_rate, 4) if report.trades else None,
+            "max_drawdown_usdc": round(report.max_drawdown(), 4),
+        }
+
+    return {
+        "por_tamanho": saida,
+        "tamanho_base": tamanhos[0] if tamanhos else None,
+        "nota": (
+            "M2.14. O criterio 1.5 do VEREDITO_M2 reprovou por profundidade "
+            "(p50 de 87,8 USDC a 3 ticks contra 200 exigidos), mas 1.5 e um "
+            "LIMIAR escolhido antes do dado. Esta curva mede direto o que ele "
+            "quer proteger: a borda por share sobrevive ao tamanho? "
+            "Olhe `pnl_por_share` ao longo da curva — plano quer dizer que o "
+            "limiar era conservador e a estrategia escala; despencando quer "
+            "dizer que o teto e real, e a curva diz ONDE ele esta. "
+            "`sinais_nao_preenchiveis` e o teto na outra forma: com FOK, "
+            "entrada que o livro nao comporta e recusada, e a capacidade "
+            "aparece como oportunidade perdida em vez de margem corroida. "
+            "OTIMISTA POR CONSTRUCAO: nao modela fila nem o impacto que a "
+            "nossa propria ordem tem sobre os participantes seguintes. O teto "
+            "real e mais baixo que este, nunca mais alto."
+        ),
     }
