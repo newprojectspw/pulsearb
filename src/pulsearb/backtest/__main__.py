@@ -862,9 +862,12 @@ class RecordingIndex:
             # O primeiro ponto também cobre o seu próprio intervalo de validade.
             coberto_ms += idade_max_ms
             coberto = coberto_ms / 1000.0
-            # ms do servidor → ns de parede, para comparar os dois eixos
-            fim_ns = max(carimbos) * 1_000_000
-            inicio_ns = min(carimbos) * 1_000_000
+            # ms do servidor → ns de parede, para comparar os dois eixos.
+            # `carimbos` já está ordenado: indexar as pontas evita duas
+            # varreduras completas por ativo, que a 68 mil pontos vezes oito
+            # ativos custam mais de um milhão de comparações à toa.
+            inicio_ns = carimbos[0] * 1_000_000
+            fim_ns = carimbos[-1] * 1_000_000
             por_ativo[asset] = {
                 "coberto_s": round(coberto, 1),
                 "fracao_da_gravacao": round(min(coberto / gravacao_s, 1.0), 4),
