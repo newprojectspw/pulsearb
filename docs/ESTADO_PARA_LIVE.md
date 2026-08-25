@@ -311,9 +311,31 @@ Falha fechada em quatro casos, cada um com nome próprio em `descartes`:
 O contador responde a pergunta que importa quando o bot não opera: *ele não
 achou janela, ou achou e jogou fora?*
 
-**Ainda falta** para o ciclo fechar: manter o topo do livro por token a partir
-do `poly_ws`, alimentar o TWAP a partir do RTDS, e o laço que junta tudo e
-chama o executor.
+Segunda peça pronta: **`live/livros.py`** — o livro de cada token, ao vivo.
+
+Fino de propósito: reusa `OrderBook`, a MESMA classe com que o critério 1.5
+mediu os 87,8 USDC. Se o shadow medisse profundidade de outro jeito, a
+comparação entre os dois não diria nada sobre capacidade.
+
+Carrega duas defesas que o M2 pagou caro para aprender:
+
+**Silêncio é por TOKEN, não por feed.** É a lição do M2.7/M2.10 no RTDS —
+tópico mudo com a conexão viva. O feed do CLOB pode estar impecável enquanto o
+livro de um token não recebe nada há minutos, e o portão `feed_parado` olha o
+feed, não o token. `resumo()["mudos"]` é o número que nenhum outro alarme daria.
+
+**Delta sem snapshot é contado, não engolido.** A gravação de 20 h mediu
+187.452 dessas observações. Aplicá-las a um livro vazio inventaria
+profundidade; ignorá-las em silêncio esconderia que o livro está incompleto.
+
+Uma escolha registrada: `livro()` devolve o **objeto vivo**, não uma cópia — o
+próximo delta o reescreve embaixo de quem o guardar. Clonar a cada consulta
+custaria uma cópia por tick por token no caminho quente, para proteger um uso
+que a decisão não faz. Está no docstring e há dois testes travando o
+comportamento, incluindo o de `.clone()` para quem precisar congelar.
+
+**Ainda falta** para o ciclo fechar: alimentar o TWAP a partir do RTDS, e o
+laço que junta tudo e chama o executor.
 
 ### 3.3 fechou — o SHADOW ensaia o caminho inteiro
 

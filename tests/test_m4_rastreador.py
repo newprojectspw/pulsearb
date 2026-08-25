@@ -8,8 +8,11 @@ errada. Estes testes travam a aritmética que o produz.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
+from pulsearb.backtest.__main__ import duracao_do_slug as duracao_usada_pelo_backtest
 from pulsearb.live.rastreador import (
     DESCARTE_JA_FECHADA,
     DESCARTE_NAO_OPERAVEL,
@@ -50,8 +53,6 @@ def _mercado(
 
 
 def _epoch(iso: str) -> float:
-    from datetime import datetime
-
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
@@ -81,9 +82,7 @@ class TestDuracaoCompartilhada:
     def test_o_backtest_usa_a_MESMA_funcao(self):
         # Não é teste de importação por burocracia: uma segunda cópia é
         # exatamente o defeito que este teste existe para impedir.
-        from pulsearb.backtest.__main__ import duracao_do_slug as do_backtest
-
-        assert do_backtest is duracao_do_slug
+        assert duracao_usada_pelo_backtest is duracao_do_slug
 
 
 class TestSecondsLeft:
