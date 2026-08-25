@@ -6,11 +6,15 @@ cada 5 minutos. Este pacote é quem sabe disso.
 """
 
 from pulsearb.live.livros import LivroDoToken, LivrosAoVivo
+from pulsearb.live.precos import PrecosAoVivo, PrecosPorAtivo, SerieE18AoVivo
 from pulsearb.live.rastreador import JanelaAoVivo, RastreadorDeJanelas
 
 __all__ = [
     "JanelaAoVivo",
     "LivroDoToken",
     "LivrosAoVivo",
+    "PrecosAoVivo",
+    "PrecosPorAtivo",
     "RastreadorDeJanelas",
+    "SerieE18AoVivo",
 ]

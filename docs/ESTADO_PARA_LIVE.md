@@ -334,8 +334,32 @@ custaria uma cópia por tick por token no caminho quente, para proteger um uso
 que a decisão não faz. Está no docstring e há dois testes travando o
 comportamento, incluindo o de `.clone()` para quem precisar congelar.
 
-**Ainda falta** para o ciclo fechar: alimentar o TWAP a partir do RTDS, e o
-laço que junta tudo e chama o executor.
+Terceira peça pronta: **`live/precos.py`** — TWAP corrente, volatilidade e a
+âncora de cada janela.
+
+**A âncora ganha ao vivo um jeito de faltar que o backtest não tinha.** O M2 a
+fixou em τ=0 — valor do stream no instante da abertura, 0,9984 sobre 640
+janelas. Mas se o processo subiu às 12:03 e a janela abriu às 12:00, o valor de
+12:00 não existe em lugar nenhum: a série começa quando o bot começa. Usar a
+amostra mais antiga disponível seria inventar a âncora e errar a janela inteira
+em silêncio — exatamente o que `ancora_verificada` recusa fazer.
+
+**Consequência operacional que precisa ser esperada:** o bot recém-iniciado
+**não opera nada por até uma janela inteira** — a de 4 h inclusive. Não é
+defeito, é a âncora sendo honesta. `sem_ancora` separa os dois diagnósticos:
+`serie_nao_alcanca_a_abertura` é normal ao subir; `lacuna_no_instante_da_abertura`
+persistente aponta para o feed.
+
+A busca é a **mesma** do M2: `SerieE18AoVivo` compõe `StreamE18` em vez de
+reimplementar `em()`, e há um teste comparando as duas respostas. Uma segunda
+cópia dessa busca seria a forma mais silenciosa possível de o SHADOW e o
+backtest discordarem sobre a âncora.
+
+Âncora resolvida fica **fixada**: a abertura é um instante, e reler a série
+depois daria outro valor conforme os pontos velhos são podados.
+
+**Ainda falta** para o ciclo fechar: o laço que junta rastreador, livros e
+preços, chama o modelo e entrega ao executor.
 
 ### 3.3 fechou — o SHADOW ensaia o caminho inteiro
 
