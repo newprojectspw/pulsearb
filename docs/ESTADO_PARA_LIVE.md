@@ -229,12 +229,52 @@ frente, que só o `silencio_final_s` não via.
 
 | # | Item | Estado |
 |---|---|---|
-| 3.1 | `risk/gates.py` | ⬜ diretório não existe |
+| 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ⬜ |
 | 3.3 | Modo SHADOW | ⬜ enum sem implementação |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ⬜ |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | ⬜ |
-| 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ⬜ |
+| 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
+
+### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
+
+Ordem deliberada: um cliente de ordens sem portão é uma máquina de perder
+dinheiro que já funciona; um portão sem cliente é um teste que não custa nada.
+
+| Portão | Recusa quando |
+|---|---|
+| `modo_nao_opera` | modo não é LIVE — SIM e SHADOW nunca enviam |
+| `disjuntor_armado` | a perda do dia estourou, ou o registro estava ilegível |
+| `feed_parado` | algum feed está velho — preço velho é preço que já não existe |
+| `ordem_mal_formada` | shares ≤ 0, ou preço fora de (0, 1) |
+| `preco_fora_da_faixa` | fora de [0,05 · 0,95] — a 0,97 arrisca-se 0,97 para ganhar 0,03 |
+| `stake_acima_do_teto` | a ordem passa de 5 USDC |
+| `janela_no_teto` | o acumulado no MESMO mercado passa de 15 USDC |
+| `exposicao_no_teto` | o capital simultâneo em risco passa de 50 USDC |
+| `posicoes_no_teto` | mais de 5 janelas com posição aberta |
+
+Três decisões de projeto, cada uma cobrindo uma forma concreta de sangrar:
+
+**Falha fechada.** `avaliar()` começa negando. Registro do dia ilegível **arma
+o disjuntor** em vez de assumir que estava tudo bem — não dá para distinguir
+"arquivo corrompido" de "arquivo com o disjuntor armado que não consigo ler".
+
+**O disjuntor gruda.** Não desarma porque o número melhorou depois (perdeu 11,
+armou, ganhou 5 → continua armado), não desarma na virada de data, e
+**sobrevive a reinício** porque é gravado em disco com rename atômico. Sem
+persistência ele viraria um limite por vida de processo — que não é limite
+nenhum: bot perde, processo cai, systemd reinicia, contador zera, bot perde de
+novo.
+
+**Toda recusa se nomeia.** `Decisao.motivo` é constante de `MOTIVOS`;
+construir uma recusa com frase livre levanta `ValueError`. Recusa anônima não
+vira métrica nem alarme, e não distingue "o bot está travado" de "o bot não
+achou trade".
+
+Os tetos não são chute de conforto — saem do que o M2 mediu: 2,91 USDC
+movimentados por trade, 0,18 de lucro, e profundidade mediana de 87,8 USDC na
+duração mais líquida. Subir qualquer um deles deve esperar a curva de
+capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → kill (US$ 20) | ⬜ |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ⬜ |
 | 3.9 | Trava: exposição simultânea máxima (2 janelas) | ⬜ |

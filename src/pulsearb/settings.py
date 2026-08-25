@@ -110,6 +110,42 @@ class UiSettings(BaseModel):
     port: int = 8080
 
 
+class RiskSettings(BaseModel):
+    """Os tetos. Todos em USDC, todos pequenos de proposito.
+
+    Estes numeros nao sao chute de conforto: saem do que o M2 mediu. O
+    backtest de 20h moveu 2,91 USDC por trade e ganhou 0,18; a profundidade
+    mediana a 3 ticks na duracao mais liquida foi de 87,8 USDC. Operar
+    acima disso e apostar contra uma medicao que ja existe.
+
+    O default e o menor conjunto de numeros com que faz sentido ligar o bot
+    com dinheiro real. Subir qualquer um deles e uma decisao consciente, e
+    deve vir depois de a curva de capacidade (M2.14) dizer onde o teto esta.
+    """
+
+    #: Teto por ordem. 5 USDC e o valor que o projeto carrega desde o M1 —
+    #: pequeno o bastante para uma sequencia de erros custar menos que uma
+    #: pizza, e grande o bastante para o resultado nao ser so ruido de taxa.
+    stake_max_por_trade_usdc: float = 5.0
+    #: Teto por janela de mercado. Tres entradas de 5 no mesmo mercado ainda
+    #: sao uma aposta so no mesmo movimento — o teto por trade nao cobre isso.
+    stake_max_por_janela_usdc: float = 15.0
+    #: Teto de capital simultaneamente em risco, somando todas as janelas.
+    exposicao_max_usdc: float = 50.0
+    #: Quantas janelas podem ter posicao aberta ao mesmo tempo.
+    posicoes_max_abertas: int = 5
+    #: Disjuntor. Ao estourar, ele GRUDA — nao desarma sozinho no dia
+    #: seguinte, e sobrevive a reinicio do processo.
+    perda_max_diaria_usdc: float = 25.0
+    #: Faixa de preco em que se aceita operar. Fora dela o payoff assimetrico
+    #: transforma um erro de modelo em perda desproporcional: comprar a 0,97
+    #: arrisca 0,97 para ganhar 0,03.
+    preco_minimo: float = 0.05
+    preco_maximo: float = 0.95
+    #: Onde o registro do dia mora. Precisa sobreviver a reinicio.
+    caminho_do_registro: str = "data/risco/registro_do_dia.json"
+
+
 class Settings(BaseSettings):
     """Configuração completa. Instancie com Settings.load()."""
 
@@ -139,6 +175,7 @@ class Settings(BaseSettings):
     feeds: FeedSettings = Field(default_factory=FeedSettings)
     recorder: RecorderSettings = Field(default_factory=RecorderSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+    risk: RiskSettings = Field(default_factory=RiskSettings)
 
     @field_validator("durations")
     @classmethod
