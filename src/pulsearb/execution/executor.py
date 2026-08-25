@@ -78,6 +78,10 @@ class Executor(Protocol):
     """O contrato. Quem chama não sabe se está em SHADOW ou LIVE."""
 
     modo: Mode
+    #: O portão fica exposto porque quem orquestra precisa dar baixa na
+    #: exposição quando uma janela fecha. Sem isso o teto de exposição trava
+    #: para sempre e o bot passa a recusar tudo sem nada de errado no mercado.
+    portao: PortaoDeRisco
 
     def executar(
         self,

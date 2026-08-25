@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pulsearb.engine.decisao import JOGO_HORARIO, JOGO_TWAP
 from pulsearb.markets.discovery import (
     DiscoveredMarket,
     duracao_do_slug,
@@ -52,6 +53,10 @@ class JanelaAoVivo:
 
     slug: str
     asset: str
+    #: "twap" ou "horario". Os dois jogos sao FISICAMENTE diferentes
+    #: (API_NOTES 13.4) e usam modelos diferentes: estimar um com o modelo do
+    #: outro nao degrada a previsao, produz outra previsao.
+    jogo: str
     condition_id: str
     token_up: str
     token_down: str
@@ -118,6 +123,11 @@ class RastreadorDeJanelas:
         janela = JanelaAoVivo(
             slug=mercado.slug,
             asset=mercado.asset,
+            jogo=(
+                JOGO_HORARIO
+                if mercado.resolution == "binance_candle"
+                else JOGO_TWAP
+            ),
             condition_id=mercado.condition_id,
             token_up=token_up,
             token_down=token_down,

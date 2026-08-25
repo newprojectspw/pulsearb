@@ -358,8 +358,45 @@ backtest discordarem sobre a âncora.
 Âncora resolvida fica **fixada**: a abertura é um instante, e reler a série
 depois daria outro valor conforme os pontos velhos são podados.
 
-**Ainda falta** para o ciclo fechar: o laço que junta rastreador, livros e
-preços, chama o modelo e entrega ao executor.
+Quarta e última peça: **`live/motor.py`** — o laço.
+
+O que sobra de novo nele é só a **orquestração**. Cada etapa reusa o que o
+backtest usa, e essa é a regra que faz o SHADOW valer alguma coisa:
+
+| Etapa | Compartilhado |
+|---|---|
+| duração da janela | `markets.discovery.duracao_do_slug` |
+| âncora | `analysis.anchor_sweep.StreamE18.em` |
+| probabilidade | `engine.decisao.estimar_prob_up` (extraído do `BacktestRunner`) |
+| edge | `backtest.runner.edge_liquido` |
+| livro e profundidade | `backtest.book.OrderBook` |
+| portões | `risk.PortaoDeRisco.avaliar_risco` |
+
+Quando falta uma peça a resposta é sempre a mesma — não opera, e conta o
+motivo. `pulos` responde à pergunta operacional que mais vai ser feita: *o bot
+está vivo e não opera, por quê?*
+
+```
+sem_ancora                  esperado logo após subir
+volatilidade_nao_calibrada  some depois de 20 retornos
+sem_livro_confiavel         token mudo, não mercado parado
+fora_da_faixa_de_tempo      o gatilho chegando cedo — foi o BUG 2 do M2.6
+edge_abaixo_do_threshold    só este fala sobre a BORDA
+```
+
+O motor é **síncrono e sem I/O**: dá para simular seis horas de mercado num
+teste sem esperar seis horas e sem fingir rede.
+
+Três defeitos apareceram ao escrevê-lo, e valem registro. Eu tinha fixado
+`JOGO_TWAP` no motor — janela horária seria estimada com o modelo errado, e os
+dois jogos são fisicamente diferentes (API_NOTES §13.4). `JanelaAoVivo` passou
+a carregar o jogo. `feeds_saudaveis` estava chumbado em `True` e virou
+parâmetro do `tick()` — o motor não decide sobre saúde de feed, ele repassa e o
+portão recusa. E o `Executor` não declarava `portao`, que o laço precisa para
+dar baixa na exposição.
+
+**O ciclo está fechado.** O que falta agora é o cliente de ordens (3.2), que
+exige credencial, e a trava tripla do LIVE (3.4).
 
 ### 3.3 fechou — o SHADOW ensaia o caminho inteiro
 
