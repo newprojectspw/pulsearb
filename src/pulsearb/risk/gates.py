@@ -220,16 +220,46 @@ class PortaoDeRisco:
         *,
         feeds_saudaveis: bool,
     ) -> Decisao:
-        """Esta ordem pode? Começa em não e só vira sim com todos os portões."""
+        """Esta ordem pode SER ENVIADA? Portão de modo mais todos os de risco.
+
+        É esta que o caminho de envio real chama. O portão de modo vem
+        primeiro de propósito: em SIM e SHADOW a resposta é não antes de
+        qualquer outra consideração.
+        """
+        if self.modo is not Mode.LIVE:
+            # A ordem mal formada é checada antes até aqui: um pedido inválido
+            # é defeito de quem chamou, e o motivo certo é esse, não o modo.
+            if ordem.shares <= 0 or not (0.0 < ordem.preco_limite < 1.0):
+                return Decisao(
+                    False,
+                    MOTIVOS.ORDEM_MAL_FORMADA,
+                    {"shares": ordem.shares, "preco_limite": ordem.preco_limite},
+                )
+            return Decisao(False, MOTIVOS.MODO_NAO_OPERA, {"modo": self.modo.value})
+        return self.avaliar_risco(ordem, feeds_saudaveis=feeds_saudaveis)
+
+    def avaliar_risco(
+        self,
+        ordem: OrdemPretendida,
+        *,
+        feeds_saudaveis: bool,
+    ) -> Decisao:
+        """Os portões de RISCO, sem o portão de modo. Começa em não.
+
+        Existe separado por causa do SHADOW. O portão de modo serve para
+        impedir ENVIO, e no shadow não há envio para impedir — rodá-lo ali
+        faria toda intenção sair como `modo_nao_opera` e o diário perderia
+        exatamente a informação que justifica o ensaio: qual portão estaria
+        segurando se o modo fosse LIVE.
+
+        Quem envia ordem NÃO chama esta função: chama `avaliar()`.
+        """
         if ordem.shares <= 0 or not (0.0 < ordem.preco_limite < 1.0):
             return Decisao(
                 False,
                 MOTIVOS.ORDEM_MAL_FORMADA,
                 {"shares": ordem.shares, "preco_limite": ordem.preco_limite},
             )
-
-        if self.modo is not Mode.LIVE:
-            return Decisao(False, MOTIVOS.MODO_NAO_OPERA, {"modo": self.modo.value})
 
         if self.registro.disjuntor_armado:
             return Decisao(

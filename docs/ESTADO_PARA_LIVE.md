@@ -231,7 +231,7 @@ frente, que só o `silencio_final_s` não via.
 |---|---|---|
 | 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ⬜ |
-| 3.3 | Modo SHADOW | ⬜ enum sem implementação |
+| 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 14 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ⬜ |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | ⬜ |
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
@@ -282,6 +282,40 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ⬜ |
 | 3.12 | Suíte de testes das travas (uma por trava) | ⬜ |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
+
+### 3.3 fechou — o SHADOW ensaia o caminho inteiro
+
+O backtest diz o que teria acontecido sobre gravação. O SHADOW diz o que
+teria acontecido **ao vivo**: feed real no tempo real, decisão com a latência
+real, livro no estado em que estava. A diferença entre os dois é a única
+medida honesta de quanto do resultado do backtest é artefato de olhar o
+passado com calma.
+
+**A regra que o faz valer: mesmo caminho.** Executor é uma interface com duas
+implementações que divergem só no último passo — uma escreveria na rede, a
+outra escreve num arquivo. Os portões de risco rodam iguais, e a exposição é
+contabilizada, senão os tetos por janela nunca seriam exercitados.
+
+O portão de **modo** é a única exceção, e de propósito: ele existe para
+impedir envio, e no shadow não há envio para impedir. Rodá-lo faria toda
+intenção sair como `modo_nao_opera` e o diário perderia justamente o que
+justifica o ensaio — *qual portão estaria segurando se o modo fosse LIVE*. Daí
+`avaliar_risco()` existir separado de `avaliar()`; quem envia chama a segunda.
+
+**Pedir LIVE falha alto**, com `NotImplementedError`. Cair para SHADOW em
+silêncio seria a falha mais cara possível: o operador acredita que está
+operando, o dinheiro não se move, e a descoberta vem quando alguém for
+conferir o saldo.
+
+**O que o SHADOW não prova:** que a ordem seria preenchida. Ninguém do outro
+lado sabe que ela existe — não há fila, não há concorrência pelo nível, o
+mercado não reage. O diário guarda `melhor_bid`, `melhor_ask` e
+`profundidade_no_topo` do instante para que essa conta possa ser feita depois.
+Ela é uma **conta**, não uma observação.
+
+`resumo()["por_motivo"]` é a parte acionável: um shadow que roda a noite
+inteira com zero aprovadas não é falta de oportunidade, é um portão fechado —
+e ali está o nome dele.
 
 ---
 
