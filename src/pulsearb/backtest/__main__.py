@@ -78,7 +78,7 @@ from pulsearb.feeds.poly_ws import (
     resolucao_do_evento,
 )
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
-from pulsearb.markets.discovery import parse_end_date_epoch
+from pulsearb.markets.discovery import duracao_do_slug, parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
 
@@ -509,7 +509,7 @@ class RecordingIndex:
             fim_epoch = parse_end_date_epoch({"endDate": meta.get("end_date_iso")})
             if fim_epoch is None:
                 continue
-            duracao = _duracao_do_slug(slug)
+            duracao = duracao_do_slug(slug)
             inicio_ns = int((fim_epoch - duracao - PRE_ROLO_S) * 1e9)
             fim_ns = int((fim_epoch + POS_ROLO_S) * 1e9)
             tokens = meta.get("token_id_by_outcome") or {}
@@ -996,7 +996,7 @@ class RecordingIndex:
                 self.resolucoes_ambiguas.append(slug)
             if achada is not None:
                 self.resolvido_up[token_up] = bool(resolucao)
-            duracao = _duracao_do_slug(slug)
+            duracao = duracao_do_slug(slug)
             janela = WindowState(
                 slug=slug,
                 jogo="horario" if meta.get("resolution") == "binance_candle" else "twap",
@@ -1176,15 +1176,6 @@ def _medio_do_dado(janelas: list[WindowState], campo: str) -> float:
         float(getattr(j, campo)) for j in janelas if getattr(j, campo, None)
     ]
     return sum(valores) / len(valores) if valores else 0.0
-
-
-def _duracao_do_slug(slug: str) -> int:
-    if "-up-or-down-" in slug:
-        return 3600
-    for sufixo, segundos in (("-5m-", 300), ("-15m-", 900), ("-1h-", 3600), ("-4h-", 14400)):
-        if sufixo in slug:
-            return segundos
-    return TOKEN_DURACAO_PADRAO
 
 
 #: Saída do backtest quando a âncora verificada deixa de explicar as

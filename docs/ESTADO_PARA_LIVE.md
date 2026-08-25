@@ -283,6 +283,38 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.12 | Suíte de testes das travas (uma por trava) | ⬜ |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
 
+### O que falta para o SHADOW rodar de verdade
+
+O executor existe e está testado, mas **não há ciclo de decisão ao vivo** para
+alimentá-lo. O `main.py` é dashboard mais feeds; quem tem ciclo ao vivo é o
+recorder (957 linhas: descoberta, rotação de janelas, assinatura, livro), e
+quem tem a lógica de decisão é o `BacktestRunner` — sobre gravação. O SHADOW
+precisa dos dois casados, e isso é um componente novo.
+
+Primeira peça pronta: **`live/rastreador.py`** — quais janelas estão abertas
+agora e quanto falta em cada uma.
+
+`seconds_left` é o número que ele existe para produzir, e ele decide mais do
+que parece: escolhe o balde de calibração, e o M2 mediu erro de **0,008** na
+faixa 240–120 s contra **0,240** acima de 240 s. Trinta vezes. Um
+`seconds_left` deslocado não degrada a decisão — toma a decisão na faixa
+errada.
+
+Daí `duracao_do_slug` ter saído do backtest para `markets/discovery.py`: as
+duas pontas passaram a usar **a mesma função**, e há um teste que compara as
+identidades. Com duas cópias, uma divergência entre SHADOW e backtest
+pareceria diferença de mercado quando seria diferença de aritmética — e é
+justamente essa comparação que justifica o SHADOW existir.
+
+Falha fechada em quatro casos, cada um com nome próprio em `descartes`:
+`nao_operavel`, `sem_fechamento_legivel`, `sem_par_de_tokens` e `ja_fechada`.
+O contador responde a pergunta que importa quando o bot não opera: *ele não
+achou janela, ou achou e jogou fora?*
+
+**Ainda falta** para o ciclo fechar: manter o topo do livro por token a partir
+do `poly_ws`, alimentar o TWAP a partir do RTDS, e o laço que junta tudo e
+chama o executor.
+
 ### 3.3 fechou — o SHADOW ensaia o caminho inteiro
 
 O backtest diz o que teria acontecido sobre gravação. O SHADOW diz o que
