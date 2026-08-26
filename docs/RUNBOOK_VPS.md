@@ -254,6 +254,17 @@ df -h /opt/pulsearb/data
 du -sh /opt/pulsearb/data/recordings
 ```
 
+Do Mac, sem abrir sessão na VPS, o mesmo diagnóstico mais o estado do código
+e do serviço saem de uma vez:
+
+```bash
+./scripts/estado_vps.sh root@SEU_IP
+```
+
+Guardando o host uma vez (`echo root@SEU_IP > ~/.pulsearb-vps`), passa a ser
+só `./scripts/estado_vps.sh`. Item que não deu para apurar aparece como
+`DESCONHECIDO` e o script sai com código 4 — nunca como "ok".
+
 Se a primeira hora fechada não estiver na casa das centenas de MB, algo está
 errado — provavelmente um feed calado (§5.1).
 
