@@ -285,6 +285,46 @@ duas plataformas.
 
 ---
 
+### `scripts/analisa_dia.sh` — a colagem saiu do caminho
+
+Três caracteres do zsh interativo morderam esta campanha, cada um custando
+uma rodada:
+
+| | O que acontece |
+|---|---|
+| `#` | sem `interactive_comments`, vira `command not found: #` e a linha seguinte roda solta |
+| `!` | expansão de histórico, **ativa mesmo dentro de aspas duplas** — `echo "PID $!"` prende o terminal em `dquote>` |
+| `&` | numa colagem de várias linhas, muda o que roda em primeiro e segundo plano |
+
+O custo do `!` não foi o incômodo: foi uma rodada de 24 h que **nunca
+começou** e ninguém percebeu, porque o log que provaria isso também nunca foi
+criado. O operador esperou horas por um processo inexistente.
+
+Agora é um comando curto, sem caractere especial nenhum:
+
+```
+./scripts/analisa_dia.sh 20260824
+```
+
+Ele monta os links **só das horas cujo gzip abre inteiro** — a hora corrente e
+a que morreu no meio de uma escrita reprovam, e incluí-las envenenaria a
+rodada por causa de um arquivo, depois de três horas de processamento.
+
+**E ele prova que subiu antes de dizer que subiu.** Espera a linha
+`passada 1: comecando` aparecer no log; se o processo morrer antes, imprime o
+log e sai com erro.
+
+Isso não é paranoia de projeto — os dois testes do próprio script pegaram dois
+defeitos nele:
+
+1. A primeira versão checava só "arquivo não vazio", e **anunciou `rodando`
+   para um processo que tinha acabado de morrer** com `ModuleNotFoundError`.
+   Mensagem de erro também enche o arquivo.
+2. A segunda passava caminho **absoluto** no `--json`, que a contenção de
+   saída do M2.5 recusa. O próprio guard do script mostrou o erro.
+
+---
+
 ## Bloco 3 — M4: execução e travas (**nada existe**)
 
 `main.py:153` — *"Trava do M1: só SIM existe. SHADOW/LIVE chegam no M4."*
