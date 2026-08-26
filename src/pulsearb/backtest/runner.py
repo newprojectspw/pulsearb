@@ -22,9 +22,9 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
 from pulsearb.backtest.report import BacktestReport, Trade
+from pulsearb.engine.decisao import estimar_prob_up
 from pulsearb.engine.fees import fee_pp_por_share
-from pulsearb.engine.hourly import prob_up_hourly
-from pulsearb.engine.twap import RealizedVol, TwapTracker, prob_up_twap
+from pulsearb.engine.twap import RealizedVol, TwapTracker
 
 # Defaults do M2.D. Nenhum é constante de mercado: todos são parâmetros de
 # cenário, e a sensibilidade é reportada.
@@ -366,24 +366,16 @@ class BacktestRunner:
         contra o preço de abertura do candle. Só a escolha entre eles mora
         aqui — o resto do laço não precisa saber qual é.
         """
-        if janela.jogo == "twap":
-            locked_mean, locked_weight = twap.locked_mean_and_weight(seconds_left)
-            return prob_up_twap(
-                ancora=janela.ancora,
-                spot=preco_spot,
-                seconds_left=seconds_left,
-                sigma_1s=vol.sigma_1s,
-                locked_mean=locked_mean,
-                locked_weight=locked_weight,
-                twap_atual=twap.current_twap,
-                vol_ready=vol.ready,
-            )
-        return prob_up_hourly(
-            open_price=janela.ancora,
-            spot=preco_spot,
+        # A escolha entre os jogos mora em `engine/decisao.py`, compartilhada
+        # com o motor ao vivo. Duas cópias fariam SHADOW e backtest divergirem
+        # por código, e a divergência pareceria diferença de mercado.
+        return estimar_prob_up(
+            jogo=janela.jogo,
+            ancora=janela.ancora,
+            twap=twap,
+            vol=vol,
+            preco_spot=preco_spot,
             seconds_left=seconds_left,
-            sigma_1s=vol.sigma_1s,
-            vol_ready=vol.ready,
         )
 
     def _candidatos_com_edge(

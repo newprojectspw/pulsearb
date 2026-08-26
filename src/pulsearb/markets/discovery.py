@@ -176,6 +176,42 @@ def parse_end_date_epoch(gamma: dict[str, Any]) -> float | None:
         return None
 
 
+#: Duração nominal de cada família de slug, em segundos. Não é tabela de
+#: conveniência: o `endDate` sozinho diz quando a janela FECHA, e a abertura
+#: sai de `fim - duração`. Errar aqui desloca o `seconds_left` inteiro, e
+#: `seconds_left` é o que o modelo usa para decidir.
+DURACAO_POR_SUFIXO = (
+    ("-5m-", 300),
+    ("-15m-", 900),
+    ("-1h-", 3600),
+    ("-4h-", 14400),
+)
+
+#: A família horária ("bitcoin-up-or-down-august-25-2026-3am-et") não carrega
+#: sufixo de duração — é sempre 1h, nominal em America/New_York (API_NOTES
+#: 12.2).
+SUFIXO_HORARIO = "-up-or-down-"
+
+DURACAO_PADRAO_S = 300
+
+
+def duracao_do_slug(slug: str) -> int:
+    """Duração da janela em segundos, a partir do slug.
+
+    MORA AQUI, e não no backtest, de propósito. O motor ao vivo e o backtest
+    precisam concordar sobre quanto tempo falta numa janela — se cada um
+    tivesse a sua cópia, uma divergência entre os dois pareceria diferença de
+    mercado quando seria diferença de aritmética, e é exatamente a comparação
+    entre os dois que justifica o modo SHADOW existir.
+    """
+    if SUFIXO_HORARIO in slug:
+        return 3600
+    for sufixo, segundos in DURACAO_POR_SUFIXO:
+        if sufixo in slug:
+            return segundos
+    return DURACAO_PADRAO_S
+
+
 # Tolerância ao comparar o endDate com a janela pedida. Precisa ser bem menor
 # que a menor duração (300s) para não aceitar a janela vizinha por engano.
 WINDOW_MATCH_TOLERANCE_SECONDS = 60.0

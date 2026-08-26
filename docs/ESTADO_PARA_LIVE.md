@@ -229,12 +229,52 @@ frente, que só o `silencio_final_s` não via.
 
 | # | Item | Estado |
 |---|---|---|
-| 3.1 | `risk/gates.py` | ⬜ diretório não existe |
+| 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ⬜ |
-| 3.3 | Modo SHADOW | ⬜ enum sem implementação |
+| 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 14 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ⬜ |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | ⬜ |
-| 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ⬜ |
+| 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
+
+### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
+
+Ordem deliberada: um cliente de ordens sem portão é uma máquina de perder
+dinheiro que já funciona; um portão sem cliente é um teste que não custa nada.
+
+| Portão | Recusa quando |
+|---|---|
+| `modo_nao_opera` | modo não é LIVE — SIM e SHADOW nunca enviam |
+| `disjuntor_armado` | a perda do dia estourou, ou o registro estava ilegível |
+| `feed_parado` | algum feed está velho — preço velho é preço que já não existe |
+| `ordem_mal_formada` | shares ≤ 0, ou preço fora de (0, 1) |
+| `preco_fora_da_faixa` | fora de [0,05 · 0,95] — a 0,97 arrisca-se 0,97 para ganhar 0,03 |
+| `stake_acima_do_teto` | a ordem passa de 5 USDC |
+| `janela_no_teto` | o acumulado no MESMO mercado passa de 15 USDC |
+| `exposicao_no_teto` | o capital simultâneo em risco passa de 50 USDC |
+| `posicoes_no_teto` | mais de 5 janelas com posição aberta |
+
+Três decisões de projeto, cada uma cobrindo uma forma concreta de sangrar:
+
+**Falha fechada.** `avaliar()` começa negando. Registro do dia ilegível **arma
+o disjuntor** em vez de assumir que estava tudo bem — não dá para distinguir
+"arquivo corrompido" de "arquivo com o disjuntor armado que não consigo ler".
+
+**O disjuntor gruda.** Não desarma porque o número melhorou depois (perdeu 11,
+armou, ganhou 5 → continua armado), não desarma na virada de data, e
+**sobrevive a reinício** porque é gravado em disco com rename atômico. Sem
+persistência ele viraria um limite por vida de processo — que não é limite
+nenhum: bot perde, processo cai, systemd reinicia, contador zera, bot perde de
+novo.
+
+**Toda recusa se nomeia.** `Decisao.motivo` é constante de `MOTIVOS`;
+construir uma recusa com frase livre levanta `ValueError`. Recusa anônima não
+vira métrica nem alarme, e não distingue "o bot está travado" de "o bot não
+achou trade".
+
+Os tetos não são chute de conforto — saem do que o M2 mediu: 2,91 USDC
+movimentados por trade, 0,18 de lucro, e profundidade mediana de 87,8 USDC na
+duração mais líquida. Subir qualquer um deles deve esperar a curva de
+capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → kill (US$ 20) | ⬜ |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ⬜ |
 | 3.9 | Trava: exposição simultânea máxima (2 janelas) | ⬜ |
@@ -242,6 +282,155 @@ frente, que só o `silencio_final_s` não via.
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ⬜ |
 | 3.12 | Suíte de testes das travas (uma por trava) | ⬜ |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
+
+### O que falta para o SHADOW rodar de verdade
+
+O executor existe e está testado, mas **não há ciclo de decisão ao vivo** para
+alimentá-lo. O `main.py` é dashboard mais feeds; quem tem ciclo ao vivo é o
+recorder (957 linhas: descoberta, rotação de janelas, assinatura, livro), e
+quem tem a lógica de decisão é o `BacktestRunner` — sobre gravação. O SHADOW
+precisa dos dois casados, e isso é um componente novo.
+
+Primeira peça pronta: **`live/rastreador.py`** — quais janelas estão abertas
+agora e quanto falta em cada uma.
+
+`seconds_left` é o número que ele existe para produzir, e ele decide mais do
+que parece: escolhe o balde de calibração, e o M2 mediu erro de **0,008** na
+faixa 240–120 s contra **0,240** acima de 240 s. Trinta vezes. Um
+`seconds_left` deslocado não degrada a decisão — toma a decisão na faixa
+errada.
+
+Daí `duracao_do_slug` ter saído do backtest para `markets/discovery.py`: as
+duas pontas passaram a usar **a mesma função**, e há um teste que compara as
+identidades. Com duas cópias, uma divergência entre SHADOW e backtest
+pareceria diferença de mercado quando seria diferença de aritmética — e é
+justamente essa comparação que justifica o SHADOW existir.
+
+Falha fechada em quatro casos, cada um com nome próprio em `descartes`:
+`nao_operavel`, `sem_fechamento_legivel`, `sem_par_de_tokens` e `ja_fechada`.
+O contador responde a pergunta que importa quando o bot não opera: *ele não
+achou janela, ou achou e jogou fora?*
+
+Segunda peça pronta: **`live/livros.py`** — o livro de cada token, ao vivo.
+
+Fino de propósito: reusa `OrderBook`, a MESMA classe com que o critério 1.5
+mediu os 87,8 USDC. Se o shadow medisse profundidade de outro jeito, a
+comparação entre os dois não diria nada sobre capacidade.
+
+Carrega duas defesas que o M2 pagou caro para aprender:
+
+**Silêncio é por TOKEN, não por feed.** É a lição do M2.7/M2.10 no RTDS —
+tópico mudo com a conexão viva. O feed do CLOB pode estar impecável enquanto o
+livro de um token não recebe nada há minutos, e o portão `feed_parado` olha o
+feed, não o token. `resumo()["mudos"]` é o número que nenhum outro alarme daria.
+
+**Delta sem snapshot é contado, não engolido.** A gravação de 20 h mediu
+187.452 dessas observações. Aplicá-las a um livro vazio inventaria
+profundidade; ignorá-las em silêncio esconderia que o livro está incompleto.
+
+Uma escolha registrada: `livro()` devolve o **objeto vivo**, não uma cópia — o
+próximo delta o reescreve embaixo de quem o guardar. Clonar a cada consulta
+custaria uma cópia por tick por token no caminho quente, para proteger um uso
+que a decisão não faz. Está no docstring e há dois testes travando o
+comportamento, incluindo o de `.clone()` para quem precisar congelar.
+
+Terceira peça pronta: **`live/precos.py`** — TWAP corrente, volatilidade e a
+âncora de cada janela.
+
+**A âncora ganha ao vivo um jeito de faltar que o backtest não tinha.** O M2 a
+fixou em τ=0 — valor do stream no instante da abertura, 0,9984 sobre 640
+janelas. Mas se o processo subiu às 12:03 e a janela abriu às 12:00, o valor de
+12:00 não existe em lugar nenhum: a série começa quando o bot começa. Usar a
+amostra mais antiga disponível seria inventar a âncora e errar a janela inteira
+em silêncio — exatamente o que `ancora_verificada` recusa fazer.
+
+**Consequência operacional que precisa ser esperada:** o bot recém-iniciado
+**não opera nada por até uma janela inteira** — a de 4 h inclusive. Não é
+defeito, é a âncora sendo honesta. `sem_ancora` separa os dois diagnósticos:
+`serie_nao_alcanca_a_abertura` é normal ao subir; `lacuna_no_instante_da_abertura`
+persistente aponta para o feed.
+
+A busca é a **mesma** do M2: `SerieE18AoVivo` compõe `StreamE18` em vez de
+reimplementar `em()`, e há um teste comparando as duas respostas. Uma segunda
+cópia dessa busca seria a forma mais silenciosa possível de o SHADOW e o
+backtest discordarem sobre a âncora.
+
+Âncora resolvida fica **fixada**: a abertura é um instante, e reler a série
+depois daria outro valor conforme os pontos velhos são podados.
+
+Quarta e última peça: **`live/motor.py`** — o laço.
+
+O que sobra de novo nele é só a **orquestração**. Cada etapa reusa o que o
+backtest usa, e essa é a regra que faz o SHADOW valer alguma coisa:
+
+| Etapa | Compartilhado |
+|---|---|
+| duração da janela | `markets.discovery.duracao_do_slug` |
+| âncora | `analysis.anchor_sweep.StreamE18.em` |
+| probabilidade | `engine.decisao.estimar_prob_up` (extraído do `BacktestRunner`) |
+| edge | `backtest.runner.edge_liquido` |
+| livro e profundidade | `backtest.book.OrderBook` |
+| portões | `risk.PortaoDeRisco.avaliar_risco` |
+
+Quando falta uma peça a resposta é sempre a mesma — não opera, e conta o
+motivo. `pulos` responde à pergunta operacional que mais vai ser feita: *o bot
+está vivo e não opera, por quê?*
+
+```
+sem_ancora                  esperado logo após subir
+volatilidade_nao_calibrada  some depois de 20 retornos
+sem_livro_confiavel         token mudo, não mercado parado
+fora_da_faixa_de_tempo      o gatilho chegando cedo — foi o BUG 2 do M2.6
+edge_abaixo_do_threshold    só este fala sobre a BORDA
+```
+
+O motor é **síncrono e sem I/O**: dá para simular seis horas de mercado num
+teste sem esperar seis horas e sem fingir rede.
+
+Três defeitos apareceram ao escrevê-lo, e valem registro. Eu tinha fixado
+`JOGO_TWAP` no motor — janela horária seria estimada com o modelo errado, e os
+dois jogos são fisicamente diferentes (API_NOTES §13.4). `JanelaAoVivo` passou
+a carregar o jogo. `feeds_saudaveis` estava chumbado em `True` e virou
+parâmetro do `tick()` — o motor não decide sobre saúde de feed, ele repassa e o
+portão recusa. E o `Executor` não declarava `portao`, que o laço precisa para
+dar baixa na exposição.
+
+**O ciclo está fechado.** O que falta agora é o cliente de ordens (3.2), que
+exige credencial, e a trava tripla do LIVE (3.4).
+
+### 3.3 fechou — o SHADOW ensaia o caminho inteiro
+
+O backtest diz o que teria acontecido sobre gravação. O SHADOW diz o que
+teria acontecido **ao vivo**: feed real no tempo real, decisão com a latência
+real, livro no estado em que estava. A diferença entre os dois é a única
+medida honesta de quanto do resultado do backtest é artefato de olhar o
+passado com calma.
+
+**A regra que o faz valer: mesmo caminho.** Executor é uma interface com duas
+implementações que divergem só no último passo — uma escreveria na rede, a
+outra escreve num arquivo. Os portões de risco rodam iguais, e a exposição é
+contabilizada, senão os tetos por janela nunca seriam exercitados.
+
+O portão de **modo** é a única exceção, e de propósito: ele existe para
+impedir envio, e no shadow não há envio para impedir. Rodá-lo faria toda
+intenção sair como `modo_nao_opera` e o diário perderia justamente o que
+justifica o ensaio — *qual portão estaria segurando se o modo fosse LIVE*. Daí
+`avaliar_risco()` existir separado de `avaliar()`; quem envia chama a segunda.
+
+**Pedir LIVE falha alto**, com `NotImplementedError`. Cair para SHADOW em
+silêncio seria a falha mais cara possível: o operador acredita que está
+operando, o dinheiro não se move, e a descoberta vem quando alguém for
+conferir o saldo.
+
+**O que o SHADOW não prova:** que a ordem seria preenchida. Ninguém do outro
+lado sabe que ela existe — não há fila, não há concorrência pelo nível, o
+mercado não reage. O diário guarda `melhor_bid`, `melhor_ask` e
+`profundidade_no_topo` do instante para que essa conta possa ser feita depois.
+Ela é uma **conta**, não uma observação.
+
+`resumo()["por_motivo"]` é a parte acionável: um shadow que roda a noite
+inteira com zero aprovadas não é falta de oportunidade, é um portão fechado —
+e ali está o nome dele.
 
 ---
 
