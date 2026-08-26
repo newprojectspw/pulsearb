@@ -1,8 +1,93 @@
 # VEREDITO M2 — existe edge líquido?
 
-**Status: VEREDITO EMITIDO em 2026-08-23 — ver a seção logo abaixo.**
+**Status: SEGUNDO VEREDITO em 2026-08-26, sobre 24 h limpas — e ele DERRUBA
+o primeiro. Ver a seção logo abaixo.**
 
-Data: 2026-08-16 · atualizado 2026-08-21 (M2.5) · **veredito 2026-08-23**
+Data: 2026-08-16 · atualizado 2026-08-21 (M2.5) · veredito 2026-08-23 ·
+**reveredito 2026-08-26 sobre 2026-08-24**
+
+---
+
+## SEGUNDO VEREDITO — 24 h de 2026-08-24, captação impecável
+
+Amostra: 2026-08-24, dia inteiro, 24 arquivos, 73 min de processamento com
+`--limite-por-token 20000 --niveis-por-lado 10`.
+Relatório: `relatorios/M2_24AGO.json`.
+
+**Por que esta rodada vale mais que a primeira.** A de 20 h carregava
+`gaps: rtds silencio 837s` e descartou 42% dos snapshots, com resolução
+efetiva de ~1,9 s — o suficiente para tornar o cenário de 300 ms
+indistinguível. Esta traz `pior_fracao_coberta 1,0` nos oito ativos,
+**0 silêncios**, `conexao_inteira 0`, `suspeita_de_assinatura_caducada 0`,
+896 janelas conhecidas e 820 com resolução. Não é um dia diferente apenas:
+é o primeiro dia em que o instrumento não estava cego em pedaços.
+
+### Âncora — CONFIRMADA de novo, em dia independente
+
+`tau=0` explica **0,9987** das 768 janelas elegíveis (1 discordante), com
+distribuição não concentrada (quartis 190/192/196/190). A verificação
+anterior deu 0,9984 sobre 640 janelas. Duas amostras independentes, mesma
+resposta: **a âncora é o `crypto_prices_twap_sixty` na abertura da janela.**
+Isto fecha o item 2.3 do M3.
+
+### TAKER — reprova. O +102,92 não sobrevive
+
+| # | Critério | Exigido | 20 h (23 ago) | 24 h (24 ago) | |
+|---|---|---|---|---|---|
+| 1.1 | PnL líquido @300 ms | positivo | +102,9227 | **−53,2777** | ❌ |
+| 1.2 | Trades | ≥ 200 | 568 | **695** | ✅ |
+| 1.3 | Erro de calibração | < 0,05 em ≥ 1 balde | 0,0067 | **−0,0015** (balde <30 s) | ⚠️ |
+| 1.4 | PnL líquido @600 ms | positivo | +101,1759 | **−54,3953** | ❌ |
+| 1.5 | Profundidade p50 3 ticks | ≥ 200 USDC | 87,8 / 41,8 / 31,3 / 35,7 | **128,0 / 50,0 / 28,7 / 27,0** | ❌ |
+
+O TAKER exige as CINCO. Reprova em três.
+
+**O sinal não inverteu por pouco: inverteu por 156 USDC**, com 127 trades a
+mais e captação melhor. A leitura honesta não é "o dia 24 foi ruim" — é que
+o **+102,9227 nunca teve o lastro que aparentava**. Ele saiu de uma gravação
+com 837 s de silêncio e 42% dos snapshots jogados fora; buraco de livro não
+produz erro simétrico, porque o preenchimento simulado usa o último snapshot
+conhecido, que numa lacuna é sistematicamente melhor que o real. O critério
+1.1 foi escrito antes dos números justamente para este momento.
+
+O 1.3 fica em ⚠️ e não em ✅ de propósito: |−0,0015| passa no limiar, mas o
+M2.13 mediu que um preditor CONSTANTE alcança ECE de 0,0051 — o erro sozinho
+não distingue calibração de acaso. Quem decide é `faixas_ocupadas` /
+`calibracao_avaliavel`, que o `resumo_m2.py` ainda não imprime.
+
+O 1.5 melhorou onde importa (300 s: 87,8 → 128,0) e continua abaixo de 200
+em todas as durações. Com `threshold_mordeu: true` e 6 resultados distintos
+na curva de edge, a capacidade morde de verdade.
+
+### MAKER — reprova, pelos mesmos dois motivos de antes
+
+| # | Critério | Exigido | 20 h | 24 h | |
+|---|---|---|---|---|---|
+| 1.6 | Conta fechada @ desconto 0,3 | positiva | +0,043 ¢/share | não lido nesta saída | ⚠️ |
+| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | −0,307 | **−0,1974** | ✅ |
+| 1.8 | Horas de amostra | ≥ 20 h | 40,7 h | **65,9 h** | ✅ |
+| 1.9 | Divergência do livro | < 1 % | 2,89 % | **2,82 %** | ❌ |
+| 1.10 | Fórmula de reward na doc oficial | sim | não | **não** | ❌ |
+
+`janelas_com_pool_de_reward` subiu de 5 (em 599) para **10** (em 896) — de
+0,8% para 1,1%. Confirma em vez de derrubar: **os mercados updown não
+participam do programa de rewards**, e isso não é ajustável por nós.
+
+O saldo `rebate − markout` melhorou para **+0,1526 ¢/share** (0,35 de rebate
+contra 0,1974 de markout), mas continua sendo TETO: o rebate só existe se
+alguém nos executar, e a posição na fila não é observável no WS agregado.
+
+### O que este segundo veredito muda na prática
+
+**Nenhuma das duas rotas passa.** O TAKER perdeu o único critério que
+sustentava a ideia de ir a dinheiro real; o MAKER continua barrado por
+divergência de livro e por uma fórmula não confirmada.
+
+O trabalho do M4 — portões de risco, SHADOW, ciclo ao vivo — **não é
+perdido**: ele é o que permite medir sem arriscar. Mas a decisão de ligar o
+LIVE com a estratégia taker atual deixa de ter base, e o próximo passo
+honesto é entender POR QUE o sinal inverte, não procurar um dia em que ele
+volte a fechar positivo.
 
 ---
 
