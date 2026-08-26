@@ -14,7 +14,9 @@ import argparse
 import json
 import os
 import re
+import resource
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -81,6 +83,81 @@ from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.markets.discovery import duracao_do_slug, parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
+
+#: De quantos em quantos registros o progresso é impresso. 500 mil é ~1 % de
+#: uma gravação de 24 h, então dá umas cem linhas por rodada: frequente o
+#: bastante para ninguém achar que travou, raro o bastante para não virar
+#: ruído nem custar tempo no laço quente.
+PASSO_DO_PROGRESSO = 500_000
+
+
+def _rss_gib() -> float:
+    """Memória residente do processo, em GiB.
+
+    `ru_maxrss` vem em BYTES no macOS e em KILOBYTES no Linux. A conta errada
+    dá 1024x de diferença — e como a máquina de análise é um Mac e os testes
+    rodam em Linux, o erro passaria despercebido nos dois lugares por motivos
+    opostos.
+    """
+    bruto = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return bruto / (1024**3)
+    return bruto / (1024**2)
+
+
+class Progresso:
+    """Diz onde a rodada está. Vai para STDERR, e isso não é detalhe.
+
+    O relatório sai por STDOUT. Progresso no mesmo lugar corromperia o JSON —
+    quem redireciona `> relatorio.json` receberia um arquivo que não parseia.
+
+    Isto existe porque o backtest passou a vida inteira sem imprimir nada até
+    terminar. Numa gravação de 24 h são mais de três horas de silêncio
+    absoluto, e a única leitura possível de fora é "travou". `rss_gib` está
+    junto porque o modo real de falhar numa máquina de análise não é erro: é
+    swap, e swap não parece travamento — parece lentidão sem fim.
+    """
+
+    def __init__(self, *, ativo: bool = True) -> None:
+        self.ativo = ativo
+        self.inicio = time.monotonic()
+        self.marco = self.inicio
+        self.ultimo_total = 0
+
+    def passada(self, nome: str, *, arquivos: int) -> None:
+        if not self.ativo:
+            return
+        self.marco = time.monotonic()
+        self.ultimo_total = 0
+        self._linha(f"{nome}: comecando sobre {arquivos} arquivo(s)")
+
+    def talvez(self, nome: str, total: int) -> None:
+        """Chame a cada registro; ela decide sozinha quando falar."""
+        if not self.ativo or total - self.ultimo_total < PASSO_DO_PROGRESSO:
+            return
+        agora = time.monotonic()
+        decorrido = agora - self.marco
+        taxa = (total / decorrido) if decorrido > 0 else 0.0
+        self.ultimo_total = total
+        self._linha(
+            f"{nome}: {total:,} registros"
+            f" | {taxa:,.0f}/s"
+            f" | {decorrido / 60:.1f} min nesta passada"
+            f" | rss {_rss_gib():.2f} GiB"
+        )
+
+    def terminou(self, nome: str, total: int) -> None:
+        if not self.ativo:
+            return
+        self._linha(
+            f"{nome}: FIM, {total:,} registros em "
+            f"{(time.monotonic() - self.marco) / 60:.1f} min"
+        )
+
+    @staticmethod
+    def _linha(texto: str) -> None:
+        print(f"[{time.strftime('%H:%M:%S')}] {texto}", file=sys.stderr, flush=True)
+
 
 TOKEN_DURACAO_PADRAO = 300
 
@@ -209,8 +286,12 @@ class RecordingIndex:
         *,
         limite_por_token: int = LIMITE_SNAPSHOTS_PADRAO,
         niveis_retidos: int = NIVEIS_RETIDOS_PADRAO,
+        progresso: Progresso | None = None,
     ) -> None:
         self.reader = reader
+        # Default ATIVO: o silêncio de três horas foi o defeito. Os testes
+        # passam um desligado para não poluir a saída.
+        self.progresso = progresso if progresso is not None else Progresso()
         self.limite_por_token = limite_por_token
         self.niveis_retidos = niveis_retidos
         self.streams: dict[str, list[tuple[int, float]]] = defaultdict(list)
@@ -282,6 +363,7 @@ class RecordingIndex:
     # --------------------------------------------------------------- passadas
     def build(self) -> None:
         self._primeira_passada()
+        self.progresso.terminou("passada 1", self.reader.total)
         # M2.5: fecha as afirmações de `best_bid_ask` que ainda esperavam
         # alinhamento e as divergências abertas no último evento. Sem isto os
         # dois erros apontariam para o mesmo lado — o de esconder problema.
@@ -291,7 +373,9 @@ class RecordingIndex:
 
     def _primeira_passada(self) -> None:
         """Metadados, preço-verdade e resoluções. Ignora o book por completo."""
+        self.progresso.passada("passada 1", arquivos=len(self.reader.files))
         for record in self.reader.iter_records():
+            self.progresso.talvez("passada 1", self.reader.total)
             if record.ts_wall_ns > 0:
                 if self._primeiro_record_ns == 0:
                     self._primeiro_record_ns = record.ts_wall_ns
@@ -311,9 +395,12 @@ class RecordingIndex:
         """Reconstrói os books dos tokens de interesse, dentro da janela deles."""
         if not self.janelas_de_interesse:
             return
+        self.progresso.passada("passada 2", arquivos=len(self.reader.files))
         for record in self.reader.iter_records():
+            self.progresso.talvez("passada 2", self.reader.total)
             if record.fonte == "poly_ws":
                 self._on_poly_book(record)
+        self.progresso.terminou("passada 2", self.reader.total)
 
     # ------------------------------------------------------------- passada 1
     def _on_discovery(self, payload: dict[str, Any]) -> None:
