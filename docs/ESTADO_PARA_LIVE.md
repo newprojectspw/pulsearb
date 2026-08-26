@@ -217,9 +217,71 @@ frente, que só o `silencio_final_s` não via.
 
 | # | Item | Estado |
 |---|---|---|
-| 2.1 | Modelo TWAP endgame | ✅ pronto |
-| 2.2 | Modelo horário | ✅ pronto |
-| 2.3 | Curva de calibração gerada a partir de gravação real | ⏳ existe por bucket; falta amostra |
+| 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py`, coberto por 24 testes |
+| 2.2 | Modelo horário | ✅ `engine/hourly.py` |
+| 2.3 | Curva de calibração sobre gravação real | ⬜ **instrumento pronto, medição nunca feita** |
+
+### O 2.3 mudou de natureza, não só de estado
+
+Até 2026-08-25 este item estava marcado "⏳ existe por bucket; falta amostra".
+As duas metades da frase envelheceram, e por motivos opostos.
+
+**O que existia não media calibração.** O `erro` publicado era
+`|prob_média_prevista − freq_realizada|`, e `freq_realizada` é a **taxa-base do
+balde**. Um preditor que cospe uma constante igual à taxa-base tirava nota
+máxima sem saber nada — foi o que a rodada de 20 h expôs no balde `<30s`:
+previsto 0,514 contra realizado 0,5073, cara-ou-coroa dos dois lados, e o
+critério "passou" com 0,0067.
+
+**O M2.13 trocou o instrumento.** Agora o relatório publica
+`curva_de_confiabilidade` por faixa de probabilidade prevista,
+`erro_de_confiabilidade` (ECE) e `faixas_ocupadas`. O critério virou
+CONJUNÇÃO — `calibracao_avaliavel` (≥ 3 faixas com amostra) **e** ECE abaixo do
+limiar —, porque o ECE sozinho também não pega o preditor constante: ele cai
+todo numa faixa só.
+
+**E a amostra deixou de faltar.** São 24 horas contínuas e limpas do dia 24,
+mais 23 do dia 23 e 5 do dia 25.
+
+Ou seja: o que falta no 2.3 **não é código nem dado**. É rodar o backtest com o
+instrumento novo sobre a gravação que já existe. A mesma rodada fecha o 2.3 do
+M3 e o critério 1.3 do M2, que hoje está marcado **não avaliado** justamente
+por causa disto.
+
+---
+
+### O analisador ficava mudo por três horas — M2.15
+
+Descoberto em 2026-08-26, do pior jeito possível: a rodada de 24 h foi
+lançada, o operador rodou `tail -f` no log e viu um arquivo **vazio**. A
+leitura de fora foi "travou".
+
+Não estava travado. O backtest tem 6 chamadas de `print` no arquivo inteiro, e
+todas são de erro ou do JSON final — ele não imprimia **nada** enquanto
+processava. Três horas e meia de silêncio absoluto, por construção.
+
+Agora ele diz onde está, a cada 500 mil registros:
+
+```
+[04:12:07] passada 1: comecando sobre 24 arquivo(s)
+[04:13:41] passada 1: 500,000 registros | 5,319/s | 1.6 min nesta passada | rss 1.84 GiB
+```
+
+Duas decisões que não são detalhe:
+
+**Vai para STDERR.** O relatório sai por stdout; progresso ali corromperia o
+JSON, e quem redirecionasse `> relatorio.json` receberia um arquivo que não
+parseia. Há teste travando isso.
+
+**`rss` está junto porque o modo real de falhar numa máquina de análise não é
+erro — é swap.** E swap não parece travamento: parece lentidão sem fim. Sem o
+número, não há como distinguir "está devagar" de "não vai terminar".
+
+Uma armadilha apareceu na implementação: `ru_maxrss` vem em **bytes no macOS**
+e em **kilobytes no Linux**. A conta errada dá 1024× de diferença — e como a
+máquina de análise é um Mac e os testes rodam em Linux, o erro passaria
+despercebido nos dois lugares por motivos opostos. Há teste parametrizado nas
+duas plataformas.
 
 ---
 
