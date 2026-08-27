@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import signal
 import sys
+from itertools import pairwise
 from typing import Any, NamedTuple
 
 from pulsearb.backtest.__main__ import (
@@ -379,6 +380,121 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
     ]
 
 
+def _balde_do_diagnostico(backtest: dict[str, Any]) -> tuple[str, dict] | None:
+    """O balde que sustenta o critério 1.3 — o mesmo que ele escolheu.
+
+    Diagnosticar um balde diferente do que decidiu o veredito produziria uma
+    explicação para um número que ninguém leu.
+    """
+    calibracao = backtest.get("calibracao") or {}
+    avaliaveis = {
+        balde: dados
+        for balde, dados in calibracao.items()
+        if dados.get("calibracao_avaliavel")
+    }
+    if not avaliaveis:
+        return None
+    return min(
+        avaliaveis.items(),
+        key=lambda par: abs(par[1].get("erro_de_confiabilidade") or 1.0),
+    )
+
+
+def leitura_do_vies(curva: dict[str, Any]) -> str:
+    """A frase que separa "conserta encolhendo" de "troca o preditor".
+
+    A pergunta acionável não é o sinal do viés médio: é se o erro tem ORDEM.
+    Erro que cresce com a probabilidade prevista é excesso de confiança, e
+    excesso de confiança tem conserto de uma linha — encolher a previsão em
+    direção à taxa-base. Erro sem ordem não tem: qualquer encolhimento que
+    acerte uma faixa piora outra, e o problema está no preditor.
+
+    Reportar só "MISTO" quando há 3 faixas otimistas e 1 pessimista esconde
+    exatamente o caso mais comum e mais tratável, que é o erro monótono
+    passando pelo zero.
+    """
+    celulas = [
+        (celula.get("previsto"), celula.get("erro"))
+        for celula in curva.values()
+        if isinstance(celula.get("erro"), int | float)
+        and isinstance(celula.get("previsto"), int | float)
+        and (celula.get("n") or 0) > 0
+    ]
+    if not celulas:
+        return "sem faixa com amostra"
+    celulas.sort()
+    erros = [erro for _previsto, erro in celulas]
+    acima = sum(1 for erro in erros if erro > 0)
+    abaixo = sum(1 for erro in erros if erro < 0)
+
+    crescente = all(a <= b for a, b in pairwise(erros))
+    if crescente and len(erros) > 1 and erros[-1] > erros[0]:
+        return (
+            f"OTIMISTA CRESCENTE: o erro sobe de {erros[0]:+.4f} a "
+            f"{erros[-1]:+.4f} conforme a confianca sobe. Encolher a previsao "
+            "em direcao a taxa-base corrige."
+        )
+    if acima and abaixo:
+        return (
+            f"MISTO e SEM ORDEM ({acima} faixa(s) otimista(s), {abaixo} "
+            "pessimista(s)) — nao ha encolhimento que acerte todas"
+        )
+    if acima:
+        return f"OTIMISTA nas {acima} faixa(s) com amostra"
+    if abaixo:
+        return f"PESSIMISTA nas {abaixo} faixa(s) com amostra"
+    return "sem viés: previsto igual ao realizado em todas as faixas"
+
+
+def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
+    """POR QUE a calibração falha, e não só QUE ela falha.
+
+    "Não calibrado" não diz o que consertar. A curva de confiabilidade diz:
+    se o previsto passa do realizado nas faixas altas, o modelo é otimista
+    onde aposta forte, e o conserto é encolher a confiança — não trocar de
+    sinal. Se o viés troca de sentido entre faixas, não há correção monótona
+    possível e o problema é o preditor, não a escala.
+
+    Impresso sempre que houver balde avaliável, inclusive quando o 1.3 passa:
+    passar com viés sistemático é informação, não silêncio.
+    """
+    escolhido = _balde_do_diagnostico(relatorio.get("backtest") or {})
+    if escolhido is None:
+        return
+    balde, dados = escolhido
+    curva = dados.get("curva_de_confiabilidade") or {}
+    if not curva:
+        return
+
+    print("=" * 74)
+    print(f"POR QUE A CALIBRACAO DA ESSE NUMERO  (balde {balde})")
+    print("=" * 74)
+    print(f"{'faixa':<14}{'n':>8}{'previsto':>11}{'realizado':>11}{'erro':>10}")
+    soma_pesada = 0.0
+    total = 0
+    for faixa, celula in sorted(curva.items()):
+        n = int(celula.get("n") or 0)
+        erro = celula.get("erro")
+        print(
+            f"{faixa:<14}{n:>8}"
+            f"{_numero(celula.get('previsto')):>11}"
+            f"{_numero(celula.get('realizado')):>11}"
+            f"{_numero(erro):>10}"
+        )
+        if isinstance(erro, int | float) and n:
+            soma_pesada += erro * n
+            total += n
+    vies = soma_pesada / total if total else 0.0
+    print()
+    print(f"  vies medio ponderado: {vies:+.4f}  {leitura_do_vies(curva)}")
+    print(
+        "  Erro = previsto - realizado. Erro que CRESCE com a confianca se\n"
+        "  corrige encolhendo a previsao em direcao a taxa-base; erro sem\n"
+        "  ordem e defeito do preditor, nao de escala."
+    )
+    print()
+
+
 def _imprimir(rotulo: str, valor: Any) -> None:
     print(f"{rotulo:<38} {valor}")
 
@@ -485,6 +601,7 @@ def main() -> None:
         criterios_do_taker(relatorio),
         "TAKER VIAVEL exige as CINCO",
     )
+    _imprimir_diagnostico_da_calibracao(relatorio)
     _imprimir_criterios(
         "OS 5 CRITERIOS DO MAKER",
         criterios_do_maker(relatorio),
