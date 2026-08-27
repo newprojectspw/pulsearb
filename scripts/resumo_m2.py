@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
-"""Resumo do relatório do backtest: só os campos que decidem o M2.
+"""Resumo do relatório do backtest: os dez critérios, com o veredito de cada.
 
-    python scripts/resumo_m2.py relatorios/hora_1900.json
+    python scripts/resumo_m2.py relatorios/M2_24AGO.json
 
 O relatório inteiro passa de 4.000 linhas de JSON. Ler o veredito nele exige
 saber onde procurar, e foi lendo o campo errado que um diagnóstico já saiu
-invertido numa conversa real. Este resumo mostra, em uma tela: se a captação
-prestou, se a âncora teve amostra, e os dez critérios de VEREDITO_M2 §"Regras
-de decisão" com o exigido ao lado do medido.
+invertido numa conversa real.
 
-Não interpreta nada. Se o número for feio, imprime o número feio — é a mesma
-regra do relatório que ele resume.
+E ERA ISSO QUE ESTE RESUMO CONTINUAVA FAZENDO. A versão anterior imprimia,
+para o critério 1.3, o campo `erro` — exatamente o campo que o relatório
+manda NÃO ler, por escrito, na chave `calibracao_nota`: o `erro` compara a
+probabilidade média prevista com a TAXA-BASE do balde, então um preditor que
+cospe uma constante igual à taxa-base tira zero sem saber nada. O critério
+1.3 é a CONJUNÇÃO de `calibracao_avaliavel` (pelo menos 3 faixas com
+amostra) com `erro_de_confiabilidade` abaixo do limiar. Agora é isso que sai.
+
+Por isso cada linha imprime também O CAMPO QUE FOI LIDO. Ler o campo errado
+é erro silencioso por natureza: o número sai bem formatado de qualquer jeito,
+e quem confere não tem como saber de onde ele veio. Com o caminho ao lado, a
+conferência não exige abrir o JSON.
+
+Três vereditos, e a diferença entre os dois últimos é a que mais importa:
+
+    PASSA          medido, e o número atende o exigido
+    REPROVA        medido, e o número não atende
+    NAO AVALIAVEL  o relatório não sustenta a conta — o que NÃO é reprovar
+
+Não interpreta nada além disso. Se o número for feio, imprime o número feio —
+é a mesma regra do relatório que ele resume.
 """
 
 from __future__ import annotations
@@ -18,12 +35,29 @@ from __future__ import annotations
 import json
 import signal
 import sys
+from typing import Any, NamedTuple
 
 from pulsearb.backtest.__main__ import (
     ENV_RAIZ_DE_SAIDA,
     PADRAO_SAIDA,
     raiz_de_saida,
 )
+from pulsearb.backtest.report import MINIMO_DE_FAIXAS
+
+# Os limiares do VEREDITO_M2 "Regras de decisão", escritos ANTES dos números.
+# Ficam aqui como constantes nomeadas para que mudar um critério seja uma
+# edição visível no diff, e não um número trocado no meio de um `if`.
+MINIMO_DE_TRADES = 200
+LIMIAR_DE_CALIBRACAO = 0.05
+PROFUNDIDADE_MINIMA_USDC = 200.0
+MARKOUT_MINIMO_CENTAVOS = -0.5
+HORAS_MINIMAS_DE_AMOSTRA = 20.0
+DIVERGENCIA_MAXIMA = 0.01
+FATOR_DE_DESCONTO_PESSIMISTA = "0.3"
+
+PASSA = "PASSA"
+REPROVA = "REPROVA"
+NAO_AVALIAVEL = "NAO AVALIAVEL"
 
 
 def caminho_do_relatorio(bruto: str):
@@ -55,89 +89,383 @@ def caminho_do_relatorio(bruto: str):
         raise SystemExit(f"relatório não encontrado: {resolvido}")
     return resolvido
 
+
+class Criterio(NamedTuple):
+    """Uma linha do veredito. `campo` existe para poder ser conferida."""
+
+    numero: str
+    nome: str
+    exigido: str
+    medido: str
+    veredito: str
+    campo: str
+
+
+def _julgar(ok: bool | None) -> str:
+    """`None` vira NAO AVALIAVEL, nunca REPROVA.
+
+    A distinção é o ponto: "o relatório não sustenta esta conta" e "a conta
+    deu ruim" levam a trabalhos opostos — um manda instrumentar, o outro
+    manda desistir da rota.
+    """
+    if ok is None:
+        return NAO_AVALIAVEL
+    return PASSA if ok else REPROVA
+
+
+def _fundo(dados: Any, *chaves: str, padrao: Any = None) -> Any:
+    """Desce por um caminho de chaves sem estourar em relatório antigo."""
+    atual = dados
+    for chave in chaves:
+        if not isinstance(atual, dict):
+            return padrao
+        atual = atual.get(chave)
+        if atual is None:
+            return padrao
+    return atual
+
+
+def _numero(valor: Any, sufixo: str = "") -> str:
+    if valor is None:
+        return "ausente no relatorio"
+    if isinstance(valor, float):
+        return f"{valor:g}{sufixo}"
+    return f"{valor}{sufixo}"
+
+
+def _ordem_da_duracao(par: tuple[str, Any]) -> float:
+    """`300s` antes de `3600s`. Ordem alfabética poria 14400s primeiro."""
+    try:
+        return float(par[0].rstrip("s"))
+    except ValueError:
+        return float("inf")
+
+
+def _criterio_de_calibracao(backtest: dict[str, Any]) -> Criterio:
+    campo = "backtest.calibracao[*].{calibracao_avaliavel,erro_de_confiabilidade}"
+    exigido = (
+        f"erro_de_confiabilidade < {LIMIAR_DE_CALIBRACAO:g} "
+        f"em >= 1 balde AVALIAVEL"
+    )
+    calibracao = backtest.get("calibracao") or {}
+    avaliaveis = {
+        balde: dados
+        for balde, dados in calibracao.items()
+        if dados.get("calibracao_avaliavel")
+    }
+    if not avaliaveis:
+        ocupadas = {
+            balde: dados.get("faixas_ocupadas") for balde, dados in calibracao.items()
+        }
+        return Criterio(
+            "1.3",
+            "Calibracao",
+            exigido,
+            f"nenhum balde avaliavel (min {MINIMO_DE_FAIXAS} faixas); "
+            f"faixas_ocupadas={ocupadas or 'sem baldes'}",
+            NAO_AVALIAVEL,
+            campo,
+        )
+    balde, dados = min(
+        avaliaveis.items(),
+        key=lambda par: abs(par[1].get("erro_de_confiabilidade") or 1.0),
+    )
+    erro = dados.get("erro_de_confiabilidade")
+    return Criterio(
+        "1.3",
+        "Calibracao",
+        exigido,
+        f"{_numero(erro)} no balde {balde} "
+        f"({dados.get('faixas_ocupadas')} faixas ocupadas)",
+        _julgar(None if erro is None else abs(erro) < LIMIAR_DE_CALIBRACAO),
+        campo,
+    )
+
+
+def _criterio_de_profundidade(relatorio: dict[str, Any]) -> Criterio:
+    campo = "medicoes.profundidade.criterio_do_veredito.por_duracao[*].p50_3ticks_usdc"
+    exigido = f">= {PROFUNDIDADE_MINIMA_USDC:g} USDC em >= 1 duracao"
+    por_duracao = (
+        _fundo(
+            relatorio,
+            "medicoes",
+            "profundidade",
+            "criterio_do_veredito",
+            "por_duracao",
+        )
+        or {}
+    )
+    valores = {
+        duracao: (dados or {}).get("p50_3ticks_usdc")
+        for duracao, dados in por_duracao.items()
+    }
+    medidos = {d: v for d, v in valores.items() if isinstance(v, int | float)}
+    if not medidos:
+        return Criterio(
+            "1.5", "Profundidade p50 3 ticks", exigido,
+            "sem duracao medida", NAO_AVALIAVEL, campo,
+        )
+    return Criterio(
+        "1.5",
+        "Profundidade p50 3 ticks",
+        exigido,
+        ", ".join(
+            f"{d}: {v:g}" for d, v in sorted(medidos.items(), key=_ordem_da_duracao)
+        ),
+        _julgar(max(medidos.values()) >= PROFUNDIDADE_MINIMA_USDC),
+        campo,
+    )
+
+
+def criterios_do_taker(relatorio: dict[str, Any]) -> list[Criterio]:
+    backtest = relatorio.get("backtest") or {}
+    resumo = backtest.get("resumo") or {}
+    pnl300 = resumo.get("pnl_liquido_usdc")
+    trades = resumo.get("trades")
+    pnl600 = _fundo(relatorio, "sensibilidade_latencia", "600ms", "pnl_liquido_usdc")
+    return [
+        Criterio(
+            "1.1", "PnL liquido @300ms", "positivo", _numero(pnl300, " USDC"),
+            _julgar(None if pnl300 is None else pnl300 > 0),
+            "backtest.resumo.pnl_liquido_usdc",
+        ),
+        Criterio(
+            "1.2", "Trades", f">= {MINIMO_DE_TRADES}", _numero(trades),
+            _julgar(None if trades is None else trades >= MINIMO_DE_TRADES),
+            "backtest.resumo.trades",
+        ),
+        _criterio_de_calibracao(backtest),
+        Criterio(
+            "1.4", "PnL liquido @600ms", "positivo", _numero(pnl600, " USDC"),
+            _julgar(None if pnl600 is None else pnl600 > 0),
+            "sensibilidade_latencia.600ms.pnl_liquido_usdc",
+        ),
+        _criterio_de_profundidade(relatorio),
+    ]
+
+
+def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
+    """1.6 — e o motivo de ele quase nunca poder ser respondido.
+
+    `o_que_falta_para_fechar` lista os termos que a conta não tem. Enquanto
+    ela não estiver vazia, o número que existe é PARCIAL por construção:
+    `resultado_parcial_usdc` soma rewards e rebate e NÃO subtrai o custo de
+    markout. Ler esse parcial como se fosse a conta fechada foi o erro que o
+    primeiro veredito cometeu, e é o que esta função existe para impedir.
+    """
+    campo = "rota_maker.conta_fechada.o_que_falta_para_fechar"
+    exigido = f"positiva com fator de desconto {FATOR_DE_DESCONTO_PESSIMISTA}"
+    conta = rota_maker.get("conta_fechada") or {}
+    falta = conta.get("o_que_falta_para_fechar")
+    if falta is None:
+        return Criterio("1.6", "Conta fechada do maker", exigido,
+                        "bloco ausente no relatorio", NAO_AVALIAVEL, campo)
+    if falta:
+        termos = ", ".join(str(t).split(":", 1)[0] for t in falta)
+        return Criterio(
+            "1.6", "Conta fechada do maker", exigido,
+            f"conta NAO fechada: faltam {len(falta)} termos ({termos})",
+            NAO_AVALIAVEL, campo,
+        )
+    por_fator = rota_maker.get("sensibilidade_ao_fator") or {}
+    valores = [
+        celulas.get(FATOR_DE_DESCONTO_PESSIMISTA)
+        for celulas in por_fator.values()
+        if isinstance(celulas, dict)
+    ]
+    medidos = [v for v in valores if isinstance(v, int | float)]
+    if not medidos:
+        return Criterio(
+            "1.6", "Conta fechada do maker", exigido,
+            f"sem celula no fator {FATOR_DE_DESCONTO_PESSIMISTA}",
+            NAO_AVALIAVEL,
+            f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
+        )
+    return Criterio(
+        "1.6", "Conta fechada do maker", exigido,
+        _numero(max(medidos), " USDC"), _julgar(max(medidos) > 0),
+        f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
+    )
+
+
+def _melhor_markout(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
+    tabela = _fundo(rota_maker, "markout", "markout_centavos_por_share") or {}
+    melhores: list[tuple[str, float]] = []
+    for recorte, horizontes in tabela.items():
+        media = _fundo(horizontes or {}, "5s", "media")
+        if isinstance(media, int | float):
+            melhores.append((recorte, float(media)))
+    return max(melhores, key=lambda par: par[1]) if melhores else None
+
+
+def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
+    celulas = _fundo(rota_maker, "conta_fechada", "por_ordem_e_recorte") or {}
+    horas = [
+        (nome, float(dados["horas_de_amostra"]))
+        for nome, dados in celulas.items()
+        if isinstance((dados or {}).get("horas_de_amostra"), int | float)
+    ]
+    return max(horas, key=lambda par: par[1]) if horas else None
+
+
+def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
+    rota = relatorio.get("rota_maker") or {}
+    markout = _melhor_markout(rota)
+    amostra = _melhor_amostra(rota)
+    divergencia = _fundo(relatorio, "integridade", "divergencia_topo_book", "taxa")
+    return [
+        _criterio_da_conta_fechada(rota),
+        Criterio(
+            "1.7", "Markout 5s",
+            f">= {MARKOUT_MINIMO_CENTAVOS:g} centavo/share em >= 1 recorte",
+            # O criterio fala em p50; o relatorio traz `media`. Dizer qual
+            # estatistica saiu evita comparar duas coisas diferentes depois.
+            f"{markout[1]:g} (media) no recorte {markout[0]}" if markout
+            else "sem recorte com markout de 5s",
+            _julgar(None if markout is None else markout[1] >= MARKOUT_MINIMO_CENTAVOS),
+            "rota_maker.markout.markout_centavos_por_share[*].5s.media",
+        ),
+        Criterio(
+            "1.8", "Horas de amostra", f">= {HORAS_MINIMAS_DE_AMOSTRA:g} h",
+            f"{amostra[1]:g} h em {amostra[0]}" if amostra else "sem celula",
+            _julgar(None if amostra is None else amostra[1] >= HORAS_MINIMAS_DE_AMOSTRA),
+            "rota_maker.conta_fechada.por_ordem_e_recorte[*].horas_de_amostra",
+        ),
+        Criterio(
+            "1.9", "Divergencia do topo do livro", f"< {DIVERGENCIA_MAXIMA:.0%}",
+            f"{divergencia:.2%}" if isinstance(divergencia, int | float)
+            else "ausente no relatorio",
+            _julgar(
+                None if not isinstance(divergencia, int | float)
+                else divergencia < DIVERGENCIA_MAXIMA
+            ),
+            "integridade.divergencia_topo_book.taxa",
+        ),
+        # 1.10 nao e medicao: e um fato sobre a documentacao da Polymarket,
+        # que o relatorio nao tem como observar. Enquanto a formula for
+        # hipotese, ele REPROVA — e o relatorio diz isso de si mesmo no
+        # proprio `aviso`, que sai impresso para nao virar palavra minha.
+        Criterio(
+            "1.10", "Formula de reward confirmada na doc", "sim",
+            "nao — segue como hipotese",
+            REPROVA,
+            "rota_maker.rewards.hipoteses (fato externo ao relatorio)",
+        ),
+    ]
+
+
+def _imprimir(rotulo: str, valor: Any) -> None:
+    print(f"{rotulo:<38} {valor}")
+
+
+def _imprimir_criterios(titulo: str, criterios: list[Criterio], exige: str) -> None:
+    print("=" * 74)
+    print(titulo)
+    print("=" * 74)
+    for c in criterios:
+        print(f"{c.veredito:<14} {c.numero:<5} {c.nome}")
+        print(f"{'':14} exigido: {c.exigido}")
+        print(f"{'':14} medido:  {c.medido}")
+        print(f"{'':14} campo:   {c.campo}")
+    reprovados = [c.numero for c in criterios if c.veredito == REPROVA]
+    sem_conta = [c.numero for c in criterios if c.veredito == NAO_AVALIAVEL]
+    print()
+    if reprovados:
+        print(f"  >> {exige} — REPROVA em {', '.join(reprovados)}")
+    elif sem_conta:
+        print(f"  >> {exige} — NAO CONCLUSIVO: {', '.join(sem_conta)} sem conta")
+    else:
+        print(f"  >> {exige} — PASSA em todos")
+    if reprovados and sem_conta:
+        print(f"     (sem conta, e portanto NAO reprovado: {', '.join(sem_conta)})")
+    print()
+
+
+def _imprimir_captacao(relatorio: dict[str, Any]) -> None:
+    gravacao = relatorio.get("gravacao") or {}
+    print("=" * 74)
+    print("CAPTACAO  (bloco 0 — decide se a gravacao presta)")
+    print("=" * 74)
+    cobertura = _fundo(gravacao, "stream_de_ancora", "cobertura_da_gravacao") or {}
+    _imprimir("pior_fracao_coberta", cobertura.get("pior_fracao_coberta"))
+    for ativo, v in sorted((cobertura.get("por_ativo") or {}).items()):
+        _imprimir(
+            f"  {ativo}",
+            f"{v['fracao_da_gravacao']:.1%}  silencio_final={v['silencio_final_s']}s",
+        )
+    silencio = gravacao.get("silencio_do_rtds") or {}
+    _imprimir("silencios", silencio.get("silencios"))
+    _imprimir("total_s (uniao)", silencio.get("total_s"))
+    _imprimir(
+        "conexao_inteira", len(silencio.get("silencios_da_conexao_inteira") or [])
+    )
+    _imprimir(
+        "suspeita_de_assinatura_caducada",
+        silencio.get("suspeita_de_assinatura_caducada"),
+    )
+    for evento in silencio.get("eventos_coincidentes") or []:
+        _imprimir(
+            "  evento coincidente",
+            f"{evento['quantos_ativos']} ativos, "
+            f"dispersao {evento['dispersao_do_inicio_s']}s",
+        )
+    _imprimir(
+        "janelas_conhecidas / com_resolucao",
+        f"{gravacao.get('janelas_conhecidas')} / "
+        f"{gravacao.get('janelas_com_resolucao')}",
+    )
+    print()
+
+
+def _imprimir_ancora(relatorio: dict[str, Any]) -> None:
+    veredito = _fundo(relatorio, "ancora", "veredito_da_varredura") or {}
+    print("=" * 74)
+    print("ANCORA")
+    print("=" * 74)
+    _imprimir(
+        "elegiveis / recebidas",
+        f"{veredito.get('janelas_elegiveis')} / {veredito.get('janelas_recebidas')}"
+        f"  (min {veredito.get('minimo_para_veredito')})",
+    )
+    _imprimir(
+        "sem_cobertura_do_stream", veredito.get("janelas_sem_cobertura_do_stream")
+    )
+    _imprimir("consistencia em tau=0", veredito.get("consistencia_do_tau_verificado"))
+    distribuicao = veredito.get("distribuicao_das_elegiveis") or {}
+    _imprimir("distribuicao (quartis)", distribuicao.get("quartis"))
+    _imprimir("concentrada?", distribuicao.get("concentrada"))
+    print(f"\n  {veredito.get('veredito')}\n")
+
+
 def main() -> None:
     """Imprime o resumo do relatório nomeado no argumento."""
     if len(sys.argv) != 2:
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
         raise SystemExit(2)
 
+    # `| head` fecha o cano e o Python morre com BrokenPipeError. Um resumo
+    # que estoura quando alguém o pipeia é um resumo que não se pode pipeiar;
+    # o default do sistema mata o processo em silêncio, que é o que qualquer
+    # ferramenta de linha de comando faz.
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-    with caminho_do_relatorio(sys.argv[1]).open(encoding="utf-8") as handle:
-        d = json.load(handle)
-    g, i, a = d.get("gravacao", {}), d.get("integridade", {}), d.get("ancora", {})
-    b, m, r = d.get("backtest", {}), d.get("medicoes", {}), d.get("rota_maker", {})
+    with caminho_do_relatorio(sys.argv[1]).open(encoding="utf-8") as arquivo:
+        relatorio = json.load(arquivo)
 
-
-    def p(rotulo, valor):
-        print(f"{rotulo:<38} {valor}")
-
-
-    def _saida_curta(_sinal, _frame):
-        """`| head` fecha o cano e o Python morre com BrokenPipeError.
-
-        Um resumo que estoura quando alguém o pipeia é um resumo que não se pode
-        pipeiar. Sair em silêncio é o comportamento de qualquer ferramenta de
-        linha de comando.
-        """
-        raise SystemExit(0)
-
-
-    print("=" * 68)
-    print("CAPTACAO  (bloco 0 — decide se a gravacao presta)")
-    print("=" * 68)
-    cob = (g.get("stream_de_ancora") or {}).get("cobertura_da_gravacao") or {}
-    p("pior_fracao_coberta", cob.get("pior_fracao_coberta"))
-    for ativo, v in sorted((cob.get("por_ativo") or {}).items()):
-        p(f"  {ativo}", f"{v['fracao_da_gravacao']:.1%}  silencio_final={v['silencio_final_s']}s")
-    sil = g.get("silencio_do_rtds") or {}
-    p("silencios", sil.get("silencios"))
-    p("total_s (uniao)", sil.get("total_s"))
-    p("conexao_inteira", len(sil.get("silencios_da_conexao_inteira") or []))
-    p("suspeita_de_assinatura_caducada", sil.get("suspeita_de_assinatura_caducada"))
-    for ev in sil.get("eventos_coincidentes") or []:
-        p("  evento coincidente", f"{ev['quantos_ativos']} ativos, dispersao {ev['dispersao_do_inicio_s']}s")
-    p("janelas_conhecidas / com_resolucao", f"{g.get('janelas_conhecidas')} / {g.get('janelas_com_resolucao')}")
-
-    print()
-    print("=" * 68)
-    print("ANCORA")
-    print("=" * 68)
-    v = a.get("veredito_da_varredura") or {}
-    p("elegiveis / recebidas", f"{v.get('janelas_elegiveis')} / {v.get('janelas_recebidas')}  (min {v.get('minimo_para_veredito')})")
-    p("sem_cobertura_do_stream", v.get("janelas_sem_cobertura_do_stream"))
-    p("consistencia em tau=0", v.get("consistencia_do_tau_verificado"))
-    dist = v.get("distribuicao_das_elegiveis") or {}
-    p("distribuicao (quartis)", dist.get("quartis"))
-    p("concentrada?", dist.get("concentrada"))
-    print(f"\n  {v.get('veredito')}\n")
-
-    print("=" * 68)
-    print("OS 5 CRITERIOS DO TAKER")
-    print("=" * 68)
-    res = b.get("resumo") or {}
-    p("1. pnl_liquido_usdc @300ms", res.get("pnl_liquido_usdc"))
-    p("2. trades  (exige >= 200)", res.get("trades"))
-    cal = b.get("calibracao") or {}
-    melhor = min(((abs(x["erro"]), k, x["erro"]) for k, x in cal.items()), default=None)
-    p("3. melhor erro de calibracao", f"{melhor[2]} no bucket {melhor[1]}" if melhor else "-")
-    p("4. pnl @600ms", ((d.get("sensibilidade_latencia") or {}).get("600ms") or {}).get("pnl_liquido_usdc"))
-    crit = ((m.get("profundidade") or {}).get("criterio_do_veredito") or {})
-    p("5. profundidade p50 3ticks (>=200)", {k: x["p50_3ticks_usdc"] for k, x in (crit.get("por_duracao") or {}).items()})
-    ce = d.get("curva_de_edge") or {}
-    p("   threshold MORDEU?", f"{ce.get('threshold_mordeu')}  ({ce.get('resultados_distintos')} resultados distintos)")
-
-    print()
-    print("=" * 68)
-    print("OS 5 CRITERIOS DO MAKER")
-    print("=" * 68)
-    rv = (r.get("conta_fechada") or {}).get("rebate_vs_markout") or {}
-    p("1. saldo centavos/share", rv.get("saldo_centavos_por_share"))
-    p("2. markout 5s (>= -0,5)", rv.get("markout_centavos_por_share"))
-    p("3. janelas com pool de reward", (r.get("rewards") or {}).get("janelas_com_pool_de_reward"))
-    p("4. taxa de divergencia (< 1%)", ((i.get("divergencia_topo_book") or {}).get("taxa")))
-    p("   janelas por qualidade", i.get("janelas_por_qualidade"))
+    _imprimir_captacao(relatorio)
+    _imprimir_ancora(relatorio)
+    _imprimir_criterios(
+        "OS 5 CRITERIOS DO TAKER",
+        criterios_do_taker(relatorio),
+        "TAKER VIAVEL exige as CINCO",
+    )
+    _imprimir_criterios(
+        "OS 5 CRITERIOS DO MAKER",
+        criterios_do_maker(relatorio),
+        "SO MAKER VIAVEL exige as CINCO",
+    )
+    print((relatorio.get("rota_maker") or {}).get("aviso", ""))
 
 
 if __name__ == "__main__":

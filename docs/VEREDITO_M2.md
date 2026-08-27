@@ -36,7 +36,7 @@ Isto fecha o item 2.3 do M3.
 |---|---|---|---|---|---|
 | 1.1 | PnL líquido @300 ms | positivo | +102,9227 | **−53,2777** | ❌ |
 | 1.2 | Trades | ≥ 200 | 568 | **695** | ✅ |
-| 1.3 | Erro de calibração | < 0,05 em ≥ 1 balde | 0,0067 | **−0,0015** (balde <30 s) | ⚠️ |
+| 1.3 | Erro de calibração | < 0,05 em ≥ 1 balde AVALIÁVEL | 0,0067 | **não lido** — ver abaixo | ⚠️ |
 | 1.4 | PnL líquido @600 ms | positivo | +101,1759 | **−54,3953** | ❌ |
 | 1.5 | Profundidade p50 3 ticks | ≥ 200 USDC | 87,8 / 41,8 / 31,3 / 35,7 | **128,0 / 50,0 / 28,7 / 27,0** | ❌ |
 
@@ -50,10 +50,22 @@ produz erro simétrico, porque o preenchimento simulado usa o último snapshot
 conhecido, que numa lacuna é sistematicamente melhor que o real. O critério
 1.1 foi escrito antes dos números justamente para este momento.
 
-O 1.3 fica em ⚠️ e não em ✅ de propósito: |−0,0015| passa no limiar, mas o
-M2.13 mediu que um preditor CONSTANTE alcança ECE de 0,0051 — o erro sozinho
-não distingue calibração de acaso. Quem decide é `faixas_ocupadas` /
-`calibracao_avaliavel`, que o `resumo_m2.py` ainda não imprime.
+**O 1.3 não foi medido em nenhum dos dois vereditos, e a causa é um defeito
+do resumo.** O `resumo_m2.py` imprimia o campo `erro` — exatamente o campo
+que o relatório manda NÃO ler, por escrito, na chave `calibracao_nota`. O
+`erro` compara a probabilidade média prevista com a TAXA-BASE do balde,
+então um preditor que cospe uma constante igual à taxa-base tira zero sem
+saber nada; foi o que a rodada de 20 h expôs, com previsto 0,514 contra
+realizado 0,5073 no balde `<30s` — cara-ou-coroa dos dois lados — e o
+critério "passando" com 0,0067. O `−0,0015` do dia 24 é o mesmo campo
+errado.
+
+O critério é a CONJUNÇÃO de `calibracao_avaliavel` (≥ 3 faixas com amostra)
+com `erro_de_confiabilidade` abaixo do limiar. O resumo agora lê os dois e
+imprime, em cada linha, O CAMPO QUE LEU — ler o campo errado é erro
+silencioso por natureza, porque o número sai bem formatado de qualquer jeito.
+Rodar `scripts/resumo_m2.py` de novo sobre `M2_24AGO.json` fecha este item
+sem gravação nova.
 
 O 1.5 melhorou onde importa (300 s: 87,8 → 128,0) e continua abaixo de 200
 em todas as durações. Com `threshold_mordeu: true` e 6 resultados distintos
@@ -63,11 +75,19 @@ na curva de edge, a capacidade morde de verdade.
 
 | # | Critério | Exigido | 20 h | 24 h | |
 |---|---|---|---|---|---|
-| 1.6 | Conta fechada @ desconto 0,3 | positiva | +0,043 ¢/share | não lido nesta saída | ⚠️ |
+| 1.6 | Conta fechada @ desconto 0,3 | positiva | +0,043 ¢/share | **NÃO AVALIÁVEL** | ⚠️ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | −0,307 | **−0,1974** | ✅ |
 | 1.8 | Horas de amostra | ≥ 20 h | 40,7 h | **65,9 h** | ✅ |
 | 1.9 | Divergência do livro | < 1 % | 2,89 % | **2,82 %** | ❌ |
 | 1.10 | Fórmula de reward na doc oficial | sim | não | **não** | ❌ |
+
+**O 1.6 é NÃO AVALIÁVEL por construção, não por falta de amostra.**
+`conta_fechada.o_que_falta_para_fechar` é não-vazia em todo relatório que
+este backtest produz: faltam `volume_taker_usdc`, o custo de markout em USDC
+e o capital imobilizado — os três dependem de posição na fila, que o WS
+agregado não entrega. O `+0,043 ¢/share` do primeiro veredito saiu de
+`rebate_vs_markout`, que é outro número: `resultado_parcial_usdc` soma
+rewards e rebate e **não subtrai o markout**. Não reprova; também não passa.
 
 `janelas_com_pool_de_reward` subiu de 5 (em 599) para **10** (em 896) — de
 0,8% para 1,1%. Confirma em vez de derrubar: **os mercados updown não
