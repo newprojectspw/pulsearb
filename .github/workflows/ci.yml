@@ -1,0 +1,28 @@
+# 5.3 do ESTADO_PARA_LIVE: pytest e ruff a cada push. O SonarCloud analisa o
+# codigo, mas nao RODA nada — sem isto, um teste quebrado so aparece quando
+# alguem roda a suite na propria maquina, e o historico mostra que o "alguem"
+# costuma descobrir tarde.
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: instalar
+        run: pip install -e ".[dev]"
+      - name: ruff
+        run: |
+          ruff check src/ tests/ scripts/
+      - name: pytest
+        run: pytest -q
