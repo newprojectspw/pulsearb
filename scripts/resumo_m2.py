@@ -290,14 +290,34 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     )
 
 
-def _melhor_markout(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
+def _markout_representativo(
+    rota_maker: dict[str, Any],
+) -> tuple[str, float, int] | None:
+    """O recorte que RESPONDE, não o que agrada.
+
+    O critério 1.7 pede "no p50 de pelo menos um recorte", e a leitura
+    ingênua disso — pegar o melhor número da tabela — é uma armadilha de
+    comparações múltiplas. A tabela tem `total` ao lado de recortes por
+    duração e por HORA DO DIA: são duas dezenas de células, e o máximo entre
+    elas é ruído por construção. A primeira rodada com esta função escolheu
+    `hora_utc=01` com markout de +0,88 centavo — markout POSITIVO, isto é,
+    lucro de adverse selection, que não existe: era uma célula pequena.
+
+    Então a ordem é: `total` quando houver, e senão a célula com a MAIOR
+    amostra. Nunca a mais favorável. E o `n` sai impresso junto, porque é
+    ele que permite ao leitor desconfiar sem abrir o JSON.
+    """
     tabela = _fundo(rota_maker, "markout", "markout_centavos_por_share") or {}
-    melhores: list[tuple[str, float]] = []
+    celulas: list[tuple[str, float, int]] = []
     for recorte, horizontes in tabela.items():
-        media = _fundo(horizontes or {}, "5s", "media")
+        cinco_s = _fundo(horizontes or {}, "5s") or {}
+        media = cinco_s.get("media")
         if isinstance(media, int | float):
-            melhores.append((recorte, float(media)))
-    return max(melhores, key=lambda par: par[1]) if melhores else None
+            celulas.append((recorte, float(media), int(cinco_s.get("n") or 0)))
+    if not celulas:
+        return None
+    total = next((celula for celula in celulas if celula[0] == "total"), None)
+    return total or max(celulas, key=lambda celula: celula[2])
 
 
 def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
@@ -312,7 +332,7 @@ def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
 
 def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
     rota = relatorio.get("rota_maker") or {}
-    markout = _melhor_markout(rota)
+    markout = _markout_representativo(rota)
     amostra = _melhor_amostra(rota)
     divergencia = _fundo(relatorio, "integridade", "divergencia_topo_book", "taxa")
     return [
@@ -321,8 +341,11 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
             "1.7", "Markout 5s",
             f">= {MARKOUT_MINIMO_CENTAVOS:g} centavo/share em >= 1 recorte",
             # O criterio fala em p50; o relatorio traz `media`. Dizer qual
-            # estatistica saiu evita comparar duas coisas diferentes depois.
-            f"{markout[1]:g} (media) no recorte {markout[0]}" if markout
+            # estatistica saiu, e sobre quantas execucoes, evita comparar
+            # duas coisas diferentes depois.
+            f"{markout[1]:g} (media de {markout[2]} execucoes) "
+            f"no recorte {markout[0]}"
+            if markout
             else "sem recorte com markout de 5s",
             _julgar(None if markout is None else markout[1] >= MARKOUT_MINIMO_CENTAVOS),
             "rota_maker.markout.markout_centavos_por_share[*].5s.media",

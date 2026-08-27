@@ -3,8 +3,15 @@
 **Semáforo de hoje: 🔴 VERMELHO** — o segundo veredito, sobre 24 h de
 captação impecável, **derrubou o primeiro**. O TAKER passava em 4 dos 5
 critérios com +102,92 USDC; no dia 24 ele mede **−53,28 USDC** e reprova em
-três (1.1, 1.4, 1.5). O MAKER segue reprovando em 1.9 e 1.10. Nenhuma das
-duas rotas sustenta ir a dinheiro real hoje.
+quatro (1.1, **1.3**, 1.4, 1.5). O MAKER segue reprovando em 1.9 e 1.10.
+Nenhuma das duas rotas sustenta ir a dinheiro real hoje.
+
+**A causa é o 1.3, e ela é mais funda que o PnL.** O erro de calibração real
+é 0,0694 contra uma taxa de taker que exige vencer 0,0175 — o ruído do
+próprio modelo é quatro vezes o edge que ele precisa produzir. Nem o
+threshold (12× de variação, sem tendência) nem a latência (1000 ms melhor
+que 600 ms) mudam o resultado, que é a assinatura de não haver sinal para
+filtrar.
 
 Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
 exatamente a máquina que permite medir sem arriscar. Invalida a decisão de

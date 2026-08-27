@@ -168,3 +168,44 @@ class TestOsLimiares:
         # exatamente o erro que o critério 1.10 existe para impedir.
         criterio = _por_numero(resumo_m2.criterios_do_maker(_relatorio()))["1.10"]
         assert criterio.veredito == REPROVA
+
+
+class TestOMarkoutRepresentativo:
+    """A armadilha de comparações múltiplas, pega rodando de verdade.
+
+    A primeira versão pegava o melhor número da tabela de markout. Sobre o
+    relatório real ela escolheu `hora_utc=01` com **+0,88 centavo** — markout
+    positivo, ou seja, lucro de adverse selection, que não existe. Era uma
+    célula pequena entre duas dezenas.
+    """
+
+    def _com_tabela(self, tabela):
+        relatorio = _relatorio()
+        relatorio["rota_maker"]["markout"]["markout_centavos_por_share"] = tabela
+        return _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.7"]
+
+    def test_total_ganha_da_celula_mais_favoravel(self):
+        criterio = self._com_tabela(
+            {
+                "total": {"5s": {"media": -0.1974, "n": 246504}},
+                "hora_utc=01": {"5s": {"media": 0.8801, "n": 312}},
+            }
+        )
+        assert "-0.1974" in criterio.medido
+        assert "246504" in criterio.medido
+        assert "hora_utc=01" not in criterio.medido
+
+    def test_sem_total_vence_a_MAIOR_AMOSTRA_e_nao_a_melhor(self):
+        criterio = self._com_tabela(
+            {
+                "hora_utc=01": {"5s": {"media": 0.88, "n": 312}},
+                "300s": {"5s": {"media": -0.40, "n": 80000}},
+            }
+        )
+        assert "-0.4" in criterio.medido
+        assert "300s" in criterio.medido
+
+    def test_o_n_sai_impresso(self):
+        # É o que permite desconfiar da célula sem abrir o JSON.
+        criterio = self._com_tabela({"total": {"5s": {"media": -0.2, "n": 5}}})
+        assert "5 execucoes" in criterio.medido
