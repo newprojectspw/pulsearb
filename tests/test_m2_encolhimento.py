@@ -186,6 +186,27 @@ class TestNoCLI:
         faixa = relatorio["encolhimento"]["faixa"]
         assert faixa["tempo_restante_min_s"] == pytest.approx(30.0)
 
+    @pytest.mark.parametrize("fator", ["0", "-0.5", "1.5"])
+    def test_fator_invalido_morre_no_parse_e_nao_horas_depois(
+        self, fator, tmp_path, capsys
+    ):
+        """Achado em review: `type=float` aceitava qualquer coisa.
+
+        A validação só acontecia em `encolher_para_a_base`, na comparação
+        final — depois de indexar a gravação e rodar os backtests crus.
+        Num bloco de 72 h isso é estourar horas depois do lançamento; sem
+        previsão elegível, é pior: fator inválido dentro de relatório de
+        aparência normal.
+        """
+        from pulsearb.backtest.__main__ import main
+
+        with pytest.raises(SystemExit) as excinfo:
+            main([str(tmp_path), "--fator-de-encolhimento", fator])
+
+        # codigo 2 = erro de argparse: morreu ANTES de tocar a gravacao.
+        assert excinfo.value.code == 2
+        assert "fator fora de (0, 1]" in capsys.readouterr().err
+
     def test_sem_o_flag_o_bloco_e_nulo(self, tmp_path, monkeypatch):
         from pulsearb.backtest.__main__ import main
 

@@ -125,7 +125,7 @@ O 1.5 melhorou onde importa (300 s: 87,8 → 128,0) e continua abaixo de 200
 em todas as durações. Com `threshold_mordeu: true` e 6 resultados distintos
 na curva de edge, a capacidade morde de verdade.
 
-### MAKER — reprova, pelos mesmos dois motivos de antes
+### MAKER — reprova pelo 1.10, com o 1.6 não avaliável
 
 | # | Critério | Exigido | 20 h | 24 h | |
 |---|---|---|---|---|---|
@@ -179,8 +179,11 @@ alguém nos executar, e a posição na fila não é observável no WS agregado.
 ### O que este segundo veredito muda na prática
 
 **Nenhuma das duas rotas passa.** O TAKER perdeu o único critério que
-sustentava a ideia de ir a dinheiro real; o MAKER continua barrado por
-divergência de livro e por uma fórmula não confirmada.
+sustentava a ideia de ir a dinheiro real; o MAKER continua barrado pela
+fórmula de reward não confirmada (1.10) e pela conta que não fecha sem
+posição na fila (1.6, não avaliável por construção) — a divergência de
+livro saiu da lista de bloqueios com a emenda ao 1.9 (0,20 % na população
+que invalida).
 
 O trabalho do M4 — portões de risco, SHADOW, ciclo ao vivo — **não é
 perdido**: ele é o que permite medir sem arriscar. Mas a decisão de ligar o

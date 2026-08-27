@@ -162,6 +162,26 @@ class Progresso:
 TOKEN_DURACAO_PADRAO = 300
 
 
+def _fator_de_encolhimento_valido(bruto: str) -> float:
+    """Rejeita fator fora de (0, 1] NO PARSE, não horas depois.
+
+    `encolher_para_a_base` valida a mesma faixa, mas só é chamada na
+    comparação final — depois de indexar a gravação e rodar os backtests
+    crus. Num bloco de 72 h, um `--fator-de-encolhimento 0` estourava
+    horas depois do lançamento; e sem nenhuma previsão elegível, nem
+    estourava — o fator inválido ia parar num relatório de aparência
+    normal. Achado em review.
+    """
+    valor = float(bruto)
+    if not 0.0 < valor <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"fator fora de (0, 1]: {bruto!r} — 1.0 é identidade, e "
+            "encolher é multiplicar por MENOS que um; 0 apagaria o "
+            "preditor inteiro."
+        )
+    return valor
+
+
 def caminho_de_leitura(bruto: str) -> Path:
     """Valida um caminho de ENTRADA vindo da linha de comando.
 
@@ -1553,7 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fator-de-encolhimento",
         dest="fator_de_encolhimento",
-        type=float,
+        type=_fator_de_encolhimento_valido,
         default=None,
         help=(
             "correção de escala da calibração: p' = 0,5 + fator*(p - 0,5), "
