@@ -619,21 +619,25 @@ def veredito_do_encolhimento(
 ) -> str:
     """O texto honesto sobre o que a remedição faria com este fator.
 
-    Este texto NUNCA promete aprovação, por construção: o resumo só tem
-    os agregados por faixa (n, previsto, realizado), e uma faixa de 0,05
-    que cavalga uma fronteira pós-encolhimento vai inteira para o grupo
-    da sua média — tanto aqui quanto no `ece_encolhido`. Só o backtest,
-    que tem as previsões cruas, reagrupa de verdade (achado em review).
-    O que a aproximação sabe dizer com segurança é o NEGATIVO: defeito
-    que não é de escala, ou estrutura comprimida abaixo do mínimo.
+    Este texto NUNCA antecipa o veredito do backtest, por construção: o
+    resumo só tem os agregados por faixa (n, previsto, realizado), e uma
+    faixa de 0,05 que cavalga uma fronteira pós-encolhimento vai inteira
+    para o grupo da sua média — tanto aqui quanto no `ece_encolhido`. O
+    corte pela média erra para os DOIS lados (achados em review): pode
+    prometer PASSA onde as previsões cruas se dividem pior, e pode
+    contar menos faixas do que as previsões cruas realmente ocupam. Por
+    isso o melhor caso é condicionado, e a compressão de faixas é
+    apontada como RISCO, não como veredito. Só a remedição ponto a
+    ponto, com as previsões cruas, decide.
     """
     if ece_encolhido_final >= LIMIAR_DE_CALIBRACAO:
         return "continuaria reprovando — o defeito nao e de escala"
     if faixas_ocupadas_apos_encolher(curva, fator) < MINIMO_DE_FAIXAS:
         return (
-            "ECE aproximado abaixo do limiar, MAS o fator comprime as "
-            f"previsoes em menos de {MINIMO_DE_FAIXAS} faixas — o backtest "
-            "daria NAO AVALIAVEL, nao PASSA"
+            "ECE aproximado abaixo do limiar, MAS as medias encolhidas "
+            f"ocupam menos de {MINIMO_DE_FAIXAS} faixas — RISCO de a "
+            "remedicao devolver NAO AVALIAVEL; so as previsoes cruas, "
+            "no backtest, decidem"
         )
     return (
         f"abaixo do limiar de {LIMIAR_DE_CALIBRACAO:g} NA APROXIMACAO — "

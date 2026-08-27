@@ -504,7 +504,10 @@ class TestVereditoDoEncolhimento:
         veredito = resumo_m2.veredito_do_encolhimento(
             self.CURVA_AGRESSIVA, fator, com
         )
-        # ...mas o texto tem de dizer que o backtest daria NAO AVALIAVEL.
+        # ...mas o texto aponta o RISCO de nao-avaliabilidade sem cravar o
+        # veredito do backtest: a media por faixa erra para os dois lados,
+        # e so as previsoes cruas decidem (achados em review, rodadas 5-6).
+        assert "RISCO" in veredito
         assert "NAO AVALIAVEL" in veredito
         assert "PASSARIA" not in veredito
 
