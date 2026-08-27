@@ -796,10 +796,66 @@ def _imprimir_ancora(relatorio: dict[str, Any]) -> None:
     print(f"\n  {veredito.get('veredito')}\n")
 
 
-def main() -> None:
+FLAG_ENCOLHIDO = "--encolhido"
+
+
+def relatorio_da_variante_encolhida(relatorio: dict[str, Any]) -> dict[str, Any] | None:
+    """O relatório relido como se a variante encolhida fosse O backtest.
+
+    A remedição do 1.1 precisa dos MESMOS critérios aplicados à variante —
+    e aplicá-los a olho, lendo o JSON, é como o 1.3 passou dois vereditos
+    sendo medido no campo errado. Trocando o bloco, o motor de critérios
+    é um só: mesma leitura de campo, mesmos limiares, mesma tabela.
+
+    As contagens de janela (`janelas_*`) vêm do bloco original de
+    propósito: descrevem a GRAVAÇÃO, que é a mesma nas duas rodadas.
+    """
+    bloco = relatorio.get("encolhimento") or {}
+    encolhido = (bloco.get("comparacao") or {}).get("encolhido")
+    if not encolhido:
+        return None
+    original = relatorio.get("backtest") or {}
+    da_gravacao = {
+        chave: valor
+        for chave, valor in original.items()
+        if chave.startswith("janelas_")
+    }
+    return {**relatorio, "backtest": {**encolhido, **da_gravacao}}
+
+
+def _imprimir_cabecalho_da_variante(relatorio: dict[str, Any]) -> None:
+    """O aviso que impede a variante de ser lida como resultado."""
+    bloco = relatorio.get("encolhimento") or {}
+    faixa = bloco.get("faixa") or {}
+    print("=" * 72)
+    print("  VARIANTE ENCOLHIDA — NAO E O RESULTADO PRE-REGISTRADO")
+    print("=" * 72)
+    print(f"  fator {bloco.get('fator')}  base {bloco.get('base')}")
+    print(
+        f"  faixa: min {faixa.get('tempo_restante_min_s')} s, "
+        f"max {faixa.get('tempo_restante_max_s')} s, entrada unica"
+    )
+    print(
+        "  VALIDADE: so vale se o fator foi ajustado em periodo ANTERIOR ao\n"
+        "  desta gravacao. Ajustado nesta, e in-sample e nao sustenta\n"
+        "  veredito nenhum — nem a favor, nem contra."
+    )
+    print()
+
+
+def main(argv: list[str] | None = None) -> None:
     """Imprime o resumo do relatório nomeado no argumento."""
-    if len(sys.argv) != 2:
+    argumentos = list(sys.argv[1:] if argv is None else argv)
+    variante_encolhida = FLAG_ENCOLHIDO in argumentos
+    if variante_encolhida:
+        argumentos.remove(FLAG_ENCOLHIDO)
+    if len(argumentos) != 1:
         print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
+        print(
+            f"  {FLAG_ENCOLHIDO}: julga a variante do bloco `encolhimento` "
+            "em vez do backtest cru.",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
 
     # `| head` fecha o cano e o Python morre com BrokenPipeError. Um resumo
@@ -809,8 +865,20 @@ def main() -> None:
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-    with caminho_do_relatorio(sys.argv[1]).open(encoding="utf-8") as arquivo:
+    with caminho_do_relatorio(argumentos[0]).open(encoding="utf-8") as arquivo:
         relatorio = json.load(arquivo)
+
+    if variante_encolhida:
+        variante = relatorio_da_variante_encolhida(relatorio)
+        if variante is None:
+            print(
+                "erro: este relatorio nao tem bloco `encolhimento` — rode o "
+                "backtest com --fator-de-encolhimento.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        _imprimir_cabecalho_da_variante(relatorio)
+        relatorio = variante
 
     _imprimir_captacao(relatorio)
     _imprimir_ancora(relatorio)

@@ -532,3 +532,73 @@ class TestVereditoDoEncolhimento:
     def test_ece_ruim_continua_reprovando_sem_olhar_faixas(self):
         veredito = resumo_m2.veredito_do_encolhimento(self.CURVA_AGRESSIVA, 1.0, 0.20)
         assert "reprovando" in veredito
+
+
+class TestVarianteEncolhida:
+    """`--encolhido` julga a variante com o MESMO motor de critérios.
+
+    Ler o bloco `encolhimento` a olho, no JSON, é exatamente como o 1.3
+    saiu medido no campo errado em dois vereditos seguidos. A remedição
+    do 1.1 precisa da mesma tabela, com os mesmos campos impressos.
+    """
+
+    def _relatorio_com_encolhimento(self):
+        relatorio = _relatorio()
+        relatorio["backtest"]["pnl_liquido_usdc"] = -53.2777
+        relatorio["backtest"]["janelas_avaliaveis"] = 640
+        relatorio["encolhimento"] = {
+            "fator": 0.61,
+            "base": 0.5,
+            "faixa": {"tempo_restante_min_s": None, "tempo_restante_max_s": 240.0},
+            "comparacao": {
+                "sem_encolher": {"pnl_liquido_usdc": -53.2777},
+                "encolhido": {
+                    "pnl_liquido_usdc": 12.5,
+                    "trades": [{}] * 300,
+                    "calibracao": {
+                        "240-120s": {
+                            "erro_de_confiabilidade": 0.009,
+                            "faixas_ocupadas": 4,
+                            "calibracao_avaliavel": True,
+                        }
+                    },
+                },
+            },
+        }
+        return relatorio
+
+    def test_o_backtest_vira_a_variante(self):
+        variante = resumo_m2.relatorio_da_variante_encolhida(
+            self._relatorio_com_encolhimento()
+        )
+        assert variante["backtest"]["pnl_liquido_usdc"] == pytest.approx(12.5)
+
+    def test_as_contagens_da_gravacao_sobrevivem(self):
+        # `janelas_*` descrevem a GRAVACAO, identica nas duas rodadas: se
+        # sumissem, a variante pareceria ter rodado sobre outra amostra.
+        variante = resumo_m2.relatorio_da_variante_encolhida(
+            self._relatorio_com_encolhimento()
+        )
+        assert variante["backtest"]["janelas_avaliaveis"] == 640
+
+    def test_os_criterios_leem_a_variante(self):
+        variante = resumo_m2.relatorio_da_variante_encolhida(
+            self._relatorio_com_encolhimento()
+        )
+        criterios = _por_numero(resumo_m2.criterios_do_taker(variante))
+        assert criterios["1.3"].veredito == PASSA
+        assert "0.009" in criterios["1.3"].medido
+
+    def test_relatorio_sem_bloco_devolve_none(self):
+        # Nao inventa variante: sem o bloco, nao ha o que julgar.
+        assert resumo_m2.relatorio_da_variante_encolhida(_relatorio()) is None
+
+    def test_o_flag_sem_bloco_morre_em_vez_de_julgar_o_cru(self, tmp_path, monkeypatch):
+        """O erro mais caro seria julgar o CRU achando que e a variante."""
+        import json as _json
+
+        monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+        (tmp_path / "r.json").write_text(_json.dumps(_relatorio()))
+        with pytest.raises(SystemExit) as excinfo:
+            resumo_m2.main(["r.json", "--encolhido"])
+        assert excinfo.value.code == 2

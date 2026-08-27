@@ -533,6 +533,56 @@ TODAS as janelas avaliadas, não só as discordantes. Se a massa se acumular
 perto do limiar, ele está no lugar errado, e a revisão terá dado em vez de
 opinião.
 
+### 2d. Protocolo de remediação do 1.1 — ESCRITO ANTES DE RODAR (2026-08-27)
+
+O segundo veredito localizou a causa do TAKER no **1.3**: erro de calibração
+0,0694 contra uma barreira de taxa de 0,0175. A varredura offline indicou que
+o erro é de **escala** — encolher a previsão em direção a 0,5 derruba o ECE em
+todos os baldes. Este protocolo testa se a correção de escala devolve o 1.1.
+
+Ele é escrito **antes de rodar** porque o risco aqui não é errar a conta: é
+rodar variações até uma dar positiva. Com o protocolo registrado, um resultado
+bom fora dele não conta.
+
+**Ajuste (fora da amostra).** O fator sai de `--desde 2026082100 --ate
+2026082323`, período ANTERIOR ao avaliado. Fator ajustado no dia 24 e aplicado
+ao dia 24 é in-sample e não sustenta veredito — nem a favor, nem contra.
+
+**Qual fator, decidido agora.** O resumo reporta um fator por balde de tempo
+restante; o backtest aplica UM fator global. A regra: **o fator do balde de
+maior `n` entre os que caem na faixa operada (≤ 240 s)**. Os outros baldes
+dessa faixa entram como *sensibilidade* — rodados e publicados, mas o veredito
+é o do fator pré-registrado. Resultado positivo só num extremo da
+sensibilidade, e não no fator da regra, **não conta como remediação**.
+
+**Aplicação.** Dia 24 (`M2_24AGO`), faixa calibrada, entrada única — a mesma
+configuração do bloco `encolhimento`, cuja rodada `sem_encolher` é o controle.
+A leitura é pelo `scripts/resumo_m2.py --encolhido`, que aplica os MESMOS
+critérios à variante: ler o JSON a olho é como o 1.3 saiu medido no campo
+errado em dois vereditos seguidos.
+
+**O que decide, com os limiares que já valem:**
+
+| # | Critério | Exigido |
+|---|---|---|
+| 1.1 | PnL líquido | **positivo** |
+| 1.2 | Trades | ≥ 200 |
+| 1.3 | Calibração da variante | `erro_de_confiabilidade` < 0,05 em balde avaliável |
+
+**A remediação é considerada bem-sucedida apenas se as três valerem juntas.**
+1.3 sozinho não basta: encolher até a previsão virar ruído calibra e não
+opera. 1.1 sozinho também não: PnL positivo com calibração ainda quebrada é
+sorte de amostra, e foi assim que o +102,92 apareceu e caiu.
+
+**Falseamento, dito agora.** Se o 1.1 continuar negativo com o 1.3 já
+corrigido, a conclusão é que **o defeito não é de escala** — o preditor precisa
+mudar, não a sua confiança —, e o M3 começa por aí em vez de por ajuste de
+parâmetro. Este resultado é tão publicável quanto o outro.
+
+**Uma ressalva que não é rodapé.** Nem o melhor resultado deste protocolo
+autoriza dinheiro real: um único dia avaliado, com o fator vindo de três dias.
+O que ele decide é qual trabalho vem a seguir.
+
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
 O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por
