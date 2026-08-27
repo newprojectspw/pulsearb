@@ -24,6 +24,12 @@ jobs:
       # controla o repositorio da action; um SHA nao. Verificados via
       # `git ls-remote` nos repositorios oficiais em 2026-08-27.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Por padrao o checkout grava o GITHUB_TOKEN em .git/config, e todo
+          # passo seguinte (inclusive uma dependencia comprometida do pip)
+          # consegue le-lo. Este workflow nunca faz push — nao ha motivo para
+          # deixar a credencial no disco.
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
