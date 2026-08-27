@@ -238,8 +238,16 @@ def caminho_de_escrita(bruto: str) -> Path:
     # Cinto e suspensório: o padrão acima já exclui `..` e raiz absoluta, mas
     # a raiz vem de variável de ambiente e pode conter symlink. A contenção
     # depois de resolver custa uma syscall e fecha esse resto.
+    #
+    # A contenção está escrita na forma canônica que a análise de fluxo do
+    # SonarCloud reconhece como sanitização de S2083 (caminho absoluto +
+    # `startswith` contra a raiz + separador). `Path.is_relative_to` faz a
+    # MESMA conta, mas o motor de taint não o conhece como sanitizador e
+    # continuaria marcando o `write_text` lá na frente. O `os.sep` no fim da
+    # raiz evita a colisão de prefixo (/raiz versus /raiz2).
+    raiz_resolvida = raiz.resolve(strict=False)
     resolvido = caminho.resolve(strict=False)
-    if not resolvido.is_relative_to(raiz.resolve(strict=False)):
+    if not str(resolvido).startswith(str(raiz_resolvida) + os.sep):
         raise ValueError(f"saída fora da raiz permitida: {resolvido}")
     if not resolvido.parent.is_dir():
         raise ValueError(f"diretório de saída não existe: {resolvido.parent}")
