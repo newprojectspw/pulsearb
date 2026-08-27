@@ -45,6 +45,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `from tests...` funciona com `python -m pytest` porque o -m poe o cwd no
+# sys.path — e quebra com o executavel `pytest`, que nao poe. Foi exatamente
+# a primeira rodada do CI que expos a diferenca. Declarar aqui vale para as
+# duas formas de invocar.
+pythonpath = ["."]
 # Nenhum teste depende de rede externa — regra do M1 (sandbox sem egress).
 addopts = "-q"
 

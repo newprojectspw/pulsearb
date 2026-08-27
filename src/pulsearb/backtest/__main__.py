@@ -162,6 +162,26 @@ class Progresso:
 TOKEN_DURACAO_PADRAO = 300
 
 
+def _fator_de_encolhimento_valido(bruto: str) -> float:
+    """Rejeita fator fora de (0, 1] NO PARSE, não horas depois.
+
+    `encolher_para_a_base` valida a mesma faixa, mas só é chamada na
+    comparação final — depois de indexar a gravação e rodar os backtests
+    crus. Num bloco de 72 h, um `--fator-de-encolhimento 0` estourava
+    horas depois do lançamento; e sem nenhuma previsão elegível, nem
+    estourava — o fator inválido ia parar num relatório de aparência
+    normal. Achado em review.
+    """
+    valor = float(bruto)
+    if not 0.0 < valor <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"fator fora de (0, 1]: {bruto!r} — 1.0 é identidade, e "
+            "encolher é multiplicar por MENOS que um; 0 apagaria o "
+            "preditor inteiro."
+        )
+    return valor
+
+
 def caminho_de_leitura(bruto: str) -> Path:
     """Valida um caminho de ENTRADA vindo da linha de comando.
 
@@ -238,8 +258,21 @@ def caminho_de_escrita(bruto: str) -> Path:
     # Cinto e suspensório: o padrão acima já exclui `..` e raiz absoluta, mas
     # a raiz vem de variável de ambiente e pode conter symlink. A contenção
     # depois de resolver custa uma syscall e fecha esse resto.
+    #
+    # A contenção está escrita na forma canônica que a análise de fluxo do
+    # SonarCloud reconhece como sanitização de S2083 (caminho absoluto +
+    # `startswith` contra a raiz + separador). `Path.is_relative_to` faz a
+    # MESMA conta, mas o motor de taint não o conhece como sanitizador e
+    # continuaria marcando o `write_text` lá na frente. O `os.sep` no fim da
+    # raiz evita a colisão de prefixo (/raiz versus /raiz2) — e só entra
+    # quando a raiz ainda não termina no separador, senão a raiz `/` viraria
+    # `//` e rejeitaria todo caminho válido (achado em review).
+    raiz_resolvida = raiz.resolve(strict=False)
     resolvido = caminho.resolve(strict=False)
-    if not resolvido.is_relative_to(raiz.resolve(strict=False)):
+    prefixo = str(raiz_resolvida)
+    if not prefixo.endswith(os.sep):
+        prefixo += os.sep
+    if not str(resolvido).startswith(prefixo):
         raise ValueError(f"saída fora da raiz permitida: {resolvido}")
     if not resolvido.parent.is_dir():
         raise ValueError(f"diretório de saída não existe: {resolvido.parent}")
@@ -1543,6 +1576,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--fator-de-encolhimento",
+        dest="fator_de_encolhimento",
+        type=_fator_de_encolhimento_valido,
+        default=None,
+        help=(
+            "correção de escala da calibração: p' = 0,5 + fator*(p - 0,5), "
+            "aplicada antes de TUDO (calibração inclusive). Sai como "
+            "comparação ao lado do resultado normal, nunca no lugar dele. "
+            "O fator deve vir de calibração medida em período ANTERIOR ao "
+            "avaliado — ajustá-lo no próprio período é ajuste in-sample."
+        ),
+    )
+    parser.add_argument(
         "--qualidade-minima",
         dest="qualidade_minima",
         choices=("alta", "media", "baixa"),
@@ -1840,6 +1886,52 @@ def main(argv: list[str] | None = None) -> int:
             "restrito": report_restrito.to_dict(),
         }
 
+    # M2: a variante encolhida, quando pedida. LADO A LADO com a crua, na
+    # mesma faixa calibrada e com entrada única — mudar uma coisa por vez.
+    # A crua continua sendo a que alimenta os critérios pré-registrados; a
+    # encolhida existe para responder se a correção de escala devolve o 1.1,
+    # e a resposta só vale se o fator veio de período anterior ao avaliado.
+    comparacao_encolhimento = None
+    if args.fator_de_encolhimento is not None:
+        cfg_encolhimento = {
+            "threshold_edge": args.threshold,
+            "latencia_ms": args.latencia_ms,
+            "tempo_restante_min_s": args.tempo_restante_min,
+            "tempo_restante_max_s": faixa_comparada,
+            "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+            "max_entradas_por_janela": 1,
+        }
+        comparacao_encolhimento = {
+            "fator": args.fator_de_encolhimento,
+            "base": 0.5,
+            "faixa": {
+                "tempo_restante_min_s": args.tempo_restante_min,
+                "tempo_restante_max_s": faixa_comparada,
+            },
+            "comparacao": {
+                nome: BacktestRunner(
+                    BacktestConfig(**cfg_encolhimento, fator_de_encolhimento=fator)
+                )
+                .run(integras, index.streams)
+                .to_dict()
+                for nome, fator in (
+                    ("sem_encolher", None),
+                    ("encolhido", args.fator_de_encolhimento),
+                )
+            },
+            "nota": (
+                "As duas rodadas na faixa registrada em `faixa` (a calibrada, "
+                "ou a pedida na linha de comando), entrada unica, mesma "
+                "latencia e threshold — a UNICA variavel e o encolhimento. "
+                "A calibracao da variante e medida sobre a probabilidade "
+                "ENCOLHIDA, ponto a ponto: e o ECE real dela, nao a "
+                "aproximacao por faixas do resumo. VALIDADE: o fator deve "
+                "ter sido ajustado em periodo anterior ao desta gravacao; "
+                "se foi ajustado nesta, o resultado e in-sample e nao "
+                "sustenta veredito."
+            ),
+        }
+
     # M2.7 tarefa 3: entrada unica x multipla, lado a lado, SEMPRE — e as
     # duas dentro da faixa calibrada, que e a configuracao que produziu o
     # primeiro PnL positivo do projeto. Comparar entrada multipla no regime
@@ -1850,6 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg_entradas = {
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
+        "tempo_restante_min_s": args.tempo_restante_min,
         "tempo_restante_max_s": faixa_para_entradas,
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
     }
@@ -1939,6 +2032,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         "entradas_por_janela": {
             "faixa_aplicada_s": faixa_para_entradas,
+            # Os DOIS limites, como no bloco `encolhimento`: `faixa_aplicada_s`
+            # sozinho vem do maximo e fica `null` numa invocacao so com
+            # `--tempo-restante-min`, fazendo o experimento parecer irrestrito
+            # quando nao e — e sem reproduzir pelo JSON (achado em review).
+            "faixa": {
+                "tempo_restante_min_s": args.tempo_restante_min,
+                "tempo_restante_max_s": faixa_para_entradas,
+            },
             "intervalo_minimo_s": max(0.0, args.intervalo_entradas),
             "comparacao": comparacao_entradas,
             "nota": (
@@ -1953,6 +2054,7 @@ def main(argv: list[str] | None = None) -> int:
                 "mudar exige numero, nao intuicao."
             ),
         },
+        "encolhimento": comparacao_encolhimento,
         "faixa_de_tempo": {
             "faixa_restrita_s": faixa_comparada,
             "comparacao": comparacao,

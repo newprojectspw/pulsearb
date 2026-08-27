@@ -10,6 +10,7 @@ Cada teste aqui trava uma leitura. Nenhum é decorativo.
 from __future__ import annotations
 
 import importlib.util
+import typing
 from pathlib import Path
 
 import pytest
@@ -154,13 +155,16 @@ class TestOsLimiares:
         # 300s antes de 3600s: ordem alfabetica poria 14400s na frente.
         assert criterio.medido.index("300s") < criterio.medido.index("3600s")
 
-    def test_divergencia_do_livro_no_limite(self):
+    def test_divergencia_sem_decomposicao_julga_o_agregado(self):
+        # Relatorio antigo: so a taxa existe, e o veredito e sobre ela —
+        # com o aviso de que mistura populacoes.
         relatorio = _relatorio()
         relatorio["integridade"]["divergencia_topo_book"]["taxa"] = 0.028168
         criterio = _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.9"]
 
         assert criterio.veredito == REPROVA
-        assert criterio.medido == "2.82%"
+        assert "2.82%" in criterio.medido
+        assert "sem decomposicao" in criterio.medido
 
     def test_formula_de_reward_reprova_enquanto_for_hipotese(self):
         # Não é medição: é fato sobre a documentação. Fica REPROVA de
@@ -287,3 +291,244 @@ class TestLeituraDoVies:
 
         assert balde == "melhor"
         assert balde in criterio.medido
+
+
+class TestDivergenciaDecomposta:
+    """O 1.9 julgado sobre a população que o §2c diz poder invalidar.
+
+    No dia 24: taxa agregada 2,82%, mas 92,8% dela é `lado_vazio`, que o
+    bloco `quais_invalidam` — registrado antes dos números — marca como
+    não-invalidante. O topo DESLOCADO, a corrupção que o critério teme, é
+    0,20%.
+    """
+
+    def _com_divergencia(self, **campos):
+        relatorio = _relatorio()
+        relatorio["integridade"]["divergencia_topo_book"] = campos
+        return _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.9"]
+
+    QUAIS_INVALIDAM: typing.ClassVar[dict[str, bool]] = {
+        "vazio_desde_o_snapshot": False,
+        "esvaziado_por_delta": False,
+        "sem_snapshot": True,
+        "apos_perda": True,
+    }
+
+    def test_o_dia_24_passa_na_populacao_que_invalida(self):
+        criterio = self._com_divergencia(
+            taxa=0.028168,
+            comparacoes=372_162_674,
+            com_magnitude_finita=759_621,
+            com_lado_vazio=9_723_487,
+            lado_vazio={
+                "por_causa": {
+                    "vazio_desde_o_snapshot": 6_000_000,
+                    "esvaziado_por_delta": 3_723_487,
+                },
+                "quais_invalidam": self.QUAIS_INVALIDAM,
+            },
+        )
+
+        assert criterio.veredito == PASSA
+        assert "0.20%" in criterio.medido
+        # A agregada nao some: fica impressa ao lado para ninguem achar
+        # que o numero foi varrido para baixo do tapete.
+        assert "2.82%" in criterio.medido
+
+    def test_causa_invalidante_ou_nao_classificada_conta_contra(self):
+        """A salvaguarda da emenda, no código e não só no papel.
+
+        `sem_snapshot` é livro furado de verdade (o §2c marca True) e uma
+        causa desconhecida não foi classificada — nenhuma das duas pode
+        pegar carona no desconto do lado vazio. Achado em review: sem
+        isto, a decomposição inocentava o lado vazio POR CATEGORIA, não
+        por classificação.
+        """
+        criterio = self._com_divergencia(
+            taxa=0.03,
+            comparacoes=1_000_000,
+            com_magnitude_finita=2_000,
+            com_lado_vazio=28_000,
+            lado_vazio={
+                "por_causa": {
+                    "vazio_desde_o_snapshot": 10_000,
+                    "sem_snapshot": 12_000,
+                    "causa_nova_sem_classificacao": 6_000,
+                },
+                "quais_invalidam": self.QUAIS_INVALIDAM,
+            },
+        )
+        # julgada = (2_000 deslocadas + 18_000 nao inocentadas) / 1M = 2%
+        assert criterio.veredito == REPROVA
+        assert "nao inocentado" in criterio.medido
+
+    def test_lado_vazio_sem_classificacao_conta_todo_contra(self):
+        # Relatorio com decomposicao mas sem o bloco `lado_vazio`: nada
+        # foi inocentado por nome, entao tudo conta contra ate classificar.
+        criterio = self._com_divergencia(
+            taxa=0.028168,
+            comparacoes=372_162_674,
+            com_magnitude_finita=759_621,
+            com_lado_vazio=9_723_487,
+        )
+        assert criterio.veredito == REPROVA
+
+    def test_topo_deslocado_acima_de_1pct_reprova_mesmo_decomposto(self):
+        criterio = self._com_divergencia(
+            taxa=0.05, comparacoes=1_000_000, com_magnitude_finita=15_000,
+            com_lado_vazio=35_000,
+        )
+        assert criterio.veredito == REPROVA
+
+    def test_decomposicao_sem_comparacoes_cai_no_agregado(self):
+        criterio = self._com_divergencia(taxa=0.005, com_magnitude_finita=10)
+        assert criterio.veredito == PASSA
+        assert "sem decomposicao" in criterio.medido
+
+
+class TestVarreduraDeEncolhimento:
+    """A pergunta que decide o M3: o erro de calibração é de ESCALA?
+
+    Se for, um fator < 1 leva o ECE abaixo do limiar e o 1.1 merece
+    remedição. Se não for, o preditor precisa mudar.
+    """
+
+    def test_excesso_de_confianca_monotono_responde_ao_fator(self):
+        # O formato real dos baldes: massa nos extremos, superconfiante.
+        # base = 0.5, extremos realizados em 0.11/0.89 -> fator ~0.78.
+        curva = {
+            "0.00-0.05": {"n": 10_000, "previsto": 0.001, "realizado": 0.11},
+            "0.45-0.50": {"n": 300, "previsto": 0.475, "realizado": 0.48},
+            "0.95-1.00": {"n": 10_000, "previsto": 0.999, "realizado": 0.89},
+        }
+        sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
+
+        assert sem > 0.05
+        assert com < 0.02
+        assert 0.70 < fator < 0.85
+
+    def test_preditor_constante_nao_e_salvo_pelo_encolhimento(self):
+        """A armadilha que a primeira versão deixava passar.
+
+        Encolher uma constante em direção à taxa-base produz a taxa-base,
+        que "acerta" por definição — a varredura RESGATARIA o preditor que
+        nada sabe. Com menos faixas que o mínimo de avaliabilidade ela
+        devolve `None`: sem estrutura, não há número.
+        """
+        curva = {"0.50-0.55": {"n": 5_000, "previsto": 0.514, "realizado": 0.62}}
+        assert resumo_m2.varredura_de_encolhimento(curva) is None
+
+    def test_erro_sem_ordem_nao_passa(self):
+        # Vies misto: faixas erradas para os dois lados sem relacao com a
+        # confianca. O encolhimento ajuda pouco e nao cruza o limiar.
+        curva = {
+            "a": {"n": 1000, "previsto": 0.2, "realizado": 0.65},
+            "b": {"n": 1000, "previsto": 0.5, "realizado": 0.2},
+            "c": {"n": 1000, "previsto": 0.8, "realizado": 0.6},
+        }
+        _sem, _fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        assert com > 0.05
+
+    def test_curva_vazia_devolve_none(self):
+        assert resumo_m2.varredura_de_encolhimento({}) is None
+
+    def test_fator_agressivo_abaixo_de_030_e_encontrado(self):
+        """Achado em review: a busca parava em 0,30.
+
+        Ordem certa com escala absurda pede fator ~0,05; a varredura
+        antiga imprimia "continua reprovando" para um modelo que um fator
+        menor salvaria — desencorajando exatamente o experimento que o
+        bloco existe para motivar.
+        """
+        curva = {
+            "a": {"n": 1000, "previsto": 0.1, "realizado": 0.48},
+            "b": {"n": 1000, "previsto": 0.5, "realizado": 0.50},
+            "c": {"n": 1000, "previsto": 0.9, "realizado": 0.52},
+        }
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        assert fator < 0.30
+        assert com < 0.05
+
+    def test_a_base_e_a_do_backtest_e_nao_a_taxa_realizada(self):
+        """Achado em review: a base era a média realizada da própria curva.
+
+        Duas doenças numa: o fator recomendado alimentava
+        `--fator-de-encolhimento`, que encolhe para 0,5 — otimizava-se uma
+        transformação que o backtest nunca aplica; e puxar para a média
+        que o próprio período realizou é resgate in-sample — TODA curva
+        "calibra" contra a sua própria média. Uma curva com realizado
+        ~0,70 em todas as faixas não pode sair daqui com ECE ~0.
+        """
+        assert resumo_m2.BASE_DO_ENCOLHIMENTO == pytest.approx(0.5)
+
+        curva = {
+            "a": {"n": 1000, "previsto": 0.2, "realizado": 0.70},
+            "b": {"n": 1000, "previsto": 0.5, "realizado": 0.70},
+            "c": {"n": 1000, "previsto": 0.8, "realizado": 0.70},
+        }
+        _sem, _fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        # Com a base do backtest (0,5) nenhum fator alcanca 0,70 em todas
+        # as faixas; com a base antiga (media = 0,70) o ECE despencava
+        # para ~0 — a aprovacao fabricada que este teste proibe.
+        assert com > 0.05
+
+
+class TestVereditoDoEncolhimento:
+    """O texto do diagnóstico não pode prometer o que a remedição nega.
+
+    Achado em review: fator agressivo comprime previsões de 3+ faixas em
+    1-2, o backtest ponto a ponto marca `calibracao_avaliavel` falso, e o
+    1.3 vira NÃO AVALIÁVEL — um "PASSARIA" baseado só no ECE aproximado
+    seria promessa falsa.
+    """
+
+    CURVA_AGRESSIVA: typing.ClassVar[dict] = {
+        "a": {"n": 1000, "previsto": 0.1, "realizado": 0.48},
+        "b": {"n": 1000, "previsto": 0.5, "realizado": 0.50},
+        "c": {"n": 1000, "previsto": 0.9, "realizado": 0.52},
+    }
+
+    def test_fator_agressivo_comprime_as_faixas(self):
+        # 0.1/0.5/0.9 com fator 0.05 -> 0.48/0.50/0.52: duas faixas de 0.05.
+        assert (
+            resumo_m2.faixas_ocupadas_apos_encolher(self.CURVA_AGRESSIVA, 0.05) < 3
+        )
+        # Sem encolher, as tres previsoes ocupam tres faixas distintas.
+        assert resumo_m2.faixas_ocupadas_apos_encolher(self.CURVA_AGRESSIVA, 1.0) == 3
+
+    def test_ece_bom_com_faixas_comprimidas_nao_promete_passa(self):
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(
+            self.CURVA_AGRESSIVA
+        )
+        assert com < 0.05  # o ECE aproximado passaria...
+        veredito = resumo_m2.veredito_do_encolhimento(
+            self.CURVA_AGRESSIVA, fator, com
+        )
+        # ...mas o texto aponta o RISCO de nao-avaliabilidade sem cravar o
+        # veredito do backtest: a media por faixa erra para os dois lados,
+        # e so as previsoes cruas decidem (achados em review, rodadas 5-6).
+        assert "RISCO" in veredito
+        assert "NAO AVALIAVEL" in veredito
+        assert "PASSARIA" not in veredito
+
+    def test_fator_moderado_aponta_sem_prometer(self):
+        """Nem no melhor caso o texto promete PASSA (achado em review).
+
+        A aproximação agrupa cada faixa pela média — uma faixa de 0,05
+        que cavalga a fronteira pós-encolhimento esconde a divisão real.
+        Só o backtest, com as previsões cruas, reagrupa; o veredito da
+        aproximação é sempre condicionado a ele.
+        """
+        curva = {
+            "0.00-0.05": {"n": 10_000, "previsto": 0.001, "realizado": 0.11},
+            "0.45-0.50": {"n": 300, "previsto": 0.475, "realizado": 0.48},
+            "0.95-1.00": {"n": 10_000, "previsto": 0.999, "realizado": 0.89},
+        }
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        veredito = resumo_m2.veredito_do_encolhimento(curva, fator, com)
+        assert "NA APROXIMACAO" in veredito
+        assert "PASSARIA" not in veredito
+
+    def test_ece_ruim_continua_reprovando_sem_olhar_faixas(self):
+        veredito = resumo_m2.veredito_do_encolhimento(self.CURVA_AGRESSIVA, 1.0, 0.20)
+        assert "reprovando" in veredito
