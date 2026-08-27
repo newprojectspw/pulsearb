@@ -1863,6 +1863,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg_encolhimento = {
             "threshold_edge": args.threshold,
             "latencia_ms": args.latencia_ms,
+            "tempo_restante_min_s": args.tempo_restante_min,
             "tempo_restante_max_s": faixa_comparada,
             "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
             "max_entradas_por_janela": 1,
@@ -1870,6 +1871,10 @@ def main(argv: list[str] | None = None) -> int:
         comparacao_encolhimento = {
             "fator": args.fator_de_encolhimento,
             "base": 0.5,
+            "faixa": {
+                "tempo_restante_min_s": args.tempo_restante_min,
+                "tempo_restante_max_s": faixa_comparada,
+            },
             "comparacao": {
                 nome: BacktestRunner(
                     BacktestConfig(**cfg_encolhimento, fator_de_encolhimento=fator)
@@ -1882,7 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             },
             "nota": (
-                "As duas rodadas na faixa calibrada, entrada unica, mesma "
+                "As duas rodadas na faixa registrada em `faixa` (a calibrada, "
+                "ou a pedida na linha de comando), entrada unica, mesma "
                 "latencia e threshold — a UNICA variavel e o encolhimento. "
                 "A calibracao da variante e medida sobre a probabilidade "
                 "ENCOLHIDA, ponto a ponto: e o ECE real dela, nao a "
@@ -1903,6 +1909,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg_entradas = {
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
+        "tempo_restante_min_s": args.tempo_restante_min,
         "tempo_restante_max_s": faixa_para_entradas,
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
     }

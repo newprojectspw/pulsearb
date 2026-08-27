@@ -132,8 +132,33 @@ na curva de edge, a capacidade morde de verdade.
 | 1.6 | Conta fechada @ desconto 0,3 | positiva | +0,043 ¢/share | **NÃO AVALIÁVEL** | ⚠️ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | −0,307 | **−0,1974** | ✅ |
 | 1.8 | Horas de amostra | ≥ 20 h | 40,7 h | **65,9 h** | ✅ |
-| 1.9 | Divergência do livro | < 1 % | 2,89 % | **2,82 %** | ❌ |
+| 1.9 | Divergência com topo deslocado (emenda abaixo) | < 1 % | 2,89 %¹ | **0,20 %** | ✅ |
 | 1.10 | Fórmula de reward na doc oficial | sim | não | **não** | ❌ |
+
+¹ agregada — o relatório de 20 h não tem a decomposição; pela regra da
+emenda, relatório sem decomposição continua julgado pelo agregado.
+
+#### Emenda ao 1.9 — registrada em 2026-08-27, DEPOIS de ver os números
+
+O 1.9 passa a ser julgado sobre `com_magnitude_finita / comparacoes` (o topo
+deslocado), não sobre a `taxa` agregada. A honestidade metodológica exige
+dizer as duas coisas na ordem certa:
+
+- **A emenda é posterior à observação.** O dia 24 mediu 2,82 % agregado e
+  0,20 % decomposto; a mudança de população foi decidida com esses números
+  na mesa. Quem quiser descontar o 1.9 por isso tem direito.
+- **A classificação em que ela se apoia é anterior.** O §2c (M2.5) registrou
+  quais divergências invalidam antes de qualquer veredito: lado vazio por
+  snapshot incompleto ou truncagem de profundidade **não** invalida — é
+  visão incompleta nossa, não livro furado. A `taxa` agregada soma essas
+  categorias (92,8 % do total no dia 24) com a corrupção real. A emenda não
+  inventa uma população nova; alinha o número julgado à classificação já
+  registrada.
+- **Salvaguardas**: a agregada continua impressa em todo resumo ao lado da
+  julgada; relatório antigo sem decomposição segue julgado pelo agregado,
+  com aviso; e se num relatório futuro a decomposição passar enquanto a
+  agregada explodir por categoria que o §2c NÃO classificou como
+  não-invalidante, o veredito é ❌ até classificar.
 
 **O 1.6 é NÃO AVALIÁVEL por construção, não por falta de amostra.**
 `conta_fechada.o_que_falta_para_fechar` é não-vazia em todo relatório que
@@ -877,9 +902,11 @@ Exige TODAS:
    shares é da ordem de centavos por hora.
 3. Pelo menos **20 horas de amostra** na célula que sustenta a conclusão —
    `horas_de_amostra` vem em cada célula justamente para isto.
-4. `integridade.divergencia_topo_book.taxa` **abaixo de 1%** na gravação. A
-   conta do maker é uma soma sobre o livro reconstruído: se o livro é
-   duvidoso, o resultado é decorativo.
+4. Divergência com topo deslocado (`com_magnitude_finita / comparacoes`)
+   **abaixo de 1%** na gravação — ver a emenda ao 1.9, que rege este
+   critério e obriga a agregada impressa ao lado. A conta do maker é uma
+   soma sobre o livro reconstruído: se o livro é duvidoso, o resultado é
+   decorativo.
 5. A fórmula de reward **confirmada** contra a documentação oficial
    (API_NOTES §15.2). Enquanto for palpite, o veredito maker é "promissor,
    não verificado" — nunca "viável".

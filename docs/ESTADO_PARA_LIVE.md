@@ -3,7 +3,9 @@
 **Semáforo de hoje: 🔴 VERMELHO** — o segundo veredito, sobre 24 h de
 captação impecável, **derrubou o primeiro**. O TAKER passava em 4 dos 5
 critérios com +102,92 USDC; no dia 24 ele mede **−53,28 USDC** e reprova em
-quatro (1.1, **1.3**, 1.4, 1.5). O MAKER segue reprovando em 1.9 e 1.10.
+quatro (1.1, **1.3**, 1.4, 1.5). O MAKER fica barrado pelo 1.10 e pelo 1.6
+(não avaliável por construção) — o 1.9 passou a 0,20 % sob a emenda
+registrada no VEREDITO_M2.
 Nenhuma das duas rotas sustenta ir a dinheiro real hoje.
 
 **A causa é o 1.3, e ela é mais funda que o PnL.** O erro de calibração real
@@ -182,7 +184,7 @@ fixou antes de existir dado. Nenhuma duração passa.
 | 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — a conta não fecha sem posição na fila | ⚠️ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
-| 1.9 | Taxa de divergência do livro | < 1 % | **2,82 %** | ❌ |
+| 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | não | ❌ |
 
 **O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas

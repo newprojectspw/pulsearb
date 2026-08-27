@@ -152,6 +152,40 @@ class TestNoCLI:
         assert set(bloco["comparacao"]) == {"sem_encolher", "encolhido"}
         assert "in-sample" in bloco["nota"]
 
+    def test_a_faixa_pedida_sobrevive_na_comparacao(self, tmp_path, monkeypatch):
+        """`--tempo-restante-min` não pode evaporar do bloco de comparação.
+
+        O bug original (achado em review): `cfg_encolhimento` não repassava
+        o mínimo, e uma invocação só com `--tempo-restante-min` ainda zerava
+        o máximo — as duas rodadas comparadas operavam em instantes que o
+        backtest principal foi explicitamente configurado a excluir. O bloco
+        agora registra a faixa em que rodou, e ela tem de ser a pedida.
+        """
+        from pulsearb.backtest.__main__ import main
+
+        diretorio = tmp_path / "rec"
+        diretorio.mkdir()
+        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+        monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+
+        assert main(
+            [
+                str(diretorio),
+                "--json",
+                "r.json",
+                "--fator-de-encolhimento",
+                "0.7",
+                "--tempo-restante-min",
+                "30",
+            ]
+        ) == 0
+
+        import json
+
+        relatorio = json.loads((tmp_path / "r.json").read_text())
+        faixa = relatorio["encolhimento"]["faixa"]
+        assert faixa["tempo_restante_min_s"] == pytest.approx(30.0)
+
     def test_sem_o_flag_o_bloco_e_nulo(self, tmp_path, monkeypatch):
         from pulsearb.backtest.__main__ import main
 
