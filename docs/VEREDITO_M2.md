@@ -545,8 +545,25 @@ rodar variações até uma dar positiva. Com o protocolo registrado, um resultad
 bom fora dele não conta.
 
 **Ajuste (fora da amostra).** O fator sai de `--desde 2026082100 --ate
-2026082323`, período ANTERIOR ao avaliado. Fator ajustado no dia 24 e aplicado
+2026082322`, período ANTERIOR ao avaliado. Fator ajustado no dia 24 e aplicado
 ao dia 24 é in-sample e não sustenta veredito — nem a favor, nem contra.
+
+O `22` na hora final é deliberado, e vale explicar porque a primeira redação
+deste protocolo escreveu `23` e estava **errada**. `--desde/--ate` filtram
+**arquivos**, não janelas, com margem de ±1 h (`arquivos_na_fatia`): com
+`--ate ...23` o limite superior vira 24/08 00:00 e a **hora 00 do dia 24 entra
+inteira no ajuste** — o fator seria ajustado sobre uma hora do próprio dia
+avaliado. Com `22`, o último arquivo lido é o das 23 h de 23/08 e nenhum
+arquivo do dia 24 é aberto. A correção foi feita **antes de existir qualquer
+número**: nenhuma rodada de ajuste havia terminado.
+
+**O vazamento residual, medido em vez de negado.** Uma janela que ABRE às
+23:5x de 23/08 resolve depois da virada, e o arquivo das 23 h é lido tanto por
+esta fatia quanto pela do dia 24 (que o alcança pela margem de −1 h). Essas
+janelas de fronteira aparecem nos dois conjuntos: são as que abrem na última
+hora de 23/08, contra ~72 h de ajuste. É pequeno e é conhecido — e se o
+resultado da remediação ficar a uma distância dessa ordem do limiar, ele não
+decide nada.
 
 **Qual fator, decidido agora.** O resumo reporta um fator por balde de tempo
 restante; o backtest aplica UM fator global. A regra: **o fator do balde de
