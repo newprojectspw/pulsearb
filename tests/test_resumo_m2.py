@@ -508,7 +508,14 @@ class TestVereditoDoEncolhimento:
         assert "NAO AVALIAVEL" in veredito
         assert "PASSARIA" not in veredito
 
-    def test_fator_moderado_com_estrutura_preservada_promete_passa(self):
+    def test_fator_moderado_aponta_sem_prometer(self):
+        """Nem no melhor caso o texto promete PASSA (achado em review).
+
+        A aproximação agrupa cada faixa pela média — uma faixa de 0,05
+        que cavalga a fronteira pós-encolhimento esconde a divisão real.
+        Só o backtest, com as previsões cruas, reagrupa; o veredito da
+        aproximação é sempre condicionado a ele.
+        """
         curva = {
             "0.00-0.05": {"n": 10_000, "previsto": 0.001, "realizado": 0.11},
             "0.45-0.50": {"n": 300, "previsto": 0.475, "realizado": 0.48},
@@ -516,7 +523,8 @@ class TestVereditoDoEncolhimento:
         }
         _sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
         veredito = resumo_m2.veredito_do_encolhimento(curva, fator, com)
-        assert "PASSARIA" in veredito
+        assert "NA APROXIMACAO" in veredito
+        assert "PASSARIA" not in veredito
 
     def test_ece_ruim_continua_reprovando_sem_olhar_faixas(self):
         veredito = resumo_m2.veredito_do_encolhimento(self.CURVA_AGRESSIVA, 1.0, 0.20)

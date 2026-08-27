@@ -617,7 +617,16 @@ def faixas_ocupadas_apos_encolher(curva: dict[str, Any], fator: float) -> int:
 def veredito_do_encolhimento(
     curva: dict[str, Any], fator: float, ece_encolhido_final: float
 ) -> str:
-    """O texto honesto sobre o que a remedição faria com este fator."""
+    """O texto honesto sobre o que a remedição faria com este fator.
+
+    Este texto NUNCA promete aprovação, por construção: o resumo só tem
+    os agregados por faixa (n, previsto, realizado), e uma faixa de 0,05
+    que cavalga uma fronteira pós-encolhimento vai inteira para o grupo
+    da sua média — tanto aqui quanto no `ece_encolhido`. Só o backtest,
+    que tem as previsões cruas, reagrupa de verdade (achado em review).
+    O que a aproximação sabe dizer com segurança é o NEGATIVO: defeito
+    que não é de escala, ou estrutura comprimida abaixo do mínimo.
+    """
     if ece_encolhido_final >= LIMIAR_DE_CALIBRACAO:
         return "continuaria reprovando — o defeito nao e de escala"
     if faixas_ocupadas_apos_encolher(curva, fator) < MINIMO_DE_FAIXAS:
@@ -626,7 +635,11 @@ def veredito_do_encolhimento(
             f"previsoes em menos de {MINIMO_DE_FAIXAS} faixas — o backtest "
             "daria NAO AVALIAVEL, nao PASSA"
         )
-    return f"PASSARIA no limiar de {LIMIAR_DE_CALIBRACAO:g}"
+    return (
+        f"abaixo do limiar de {LIMIAR_DE_CALIBRACAO:g} NA APROXIMACAO — "
+        "quem decide e a remedicao ponto a ponto, que reagrupa as "
+        "previsoes cruas"
+    )
 
 
 def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
