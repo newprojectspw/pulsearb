@@ -1543,6 +1543,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--fator-de-encolhimento",
+        dest="fator_de_encolhimento",
+        type=float,
+        default=None,
+        help=(
+            "correção de escala da calibração: p' = 0,5 + fator*(p - 0,5), "
+            "aplicada antes de TUDO (calibração inclusive). Sai como "
+            "comparação ao lado do resultado normal, nunca no lugar dele. "
+            "O fator deve vir de calibração medida em período ANTERIOR ao "
+            "avaliado — ajustá-lo no próprio período é ajuste in-sample."
+        ),
+    )
+    parser.add_argument(
         "--qualidade-minima",
         dest="qualidade_minima",
         choices=("alta", "media", "baixa"),
@@ -1840,6 +1853,46 @@ def main(argv: list[str] | None = None) -> int:
             "restrito": report_restrito.to_dict(),
         }
 
+    # M2: a variante encolhida, quando pedida. LADO A LADO com a crua, na
+    # mesma faixa calibrada e com entrada única — mudar uma coisa por vez.
+    # A crua continua sendo a que alimenta os critérios pré-registrados; a
+    # encolhida existe para responder se a correção de escala devolve o 1.1,
+    # e a resposta só vale se o fator veio de período anterior ao avaliado.
+    comparacao_encolhimento = None
+    if args.fator_de_encolhimento is not None:
+        cfg_encolhimento = {
+            "threshold_edge": args.threshold,
+            "latencia_ms": args.latencia_ms,
+            "tempo_restante_max_s": faixa_comparada,
+            "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+            "max_entradas_por_janela": 1,
+        }
+        comparacao_encolhimento = {
+            "fator": args.fator_de_encolhimento,
+            "base": 0.5,
+            "comparacao": {
+                nome: BacktestRunner(
+                    BacktestConfig(**cfg_encolhimento, fator_de_encolhimento=fator)
+                )
+                .run(integras, index.streams)
+                .to_dict()
+                for nome, fator in (
+                    ("sem_encolher", 1.0),
+                    ("encolhido", args.fator_de_encolhimento),
+                )
+            },
+            "nota": (
+                "As duas rodadas na faixa calibrada, entrada unica, mesma "
+                "latencia e threshold — a UNICA variavel e o encolhimento. "
+                "A calibracao da variante e medida sobre a probabilidade "
+                "ENCOLHIDA, ponto a ponto: e o ECE real dela, nao a "
+                "aproximacao por faixas do resumo. VALIDADE: o fator deve "
+                "ter sido ajustado em periodo anterior ao desta gravacao; "
+                "se foi ajustado nesta, o resultado e in-sample e nao "
+                "sustenta veredito."
+            ),
+        }
+
     # M2.7 tarefa 3: entrada unica x multipla, lado a lado, SEMPRE — e as
     # duas dentro da faixa calibrada, que e a configuracao que produziu o
     # primeiro PnL positivo do projeto. Comparar entrada multipla no regime
@@ -1953,6 +2006,7 @@ def main(argv: list[str] | None = None) -> int:
                 "mudar exige numero, nao intuicao."
             ),
         },
+        "encolhimento": comparacao_encolhimento,
         "faixa_de_tempo": {
             "faixa_restrita_s": faixa_comparada,
             "comparacao": comparacao,

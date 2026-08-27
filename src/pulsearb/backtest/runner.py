@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
 from pulsearb.backtest.report import BacktestReport, Trade
-from pulsearb.engine.decisao import estimar_prob_up
+from pulsearb.engine.decisao import encolher_para_a_base, estimar_prob_up
 from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.engine.twap import RealizedVol, TwapTracker
 
@@ -203,6 +203,12 @@ class BacktestConfig:
     # viraria centenas de trades sobre o mesmo movimento — e o PnL somaria a
     # mesma aposta repetida como se fossem independentes.
     intervalo_min_entre_entradas_s: float = 30.0
+    # M2: correção de escala da calibração. 1.0 = identidade (o preditor
+    # cru). Um fator < 1 encolhe TODA probabilidade em direção a 0,5 ANTES
+    # de qualquer uso — inclusive da própria medição de calibração, para que
+    # o ECE reportado seja o do preditor encolhido de verdade, ponto a
+    # ponto, e não a aproximação por faixas do resumo.
+    fator_de_encolhimento: float = 1.0
 
     def na_faixa(self, seconds_left: float) -> bool:
         """Este instante está na faixa de tempo restante autorizada?"""
@@ -292,6 +298,16 @@ class BacktestRunner:
             janela, stream, vol, twap
         ):
             est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
+            if cfg.fator_de_encolhimento != 1.0:
+                # ANTES da calibração e do edge, de propósito: encolher só o
+                # gatilho e medir a calibração no cru produziria um ECE que
+                # não descreve o preditor que operou.
+                est = replace(
+                    est,
+                    prob_up=encolher_para_a_base(
+                        est.prob_up, cfg.fator_de_encolhimento
+                    ),
+                )
 
             # Calibração: medida em TODA previsão, não só onde se operou.
             report.add_calibration(est.bucket_tempo, est.prob_up, janela.resolveu_up)

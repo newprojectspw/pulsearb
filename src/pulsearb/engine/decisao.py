@@ -18,6 +18,39 @@ from pulsearb.engine.twap import (
     prob_up_twap,
 )
 
+#: O alvo do encolhimento. É 0,5 e não a taxa-base MEDIDA de propósito: a
+#: taxa realizada do próprio período só se conhece depois dele (usá-la na
+#: decisão seria olhar o futuro), e as medidas ficaram em 0,507–0,509 —
+#: indistinguíveis de meio a meio para este fim.
+BASE_DO_ENCOLHIMENTO = 0.5
+
+
+def encolher_para_a_base(prob_up: float, fator: float) -> float:
+    """A correção de escala do M2: p' = base + fator·(p − base).
+
+    O que ela conserta, medido: o erro de calibração do preditor CRESCE com
+    a confiança (−0,0105 a +0,1554 no dia 24), que é a assinatura de excesso
+    de confiança — e excesso de confiança se corrige encolhendo a previsão
+    em direção à taxa-base. Sobre os quatro baldes de 21–25/08, o fator
+    ótimo levou o ECE de 0,058–0,199 para 0,003–0,009.
+
+    O que ela NÃO é: um botão de ajuste do PnL. O fator vem de calibração
+    medida em período ANTERIOR ao avaliado; ajustá-lo no próprio período
+    é ajuste in-sample, e o relatório imprime essa ressalva onde o número
+    aparece.
+
+    Mora aqui — e não no runner — pela regra da casa: o motor ao vivo e o
+    backtest precisam produzir a MESMA probabilidade a partir do mesmo
+    estado. `fator = 1` é a identidade.
+    """
+    if not 0.0 < fator <= 1.0:
+        raise ValueError(
+            f"fator de encolhimento fora de (0, 1]: {fator!r} — acima de 1 "
+            "seria INFLAR a confianca de um preditor ja superconfiante"
+        )
+    return BASE_DO_ENCOLHIMENTO + fator * (prob_up - BASE_DO_ENCOLHIMENTO)
+
+
 #: O jogo TWAP: resolve pela média dos últimos 60 s contra a âncora.
 JOGO_TWAP = "twap"
 #: O jogo horário: resolve pelo candle da Binance contra o preço de abertura.
