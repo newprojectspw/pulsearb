@@ -796,6 +796,56 @@ def _porque_caiu(
     return frase
 
 
+def _texto_do_lixo_residual(
+    consistencia: float, elegiveis: int, discordantes: int | None
+) -> str:
+    """A frase da faixa do orçamento (VEREDITO_M2 §2b)."""
+    ressalva = (
+        f" RESSALVA: {elegiveis} janelas estao abaixo das "
+        f"{MINIMO_PARA_ORCAMENTO} que o criterio pede para o orcamento "
+        "separar lixo de impostor — o intervalo de confianca ainda e largo."
+        if elegiveis < MINIMO_PARA_ORCAMENTO
+        else ""
+    )
+    return (
+        f"CONFIRMADA COM LIXO RESIDUAL: tau=0 explica {consistencia} das "
+        f"{elegiveis} janelas elegiveis — {discordantes} discordante(s), "
+        f"dentro do orcamento de {LIMIAR_CONSISTENCIA:.0%} que VEREDITO_M2 2b "
+        "reservou para lacuna de stream fina e empate mal-carimbado. NAO e "
+        "mudanca de regra: mudanca de regra DERRUBA a consistencia, nao a "
+        "arranha. Confira `discordantes_em_tau_verificado` para ver o numero "
+        "de cada falha." + ressalva
+    )
+
+
+def _texto_do_alarme(
+    consistencia: Any, elegiveis: int, discordantes: int | None, regiao: list
+) -> str:
+    """As duas formas do alarme, e a diferença importa para o diagnóstico.
+
+    Nenhum τ funciona significa que o modelo do jogo mudou; outro τ funciona
+    significa que a âncora deslocou no tempo. Os dois consertos são
+    diferentes, e um texto só mandaria procurar no lugar errado metade das
+    vezes.
+    """
+    comum = (
+        f"MUDANCA DE REGRA: tau=0 explica {consistencia} das "
+        f"{elegiveis} janelas elegiveis ({discordantes} discordantes), ABAIXO "
+        f"do limiar de {LIMIAR_CONSISTENCIA:.0%}, "
+    )
+    if regiao:
+        return (
+            comum + f"e a regiao de 100% existe em {regiao}. A ancora parece "
+            "ter se deslocado no tempo. NAO opere com o resultado deste "
+            "backtest ate reconfirmar a ancora e atualizar API_NOTES 13.8."
+        )
+    return (
+        comum + "e nenhum tau chega a 100%. Nem a ancora verificada nem "
+        "qualquer deslocamento dela reproduzem as resolucoes — o jogo pode "
+        "ter mudado de fonte. NAO opere com o resultado deste backtest."
+    )
+
+
 def veredito_da_ancora(
     varredura: dict[str, Any],
     *,
@@ -921,50 +971,14 @@ def veredito_da_ancora(
     # ou ancora velha confirmam lixo; folga grande com ancora fresca seria
     # outra historia, e ai o numero agregado ja teria caido abaixo do limiar.
     if consistencia is not None and consistencia >= LIMIAR_CONSISTENCIA:
-        magro = elegiveis < MINIMO_PARA_ORCAMENTO
         return {
             **base,
             "confirmada": True,
             "alerta": None,
-            "veredito": (
-                f"CONFIRMADA COM LIXO RESIDUAL: tau=0 explica {consistencia} "
-                f"das {elegiveis} janelas elegiveis — {discordantes} "
-                f"discordante(s), dentro do orcamento de "
-                f"{LIMIAR_CONSISTENCIA:.0%} que VEREDITO_M2 2b reservou para "
-                "lacuna de stream fina e empate mal-carimbado. NAO e mudanca "
-                "de regra: mudanca de regra DERRUBA a consistencia, nao a "
-                "arranha. Confira `discordantes_em_tau_verificado` para ver "
-                "o numero de cada falha."
-                + (
-                    f" RESSALVA: {elegiveis} janelas estao abaixo das "
-                    f"{MINIMO_PARA_ORCAMENTO} que o criterio pede para o "
-                    "orcamento separar lixo de impostor — o intervalo de "
-                    "confianca ainda e largo."
-                    if magro
-                    else ""
-                )
+            "veredito": _texto_do_lixo_residual(
+                consistencia, elegiveis, discordantes
             ),
         }
 
-    # Daqui para baixo é alarme. Duas formas, e a diferença importa para o
-    # diagnóstico: nenhum τ funciona (o modelo do jogo mudou) ou outro τ
-    # funciona (a âncora deslocou no tempo).
-    if regiao:
-        alerta = (
-            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das resolucoes "
-            f"({discordantes} de {elegiveis}), ABAIXO do limiar de "
-            f"{LIMIAR_CONSISTENCIA:.0%}, e a regiao de 100% existe em "
-            f"{regiao}. A ancora parece ter se deslocado no tempo. NAO opere "
-            "com o resultado deste backtest ate reconfirmar a ancora e "
-            "atualizar API_NOTES 13.8."
-        )
-    else:
-        alerta = (
-            f"MUDANCA DE REGRA: tau=0 explica {consistencia} das "
-            f"{elegiveis} janelas elegiveis ({discordantes} discordantes), "
-            f"ABAIXO do limiar de {LIMIAR_CONSISTENCIA:.0%}, e nenhum tau "
-            "chega a 100%. Nem a ancora verificada nem qualquer deslocamento "
-            "dela reproduzem as resolucoes — o jogo pode ter mudado de fonte. "
-            "NAO opere com o resultado deste backtest."
-        )
+    alerta = _texto_do_alarme(consistencia, elegiveis, discordantes, regiao)
     return {**base, "confirmada": False, "alerta": alerta, "veredito": alerta}
