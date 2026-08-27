@@ -79,6 +79,47 @@ def _teto_do_balde(nome: str) -> float | None:
         return None
 
 
+#: Chaves do acumulador. Nomeadas porque aparecem no acúmulo e na média —
+#: e um erro de digitação entre os dois lugares seria um zero silencioso.
+SOMA_PREVISTO = "soma_previsto"
+SOMA_REALIZADO = "soma_realizado"
+
+
+def _acumular_curva(
+    destino: dict[str, dict[str, float]], curva: dict[str, Any]
+) -> None:
+    """Soma uma curva no acumulador do balde, ponderando por `n`."""
+    for faixa, celula in curva.items():
+        n = celula.get("n") or 0
+        previsto = celula.get("previsto")
+        realizado = celula.get("realizado")
+        if not n:
+            continue
+        if not isinstance(previsto, int | float):
+            continue
+        if not isinstance(realizado, int | float):
+            continue
+        atual = destino.setdefault(
+            faixa, {"n": 0.0, SOMA_PREVISTO: 0.0, SOMA_REALIZADO: 0.0}
+        )
+        atual["n"] += n
+        atual[SOMA_PREVISTO] += n * previsto
+        atual[SOMA_REALIZADO] += n * realizado
+
+
+def _medias_do_balde(faixas: dict[str, dict[str, float]]) -> dict[str, Any]:
+    """O acumulador virando curva: soma ponderada dividida pelo `n` total."""
+    return {
+        faixa: {
+            "n": int(dados["n"]),
+            "previsto": dados[SOMA_PREVISTO] / dados["n"],
+            "realizado": dados[SOMA_REALIZADO] / dados["n"],
+        }
+        for faixa, dados in sorted(faixas.items())
+        if dados["n"]
+    }
+
+
 def curvas_somadas(relatorios: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """As curvas de confiabilidade de vários relatórios, somadas por balde.
 
@@ -90,33 +131,8 @@ def curvas_somadas(relatorios: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         calibracao = (relatorio.get("backtest") or {}).get("calibracao") or {}
         for balde, dados in calibracao.items():
             curva = (dados or {}).get("curva_de_confiabilidade") or {}
-            destino = acumulado.setdefault(balde, {})
-            for faixa, celula in curva.items():
-                n = celula.get("n") or 0
-                previsto = celula.get("previsto")
-                realizado = celula.get("realizado")
-                if not n or not isinstance(previsto, int | float):
-                    continue
-                if not isinstance(realizado, int | float):
-                    continue
-                atual = destino.setdefault(
-                    faixa, {"n": 0.0, "soma_previsto": 0.0, "soma_realizado": 0.0}
-                )
-                atual["n"] += n
-                atual["soma_previsto"] += n * previsto
-                atual["soma_realizado"] += n * realizado
-    saida: dict[str, dict[str, Any]] = {}
-    for balde, faixas in acumulado.items():
-        saida[balde] = {
-            faixa: {
-                "n": int(dados["n"]),
-                "previsto": dados["soma_previsto"] / dados["n"],
-                "realizado": dados["soma_realizado"] / dados["n"],
-            }
-            for faixa, dados in sorted(faixas.items())
-            if dados["n"]
-        }
-    return saida
+            _acumular_curva(acumulado.setdefault(balde, {}), curva)
+    return {balde: _medias_do_balde(faixas) for balde, faixas in acumulado.items()}
 
 
 def baldes_da_faixa_operada(curvas: dict[str, dict[str, Any]]) -> dict[str, int]:
