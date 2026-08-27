@@ -565,6 +565,16 @@ hora de 23/08, contra ~72 h de ajuste. É pequeno e é conhecido — e se o
 resultado da remediação ficar a uma distância dessa ordem do limiar, ele não
 decide nada.
 
+**O ajuste roda dia a dia, e isso não muda o que ele mede.** Três dias numa
+passada só multiplicam por três a RAM de pico da passada 2
+(`memoria.projecao_de_pico` é linear no número de tokens), e a gravação de
+21–23 vive em `~/pulsearb-dados`, não no diretório do dia 24. O passo 1 são
+três rodadas — 21, 22 e 23 — somadas por `scripts/ajuste_do_encolhimento.py`:
+as faixas são as mesmas, e cada previsão pesa uma, então a soma ponderada por
+`n` dá o mesmo ajuste que a rodada única daria. O script também **executa a
+regra de escolha abaixo**, em vez de deixá-la para o julgamento de quem lê a
+tabela depois de ver os números.
+
 **Qual fator, decidido agora.** O resumo reporta um fator por balde de tempo
 restante; o backtest aplica UM fator global. A regra: **o fator do balde de
 maior `n` entre os que caem na faixa operada (≤ 240 s)**. Os outros baldes
