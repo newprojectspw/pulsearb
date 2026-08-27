@@ -141,7 +141,12 @@ class ExecutorSombra:
         # Rodá-lo aqui faria todo registro sair como `modo_nao_opera`, e o
         # diário perderia justamente a informação que justifica o SHADOW —
         # qual portão estaria segurando se o modo fosse LIVE.
-        decisao = self.portao.avaliar_risco(ordem, feeds_saudaveis=feeds_saudaveis)
+        decisao = self.portao.avaliar_risco(
+            ordem,
+            feeds_saudaveis=feeds_saudaveis,
+            melhor_bid=melhor_bid,
+            melhor_ask=melhor_ask,
+        )
 
         intencao = IntencaoRegistrada(
             ts_ns=ts_ns,

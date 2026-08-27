@@ -33,23 +33,35 @@ def _portao(tmp_path, modo=Mode.LIVE, **ajustes):
     )
 
 
+#: Livro sadio: spread de 0,02, dentro do teto de 0,04. Passa em `_avaliar`
+#: por padrão para que cada teste exercite o portão que ele nomeia, e não o
+#: do livro. Quem quer testar o livro passa o dele.
+LIVRO_SADIO = {"melhor_bid": 0.49, "melhor_ask": 0.51}
+
+
+def _avaliar(portao, ordem, *, feeds_saudaveis=True, **livro):
+    return portao.avaliar(
+        ordem, feeds_saudaveis=feeds_saudaveis, **(LIVRO_SADIO | livro)
+    )
+
+
 class TestFalhaFechada:
     """Estado desconhecido é motivo de recusa, não de seguir em frente."""
 
     def test_ordem_de_teste_passa(self, tmp_path):
         # A linha de base: sem ela, um teste que "recusa tudo" passaria em
         # todos os outros sem provar nada.
-        assert _portao(tmp_path).avaliar(_ordem(), feeds_saudaveis=True).pode
+        assert _avaliar(_portao(tmp_path), _ordem(), feeds_saudaveis=True).pode
 
     @pytest.mark.parametrize("modo", [Mode.SIM, Mode.SHADOW])
     def test_so_live_envia(self, tmp_path, modo):
-        decisao = _portao(tmp_path, modo=modo).avaliar(_ordem(), feeds_saudaveis=True)
+        decisao = _avaliar(_portao(tmp_path, modo=modo), _ordem(), feeds_saudaveis=True)
         assert not decisao.pode
         assert decisao.motivo == MOTIVOS.MODO_NAO_OPERA
 
     def test_feed_parado_recusa(self, tmp_path):
         # Operar com feed velho é operar com preço que já não existe.
-        decisao = _portao(tmp_path).avaliar(_ordem(), feeds_saudaveis=False)
+        decisao = _avaliar(_portao(tmp_path), _ordem(), feeds_saudaveis=False)
         assert not decisao.pode
         assert decisao.motivo == MOTIVOS.FEED_PARADO
 
@@ -58,7 +70,7 @@ class TestFalhaFechada:
         [(0.0, 0.5), (-1.0, 0.5), (5.0, 0.0), (5.0, 1.0), (5.0, -0.1), (5.0, 1.5)],
     )
     def test_ordem_mal_formada_recusa_antes_de_tudo(self, tmp_path, shares, preco):
-        decisao = _portao(tmp_path).avaliar(
+        decisao = _avaliar(_portao(tmp_path),
             _ordem(shares=shares, preco=preco), feeds_saudaveis=True
         )
         assert not decisao.pode
@@ -74,7 +86,7 @@ class TestFalhaFechada:
         )
 
         assert portao.registro.disjuntor_armado
-        decisao = portao.avaliar(_ordem(), feeds_saudaveis=True)
+        decisao = _avaliar(portao, _ordem(), feeds_saudaveis=True)
         assert decisao.motivo == MOTIVOS.DISJUNTOR_ARMADO
 
 
@@ -82,7 +94,7 @@ class TestTetos:
     def test_stake_por_trade(self, tmp_path):
         portao = _portao(tmp_path, stake_max_por_trade_usdc=5.0)
         # 12 shares a 0,50 = 6 USDC, acima do teto de 5.
-        decisao = portao.avaliar(_ordem(shares=12.0), feeds_saudaveis=True)
+        decisao = _avaliar(portao, _ordem(shares=12.0), feeds_saudaveis=True)
         assert decisao.motivo == MOTIVOS.STAKE_ACIMA_DO_TETO
         assert decisao.detalhe["custo"] == pytest.approx(6.0)
 
@@ -98,10 +110,10 @@ class TestTetos:
         )
         ordem = _ordem(shares=10.0)  # 5,00 USDC — passa no teto por trade
 
-        assert portao.avaliar(ordem, feeds_saudaveis=True).pode
+        assert _avaliar(portao, ordem, feeds_saudaveis=True).pode
         portao.registrar_envio(ordem)
 
-        segunda = portao.avaliar(ordem, feeds_saudaveis=True)
+        segunda = _avaliar(portao, ordem, feeds_saudaveis=True)
         assert segunda.motivo == MOTIVOS.JANELA_NO_TETO
         assert segunda.detalhe["ja_gasto"] == pytest.approx(5.0)
 
@@ -114,7 +126,7 @@ class TestTetos:
         )
         portao.registrar_envio(_ordem("janela-a", shares=10.0))
 
-        decisao = portao.avaliar(_ordem("janela-b", shares=10.0), feeds_saudaveis=True)
+        decisao = _avaliar(portao, _ordem("janela-b", shares=10.0), feeds_saudaveis=True)
         assert decisao.motivo == MOTIVOS.EXPOSICAO_NO_TETO
 
     def test_posicoes_abertas(self, tmp_path):
@@ -122,17 +134,17 @@ class TestTetos:
         for nome in ("a", "b"):
             portao.registrar_envio(_ordem(nome, shares=2.0))
 
-        assert portao.avaliar(_ordem("c", shares=2.0), feeds_saudaveis=True).motivo == (
+        assert _avaliar(portao, _ordem("c", shares=2.0), feeds_saudaveis=True).motivo == (
             MOTIVOS.POSICOES_NO_TETO
         )
         # Reforçar uma janela QUE JÁ TEM posição não abre posição nova.
-        assert portao.avaliar(_ordem("a", shares=2.0), feeds_saudaveis=True).pode
+        assert _avaliar(portao, _ordem("a", shares=2.0), feeds_saudaveis=True).pode
 
     @pytest.mark.parametrize("preco", [0.02, 0.04, 0.96, 0.99])
     def test_preco_fora_da_faixa(self, tmp_path, preco):
         # Comprar a 0,97 arrisca 0,97 para ganhar 0,03: um erro de modelo
         # pequeno vira perda desproporcional.
-        decisao = _portao(tmp_path).avaliar(
+        decisao = _avaliar(_portao(tmp_path),
             _ordem(shares=1.0, preco=preco), feeds_saudaveis=True
         )
         assert decisao.motivo == MOTIVOS.PRECO_FORA_DA_FAIXA
@@ -145,7 +157,7 @@ class TestDisjuntor:
         portao.registrar_resolucao("a", -10.5)
 
         assert portao.registro.disjuntor_armado
-        assert portao.avaliar(_ordem("b"), feeds_saudaveis=True).motivo == (
+        assert _avaliar(portao, _ordem("b"), feeds_saudaveis=True).motivo == (
             MOTIVOS.DISJUNTOR_ARMADO
         )
 
@@ -185,7 +197,7 @@ class TestDisjuntor:
             hoje="2026-08-25",
         )
         assert renascido.registro.disjuntor_armado
-        assert renascido.avaliar(_ordem(), feeds_saudaveis=True).motivo == (
+        assert _avaliar(renascido, _ordem(), feeds_saudaveis=True).motivo == (
             MOTIVOS.DISJUNTOR_ARMADO
         )
 
@@ -216,7 +228,7 @@ class TestDisjuntor:
         portao.registrar_resolucao("a", -12.0)
         portao.desarmar_disjuntor()
 
-        assert portao.avaliar(_ordem(), feeds_saudaveis=True).pode
+        assert _avaliar(portao, _ordem(), feeds_saudaveis=True).pode
 
 
 class TestContabilidade:
@@ -227,7 +239,7 @@ class TestContabilidade:
 
         portao.registrar_resolucao("a", +1.0)
         assert portao.registro.exposicao_total_usdc == 0.0
-        assert portao.avaliar(_ordem("b", shares=10.0), feeds_saudaveis=True).pode
+        assert _avaliar(portao, _ordem("b", shares=10.0), feeds_saudaveis=True).pode
 
     def test_registro_e_gravado_de_forma_legivel(self, tmp_path):
         portao = _portao(tmp_path)

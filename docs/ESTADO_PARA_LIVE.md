@@ -102,22 +102,33 @@ derrubar e reconectar, refazendo a assinatura do zero.
 Critérios escritos **antes** dos números, em `VEREDITO_M2.md`. Não são
 negociáveis depois do resultado.
 
-Amostra: 20 horas contínuas de 2026-08-23, `pior_fracao_coberta` 1,0 nos oito
-ativos, 794 janelas conhecidas, 568 trades. A rodada levou 2 h 47 min.
+Amostra: **24 horas de 2026-08-24**, `pior_fracao_coberta` 1,0 nos oito
+ativos, **0 silêncios**, 896 janelas conhecidas, 695 trades. A rodada levou
+73 min. A amostra anterior — 20 h de 23/08, com 837 s de silêncio e 42% dos
+snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 
-### TAKER — passa em 4 dos 5
+### TAKER — reprova em 4 dos 5
 
-| # | Critério | Exigido | Medido (20 h) | |
+| # | Critério | Exigido | Medido (24 h) | |
 |---|---|---|---|---|
-| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **+102,9227 USDC** | ✅ |
-| 1.2 | Número de trades | ≥ 200 | **568** | ✅ |
-| 1.3 | Calibração: erro < 0,05 em ≥ 1 bucket | sim | 0,0067 em `<30s` | ⚠️ **não avaliado** |
-| 1.4 | Positivo também a 600 ms | sim | **+101,1759 USDC** | ✅ |
-| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **87,8 (5m) · 41,8 (15m) · 31,3 (1h) · 35,7 (4h)** | ❌ |
+| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **−53,2777 USDC** (24 h de 24/08) | ❌ |
+| 1.2 | Número de trades | ≥ 200 | **695** | ✅ |
+| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **0,0694** em `<30s` (20 faixas) | ❌ **e é a causa dos outros** |
+| 1.4 | Positivo também a 600 ms | sim | **−54,3953 USDC** | ❌ |
+| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
 
-**1.1 inverteu de sinal, e o sinal novo se sustenta.** Na amostra de 5 h era
-−41,57; com 20 h deu +102,92. A diferença é tamanho de amostra, não
-arredondamento, e três cortes independentes concordam:
+**1.1 inverteu duas vezes, e a última leitura é a que tem lastro.** 5 h deram
+−41,57; 20 h deram +102,92; 24 h limpas dão **−53,28**. A gravação de 20 h
+carregava 837 s de silêncio e descartou 42% dos snapshots — e buraco de livro
+não erra para os dois lados, porque o preenchimento simulado usa o último
+snapshot conhecido, que numa lacuna é sistematicamente melhor que o real.
+
+**E o −53,28 é entrada múltipla, não borda negativa.** `max_1_entradas` dá
++2,7125, `max_3` dá −98,39 e `max_10` dá −221,64. Mas +2,71 em 640 trades é
+0,4 centavo por trade com drawdown de −108: ruído, não resgate.
+
+O texto abaixo é da leitura de 20 h e fica como registro do que se acreditava
+então:
 
 - faixa calibrada (240–120 s): **+91,58** com drawdown **menor** (−43,07
   contra −60,84)
@@ -168,10 +179,10 @@ fixou antes de existir dado. Nenhuma duração passa.
 
 | # | Critério | Exigido | Medido (20 h) | |
 |---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | +0,043 ¢/share (fator 0,5) | ⚠️ margem de 4 centésimos |
-| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,307** | ✅ |
-| 1.8 | Horas de amostra na célula | ≥ 20 h | **40,7 h** | ✅ |
-| 1.9 | Taxa de divergência do livro | < 1 % | **2,89 %** | ❌ |
+| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — a conta não fecha sem posição na fila | ⚠️ |
+| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
+| 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
+| 1.9 | Taxa de divergência do livro | < 1 % | **2,82 %** | ❌ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | não | ❌ |
 
 **O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas
@@ -233,7 +244,7 @@ frente, que só o `silencio_final_s` não via.
 |---|---|---|
 | 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py`, coberto por 24 testes |
 | 2.2 | Modelo horário | ✅ `engine/hourly.py` |
-| 2.3 | Curva de calibração sobre gravação real | ⬜ **instrumento pronto, medição nunca feita** |
+| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA** — 0,0694 no balde `<30s`, erro CRESCENTE com a confiança (−0,0105 → +0,1554) |
 
 ### O 2.3 mudou de natureza, não só de estado
 
@@ -391,12 +402,12 @@ Os tetos não são chute de conforto — saem do que o M2 mediu: 2,91 USDC
 movimentados por trade, 0,18 de lucro, e profundidade mediana de 87,8 USDC na
 duração mais líquida. Subir qualquer um deles deve esperar a curva de
 capacidade (M2.14) dizer onde o teto está.
-| 3.7 | Trava: perda diária máxima → kill (US$ 20) | ⬜ |
-| 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ⬜ |
-| 3.9 | Trava: exposição simultânea máxima (2 janelas) | ⬜ |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo → não opera | ⬜ |
-| 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ⬜ |
-| 3.12 | Suíte de testes das travas (uma por trava) | ⬜ |
+| 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
+| 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
+| 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ⬜ **sem fonte de deriva no caminho ao vivo** |
+| 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
+| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — 28 no portão + 19 nas travas novas |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
 
 ### O que falta para o SHADOW rodar de verdade
