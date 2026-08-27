@@ -44,6 +44,7 @@ from pulsearb.backtest.__main__ import (
     raiz_de_saida,
 )
 from pulsearb.backtest.report import MINIMO_DE_FAIXAS
+from pulsearb.engine.decisao import BASE_DO_ENCOLHIMENTO
 
 # Os limiares do VEREDITO_M2 "Regras de decisão", escritos ANTES dos números.
 # Ficam aqui como constantes nomeadas para que mudar um critério seja uma
@@ -350,12 +351,21 @@ def _criterio_da_divergencia(relatorio: dict[str, Any]) -> Criterio:
     invalidação declarou inocente. Isto não é afrouxar o 1.9 depois de ver
     o número: é alinhá-lo à classificação que JÁ estava registrada. A taxa
     agregada continua impressa ao lado, para ninguém achar que sumiu.
+
+    A salvaguarda da emenda (VEREDITO_M2) vale aqui, não só no papel: o
+    desconto é POR NOME. Só sai da conta o lado vazio cuja causa o próprio
+    relatório classifica como não-invalidante em `quais_invalidam`. Causa
+    invalidante, causa que o relatório não classificou, ou lado vazio sem
+    decomposição por causa — tudo isso CONTA CONTRA, e reprova até ser
+    classificado. Sem isto, um relatório futuro com lado vazio por
+    `sem_snapshot` (livro furado de verdade) passaria pelo mesmo desconto
+    que inocenta truncagem de profundidade.
     """
     div = _fundo(relatorio, "integridade", "divergencia_topo_book") or {}
     taxa = div.get("taxa")
     comparacoes = div.get("comparacoes")
     deslocadas = div.get("com_magnitude_finita")
-    exigido = f"topo deslocado < {DIVERGENCIA_MAXIMA:.0%} das comparacoes"
+    exigido = f"populacao invalidante < {DIVERGENCIA_MAXIMA:.0%} das comparacoes"
 
     if (
         isinstance(taxa, int | float)
@@ -363,17 +373,34 @@ def _criterio_da_divergencia(relatorio: dict[str, Any]) -> Criterio:
         and comparacoes > 0
         and isinstance(deslocadas, int | float)
     ):
-        taxa_deslocada = deslocadas / comparacoes
+        vazio_total = div.get("com_lado_vazio") or 0
+        bloco_vazio = div.get("lado_vazio") or {}
+        por_causa = (
+            bloco_vazio.get("por_causa") or div.get("lado_vazio_por_causa") or {}
+        )
+        quais_invalidam = bloco_vazio.get("quais_invalidam") or {}
+        inocentadas = sum(
+            n
+            for causa, n in por_causa.items()
+            if isinstance(n, int | float) and quais_invalidam.get(causa) is False
+        )
+        vazio_contra = max(0, vazio_total - inocentadas)
+        taxa_julgada = (deslocadas + vazio_contra) / comparacoes
+        detalhe_vazio = (
+            f"lado vazio nao inocentado {vazio_contra:,}"
+            if vazio_contra
+            else f"lado vazio {vazio_total:,} todo inocentado pelo 2c"
+        )
         return Criterio(
             "1.9",
             "Divergencia do topo do livro",
             exigido,
-            f"topo deslocado {taxa_deslocada:.2%} "
-            f"(agregada {taxa:.2%}; lado_vazio {div.get('com_lado_vazio')}, "
-            "nao-invalidante pelo 2c)",
-            _julgar(taxa_deslocada < DIVERGENCIA_MAXIMA),
-            "integridade.divergencia_topo_book"
-            ".{com_magnitude_finita / comparacoes}",
+            f"julgada {taxa_julgada:.2%} = topo deslocado "
+            f"{deslocadas / comparacoes:.2%} + {detalhe_vazio} "
+            f"(agregada {taxa:.2%})",
+            _julgar(taxa_julgada < DIVERGENCIA_MAXIMA),
+            "integridade.divergencia_topo_book.{(com_magnitude_finita"
+            " + lado_vazio nao inocentado em quais_invalidam) / comparacoes}",
         )
 
     # Relatório antigo, sem a decomposição: só o agregado existe, e o
@@ -522,15 +549,25 @@ def varredura_de_encolhimento(
 ) -> tuple[float, float, float] | None:
     """(ECE sem encolher, melhor fator, ECE no melhor fator).
 
-    A taxa-base sai da PRÓPRIA curva (média de `realizado` ponderada por
-    `n`), e não de um campo ao lado, para a conta ser autossuficiente e
-    consistente com o que ela mede.
+    A base é a MESMA do backtest (`BASE_DO_ENCOLHIMENTO` = 0,5), não a
+    taxa realizada da própria curva. O fator que sai daqui alimenta
+    `--fator-de-encolhimento`, que encolhe para 0,5 — otimizar contra
+    outra base recomendaria um fator para uma transformação que o
+    backtest nunca vai aplicar. E encolher para a taxa realizada do
+    próprio período seria resgate in-sample: qualquer curva "calibra"
+    quando puxada para a média que ela mesma realizou.
 
     O preditor constante seria RESGATADO por esta conta se ela rodasse
-    nele: encolher uma constante em direção à taxa-base produz a taxa-base,
-    que "acerta" por definição. Por isso a varredura exige o mesmo mínimo
-    de faixas ocupadas que torna um balde avaliável — sem estrutura na
-    curva, ela devolve `None` em vez de um número que parece aprovação.
+    nele com taxa-base perto de 0,5: encolher uma constante para 0,5
+    produz 0,5, que "acerta" sempre que o mercado fica meio a meio. Por
+    isso a varredura exige o mesmo mínimo de faixas ocupadas que torna um
+    balde avaliável — sem estrutura na curva, ela devolve `None` em vez
+    de um número que parece aprovação.
+
+    O fator varre (0, 1] inteiro, no passo de 0,01: uma curva que precise
+    de encolhimento agressivo (fator ~0,05) existe — é o preditor com
+    ordem certa e escala absurda — e parar a busca em 0,30 imprimiria
+    "continua reprovando" para um modelo que um fator menor salvaria.
     """
     pares = [
         (celula.get("n") or 0, celula.get("realizado"))
@@ -540,15 +577,14 @@ def varredura_de_encolhimento(
     total = sum(n for n, _ in pares)
     if not total or len(pares) < MINIMO_DE_FAIXAS:
         return None
-    base = sum(n * realizado for n, realizado in pares) / total
 
-    sem_encolher = ece_encolhido(curva, base, 1.0)
+    sem_encolher = ece_encolhido(curva, BASE_DO_ENCOLHIMENTO, 1.0)
     if sem_encolher is None:
         return None
     melhor_fator, melhor_ece = 1.0, sem_encolher
-    for centesimos in range(30, 101):
+    for centesimos in range(1, 101):
         fator = centesimos / 100
-        valor = ece_encolhido(curva, base, fator)
+        valor = ece_encolhido(curva, BASE_DO_ENCOLHIMENTO, fator)
         if valor is not None and valor < melhor_ece:
             melhor_fator, melhor_ece = fator, valor
     return (sem_encolher, melhor_fator, melhor_ece)

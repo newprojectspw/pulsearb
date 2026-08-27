@@ -10,6 +10,7 @@ Cada teste aqui trava uma leitura. Nenhum é decorativo.
 from __future__ import annotations
 
 import importlib.util
+import typing
 from pathlib import Path
 
 import pytest
@@ -306,12 +307,26 @@ class TestDivergenciaDecomposta:
         relatorio["integridade"]["divergencia_topo_book"] = campos
         return _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.9"]
 
+    QUAIS_INVALIDAM: typing.ClassVar[dict[str, bool]] = {
+        "vazio_desde_o_snapshot": False,
+        "esvaziado_por_delta": False,
+        "sem_snapshot": True,
+        "apos_perda": True,
+    }
+
     def test_o_dia_24_passa_na_populacao_que_invalida(self):
         criterio = self._com_divergencia(
             taxa=0.028168,
             comparacoes=372_162_674,
             com_magnitude_finita=759_621,
             com_lado_vazio=9_723_487,
+            lado_vazio={
+                "por_causa": {
+                    "vazio_desde_o_snapshot": 6_000_000,
+                    "esvaziado_por_delta": 3_723_487,
+                },
+                "quais_invalidam": self.QUAIS_INVALIDAM,
+            },
         )
 
         assert criterio.veredito == PASSA
@@ -319,6 +334,44 @@ class TestDivergenciaDecomposta:
         # A agregada nao some: fica impressa ao lado para ninguem achar
         # que o numero foi varrido para baixo do tapete.
         assert "2.82%" in criterio.medido
+
+    def test_causa_invalidante_ou_nao_classificada_conta_contra(self):
+        """A salvaguarda da emenda, no código e não só no papel.
+
+        `sem_snapshot` é livro furado de verdade (o §2c marca True) e uma
+        causa desconhecida não foi classificada — nenhuma das duas pode
+        pegar carona no desconto do lado vazio. Achado em review: sem
+        isto, a decomposição inocentava o lado vazio POR CATEGORIA, não
+        por classificação.
+        """
+        criterio = self._com_divergencia(
+            taxa=0.03,
+            comparacoes=1_000_000,
+            com_magnitude_finita=2_000,
+            com_lado_vazio=28_000,
+            lado_vazio={
+                "por_causa": {
+                    "vazio_desde_o_snapshot": 10_000,
+                    "sem_snapshot": 12_000,
+                    "causa_nova_sem_classificacao": 6_000,
+                },
+                "quais_invalidam": self.QUAIS_INVALIDAM,
+            },
+        )
+        # julgada = (2_000 deslocadas + 18_000 nao inocentadas) / 1M = 2%
+        assert criterio.veredito == REPROVA
+        assert "nao inocentado" in criterio.medido
+
+    def test_lado_vazio_sem_classificacao_conta_todo_contra(self):
+        # Relatorio com decomposicao mas sem o bloco `lado_vazio`: nada
+        # foi inocentado por nome, entao tudo conta contra ate classificar.
+        criterio = self._com_divergencia(
+            taxa=0.028168,
+            comparacoes=372_162_674,
+            com_magnitude_finita=759_621,
+            com_lado_vazio=9_723_487,
+        )
+        assert criterio.veredito == REPROVA
 
     def test_topo_deslocado_acima_de_1pct_reprova_mesmo_decomposto(self):
         criterio = self._com_divergencia(
@@ -378,3 +431,43 @@ class TestVarreduraDeEncolhimento:
 
     def test_curva_vazia_devolve_none(self):
         assert resumo_m2.varredura_de_encolhimento({}) is None
+
+    def test_fator_agressivo_abaixo_de_030_e_encontrado(self):
+        """Achado em review: a busca parava em 0,30.
+
+        Ordem certa com escala absurda pede fator ~0,05; a varredura
+        antiga imprimia "continua reprovando" para um modelo que um fator
+        menor salvaria — desencorajando exatamente o experimento que o
+        bloco existe para motivar.
+        """
+        curva = {
+            "a": {"n": 1000, "previsto": 0.1, "realizado": 0.48},
+            "b": {"n": 1000, "previsto": 0.5, "realizado": 0.50},
+            "c": {"n": 1000, "previsto": 0.9, "realizado": 0.52},
+        }
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        assert fator < 0.30
+        assert com < 0.05
+
+    def test_a_base_e_a_do_backtest_e_nao_a_taxa_realizada(self):
+        """Achado em review: a base era a média realizada da própria curva.
+
+        Duas doenças numa: o fator recomendado alimentava
+        `--fator-de-encolhimento`, que encolhe para 0,5 — otimizava-se uma
+        transformação que o backtest nunca aplica; e puxar para a média
+        que o próprio período realizou é resgate in-sample — TODA curva
+        "calibra" contra a sua própria média. Uma curva com realizado
+        ~0,70 em todas as faixas não pode sair daqui com ECE ~0.
+        """
+        assert resumo_m2.BASE_DO_ENCOLHIMENTO == pytest.approx(0.5)
+
+        curva = {
+            "a": {"n": 1000, "previsto": 0.2, "realizado": 0.70},
+            "b": {"n": 1000, "previsto": 0.5, "realizado": 0.70},
+            "c": {"n": 1000, "previsto": 0.8, "realizado": 0.70},
+        }
+        _sem, _fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        # Com a base do backtest (0,5) nenhum fator alcanca 0,70 em todas
+        # as faixas; com a base antiga (media = 0,70) o ECE despencava
+        # para ~0 — a aprovacao fabricada que este teste proibe.
+        assert com > 0.05
