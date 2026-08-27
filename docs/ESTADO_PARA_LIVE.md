@@ -1,13 +1,20 @@
 # ESTADO — o que falta para operar com dinheiro real
 
-**Semáforo de hoje: 🟡 AMARELO** — o M2 chegou ao veredito. O TAKER passa em
-**4 dos 5** critérios e reprova só no 1.5, que é **teto de capacidade** e não
-de borda. O MAKER reprova, e por um motivo que nenhum ajuste resolve: 594 das
-599 janelas não têm pool de reward.
+**Semáforo de hoje: 🔴 VERMELHO** — o segundo veredito, sobre 24 h de
+captação impecável, **derrubou o primeiro**. O TAKER passava em 4 dos 5
+critérios com +102,92 USDC; no dia 24 ele mede **−53,28 USDC** e reprova em
+três (1.1, 1.4, 1.5). O MAKER segue reprovando em 1.9 e 1.10. Nenhuma das
+duas rotas sustenta ir a dinheiro real hoje.
 
-Atualizado: 2026-08-23 · fonte dos números: **20 horas** de gravação real de
-2026-08-23 (00:00 a 20:00 UTC, hora 01:00 excluída), 568 trades
-(`relatorios/M2_VEREDITO.json`)
+Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
+exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
+ligar o LIVE com a estratégia taker atual.
+
+Atualizado: 2026-08-26 · fonte dos números: **24 horas** de gravação real de
+2026-08-24, 695 trades, `pior_fracao_coberta 1,0` e 0 silêncios
+(`relatorios/M2_24AGO.json`). O veredito anterior, de 20 h com 837 s de
+silêncio e 42% dos snapshots descartados, está preservado em
+`docs/VEREDITO_M2.md` para comparação.
 
 > Como ler: **✅** passou com dado real · **❌** medido e reprovado ·
 > **⏳** sem amostra suficiente · **⬜** não existe / não começou.
