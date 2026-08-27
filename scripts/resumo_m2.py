@@ -54,6 +54,8 @@ MARKOUT_MINIMO_CENTAVOS = -0.5
 HORAS_MINIMAS_DE_AMOSTRA = 20.0
 DIVERGENCIA_MAXIMA = 0.01
 FATOR_DE_DESCONTO_PESSIMISTA = "0.3"
+SUFIXO_USDC = " USDC"
+NOME_DA_CONTA_FECHADA = "Conta fechada do maker"
 
 PASSA = "PASSA"
 REPROVA = "REPROVA"
@@ -225,7 +227,7 @@ def criterios_do_taker(relatorio: dict[str, Any]) -> list[Criterio]:
     pnl600 = _fundo(relatorio, "sensibilidade_latencia", "600ms", "pnl_liquido_usdc")
     return [
         Criterio(
-            "1.1", "PnL liquido @300ms", "positivo", _numero(pnl300, " USDC"),
+            "1.1", "PnL liquido @300ms", "positivo", _numero(pnl300, SUFIXO_USDC),
             _julgar(None if pnl300 is None else pnl300 > 0),
             "backtest.resumo.pnl_liquido_usdc",
         ),
@@ -236,7 +238,7 @@ def criterios_do_taker(relatorio: dict[str, Any]) -> list[Criterio]:
         ),
         _criterio_de_calibracao(backtest),
         Criterio(
-            "1.4", "PnL liquido @600ms", "positivo", _numero(pnl600, " USDC"),
+            "1.4", "PnL liquido @600ms", "positivo", _numero(pnl600, SUFIXO_USDC),
             _julgar(None if pnl600 is None else pnl600 > 0),
             "sensibilidade_latencia.600ms.pnl_liquido_usdc",
         ),
@@ -258,12 +260,12 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     conta = rota_maker.get("conta_fechada") or {}
     falta = conta.get("o_que_falta_para_fechar")
     if falta is None:
-        return Criterio("1.6", "Conta fechada do maker", exigido,
+        return Criterio("1.6", NOME_DA_CONTA_FECHADA, exigido,
                         "bloco ausente no relatorio", NAO_AVALIAVEL, campo)
     if falta:
         termos = ", ".join(str(t).split(":", 1)[0] for t in falta)
         return Criterio(
-            "1.6", "Conta fechada do maker", exigido,
+            "1.6", NOME_DA_CONTA_FECHADA, exigido,
             f"conta NAO fechada: faltam {len(falta)} termos ({termos})",
             NAO_AVALIAVEL, campo,
         )
@@ -276,14 +278,14 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     medidos = [v for v in valores if isinstance(v, int | float)]
     if not medidos:
         return Criterio(
-            "1.6", "Conta fechada do maker", exigido,
+            "1.6", NOME_DA_CONTA_FECHADA, exigido,
             f"sem celula no fator {FATOR_DE_DESCONTO_PESSIMISTA}",
             NAO_AVALIAVEL,
             f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
         )
     return Criterio(
-        "1.6", "Conta fechada do maker", exigido,
-        _numero(max(medidos), " USDC"), _julgar(max(medidos) > 0),
+        "1.6", NOME_DA_CONTA_FECHADA, exigido,
+        _numero(max(medidos), SUFIXO_USDC), _julgar(max(medidos) > 0),
         f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
     )
 
