@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import signal
 import sys
+from itertools import pairwise
 from typing import Any, NamedTuple
 
 from pulsearb.backtest.__main__ import (
@@ -290,14 +291,34 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     )
 
 
-def _melhor_markout(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
+def _markout_representativo(
+    rota_maker: dict[str, Any],
+) -> tuple[str, float, int] | None:
+    """O recorte que RESPONDE, não o que agrada.
+
+    O critério 1.7 pede "no p50 de pelo menos um recorte", e a leitura
+    ingênua disso — pegar o melhor número da tabela — é uma armadilha de
+    comparações múltiplas. A tabela tem `total` ao lado de recortes por
+    duração e por HORA DO DIA: são duas dezenas de células, e o máximo entre
+    elas é ruído por construção. A primeira rodada com esta função escolheu
+    `hora_utc=01` com markout de +0,88 centavo — markout POSITIVO, isto é,
+    lucro de adverse selection, que não existe: era uma célula pequena.
+
+    Então a ordem é: `total` quando houver, e senão a célula com a MAIOR
+    amostra. Nunca a mais favorável. E o `n` sai impresso junto, porque é
+    ele que permite ao leitor desconfiar sem abrir o JSON.
+    """
     tabela = _fundo(rota_maker, "markout", "markout_centavos_por_share") or {}
-    melhores: list[tuple[str, float]] = []
+    celulas: list[tuple[str, float, int]] = []
     for recorte, horizontes in tabela.items():
-        media = _fundo(horizontes or {}, "5s", "media")
+        cinco_s = _fundo(horizontes or {}, "5s") or {}
+        media = cinco_s.get("media")
         if isinstance(media, int | float):
-            melhores.append((recorte, float(media)))
-    return max(melhores, key=lambda par: par[1]) if melhores else None
+            celulas.append((recorte, float(media), int(cinco_s.get("n") or 0)))
+    if not celulas:
+        return None
+    total = next((celula for celula in celulas if celula[0] == "total"), None)
+    return total or max(celulas, key=lambda celula: celula[2])
 
 
 def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
@@ -312,7 +333,7 @@ def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
 
 def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
     rota = relatorio.get("rota_maker") or {}
-    markout = _melhor_markout(rota)
+    markout = _markout_representativo(rota)
     amostra = _melhor_amostra(rota)
     divergencia = _fundo(relatorio, "integridade", "divergencia_topo_book", "taxa")
     return [
@@ -321,8 +342,11 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
             "1.7", "Markout 5s",
             f">= {MARKOUT_MINIMO_CENTAVOS:g} centavo/share em >= 1 recorte",
             # O criterio fala em p50; o relatorio traz `media`. Dizer qual
-            # estatistica saiu evita comparar duas coisas diferentes depois.
-            f"{markout[1]:g} (media) no recorte {markout[0]}" if markout
+            # estatistica saiu, e sobre quantas execucoes, evita comparar
+            # duas coisas diferentes depois.
+            f"{markout[1]:g} (media de {markout[2]} execucoes) "
+            f"no recorte {markout[0]}"
+            if markout
             else "sem recorte com markout de 5s",
             _julgar(None if markout is None else markout[1] >= MARKOUT_MINIMO_CENTAVOS),
             "rota_maker.markout.markout_centavos_por_share[*].5s.media",
@@ -354,6 +378,121 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
             "rota_maker.rewards.hipoteses (fato externo ao relatorio)",
         ),
     ]
+
+
+def _balde_do_diagnostico(backtest: dict[str, Any]) -> tuple[str, dict] | None:
+    """O balde que sustenta o critério 1.3 — o mesmo que ele escolheu.
+
+    Diagnosticar um balde diferente do que decidiu o veredito produziria uma
+    explicação para um número que ninguém leu.
+    """
+    calibracao = backtest.get("calibracao") or {}
+    avaliaveis = {
+        balde: dados
+        for balde, dados in calibracao.items()
+        if dados.get("calibracao_avaliavel")
+    }
+    if not avaliaveis:
+        return None
+    return min(
+        avaliaveis.items(),
+        key=lambda par: abs(par[1].get("erro_de_confiabilidade") or 1.0),
+    )
+
+
+def leitura_do_vies(curva: dict[str, Any]) -> str:
+    """A frase que separa "conserta encolhendo" de "troca o preditor".
+
+    A pergunta acionável não é o sinal do viés médio: é se o erro tem ORDEM.
+    Erro que cresce com a probabilidade prevista é excesso de confiança, e
+    excesso de confiança tem conserto de uma linha — encolher a previsão em
+    direção à taxa-base. Erro sem ordem não tem: qualquer encolhimento que
+    acerte uma faixa piora outra, e o problema está no preditor.
+
+    Reportar só "MISTO" quando há 3 faixas otimistas e 1 pessimista esconde
+    exatamente o caso mais comum e mais tratável, que é o erro monótono
+    passando pelo zero.
+    """
+    celulas = [
+        (celula.get("previsto"), celula.get("erro"))
+        for celula in curva.values()
+        if isinstance(celula.get("erro"), int | float)
+        and isinstance(celula.get("previsto"), int | float)
+        and (celula.get("n") or 0) > 0
+    ]
+    if not celulas:
+        return "sem faixa com amostra"
+    celulas.sort()
+    erros = [erro for _previsto, erro in celulas]
+    acima = sum(1 for erro in erros if erro > 0)
+    abaixo = sum(1 for erro in erros if erro < 0)
+
+    crescente = all(a <= b for a, b in pairwise(erros))
+    if crescente and len(erros) > 1 and erros[-1] > erros[0]:
+        return (
+            f"OTIMISTA CRESCENTE: o erro sobe de {erros[0]:+.4f} a "
+            f"{erros[-1]:+.4f} conforme a confianca sobe. Encolher a previsao "
+            "em direcao a taxa-base corrige."
+        )
+    if acima and abaixo:
+        return (
+            f"MISTO e SEM ORDEM ({acima} faixa(s) otimista(s), {abaixo} "
+            "pessimista(s)) — nao ha encolhimento que acerte todas"
+        )
+    if acima:
+        return f"OTIMISTA nas {acima} faixa(s) com amostra"
+    if abaixo:
+        return f"PESSIMISTA nas {abaixo} faixa(s) com amostra"
+    return "sem viés: previsto igual ao realizado em todas as faixas"
+
+
+def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
+    """POR QUE a calibração falha, e não só QUE ela falha.
+
+    "Não calibrado" não diz o que consertar. A curva de confiabilidade diz:
+    se o previsto passa do realizado nas faixas altas, o modelo é otimista
+    onde aposta forte, e o conserto é encolher a confiança — não trocar de
+    sinal. Se o viés troca de sentido entre faixas, não há correção monótona
+    possível e o problema é o preditor, não a escala.
+
+    Impresso sempre que houver balde avaliável, inclusive quando o 1.3 passa:
+    passar com viés sistemático é informação, não silêncio.
+    """
+    escolhido = _balde_do_diagnostico(relatorio.get("backtest") or {})
+    if escolhido is None:
+        return
+    balde, dados = escolhido
+    curva = dados.get("curva_de_confiabilidade") or {}
+    if not curva:
+        return
+
+    print("=" * 74)
+    print(f"POR QUE A CALIBRACAO DA ESSE NUMERO  (balde {balde})")
+    print("=" * 74)
+    print(f"{'faixa':<14}{'n':>8}{'previsto':>11}{'realizado':>11}{'erro':>10}")
+    soma_pesada = 0.0
+    total = 0
+    for faixa, celula in sorted(curva.items()):
+        n = int(celula.get("n") or 0)
+        erro = celula.get("erro")
+        print(
+            f"{faixa:<14}{n:>8}"
+            f"{_numero(celula.get('previsto')):>11}"
+            f"{_numero(celula.get('realizado')):>11}"
+            f"{_numero(erro):>10}"
+        )
+        if isinstance(erro, int | float) and n:
+            soma_pesada += erro * n
+            total += n
+    vies = soma_pesada / total if total else 0.0
+    print()
+    print(f"  vies medio ponderado: {vies:+.4f}  {leitura_do_vies(curva)}")
+    print(
+        "  Erro = previsto - realizado. Erro que CRESCE com a confianca se\n"
+        "  corrige encolhendo a previsao em direcao a taxa-base; erro sem\n"
+        "  ordem e defeito do preditor, nao de escala."
+    )
+    print()
 
 
 def _imprimir(rotulo: str, valor: Any) -> None:
@@ -462,6 +601,7 @@ def main() -> None:
         criterios_do_taker(relatorio),
         "TAKER VIAVEL exige as CINCO",
     )
+    _imprimir_diagnostico_da_calibracao(relatorio)
     _imprimir_criterios(
         "OS 5 CRITERIOS DO MAKER",
         criterios_do_maker(relatorio),

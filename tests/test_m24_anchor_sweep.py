@@ -15,7 +15,9 @@ from pulsearb.analysis.anchor_sweep import (
     JanelaResolvida,
     StreamE18,
     _como_intervalos,
+    _consistente,
     _e18_str,
+    _folga_relativa_ppb,
     varrer,
 )
 from pulsearb.backtest.__main__ import _e18_do_payload
@@ -96,12 +98,22 @@ def test_grade_tau_phi_reporta_melhor_celula():
     assert len(saida["grade_tau_phi"]["top"]) >= 1
 
 
-def test_decisao_e_inteira_um_wei_decide():
-    """O caso que float64 não enxerga: diferença de 1 na escala 1e18.
+def test_um_wei_e_visto_pela_aritmetica_e_ignorado_pela_inferencia():
+    """Duas afirmações que parecem uma só, e o M2.11 as separou.
 
-    Em ~2096 (a falha real de ETH), 1 wei é a 21ª casa relativa — float64
-    colapsa os dois lados no mesmo número e a desigualdade viraria empate.
-    A varredura tem de ver o Down com gap de 1 wei como Down.
+    ARITMÉTICA (M2.4, inalterado): 1 wei em ~2096 é a 21ª casa relativa;
+    float64 colapsa os dois lados no mesmo número e a desigualdade viraria
+    empate. A comparação em inteiros VÊ o Down, e continua vendo — é o que
+    `_consistente` devolve no primeiro campo.
+
+    INFERÊNCIA (M2.11): ver não é o mesmo que servir de evidência. Uma folga
+    de 4,8e-22 não distingue "esta é a âncora" de "a série que liquida
+    arredonda diferente da nossa" — nenhuma gravação carrega essa precisão.
+    Então a janela sai do denominador em vez de decidir o τ.
+
+    Antes deste ciclo o teste exigia `curva["0"] == 1.0`, tratando as duas
+    como a mesma coisa. A troca está registrada aqui de propósito: quem vier
+    depois vê a decisão, e não uma asserção que alguém afrouxou.
     """
     preco = 2096 * E18
     valores = []
@@ -116,10 +128,21 @@ def test_decisao_e_inteira_um_wei_decide():
         fechamento_ms=BASE_MS + 300_000,
         resolveu_up=False,   # final = preco−1 < âncora = preco ⇒ Down
     )
+    # A aritmética: o Down de 1 wei é visto, sem colapsar em empate.
+    consistente, empate, indeterminada = _consistente(False, preco - 1, 1, preco)
+    assert consistente
+    assert not empate
+    assert _folga_relativa_ppb(preco - 1, 1, preco) == 0  # < 1 ppb, nao negativo
+
+    # A inferência: 4,8e-22 não sustenta veredito nenhum.
+    assert indeterminada
     saida = varrer([janela], {"eth": valores})
     fino = saida["final_stream_no_fechamento"]
-    # τ=0 (âncora = preco) explica o Down por exatamente 1 wei
-    assert fino["curva"]["0"] == 1.0
+    assert fino["indeterminadas_em_tau"]["0"] == 1
+    assert fino["melhores_tau"][0]["avaliadas"] == 0
+    # E o principal: não vira discordante. Se virasse, o alarme voltaria
+    # pela porta dos fundos.
+    assert saida["discordantes_em_tau_verificado"] == []
 
 
 def test_empate_exato_resolve_up_e_e_contado():

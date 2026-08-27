@@ -142,8 +142,27 @@ class RiskSettings(BaseModel):
     #: arrisca 0,97 para ganhar 0,03.
     preco_minimo: float = 0.05
     preco_maximo: float = 0.95
+    #: Sequencia de perdas que dispara a pausa. Nao e superticao sobre
+    #: "maré": e o menor sinal barato de que o modelo parou de valer para o
+    #: regime atual. Quatro seguidas com hit rate de 0,59 tem probabilidade
+    #: de ~2,8% de acontecer por acaso — raro o bastante para investigar,
+    #: comum o bastante para nao travar o bot a semana inteira.
+    perdas_seguidas_para_pausa: int = 4
+    #: Quanto dura a pausa. Uma hora cobre a janela mais longa (4h nao, mas
+    #: as de 5m/15m/1h sim) e devolve o bot ao mercado no mesmo dia.
+    pausa_apos_sequencia_s: float = 3600.0
+    #: Spread acima do qual nao se opera. NAO e chute: o criterio 1.1 exige
+    #: edge >= 0,02, e o taker paga meio spread contra o meio do livro. Com
+    #: spread de 0,04 o custo de atravessar iguala o edge exigido, e o trade
+    #: nao pode ganhar por construcao.
+    spread_maximo: float = 0.04
     #: Onde o registro do dia mora. Precisa sobreviver a reinicio.
     caminho_do_registro: str = "data/risco/registro_do_dia.json"
+    #: A chave de emergencia. Enquanto este arquivo existir, nenhuma ordem
+    #: passa. E arquivo, e nao flag, porque tem de poder ser acionada por
+    #: alguem que nao consegue falar com o processo — inclusive por `touch`
+    #: numa sessao ssh com o bot travado.
+    caminho_do_kill: str = "data/risco/KILL"
 
 
 class Settings(BaseSettings):

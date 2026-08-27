@@ -36,11 +36,11 @@ Isto fecha o item 2.3 do M3.
 |---|---|---|---|---|---|
 | 1.1 | PnL líquido @300 ms | positivo | +102,9227 | **−53,2777** | ❌ |
 | 1.2 | Trades | ≥ 200 | 568 | **695** | ✅ |
-| 1.3 | Erro de calibração | < 0,05 em ≥ 1 balde AVALIÁVEL | 0,0067 | **não lido** — ver abaixo | ⚠️ |
+| 1.3 | Erro de calibração | < 0,05 em ≥ 1 balde AVALIÁVEL | 0,0067 (campo errado) | **0,0694** (balde <30 s, 20 faixas) | ❌ |
 | 1.4 | PnL líquido @600 ms | positivo | +101,1759 | **−54,3953** | ❌ |
 | 1.5 | Profundidade p50 3 ticks | ≥ 200 USDC | 87,8 / 41,8 / 31,3 / 35,7 | **128,0 / 50,0 / 28,7 / 27,0** | ❌ |
 
-O TAKER exige as CINCO. Reprova em três.
+O TAKER exige as CINCO. **Reprova em quatro.**
 
 **O sinal não inverteu por pouco: inverteu por 156 USDC**, com 127 trades a
 mais e captação melhor. A leitura honesta não é "o dia 24 foi ruim" — é que
@@ -49,6 +49,28 @@ com 837 s de silêncio e 42% dos snapshots jogados fora; buraco de livro não
 produz erro simétrico, porque o preenchimento simulado usa o último snapshot
 conhecido, que numa lacuna é sistematicamente melhor que o real. O critério
 1.1 foi escrito antes dos números justamente para este momento.
+
+### O 1.3 é o achado que explica os outros
+
+Lido no campo certo, o erro de confiabilidade do melhor balde avaliável é
+**0,0694** — 39% acima do limiar de 0,05, com 20 faixas ocupadas, então é
+avaliável de sobra. O modelo não está calibrado.
+
+E isso fecha a causa do PnL. A taxa do taker é **1,75 centavo/share**: para
+lucrar, a probabilidade verdadeira precisa exceder a paga em mais de 0,0175.
+O erro médio do próprio modelo, dentro das suas próprias faixas, é 0,0694 —
+**quatro vezes a barreira que ele precisa vencer**. Um preditor cujo ruído é
+4× o edge exigido não perde por causa do mercado, da latência ou da fila:
+perde porque não sabe o que diz saber.
+
+Duas evidências independentes concordam:
+
+- **A curva de threshold não tem tendência.** De 0,010 a 0,120 — doze vezes
+  mais exigente — o PnL passeia entre −41,96 e −53,47 sem direção. Se
+  houvesse sinal, filtrar mais forte teria de melhorar.
+- **A curva de latência também não.** −51,86 a 150 ms, −53,28 a 300, −54,40
+  a 600 e **−51,35 a 1000**. O pior caso de atraso é o segundo melhor
+  resultado. Borda que decai com latência não faz isso.
 
 **O 1.3 não foi medido em nenhum dos dois vereditos, e a causa é um defeito
 do resumo.** O `resumo_m2.py` imprimia o campo `erro` — exatamente o campo
@@ -64,8 +86,40 @@ O critério é a CONJUNÇÃO de `calibracao_avaliavel` (≥ 3 faixas com amostra
 com `erro_de_confiabilidade` abaixo do limiar. O resumo agora lê os dois e
 imprime, em cada linha, O CAMPO QUE LEU — ler o campo errado é erro
 silencioso por natureza, porque o número sai bem formatado de qualquer jeito.
-Rodar `scripts/resumo_m2.py` de novo sobre `M2_24AGO.json` fecha este item
-sem gravação nova.
+Rodar `scripts/resumo_m2.py` de novo sobre `M2_24AGO.json` fechou este item
+sem gravação nova — e o resultado foi ❌, não o ✅ que o campo errado sugeria.
+
+### O −53,28 é entrada múltipla, não inversão de sinal
+
+O mesmo relatório, lido por configuração:
+
+| configuração | PnL |
+|---|---|
+| `max_1_entradas` | **+2,7125** |
+| `max_3_entradas` | −98,3907 |
+| `max_10_entradas` | −221,6423 |
+| faixa `restrito` | **+2,7125** |
+| faixa `irrestrito` | −53,2777 |
+
+`max_1_entradas` e `restrito` dão o mesmo número até a quarta casa: são o
+mesmo conjunto de trades. A segunda entrada em diante é justamente a que cai
+fora da faixa calibrada. Confirma com 24 h o que o §2h já dizia — *a entrada
+múltipla é alavancagem, não edge*.
+
+Mas **+2,71 não resgata nada**: 640 trades para ganhar 2,71 USDC é 0,4
+centavo por trade, com drawdown máximo de −108,10. É ruído com sinal
+aleatório, e o critério 1.1 exige positivo com threshold ≥ 0,02, onde o
+número é −53,28.
+
+### Uma armadilha de comparações múltiplas, pega rodando
+
+O critério 1.7 pede markout "no p50 de pelo menos um recorte". A primeira
+versão do resumo corrigido leu isso como *o melhor número da tabela* e
+escolheu `hora_utc=01` com **+0,88 centavo** — markout POSITIVO, ou seja,
+lucro de adverse selection, que não existe. A tabela tem duas dezenas de
+células (total, durações, horas do dia): o máximo entre elas é ruído por
+construção. Passou a usar `total`, ou a célula de maior amostra, nunca a
+mais favorável — e a contagem de execuções sai impressa junto.
 
 O 1.5 melhorou onde importa (300 s: 87,8 → 128,0) e continua abaixo de 200
 em todas as durações. Com `threshold_mordeu: true` e 6 resultados distintos
@@ -378,6 +432,78 @@ relatório passou a trazer `discordantes_em_tau_verificado`: cada janela
 discordante com `folga_e18`, `empate_exato` e `idade_da_ancora_ms` — os três
 números que separam lixo residual de âncora errada. Sem isso a decisão acima
 teria sido palpite.
+
+### 2b-bis. Tolerância relativa no gate da âncora — LIMIAR ESCRITO ANTES DE RODAR
+
+**Data: 2026-08-27. Nenhuma gravação foi reprocessada antes desta seção
+existir** — este contêiner não tem as gravações, o que torna a ordem
+verificável em vez de prometida.
+
+**O problema.** O gate de "região de 100%" (`regiao_viavel_100pct`) é
+binário: uma única janela discordante, de qualquer magnitude, apaga um τ da
+região. No bloco de 5 h de 21/08, τ=0 explicou 151 de 152 janelas. A única
+discordante:
+
+| campo | valor |
+|---|---|
+| slug | `btc-updown-5m-1787354400` |
+| `folga_e18` | 162.138.224.116.891.648 |
+| âncora | 78.640,98 USD |
+| folga relativa | **2,06e-6** (2,06 ppm) |
+| `empate_exato` | false |
+| `idade_da_ancora_ms` | 0 |
+
+Dois centésimos de dólar num BTC de 78 mil, com âncora fresca. Não é mudança
+de fonte: mudança de fonte quebraria dezenas de janelas com folgas grandes, e
+a família rival (`final_media_60s`, 148 acertos) continuaria atrás — o que ela
+continua.
+
+**É o mesmo erro do M2.2.** Lá, um gate binário de 0,01 (um tick de mercado)
+reprovou 200 de 200 janelas por medir *corrida* e não *corrupção*; a correção
+foi o critério por conjunção de magnitude, persistência e fração. Aqui a
+correção análoga é tolerância **relativa**: uma folga infinitesimal não é
+evidência contra a âncora nem a favor — é ausência de evidência, e o lugar
+dela é fora do denominador.
+
+**Por que isto NÃO duplica o `LIMIAR_CONSISTENCIA` de 98%.** Os dois cobrem
+lixos diferentes, e é por isso que convivem:
+
+- O orçamento de 98% é **agregado** e cobre *lacuna de stream* e *empate
+  mal-carimbado*. Ele absorveria também uma mudança de regra que atingisse
+  1% das janelas — com folgas enormes — sem distinguir.
+- A tolerância relativa é **por janela** e cobre só *magnitude
+  infinitesimal*. Ela é incapaz de absorver folga grande, por construção.
+
+Um filtra por quantidade, o outro por tamanho. Trocar um pelo outro perderia
+metade da cobertura.
+
+**O limiar: 1e-5 (10 ppm).** A faixa defensável tem chão e teto medidos:
+
+- **Chão — 2,06e-6**: a folga observada, o único ruído real que temos.
+- **Teto — ~5,4e-5**: o que UM intervalo de amostragem do feed produz. O
+  TWAP-60 do btc anda ~4 USD/s e o p50 do intervalo é 1,061 s, então dois
+  pontos vizinhos do stream diferem por ~4,24 USD em 78.640 — 5,4e-5. Abaixo
+  disso, "a âncora está errada" é indistinguível de "amostramos o tick ao
+  lado", e o dado não tem como decidir.
+
+**1e-5 fica dentro da faixa**, 5× acima do ruído observado e 5× abaixo do
+limite de resolução do feed. Duas referências externas confirmam a folga:
+o próprio projeto chama de "janela apertada" 2 bps = 2e-4 em
+`engine/anchor.py` — 20× mais frouxo que este limiar — e uma âncora de fonte
+diferente daria folgas de 1e-3 ou mais, 100× acima.
+
+**O que o limiar NÃO pode fazer, e como saber se ele afrouxou.** Se as 4
+falhas de `final_media_60s` forem TODAS absorvidas, o limiar está frouxo
+demais — porque a `media_60s` é a família *reconhecidamente errada*, e um
+limiar que a promove a perfeita apagou a diferença que a varredura existe
+para medir. Isso é critério de rejeição, escrito aqui antes de existir
+resultado, e há teste travando o caso.
+
+**Como conferir depois com número.** A varredura passa a reportar
+`distribuicao_das_folgas_relativas` — histograma em décadas de ppb sobre
+TODAS as janelas avaliadas, não só as discordantes. Se a massa se acumular
+perto do limiar, ele está no lugar errado, e a revisão terá dado em vez de
+opinião.
 
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 

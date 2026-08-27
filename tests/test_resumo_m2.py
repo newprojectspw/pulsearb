@@ -168,3 +168,122 @@ class TestOsLimiares:
         # exatamente o erro que o critério 1.10 existe para impedir.
         criterio = _por_numero(resumo_m2.criterios_do_maker(_relatorio()))["1.10"]
         assert criterio.veredito == REPROVA
+
+
+class TestOMarkoutRepresentativo:
+    """A armadilha de comparações múltiplas, pega rodando de verdade.
+
+    A primeira versão pegava o melhor número da tabela de markout. Sobre o
+    relatório real ela escolheu `hora_utc=01` com **+0,88 centavo** — markout
+    positivo, ou seja, lucro de adverse selection, que não existe. Era uma
+    célula pequena entre duas dezenas.
+    """
+
+    def _com_tabela(self, tabela):
+        relatorio = _relatorio()
+        relatorio["rota_maker"]["markout"]["markout_centavos_por_share"] = tabela
+        return _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.7"]
+
+    def test_total_ganha_da_celula_mais_favoravel(self):
+        criterio = self._com_tabela(
+            {
+                "total": {"5s": {"media": -0.1974, "n": 246504}},
+                "hora_utc=01": {"5s": {"media": 0.8801, "n": 312}},
+            }
+        )
+        assert "-0.1974" in criterio.medido
+        assert "246504" in criterio.medido
+        assert "hora_utc=01" not in criterio.medido
+
+    def test_sem_total_vence_a_MAIOR_AMOSTRA_e_nao_a_melhor(self):
+        criterio = self._com_tabela(
+            {
+                "hora_utc=01": {"5s": {"media": 0.88, "n": 312}},
+                "300s": {"5s": {"media": -0.40, "n": 80000}},
+            }
+        )
+        assert "-0.4" in criterio.medido
+        assert "300s" in criterio.medido
+
+    def test_o_n_sai_impresso(self):
+        # É o que permite desconfiar da célula sem abrir o JSON.
+        criterio = self._com_tabela({"total": {"5s": {"media": -0.2, "n": 5}}})
+        assert "5 execucoes" in criterio.medido
+
+
+class TestLeituraDoVies:
+    """"Não calibrado" não diz o que consertar. A ordem do erro diz.
+
+    Erro que cresce com a probabilidade prevista é excesso de confiança, e
+    tem conserto de uma linha: encolher a previsão em direção à taxa-base.
+    Erro sem ordem não tem — qualquer encolhimento que acerte uma faixa
+    piora outra.
+    """
+
+    def test_erro_crescente_aponta_o_conserto(self):
+        # O caso do dia 24: -0,0105 a +0,1554, subindo com a confianca.
+        curva = {
+            "0.45-0.50": {"n": 120, "previsto": 0.4812, "erro": -0.0105},
+            "0.50-0.55": {"n": 340, "previsto": 0.5231, "erro": 0.0148},
+            "0.70-0.75": {"n": 55, "previsto": 0.7190, "erro": 0.1554},
+        }
+        leitura = resumo_m2.leitura_do_vies(curva)
+
+        assert "OTIMISTA CRESCENTE" in leitura
+        assert "taxa-base" in leitura
+
+    def test_misto_sem_ordem_nao_finge_ter_conserto(self):
+        curva = {
+            "0.45-0.50": {"n": 100, "previsto": 0.48, "erro": 0.09},
+            "0.50-0.55": {"n": 100, "previsto": 0.52, "erro": -0.07},
+            "0.70-0.75": {"n": 100, "previsto": 0.71, "erro": 0.11},
+        }
+        leitura = resumo_m2.leitura_do_vies(curva)
+
+        assert "SEM ORDEM" in leitura
+        assert "taxa-base" not in leitura
+
+    def test_tres_otimistas_e_uma_pessimista_EM_ORDEM_nao_viram_misto(self):
+        """A leitura que a primeira versão errava.
+
+        Contar sinais diria "MISTO", escondendo o caso mais comum e mais
+        tratável: o erro monótono que passa pelo zero.
+        """
+        curva = {
+            "a": {"n": 10, "previsto": 0.45, "erro": -0.01},
+            "b": {"n": 10, "previsto": 0.55, "erro": 0.02},
+            "c": {"n": 10, "previsto": 0.65, "erro": 0.05},
+            "d": {"n": 10, "previsto": 0.75, "erro": 0.09},
+        }
+        assert "CRESCENTE" in resumo_m2.leitura_do_vies(curva)
+
+    def test_faixa_sem_amostra_nao_entra(self):
+        curva = {
+            "vazia": {"n": 0, "previsto": 0.9, "erro": -9.0},
+            "cheia": {"n": 50, "previsto": 0.55, "erro": 0.03},
+        }
+        assert "OTIMISTA nas 1 faixa" in resumo_m2.leitura_do_vies(curva)
+
+    def test_curva_vazia_nao_derruba(self):
+        assert resumo_m2.leitura_do_vies({}) == "sem faixa com amostra"
+
+    def test_diagnostica_o_MESMO_balde_que_o_criterio_escolheu(self):
+        # Diagnosticar outro balde explicaria um numero que ninguem leu.
+        relatorio = _relatorio()
+        relatorio["backtest"]["calibracao"] = {
+            "ruim": {
+                "erro_de_confiabilidade": 0.20,
+                "faixas_ocupadas": 5,
+                "calibracao_avaliavel": True,
+            },
+            "melhor": {
+                "erro_de_confiabilidade": 0.01,
+                "faixas_ocupadas": 4,
+                "calibracao_avaliavel": True,
+            },
+        }
+        criterio = _por_numero(resumo_m2.criterios_do_taker(relatorio))["1.3"]
+        balde, _ = resumo_m2._balde_do_diagnostico(relatorio["backtest"])
+
+        assert balde == "melhor"
+        assert balde in criterio.medido

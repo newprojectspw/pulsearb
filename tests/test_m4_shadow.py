@@ -45,6 +45,11 @@ def _executar(sombra, ordem, **ajustes):
         "prob_prevista": 0.64,
         "seconds_left": 200.0,
         "ts_ns": 1_787_000_000_000_000_000,
+        # Livro sadio por padrão: spread de 0,02, dentro do teto de 0,04.
+        # Sem ele o portão do livro recusaria tudo e cada teste passaria a
+        # medir o portão errado.
+        "melhor_bid": 0.49,
+        "melhor_ask": 0.51,
     }
     return sombra.executar(ordem, **(padrao | ajustes))
 

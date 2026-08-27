@@ -27,6 +27,8 @@ auditável.
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,10 +53,22 @@ class MOTIVOS:
     FEED_PARADO = "feed_parado"
     PRECO_FORA_DA_FAIXA = "preco_fora_da_faixa"
     ORDEM_MAL_FORMADA = "ordem_mal_formada"
+    #: A chave de emergencia foi puxada por uma pessoa.
+    KILL_ACIONADO = "kill_acionado"
+    #: Sequencia de perdas em curso; o bot esta de molho ate a hora marcada.
+    PAUSA_POR_SEQUENCIA = "pausa_por_sequencia"
+    #: Atravessar o livro custaria mais que o edge exigido.
+    SPREAD_ANOMALO = "spread_anomalo"
+    #: Sem topo de livro nao da para saber o que a ordem custaria.
+    LIVRO_DESCONHECIDO = "livro_desconhecido"
 
     TODOS = frozenset(
         {
             MODO_NAO_OPERA,
+            KILL_ACIONADO,
+            PAUSA_POR_SEQUENCIA,
+            SPREAD_ANOMALO,
+            LIVRO_DESCONHECIDO,
             DISJUNTOR_ARMADO,
             STAKE_ACIMA_DO_TETO,
             JANELA_NO_TETO,
@@ -116,6 +130,10 @@ class RegistroDoDia:
     pnl_realizado_usdc: float = 0.0
     disjuntor_armado: bool = False
     disjuntor_motivo: str | None = None
+    #: Perdas seguidas ATE AGORA. Zera na primeira janela vencedora.
+    perdas_seguidas: int = 0
+    #: Ate quando o bot esta de molho, em epoch. `None` = nao esta.
+    pausado_ate_epoch: float | None = None
 
     @property
     def exposicao_total_usdc(self) -> float:
@@ -132,6 +150,8 @@ class RegistroDoDia:
             "pnl_realizado_usdc": self.pnl_realizado_usdc,
             "disjuntor_armado": self.disjuntor_armado,
             "disjuntor_motivo": self.disjuntor_motivo,
+            "perdas_seguidas": self.perdas_seguidas,
+            "pausado_ate_epoch": self.pausado_ate_epoch,
         }
 
     @classmethod
@@ -145,6 +165,12 @@ class RegistroDoDia:
             pnl_realizado_usdc=float(dado.get("pnl_realizado_usdc") or 0.0),
             disjuntor_armado=bool(dado.get("disjuntor_armado")),
             disjuntor_motivo=dado.get("disjuntor_motivo") or None,
+            perdas_seguidas=int(dado.get("perdas_seguidas") or 0),
+            pausado_ate_epoch=(
+                float(dado["pausado_ate_epoch"])
+                if dado.get("pausado_ate_epoch") is not None
+                else None
+            ),
         )
 
 
@@ -161,12 +187,16 @@ class PortaoDeRisco:
         modo: Mode,
         *,
         caminho_do_registro: Path | None = None,
+        caminho_do_kill: Path | None = None,
         hoje: str | None = None,
+        relogio: Callable[[], float] = time.time,
     ) -> None:
         self.settings = settings
         self.modo = modo
         self.caminho = caminho_do_registro
+        self.caminho_do_kill = caminho_do_kill
         self._hoje = hoje or _hoje_utc()
+        self._relogio = relogio
         self.registro = self._carregar()
 
     # ───────────────────────────────────────────────────────────── persistência
@@ -193,10 +223,16 @@ class PortaoDeRisco:
             # Dia virou: gasto e PnL zeram, mas o DISJUNTOR não. Se ele
             # estava armado, quem desarma é uma pessoa — a virada de data
             # não é revisão de nada.
+            # A pausa e a sequencia atravessam a meia-noite junto com o
+            # disjuntor, e pela mesma razao: o mercado nao sabe que o dia
+            # virou. Uma pausa de 1h iniciada 23:40 que evaporasse a
+            # 00:00 seria uma pausa de 20 minutos.
             return RegistroDoDia(
                 dia=self._hoje,
                 disjuntor_armado=registro.disjuntor_armado,
                 disjuntor_motivo=registro.disjuntor_motivo,
+                perdas_seguidas=registro.perdas_seguidas,
+                pausado_ate_epoch=registro.pausado_ate_epoch,
             )
         return registro
 
@@ -213,12 +249,75 @@ class PortaoDeRisco:
         # registro pela metade, e registro pela metade arma o disjuntor.
         temporario.replace(self.caminho)
 
+    def _kill_acionado(self) -> bool:
+        """Lido a CADA avaliação, nunca cacheado no construtor.
+
+        A chave existe para ser puxada com o bot rodando. Ler uma vez na
+        subida daria uma chave que só funciona antes de o bot precisar dela.
+
+        Erro de leitura conta como acionada: entre supor que ninguém puxou a
+        chave e supor que alguém puxou e o disco não deixa conferir, a
+        segunda é a que não perde dinheiro por engano — a mesma regra do
+        registro do dia ilegível.
+        """
+        if self.caminho_do_kill is None:
+            return False
+        try:
+            return self.caminho_do_kill.exists()
+        except OSError:
+            return True
+
+    def _portao_do_spread(
+        self, melhor_bid: float | None, melhor_ask: float | None
+    ) -> Decisao | None:
+        """Atravessar o livro pode custar mais que o edge que se exige dele.
+
+        O critério 1.1 do VEREDITO_M2 pede edge ≥ 0,02, e quem toma paga
+        meio spread contra o meio do livro. Com spread de 0,04 o custo de
+        atravessar iguala o edge exigido: o trade não pode ganhar, e não é
+        questão de sorte.
+
+        Livro ausente é recusa SEPARADA de livro largo. "Não sei o que isto
+        custaria" e "sei, e é caro demais" são estados diferentes, e um
+        SHADOW que os misture não diz se falta instrumentação ou liquidez.
+        """
+        if melhor_bid is None or melhor_ask is None:
+            return Decisao(
+                False,
+                MOTIVOS.LIVRO_DESCONHECIDO,
+                {"melhor_bid": melhor_bid, "melhor_ask": melhor_ask},
+            )
+        # ARREDONDAR ANTES DE COMPARAR, e não é preciosismo: `0.52 - 0.48`
+        # dá 0,040000000000000036 em float64, então um spread de exatamente
+        # um teto de 0,04 seria RECUSADO — e recusado só em alguns níveis de
+        # preço, porque o ruído depende dos operandos. Um portão que decide
+        # diferente em 0,52/0,48 e em 0,51/0,47 não tem contrato nenhum.
+        # Os preços chegam em tick de 0,01; seis casas são folga de sobra.
+        spread = round(melhor_ask - melhor_bid, 6)
+        if spread > self.settings.spread_maximo:
+            return Decisao(
+                False,
+                MOTIVOS.SPREAD_ANOMALO,
+                {"spread": spread, "teto": self.settings.spread_maximo},
+            )
+        return None
+
+    def _pausa_em_curso(self) -> float | None:
+        """Segundos restantes da pausa, ou `None` se não há pausa."""
+        ate = self.registro.pausado_ate_epoch
+        if ate is None:
+            return None
+        restante = ate - self._relogio()
+        return restante if restante > 0 else None
+
     # ───────────────────────────────────────────────────────────────── portões
     def avaliar(
         self,
         ordem: OrdemPretendida,
         *,
         feeds_saudaveis: bool,
+        melhor_bid: float | None,
+        melhor_ask: float | None,
     ) -> Decisao:
         """Esta ordem pode SER ENVIADA? Portão de modo mais todos os de risco.
 
@@ -236,13 +335,20 @@ class PortaoDeRisco:
                     {"shares": ordem.shares, "preco_limite": ordem.preco_limite},
                 )
             return Decisao(False, MOTIVOS.MODO_NAO_OPERA, {"modo": self.modo.value})
-        return self.avaliar_risco(ordem, feeds_saudaveis=feeds_saudaveis)
+        return self.avaliar_risco(
+            ordem,
+            feeds_saudaveis=feeds_saudaveis,
+            melhor_bid=melhor_bid,
+            melhor_ask=melhor_ask,
+        )
 
     def avaliar_risco(
         self,
         ordem: OrdemPretendida,
         *,
         feeds_saudaveis: bool,
+        melhor_bid: float | None,
+        melhor_ask: float | None,
     ) -> Decisao:
         """Os portões de RISCO, sem o portão de modo. Começa em não.
 
@@ -261,6 +367,13 @@ class PortaoDeRisco:
                 {"shares": ordem.shares, "preco_limite": ordem.preco_limite},
             )
 
+        # A chave de emergência vem antes de tudo que é automático: se uma
+        # pessoa puxou, a razão dela vale mais que qualquer conta nossa.
+        if self._kill_acionado():
+            return Decisao(
+                False, MOTIVOS.KILL_ACIONADO, {"arquivo": str(self.caminho_do_kill)}
+            )
+
         if self.registro.disjuntor_armado:
             return Decisao(
                 False,
@@ -268,8 +381,23 @@ class PortaoDeRisco:
                 {"motivo_do_disjuntor": self.registro.disjuntor_motivo},
             )
 
+        restante = self._pausa_em_curso()
+        if restante is not None:
+            return Decisao(
+                False,
+                MOTIVOS.PAUSA_POR_SEQUENCIA,
+                {
+                    "segundos_restantes": round(restante, 1),
+                    "perdas_que_dispararam": self.settings.perdas_seguidas_para_pausa,
+                },
+            )
+
         if not feeds_saudaveis:
             return Decisao(False, MOTIVOS.FEED_PARADO, {})
+
+        recusa_do_livro = self._portao_do_spread(melhor_bid, melhor_ask)
+        if recusa_do_livro is not None:
+            return recusa_do_livro
 
         if not (
             self.settings.preco_minimo <= ordem.preco_limite <= self.settings.preco_maximo
@@ -346,18 +474,56 @@ class PortaoDeRisco:
         self._gravar()
 
     def registrar_resolucao(self, slug: str, pnl_usdc: float) -> None:
-        """A janela fechou: libera a exposição e acumula o PnL do dia."""
+        """A janela fechou: libera a exposição, acumula o PnL, conta a sequência.
+
+        Empate (`pnl == 0`) não quebra a sequência nem a alimenta. Zerar nele
+        daria à taxa o poder de limpar o histórico de perdas: uma janela que
+        acerta o lado e devolve o lucro inteiro em taxa fecha em zero, e não
+        é evidência de que o modelo voltou a funcionar.
+        """
         self.registro.gasto_por_janela.pop(slug, None)
         self.registro.pnl_realizado_usdc += pnl_usdc
+
+        if pnl_usdc < 0:
+            self.registro.perdas_seguidas += 1
+        elif pnl_usdc > 0:
+            self.registro.perdas_seguidas = 0
+
         if self.registro.pnl_realizado_usdc <= -abs(
             self.settings.perda_max_diaria_usdc
         ):
+            # O disjuntor vence a pausa: ele gruda, ela expira. Armar os dois
+            # e deixar a pausa por cima faria a pausa parecer o motivo, e
+            # alguém esperaria uma hora por algo que exige decisão humana.
             self.armar_disjuntor(
                 f"perda do dia em {self.registro.pnl_realizado_usdc:.2f} USDC, "
                 f"teto {self.settings.perda_max_diaria_usdc:.2f}"
             )
-        else:
-            self._gravar()
+            return
+
+        if self.registro.perdas_seguidas >= self.settings.perdas_seguidas_para_pausa:
+            self._pausar()
+            return
+
+        self._gravar()
+
+    def _pausar(self) -> None:
+        """Põe o bot de molho e ZERA a sequência.
+
+        Zerar é deliberado: a pausa É a resposta àquela sequência. Mantê-la
+        faria toda perda posterior repausar sem evidência nova, e quatro
+        perdas seguidas viraria "uma perda por hora, para sempre".
+        """
+        self.registro.pausado_ate_epoch = (
+            self._relogio() + self.settings.pausa_apos_sequencia_s
+        )
+        self.registro.perdas_seguidas = 0
+        self._gravar()
+
+    def retomar(self) -> None:
+        """Encerra a pausa antes da hora. Só uma pessoa chama isto."""
+        self.registro.pausado_ate_epoch = None
+        self._gravar()
 
     def armar_disjuntor(self, motivo: str) -> None:
         """Trava tudo. NÃO desarma sozinho — nem no dia seguinte."""
