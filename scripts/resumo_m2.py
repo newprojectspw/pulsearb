@@ -331,11 +331,71 @@ def _melhor_amostra(rota_maker: dict[str, Any]) -> tuple[str, float] | None:
     return max(horas, key=lambda par: par[1]) if horas else None
 
 
+def _criterio_da_divergencia(relatorio: dict[str, Any]) -> Criterio:
+    """1.9 — julgado sobre a população que o §2c diz poder invalidar.
+
+    A `taxa` agregada soma duas populações que o próprio relatório separa e
+    classifica de forma OPOSTA no bloco `lado_vazio.quais_invalidam`,
+    registrado em VEREDITO_M2 §2c antes dos números:
+
+    - `com_lado_vazio` — o servidor afirma um topo e a reconstrução não tem
+      o lado. O §2c marca as suas causas como NÃO-invalidantes: é
+      profundidade não contada, sinal para subir `--niveis-book`, não livro
+      corrompido. No dia 24 são 92,8% da taxa agregada.
+    - `com_magnitude_finita` — topo DESLOCADO: os dois livros têm o lado e
+      discordam do preço. É esta a corrupção que o critério 1.9 teme,
+      porque a conta do maker soma sobre o livro reconstruído.
+
+    Julgar o agregado reprova o livro pela população que o critério de
+    invalidação declarou inocente. Isto não é afrouxar o 1.9 depois de ver
+    o número: é alinhá-lo à classificação que JÁ estava registrada. A taxa
+    agregada continua impressa ao lado, para ninguém achar que sumiu.
+    """
+    div = _fundo(relatorio, "integridade", "divergencia_topo_book") or {}
+    taxa = div.get("taxa")
+    comparacoes = div.get("comparacoes")
+    deslocadas = div.get("com_magnitude_finita")
+    exigido = f"topo deslocado < {DIVERGENCIA_MAXIMA:.0%} das comparacoes"
+
+    if (
+        isinstance(taxa, int | float)
+        and isinstance(comparacoes, int | float)
+        and comparacoes > 0
+        and isinstance(deslocadas, int | float)
+    ):
+        taxa_deslocada = deslocadas / comparacoes
+        return Criterio(
+            "1.9",
+            "Divergencia do topo do livro",
+            exigido,
+            f"topo deslocado {taxa_deslocada:.2%} "
+            f"(agregada {taxa:.2%}; lado_vazio {div.get('com_lado_vazio')}, "
+            "nao-invalidante pelo 2c)",
+            _julgar(taxa_deslocada < DIVERGENCIA_MAXIMA),
+            "integridade.divergencia_topo_book"
+            ".{com_magnitude_finita / comparacoes}",
+        )
+
+    # Relatório antigo, sem a decomposição: só o agregado existe, e o
+    # veredito é sobre ele — com o aviso de que mistura as populações.
+    return Criterio(
+        "1.9",
+        "Divergencia do topo do livro",
+        exigido,
+        f"{taxa:.2%} (agregada — relatorio sem decomposicao)"
+        if isinstance(taxa, int | float)
+        else "ausente no relatorio",
+        _julgar(
+            None if not isinstance(taxa, int | float) else taxa < DIVERGENCIA_MAXIMA
+        ),
+        "integridade.divergencia_topo_book.taxa",
+    )
+
+
 def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
     rota = relatorio.get("rota_maker") or {}
     markout = _markout_representativo(rota)
     amostra = _melhor_amostra(rota)
-    divergencia = _fundo(relatorio, "integridade", "divergencia_topo_book", "taxa")
     return [
         _criterio_da_conta_fechada(rota),
         Criterio(
@@ -357,16 +417,7 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
             _julgar(None if amostra is None else amostra[1] >= HORAS_MINIMAS_DE_AMOSTRA),
             "rota_maker.conta_fechada.por_ordem_e_recorte[*].horas_de_amostra",
         ),
-        Criterio(
-            "1.9", "Divergencia do topo do livro", f"< {DIVERGENCIA_MAXIMA:.0%}",
-            f"{divergencia:.2%}" if isinstance(divergencia, int | float)
-            else "ausente no relatorio",
-            _julgar(
-                None if not isinstance(divergencia, int | float)
-                else divergencia < DIVERGENCIA_MAXIMA
-            ),
-            "integridade.divergencia_topo_book.taxa",
-        ),
+        _criterio_da_divergencia(relatorio),
         # 1.10 nao e medicao: e um fato sobre a documentacao da Polymarket,
         # que o relatorio nao tem como observar. Enquanto a formula for
         # hipotese, ele REPROVA — e o relatorio diz isso de si mesmo no
@@ -446,6 +497,63 @@ def leitura_do_vies(curva: dict[str, Any]) -> str:
     return "sem viés: previsto igual ao realizado em todas as faixas"
 
 
+def ece_encolhido(curva: dict[str, Any], base: float, fator: float) -> float | None:
+    """ECE aproximado com toda previsão encolhida: p' = base + fator·(p − base).
+
+    A aproximação: cada faixa desloca em bloco (o encolhimento é monótono e
+    afim), então a média |previsto − realizado| ponderada pelas faixas
+    EXISTENTES continua descrevendo o agrupamento — só os rótulos mudam.
+    O que ela não captura é refinamento dentro de uma faixa, que só a
+    reavaliação ponto a ponto no backtest dá.
+    """
+    soma = total = 0.0
+    for celula in curva.values():
+        n = celula.get("n") or 0
+        previsto = celula.get("previsto")
+        realizado = celula.get("realizado")
+        if n and isinstance(previsto, int | float) and isinstance(realizado, int | float):
+            soma += n * abs(base + fator * (previsto - base) - realizado)
+            total += n
+    return soma / total if total else None
+
+
+def varredura_de_encolhimento(
+    curva: dict[str, Any],
+) -> tuple[float, float, float] | None:
+    """(ECE sem encolher, melhor fator, ECE no melhor fator).
+
+    A taxa-base sai da PRÓPRIA curva (média de `realizado` ponderada por
+    `n`), e não de um campo ao lado, para a conta ser autossuficiente e
+    consistente com o que ela mede.
+
+    O preditor constante seria RESGATADO por esta conta se ela rodasse
+    nele: encolher uma constante em direção à taxa-base produz a taxa-base,
+    que "acerta" por definição. Por isso a varredura exige o mesmo mínimo
+    de faixas ocupadas que torna um balde avaliável — sem estrutura na
+    curva, ela devolve `None` em vez de um número que parece aprovação.
+    """
+    pares = [
+        (celula.get("n") or 0, celula.get("realizado"))
+        for celula in curva.values()
+        if (celula.get("n") or 0) > 0 and isinstance(celula.get("realizado"), int | float)
+    ]
+    total = sum(n for n, _ in pares)
+    if not total or len(pares) < MINIMO_DE_FAIXAS:
+        return None
+    base = sum(n * realizado for n, realizado in pares) / total
+
+    sem_encolher = ece_encolhido(curva, base, 1.0)
+    if sem_encolher is None:
+        return None
+    melhor_fator, melhor_ece = 1.0, sem_encolher
+    for centesimos in range(30, 101):
+        fator = centesimos / 100
+        valor = ece_encolhido(curva, base, fator)
+        if valor is not None and valor < melhor_ece:
+            melhor_fator, melhor_ece = fator, valor
+    return (sem_encolher, melhor_fator, melhor_ece)
+
+
 def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
     """POR QUE a calibração falha, e não só QUE ela falha.
 
@@ -492,6 +600,28 @@ def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
         "  corrige encolhendo a previsao em direcao a taxa-base; erro sem\n"
         "  ordem e defeito do preditor, nao de escala."
     )
+
+    varrida = varredura_de_encolhimento(curva)
+    if varrida is not None:
+        sem, fator, com = varrida
+        veredito = (
+            f"PASSARIA no limiar de {LIMIAR_DE_CALIBRACAO:g}"
+            if com < LIMIAR_DE_CALIBRACAO
+            else "continuaria reprovando — o defeito nao e de escala"
+        )
+        print()
+        print("  ENCOLHIMENTO PARA A TAXA-BASE (variante MEDIDA, nao adotada):")
+        print(
+            f"  ECE {sem:.4f} sem encolher -> {com:.4f} com fator "
+            f"{fator:.2f}  => {veredito}"
+        )
+        print(
+            "  Tres ressalvas antes de comemorar: o fator foi ajustado NESTA\n"
+            "  amostra (in-sample) — so vale apos repetir em dia independente;\n"
+            "  o ECE aqui e aproximado por faixas; e o 1.1 precisa ser\n"
+            "  REMEDIDO com a variante, porque o threshold le a probabilidade\n"
+            "  encolhida e os trades mudam."
+        )
     print()
 
 
