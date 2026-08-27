@@ -4,6 +4,12 @@
 # costuma descobrir tarde.
 name: ci
 
+# O token do workflow so precisa LER o repositorio. Sem esta declaracao ele
+# nasce com escrita em tudo, e um passo comprometido (ou uma action de
+# terceiro) herdaria esse poder.
+permissions:
+  contents: read
+
 on:
   push:
     branches: ["main"]

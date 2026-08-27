@@ -1877,7 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
                 .run(integras, index.streams)
                 .to_dict()
                 for nome, fator in (
-                    ("sem_encolher", 1.0),
+                    ("sem_encolher", None),
                     ("encolhido", args.fator_de_encolhimento),
                 )
             },

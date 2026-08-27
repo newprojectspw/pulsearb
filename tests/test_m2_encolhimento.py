@@ -31,7 +31,7 @@ class TestAFuncao:
     def test_a_base_e_meio_e_nao_a_taxa_medida(self):
         # A taxa realizada do proprio periodo so se conhece DEPOIS dele:
         # usa-la na decisao seria olhar o futuro.
-        assert BASE_DO_ENCOLHIMENTO == 0.5
+        assert BASE_DO_ENCOLHIMENTO == pytest.approx(0.5)
 
     @pytest.mark.parametrize("fator", [0.0, -0.5, 1.01, 2.0])
     def test_fator_fora_de_zero_um_e_erro(self, fator):
@@ -104,13 +104,19 @@ class TestNoRunner:
         # 0,02: o gatilho tem de operar menos (ou nada).
         assert len(quase_constante.trades) <= len(cru.trades)
 
-    def test_fator_um_reproduz_o_cru_byte_a_byte(self, janelas_indexadas):
-        # `fator_de_encolhimento=1.0` e o default: se este teste quebrar, o
-        # ciclo mudou resultado de criterio pre-registrado sem dizer.
+    def test_none_reproduz_o_cru_byte_a_byte(self, janelas_indexadas):
+        """`None` e o default e significa DESLIGADO — o caminho nem roda.
+
+        Nao e `fator=1.0` de proposito: `0,5 + 1,0*(p - 0,5)` nao devolve
+        `p` bit a bit para todo float (a subtracao arredonda nos extremos), e
+        um "desligado" que passa pela formula mudaria resultado de criterio
+        pre-registrado por ruido de arredondamento. Se este teste quebrar, o
+        ciclo mudou o cru sem dizer.
+        """
         janelas, streams = janelas_indexadas
         a = BacktestRunner(BacktestConfig()).run(janelas, streams).to_dict()
         b = (
-            BacktestRunner(BacktestConfig(fator_de_encolhimento=1.0))
+            BacktestRunner(BacktestConfig(fator_de_encolhimento=None))
             .run(janelas, streams)
             .to_dict()
         )
@@ -142,7 +148,7 @@ class TestNoCLI:
 
         relatorio = json.loads((tmp_path / "r.json").read_text())
         bloco = relatorio["encolhimento"]
-        assert bloco["fator"] == 0.7
+        assert bloco["fator"] == pytest.approx(0.7)
         assert set(bloco["comparacao"]) == {"sem_encolher", "encolhido"}
         assert "in-sample" in bloco["nota"]
 

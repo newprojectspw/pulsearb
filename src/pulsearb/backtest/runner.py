@@ -203,12 +203,14 @@ class BacktestConfig:
     # viraria centenas de trades sobre o mesmo movimento — e o PnL somaria a
     # mesma aposta repetida como se fossem independentes.
     intervalo_min_entre_entradas_s: float = 30.0
-    # M2: correção de escala da calibração. 1.0 = identidade (o preditor
-    # cru). Um fator < 1 encolhe TODA probabilidade em direção a 0,5 ANTES
-    # de qualquer uso — inclusive da própria medição de calibração, para que
-    # o ECE reportado seja o do preditor encolhido de verdade, ponto a
-    # ponto, e não a aproximação por faixas do resumo.
-    fator_de_encolhimento: float = 1.0
+    # M2: correção de escala da calibração. `None` = desligado (o preditor
+    # cru) — e é `None`, não `1.0`, porque ligar/desligar por igualdade de
+    # ponto flutuante é o tipo de comparação que funciona até o dia em que o
+    # fator vem de uma conta. Um fator < 1 encolhe TODA probabilidade em
+    # direção a 0,5 ANTES de qualquer uso — inclusive da própria medição de
+    # calibração, para que o ECE reportado seja o do preditor encolhido de
+    # verdade, ponto a ponto, e não a aproximação por faixas do resumo.
+    fator_de_encolhimento: float | None = None
 
     def na_faixa(self, seconds_left: float) -> bool:
         """Este instante está na faixa de tempo restante autorizada?"""
@@ -298,7 +300,7 @@ class BacktestRunner:
             janela, stream, vol, twap
         ):
             est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
-            if cfg.fator_de_encolhimento != 1.0:
+            if cfg.fator_de_encolhimento is not None:
                 # ANTES da calibração e do edge, de propósito: encolher só o
                 # gatilho e medir a calibração no cru produziria um ECE que
                 # não descreve o preditor que operou.
