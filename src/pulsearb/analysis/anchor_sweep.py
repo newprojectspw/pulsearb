@@ -93,6 +93,38 @@ TWAP_JANELA_MS = 60_000
 
 E18 = 10**18
 
+# ─── M2.11: tolerância relativa, e por que ela não é afrouxamento ─────────
+#
+# O gate da região de 100% é binário: uma janela discordante, de qualquer
+# magnitude, apaga um τ. No bloco de 21/08 a única discordante de τ=0 errou
+# por 2,06e-6 — 0,16 USD num BTC de 78.640, com âncora fresca (idade 0 ms).
+#
+# Isso é o mesmo erro do M2.2, onde um gate binário de 0,01 reprovou 200 de
+# 200 janelas por medir CORRIDA e não CORRUPÇÃO. Folga infinitesimal não é
+# evidência contra a âncora nem a favor: é ausência de evidência, e o lugar
+# dela é FORA do denominador — não somada aos acertos, que inflaria a
+# consistência, nem aos erros, que a derrubaria.
+#
+# O limiar está justificado em VEREDITO_M2 §2b-bis, escrito ANTES de rodar.
+# Em resumo: 1e-5 fica 5x acima do ruído observado (2,06e-6) e 5x abaixo do
+# que UM intervalo de amostragem do feed produz (~5,4e-5 — o TWAP-60 do btc
+# anda ~4 USD/s e o p50 do intervalo é 1,061 s). Abaixo desse teto, "âncora
+# errada" é indistinguível de "amostramos o tick vizinho".
+#
+# NÃO substitui o `LIMIAR_CONSISTENCIA` de 98%: aquele é agregado e cobre
+# lacuna de stream e empate mal-carimbado; este é por janela e cobre só
+# magnitude. Um filtra por quantidade, o outro por tamanho.
+#
+# Numerador e denominador SEPARADOS porque a comparação é feita por
+# multiplicação cruzada, em inteiros. `folga/escala < 1/100000` vira
+# `folga * 100000 < escala`, sem divisão em ponto flutuante em lugar nenhum
+# — a mesma regra que vale para o resto do módulo.
+FOLGA_RELATIVA_NUM = 1
+FOLGA_RELATIVA_DEN = 100_000
+#: Resolução do histograma de folgas. Partes por bilhão dá 3 décadas abaixo
+#: do limiar, que é onde a massa deve estar se ele estiver no lugar certo.
+PPB = 1_000_000_000
+
 
 @dataclass(frozen=True, slots=True)
 class JanelaResolvida:
@@ -150,16 +182,48 @@ class StreamE18:
 
 def _consistente(
     resolveu_up: bool, soma_final: int, n_final: int, ancora: int
-) -> tuple[bool, bool]:
-    """(a desigualdade vale?, foi empate exato?) — tudo em inteiros.
+) -> tuple[bool, bool, bool]:
+    """(a desigualdade vale?, empate exato?, indeterminada?) — em inteiros.
 
     `soma_final ≥ ancora·n_final` ⇔ média ≥ âncora, sem dividir nunca.
     Empate exato resolve Up (API_NOTES 12.4), e é CONTADO: empates frequentes
     seriam sinal de âncora quantizada, o que por si é informação.
+
+    INDETERMINADA (M2.11) é a folga relativa abaixo de `FOLGA_RELATIVA_NUM /
+    FOLGA_RELATIVA_DEN`: a diferença existe, mas é pequena demais para
+    distinguir âncora errada de arredondamento entre a nossa série e a que
+    liquida. Quem chama tira essas janelas do denominador.
+
+    **Empate exato NÃO é indeterminado, e a exceção é deliberada.** Quando os
+    dois valores são idênticos não há arredondamento a discutir: a regra
+    documentada manda resolver Up, e a resolução observada ou confirma essa
+    regra ou a desmente. Marcar empate como indeterminado engoliria
+    justamente a evidência sobre o desempate, que `empates_exatos` existe
+    para expor.
     """
-    lado_up = soma_final >= ancora * n_final
-    empate = soma_final == ancora * n_final
-    return (lado_up == resolveu_up, empate)
+    escala = ancora * n_final
+    diferenca = soma_final - escala
+    lado_up = diferenca >= 0
+    empate = diferenca == 0
+    indeterminada = (
+        escala > 0
+        and not empate
+        and abs(diferenca) * FOLGA_RELATIVA_DEN < escala * FOLGA_RELATIVA_NUM
+    )
+    return (lado_up == resolveu_up, empate, indeterminada)
+
+
+def _folga_relativa_ppb(soma_final: int, n_final: int, ancora: int) -> int | None:
+    """Folga relativa em partes por bilhão, por divisão INTEIRA.
+
+    `None` quando a escala não é positiva — sem escala não há folga relativa,
+    e devolver zero ali diria "coladíssimo" onde a verdade é "não dá para
+    dizer".
+    """
+    escala = ancora * n_final
+    if escala <= 0:
+        return None
+    return abs(soma_final - escala) * PPB // escala
 
 
 def _distribuicao_no_span(
@@ -275,6 +339,11 @@ def varrer(
         "discordantes_em_tau_verificado": _discordantes_em_tau(
             elegiveis, TAU_VERIFICADO_S
         ),
+        # M2.11 item 4: o limiar de folga relativa so pode ser revisto com
+        # numero se a distribuicao das folgas estiver no relatorio.
+        "distribuicao_das_folgas_relativas": _distribuicao_das_folgas(
+            elegiveis, TAU_VERIFICADO_S
+        ),
         "nota": (
             "Comparações em inteiros na escala 1e18 do Chainlink; média por "
             "multiplicação cruzada, sem divisão; eixo do tempo = carimbo do "
@@ -292,32 +361,40 @@ def _varredura_fina(
     usar_media: bool,
 ) -> dict[str, Any]:
     curva: dict[str, float] = {}
-    detalhes: list[tuple[int, int, int, int]] = []  # (τ, ok, avaliadas, empates)
+    # (τ, ok, avaliadas, empates, indeterminadas)
+    detalhes: list[tuple[int, int, int, int, int]] = []
     for tau in taus:
-        ok = avaliadas = empates = 0
+        ok = avaliadas = empates = indeterminadas = 0
         for janela, stream, soma, n, final_stream in elegiveis:
             ancora = stream.em(janela.abertura_ms + tau * 1000)
             if ancora is None:
                 continue
             if usar_media:
-                consistente, empate = _consistente(
+                consistente, empate, indeterminada = _consistente(
                     janela.resolveu_up, soma, n, ancora
                 )
             else:
                 if final_stream is None:
                     continue
-                consistente, empate = _consistente(
+                consistente, empate, indeterminada = _consistente(
                     janela.resolveu_up, final_stream, 1, ancora
                 )
+            # M2.11: fora do denominador, não somada a nenhum dos dois lados.
+            if indeterminada:
+                indeterminadas += 1
+                continue
             avaliadas += 1
             ok += consistente
             empates += empate
         taxa = ok / avaliadas if avaliadas else 0.0
         curva[str(tau)] = round(taxa, 4)
-        detalhes.append((tau, ok, avaliadas, empates))
+        detalhes.append((tau, ok, avaliadas, empates, indeterminadas))
 
+    # A região de 100% ignora indeterminadas de graça: elas nunca entraram em
+    # `avaliadas`. É o item 3 do M2.11, e sai da contabilidade em vez de uma
+    # segunda regra que poderia divergir dela.
     perfeitos = [
-        tau for tau, ok, avaliadas, _ in detalhes if avaliadas and ok == avaliadas
+        tau for tau, ok, avaliadas, _, _ in detalhes if avaliadas and ok == avaliadas
     ]
     melhores = sorted(
         detalhes, key=lambda item: (item[1] / item[2] if item[2] else 0.0, -abs(item[0])),
@@ -333,9 +410,30 @@ def _varredura_fina(
                 "consistentes": ok,
                 "avaliadas": avaliadas,
                 "empates_exatos": empates,
+                "indeterminadas": indeterminadas,
             }
-            for tau, ok, avaliadas, empates in melhores
+            for tau, ok, avaliadas, empates, indeterminadas in melhores
         ],
+        "indeterminadas_em_tau": {
+            str(tau): indeterminadas
+            for tau, _ok, _av, _emp, indeterminadas in detalhes
+            if indeterminadas
+        },
+        # `curva` devolve 0.0 quando nada foi avaliado, e 0.0 ali significa
+        # "sem evidencia", nao "nao explica nenhuma". Quem precisa separar as
+        # duas leituras — o veredito — usa esta contagem.
+        "avaliadas_em_tau": {
+            str(tau): avaliadas for tau, _ok, avaliadas, _emp, _ind in detalhes
+        },
+        "nota_indeterminadas": (
+            "M2.11. Janela com folga relativa abaixo de "
+            f"{FOLGA_RELATIVA_NUM}/{FOLGA_RELATIVA_DEN} nao entra em "
+            "`avaliadas` nem em `consistentes`: a diferenca existe mas e "
+            "pequena demais para distinguir ancora errada de arredondamento. "
+            "Ausencia de evidencia nao e evidencia de nenhum dos dois lados. "
+            "Empate EXATO nao conta como indeterminado — ali a regra de "
+            "desempate esta sendo testada de verdade. Ver VEREDITO_M2 2b-bis."
+        ),
     }
 
 
@@ -358,7 +456,11 @@ def _grade_tau_phi(
                 final = stream.em(janela.fechamento_ms + phi * 1000)
                 if ancora is None or final is None:
                     continue
-                consistente, _ = _consistente(janela.resolveu_up, final, 1, ancora)
+                consistente, _, indeterminada = _consistente(
+                    janela.resolveu_up, final, 1, ancora
+                )
+                if indeterminada:
+                    continue
                 avaliadas += 1
                 ok += consistente
             if not avaliadas:
@@ -410,10 +512,12 @@ def _discordantes_em_tau(
         ancora = stream.em(instante)
         if ancora is None or final_stream is None:
             continue
-        consistente, empate = _consistente(
+        consistente, empate, indeterminada = _consistente(
             janela.resolveu_up, final_stream, 1, ancora
         )
-        if consistente:
+        # M2.11: indeterminada nao e discordante. Lista-la aqui devolveria
+        # pela porta dos fundos o alarme que a tolerancia tirou pela frente.
+        if consistente or indeterminada:
             continue
         indice = bisect_right(stream.ts, instante)
         idade = instante - stream.ts[indice - 1] if indice else None
@@ -427,6 +531,10 @@ def _discordantes_em_tau(
                 # Distância até virar o lado. Em e18: 10**18 = 1 unidade do
                 # preço, então folga de 10**12 é a 6ª casa decimal.
                 "folga_e18": abs(final_stream - ancora),
+                # A folga que decide se isto e lixo ou achado e a RELATIVA:
+                # 0,16 USD e enorme num token de 1 USD e desprezivel num BTC
+                # de 78 mil. Sem ela, quem le compara grandezas incomparaveis.
+                "folga_relativa_ppb": _folga_relativa_ppb(final_stream, 1, ancora),
                 "empate_exato": empate,
                 "idade_da_ancora_ms": idade,
             }
@@ -434,6 +542,75 @@ def _discordantes_em_tau(
         if len(saida) >= limite:
             break
     return saida
+
+
+#: Décadas do histograma, em ppb. O limiar (1e-5) é 10.000 ppb, então ele cai
+#: numa BORDA de balde e não no meio de um: assim dá para ler "quantas ficaram
+#: abaixo" sem interpolar nada.
+_DECADAS_PPB = (1, 10, 100, 1_000, 10_000, 100_000, 1_000_000)
+_ROTULOS_PPB = (
+    "exato (0)",
+    "1e-9..1e-8",
+    "1e-8..1e-7",
+    "1e-7..1e-6",
+    "1e-6..1e-5",
+    "1e-5..1e-4",
+    "1e-4..1e-3",
+    ">=1e-3",
+)
+
+
+def _percentil(ordenados: list[int], fracao: float) -> int | None:
+    if not ordenados:
+        return None
+    indice = min(int(fracao * len(ordenados)), len(ordenados) - 1)
+    return ordenados[indice]
+
+
+def _distribuicao_das_folgas(
+    elegiveis: list[tuple[JanelaResolvida, StreamE18, int, int, int | None]],
+    tau: int,
+) -> dict[str, Any]:
+    """Histograma das folgas relativas de TODAS as janelas, não só das falhas.
+
+    M2.11 item 4, e é o que permite rever o limiar com número em vez de
+    opinião. Olhar só as discordantes responde "as que falharam eram
+    pequenas?"; a pergunta que decide o limiar é outra — *onde está a massa*.
+    Se ela se acumular junto da borda de 1e-5, o limiar está no lugar errado,
+    e nenhuma quantidade de argumento sobre as falhas mostraria isso.
+    """
+    folgas: list[int] = []
+    for janela, stream, _soma, _n, final_stream in elegiveis:
+        ancora = stream.em(janela.abertura_ms + tau * 1000)
+        if ancora is None or final_stream is None:
+            continue
+        ppb = _folga_relativa_ppb(final_stream, 1, ancora)
+        if ppb is not None:
+            folgas.append(ppb)
+
+    histograma = dict.fromkeys(_ROTULOS_PPB, 0)
+    for ppb in folgas:
+        indice = sum(1 for limite in _DECADAS_PPB if ppb >= limite)
+        histograma[_ROTULOS_PPB[indice]] += 1
+    ordenados = sorted(folgas)
+    limiar_ppb = PPB * FOLGA_RELATIVA_NUM // FOLGA_RELATIVA_DEN
+    return {
+        "tau_s": tau,
+        "janelas_com_folga": len(folgas),
+        "histograma_ppb": histograma,
+        "p50_ppb": _percentil(ordenados, 0.50),
+        "p90_ppb": _percentil(ordenados, 0.90),
+        "max_ppb": ordenados[-1] if ordenados else None,
+        "limiar_ppb": limiar_ppb,
+        "abaixo_do_limiar": sum(1 for ppb in folgas if ppb < limiar_ppb),
+        "nota": (
+            "M2.11 item 4. Folga relativa = |final - ancora| / ancora, em "
+            "partes por bilhao, por divisao INTEIRA. Cobre todas as janelas "
+            "avaliadas, nao so as discordantes: o que decide se o limiar esta "
+            "no lugar certo e ONDE A MASSA ESTA, e massa encostada na borda "
+            "de 1e-5 e sinal de limiar mal escolhido. Ver VEREDITO_M2 2b-bis."
+        ),
+    }
 
 
 def _diagnostico_de_falhas(
@@ -685,11 +862,43 @@ def veredito_da_ancora(
         if isinstance(consistencia, (int, float))
         else None
     )
+    indeterminadas = int(
+        (fino.get("indeterminadas_em_tau") or {}).get(str(TAU_VERIFICADO_S)) or 0
+    )
+    avaliadas_no_tau = (fino.get("avaliadas_em_tau") or {}).get(
+        str(TAU_VERIFICADO_S)
+    )
     base = {
         **base,
         "janelas_discordantes": discordantes,
         "limiar_de_consistencia": LIMIAR_CONSISTENCIA,
+        # M2.11: separado de acertos E de erros. Somar a qualquer um dos dois
+        # seria dar peso de evidencia a uma folga que nao distingue nada.
+        "janelas_indeterminadas": indeterminadas,
+        "janelas_avaliadas_em_tau_verificado": avaliadas_no_tau,
+        "limiar_de_folga_relativa": f"{FOLGA_RELATIVA_NUM}/{FOLGA_RELATIVA_DEN}",
     }
+
+    # M2.11: `curva` marca 0.0 quando NADA foi avaliado, porque a divisao nao
+    # existe. Deixar isso cair no alarme diria "tau=0 nao explica nada" onde a
+    # verdade e "nenhuma janela teve folga suficiente para opinar" — o mesmo
+    # erro que a tolerancia veio corrigir, uma casa acima.
+    if avaliadas_no_tau == 0:
+        return {
+            **base,
+            "confirmada": None,
+            "alerta": None,
+            "veredito": (
+                f"SEM EVIDENCIA EM tau=0: as {elegiveis} janelas elegiveis "
+                f"ficaram todas INDETERMINADAS ({indeterminadas} com folga "
+                f"relativa abaixo de {FOLGA_RELATIVA_NUM}/"
+                f"{FOLGA_RELATIVA_DEN}). A ancora verificada segue em uso — "
+                "ausencia de evidencia nao e desmentido —, mas esta gravacao "
+                "nao a confirma nem a contradiz. Confira "
+                "`distribuicao_das_folgas_relativas`: massa toda abaixo do "
+                "limiar e sinal de limiar frouxo demais, nao de mercado calmo."
+            ),
+        }
 
     if consistencia is not None and consistencia >= 1.0:
         return {
