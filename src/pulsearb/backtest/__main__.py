@@ -2032,6 +2032,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         "entradas_por_janela": {
             "faixa_aplicada_s": faixa_para_entradas,
+            # Os DOIS limites, como no bloco `encolhimento`: `faixa_aplicada_s`
+            # sozinho vem do maximo e fica `null` numa invocacao so com
+            # `--tempo-restante-min`, fazendo o experimento parecer irrestrito
+            # quando nao e — e sem reproduzir pelo JSON (achado em review).
+            "faixa": {
+                "tempo_restante_min_s": args.tempo_restante_min,
+                "tempo_restante_max_s": faixa_para_entradas,
+            },
             "intervalo_minimo_s": max(0.0, args.intervalo_entradas),
             "comparacao": comparacao_entradas,
             "nota": (

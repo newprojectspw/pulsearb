@@ -186,6 +186,12 @@ class TestNoCLI:
         faixa = relatorio["encolhimento"]["faixa"]
         assert faixa["tempo_restante_min_s"] == pytest.approx(30.0)
 
+        # A comparacao de entradas roda SEMPRE e herda o mesmo minimo; sem
+        # registrar os dois limites ela parecia irrestrita no JSON, porque
+        # `faixa_aplicada_s` sozinho vem do maximo (achado em review).
+        faixa_entradas = relatorio["entradas_por_janela"]["faixa"]
+        assert faixa_entradas["tempo_restante_min_s"] == pytest.approx(30.0)
+
     @pytest.mark.parametrize("fator", ["0", "-0.5", "1.5"])
     def test_fator_invalido_morre_no_parse_e_nao_horas_depois(
         self, fator, tmp_path, capsys
