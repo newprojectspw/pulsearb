@@ -379,6 +379,78 @@ discordante com `folga_e18`, `empate_exato` e `idade_da_ancora_ms` — os três
 números que separam lixo residual de âncora errada. Sem isso a decisão acima
 teria sido palpite.
 
+### 2b-bis. Tolerância relativa no gate da âncora — LIMIAR ESCRITO ANTES DE RODAR
+
+**Data: 2026-08-27. Nenhuma gravação foi reprocessada antes desta seção
+existir** — este contêiner não tem as gravações, o que torna a ordem
+verificável em vez de prometida.
+
+**O problema.** O gate de "região de 100%" (`regiao_viavel_100pct`) é
+binário: uma única janela discordante, de qualquer magnitude, apaga um τ da
+região. No bloco de 5 h de 21/08, τ=0 explicou 151 de 152 janelas. A única
+discordante:
+
+| campo | valor |
+|---|---|
+| slug | `btc-updown-5m-1787354400` |
+| `folga_e18` | 162.138.224.116.891.648 |
+| âncora | 78.640,98 USD |
+| folga relativa | **2,06e-6** (2,06 ppm) |
+| `empate_exato` | false |
+| `idade_da_ancora_ms` | 0 |
+
+Dois centésimos de dólar num BTC de 78 mil, com âncora fresca. Não é mudança
+de fonte: mudança de fonte quebraria dezenas de janelas com folgas grandes, e
+a família rival (`final_media_60s`, 148 acertos) continuaria atrás — o que ela
+continua.
+
+**É o mesmo erro do M2.2.** Lá, um gate binário de 0,01 (um tick de mercado)
+reprovou 200 de 200 janelas por medir *corrida* e não *corrupção*; a correção
+foi o critério por conjunção de magnitude, persistência e fração. Aqui a
+correção análoga é tolerância **relativa**: uma folga infinitesimal não é
+evidência contra a âncora nem a favor — é ausência de evidência, e o lugar
+dela é fora do denominador.
+
+**Por que isto NÃO duplica o `LIMIAR_CONSISTENCIA` de 98%.** Os dois cobrem
+lixos diferentes, e é por isso que convivem:
+
+- O orçamento de 98% é **agregado** e cobre *lacuna de stream* e *empate
+  mal-carimbado*. Ele absorveria também uma mudança de regra que atingisse
+  1% das janelas — com folgas enormes — sem distinguir.
+- A tolerância relativa é **por janela** e cobre só *magnitude
+  infinitesimal*. Ela é incapaz de absorver folga grande, por construção.
+
+Um filtra por quantidade, o outro por tamanho. Trocar um pelo outro perderia
+metade da cobertura.
+
+**O limiar: 1e-5 (10 ppm).** A faixa defensável tem chão e teto medidos:
+
+- **Chão — 2,06e-6**: a folga observada, o único ruído real que temos.
+- **Teto — ~5,4e-5**: o que UM intervalo de amostragem do feed produz. O
+  TWAP-60 do btc anda ~4 USD/s e o p50 do intervalo é 1,061 s, então dois
+  pontos vizinhos do stream diferem por ~4,24 USD em 78.640 — 5,4e-5. Abaixo
+  disso, "a âncora está errada" é indistinguível de "amostramos o tick ao
+  lado", e o dado não tem como decidir.
+
+**1e-5 fica dentro da faixa**, 5× acima do ruído observado e 5× abaixo do
+limite de resolução do feed. Duas referências externas confirmam a folga:
+o próprio projeto chama de "janela apertada" 2 bps = 2e-4 em
+`engine/anchor.py` — 20× mais frouxo que este limiar — e uma âncora de fonte
+diferente daria folgas de 1e-3 ou mais, 100× acima.
+
+**O que o limiar NÃO pode fazer, e como saber se ele afrouxou.** Se as 4
+falhas de `final_media_60s` forem TODAS absorvidas, o limiar está frouxo
+demais — porque a `media_60s` é a família *reconhecidamente errada*, e um
+limiar que a promove a perfeita apagou a diferença que a varredura existe
+para medir. Isso é critério de rejeição, escrito aqui antes de existir
+resultado, e há teste travando o caso.
+
+**Como conferir depois com número.** A varredura passa a reportar
+`distribuicao_das_folgas_relativas` — histograma em décadas de ppb sobre
+TODAS as janelas avaliadas, não só as discordantes. Se a massa se acumular
+perto do limiar, ele está no lugar errado, e a revisão terá dado em vez de
+opinião.
+
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
 O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por
