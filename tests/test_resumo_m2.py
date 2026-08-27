@@ -471,3 +471,53 @@ class TestVarreduraDeEncolhimento:
         # as faixas; com a base antiga (media = 0,70) o ECE despencava
         # para ~0 — a aprovacao fabricada que este teste proibe.
         assert com > 0.05
+
+
+class TestVereditoDoEncolhimento:
+    """O texto do diagnóstico não pode prometer o que a remedição nega.
+
+    Achado em review: fator agressivo comprime previsões de 3+ faixas em
+    1-2, o backtest ponto a ponto marca `calibracao_avaliavel` falso, e o
+    1.3 vira NÃO AVALIÁVEL — um "PASSARIA" baseado só no ECE aproximado
+    seria promessa falsa.
+    """
+
+    CURVA_AGRESSIVA: typing.ClassVar[dict] = {
+        "a": {"n": 1000, "previsto": 0.1, "realizado": 0.48},
+        "b": {"n": 1000, "previsto": 0.5, "realizado": 0.50},
+        "c": {"n": 1000, "previsto": 0.9, "realizado": 0.52},
+    }
+
+    def test_fator_agressivo_comprime_as_faixas(self):
+        # 0.1/0.5/0.9 com fator 0.05 -> 0.48/0.50/0.52: duas faixas de 0.05.
+        assert (
+            resumo_m2.faixas_ocupadas_apos_encolher(self.CURVA_AGRESSIVA, 0.05) < 3
+        )
+        # Sem encolher, as tres previsoes ocupam tres faixas distintas.
+        assert resumo_m2.faixas_ocupadas_apos_encolher(self.CURVA_AGRESSIVA, 1.0) == 3
+
+    def test_ece_bom_com_faixas_comprimidas_nao_promete_passa(self):
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(
+            self.CURVA_AGRESSIVA
+        )
+        assert com < 0.05  # o ECE aproximado passaria...
+        veredito = resumo_m2.veredito_do_encolhimento(
+            self.CURVA_AGRESSIVA, fator, com
+        )
+        # ...mas o texto tem de dizer que o backtest daria NAO AVALIAVEL.
+        assert "NAO AVALIAVEL" in veredito
+        assert "PASSARIA" not in veredito
+
+    def test_fator_moderado_com_estrutura_preservada_promete_passa(self):
+        curva = {
+            "0.00-0.05": {"n": 10_000, "previsto": 0.001, "realizado": 0.11},
+            "0.45-0.50": {"n": 300, "previsto": 0.475, "realizado": 0.48},
+            "0.95-1.00": {"n": 10_000, "previsto": 0.999, "realizado": 0.89},
+        }
+        _sem, fator, com = resumo_m2.varredura_de_encolhimento(curva)
+        veredito = resumo_m2.veredito_do_encolhimento(curva, fator, com)
+        assert "PASSARIA" in veredito
+
+    def test_ece_ruim_continua_reprovando_sem_olhar_faixas(self):
+        veredito = resumo_m2.veredito_do_encolhimento(self.CURVA_AGRESSIVA, 1.0, 0.20)
+        assert "reprovando" in veredito

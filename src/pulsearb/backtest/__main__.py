@@ -264,10 +264,15 @@ def caminho_de_escrita(bruto: str) -> Path:
     # `startswith` contra a raiz + separador). `Path.is_relative_to` faz a
     # MESMA conta, mas o motor de taint não o conhece como sanitizador e
     # continuaria marcando o `write_text` lá na frente. O `os.sep` no fim da
-    # raiz evita a colisão de prefixo (/raiz versus /raiz2).
+    # raiz evita a colisão de prefixo (/raiz versus /raiz2) — e só entra
+    # quando a raiz ainda não termina no separador, senão a raiz `/` viraria
+    # `//` e rejeitaria todo caminho válido (achado em review).
     raiz_resolvida = raiz.resolve(strict=False)
     resolvido = caminho.resolve(strict=False)
-    if not str(resolvido).startswith(str(raiz_resolvida) + os.sep):
+    prefixo = str(raiz_resolvida)
+    if not prefixo.endswith(os.sep):
+        prefixo += os.sep
+    if not str(resolvido).startswith(prefixo):
         raise ValueError(f"saída fora da raiz permitida: {resolvido}")
     if not resolvido.parent.is_dir():
         raise ValueError(f"diretório de saída não existe: {resolvido.parent}")

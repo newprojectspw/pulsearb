@@ -590,6 +590,45 @@ def varredura_de_encolhimento(
     return (sem_encolher, melhor_fator, melhor_ece)
 
 
+LARGURA_DA_FAIXA = 0.05
+
+
+def faixas_ocupadas_apos_encolher(curva: dict[str, Any], fator: float) -> int:
+    """Quantas faixas de 0,05 as previsões ocupariam DEPOIS de encolher.
+
+    Achado em review: um fator agressivo comprime previsões que ocupavam
+    três ou mais faixas em uma ou duas — e aí o backtest ponto a ponto
+    marca `calibracao_avaliavel` como falso e o 1.3 vira NÃO AVALIÁVEL,
+    não PASSA. Um "PASSARIA" baseado só no ECE aproximado seria promessa
+    que a remedição não pode cumprir.
+    """
+    faixas = set()
+    for celula in curva.values():
+        n = celula.get("n") or 0
+        previsto = celula.get("previsto")
+        if n and isinstance(previsto, int | float):
+            encolhido = BASE_DO_ENCOLHIMENTO + fator * (
+                previsto - BASE_DO_ENCOLHIMENTO
+            )
+            faixas.add(min(int(encolhido / LARGURA_DA_FAIXA), 19))
+    return len(faixas)
+
+
+def veredito_do_encolhimento(
+    curva: dict[str, Any], fator: float, ece_encolhido_final: float
+) -> str:
+    """O texto honesto sobre o que a remedição faria com este fator."""
+    if ece_encolhido_final >= LIMIAR_DE_CALIBRACAO:
+        return "continuaria reprovando — o defeito nao e de escala"
+    if faixas_ocupadas_apos_encolher(curva, fator) < MINIMO_DE_FAIXAS:
+        return (
+            "ECE aproximado abaixo do limiar, MAS o fator comprime as "
+            f"previsoes em menos de {MINIMO_DE_FAIXAS} faixas — o backtest "
+            "daria NAO AVALIAVEL, nao PASSA"
+        )
+    return f"PASSARIA no limiar de {LIMIAR_DE_CALIBRACAO:g}"
+
+
 def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
     """POR QUE a calibração falha, e não só QUE ela falha.
 
@@ -640,11 +679,7 @@ def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
     varrida = varredura_de_encolhimento(curva)
     if varrida is not None:
         sem, fator, com = varrida
-        veredito = (
-            f"PASSARIA no limiar de {LIMIAR_DE_CALIBRACAO:g}"
-            if com < LIMIAR_DE_CALIBRACAO
-            else "continuaria reprovando — o defeito nao e de escala"
-        )
+        veredito = veredito_do_encolhimento(curva, fator, com)
         print()
         print("  ENCOLHIMENTO PARA A TAXA-BASE (variante MEDIDA, nao adotada):")
         print(

@@ -451,7 +451,7 @@ E o bloco `integridade`, que decide se o resto do relatório vale alguma coisa:
 
 | Campo | Leitura |
 |---|---|
-| `divergencia_topo_book.taxa` | acima de 1% invalida a conta do maker (ver `VEREDITO_M2.md`) |
+| `divergencia_topo_book` | a população que invalida é `com_magnitude_finita` MAIS o lado vazio não inocentado por nome em `lado_vazio.quais_invalidam`; acima de 1% das `comparacoes` invalida a conta do maker. A `taxa` agregada sozinha NÃO decide — ela soma truncagem de profundidade, que o §2c inocenta (emenda ao 1.9 no `VEREDITO_M2.md`) |
 | `janelas_invalidadas` | janelas que saíram do backtest por livro furado — se for a maioria, o número agregado não significa nada |
 | `formas_de_price_change` | qual formato o servidor usa de fato (API_NOTES 6.1b). É a resposta que a primeira gravação não deu. |
 | `offset_relogio_ms.p50` | teto do erro de relógio; dezenas de ms é normal, segundos não |

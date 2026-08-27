@@ -378,6 +378,20 @@ def test_saida_hostil_nunca_chega_ao_disco(tmp_path, monkeypatch, hostil):
         caminho_de_escrita(hostil)
 
 
+def test_raiz_barra_nao_rejeita_tudo(monkeypatch):
+    """Achado em review: `str(raiz) + os.sep` com raiz `/` virava `//`.
+
+    Nenhum caminho resolvido começa com `//`, então OUTPUT_ROOT=/ (raiz
+    suportada — é "qualquer lugar, de propósito") passava a rejeitar toda
+    saída válida. A contenção continua: o caminho tem de estar sob a raiz.
+    """
+    from pulsearb.backtest.__main__ import caminho_de_escrita
+
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", "/")
+    # /tmp existe em qualquer maquina que roda a suite; nada e escrito.
+    assert str(caminho_de_escrita("tmp/rel.json")) == "/tmp/rel.json"
+
+
 def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
     from pulsearb.backtest.__main__ import caminho_de_escrita
 
