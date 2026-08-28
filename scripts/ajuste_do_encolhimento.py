@@ -109,15 +109,23 @@ def _acumular_curva(
 
 def _medias_do_balde(faixas: dict[str, dict[str, float]]) -> dict[str, Any]:
     """O acumulador virando curva: soma ponderada dividida pelo `n` total."""
-    return {
-        faixa: {
+    saida = {}
+    for faixa, dados in sorted(faixas.items()):
+        if not dados["n"]:
+            continue
+        previsto = dados[SOMA_PREVISTO] / dados["n"]
+        realizado = dados[SOMA_REALIZADO] / dados["n"]
+        saida[faixa] = {
             "n": int(dados["n"]),
-            "previsto": dados[SOMA_PREVISTO] / dados["n"],
-            "realizado": dados[SOMA_REALIZADO] / dados["n"],
+            "previsto": previsto,
+            "realizado": realizado,
+            # `erro` na convencao do relatorio (previsto - realizado): sem ele
+            # `leitura_do_vies` descarta a celula e diz "sem faixa com amostra"
+            # mesmo com n de milhares. E o campo que separa erro de escala de
+            # defeito do preditor — tem de existir na curva somada.
+            "erro": previsto - realizado,
         }
-        for faixa, dados in sorted(faixas.items())
-        if dados["n"]
-    }
+    return saida
 
 
 def curvas_somadas(relatorios: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
