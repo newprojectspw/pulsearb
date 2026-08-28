@@ -134,3 +134,40 @@ class TestARegraDecide:
 
     def test_sem_argumento_morre_com_2(self):
         assert ajuste.main([]) == 2
+
+
+class TestALeituraDoVies:
+    """A coluna `leitura` tem de ler o vies, nao dizer 'sem faixa'.
+
+    Bug real (achado rodando o fit de 21-23): a curva somada nao trazia
+    `erro`, entao `leitura_do_vies` descartava toda celula e imprimia
+    'sem faixa com amostra' com n de 158 mil. E o campo que separa erro
+    de escala (encolhe) de defeito do preditor (troca) — nao pode sumir.
+    """
+
+    def test_curva_somada_tem_erro_e_a_leitura_funciona(self, tmp_path, monkeypatch, capsys):
+        import importlib.util
+
+        raiz = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "resumo_m2", raiz / "scripts" / "resumo_m2.py"
+        )
+        resumo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(resumo)
+
+        # Overconfianca monotona: erro cresce com o previsto, passando pelo
+        # zero — o caso "conserta encolhendo", que a leitura deve nomear.
+        curva = _relatorio({
+            "240-120s": {
+                "0.05": {"n": 5000, "previsto": 0.02, "realizado": 0.30},
+                "0.50": {"n": 500, "previsto": 0.50, "realizado": 0.50},
+                "0.95": {"n": 5000, "previsto": 0.98, "realizado": 0.70},
+            }
+        })
+        somada = ajuste.curvas_somadas([curva])["240-120s"]
+
+        # O campo erro existe e vale previsto - realizado.
+        assert somada["0.05"]["erro"] == pytest.approx(0.02 - 0.30)
+        # E a leitura reconhece a estrutura em vez de dizer "sem faixa".
+        leitura = resumo.leitura_do_vies(somada)
+        assert "sem faixa" not in leitura
