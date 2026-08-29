@@ -1,6 +1,6 @@
 # VEREDITO M2 — existe edge líquido?
 
-> ## ⛔ NÚMEROS DE 1.1 A 1.5 E DE 2.3 SUSPENSOS EM 2026-08-29
+> ## ⛔ NÚMEROS DE 1.1 A 1.4 E DE 2.3 SUSPENSOS EM 2026-08-29
 >
 > Foi encontrado um defeito no `prob_up_twap` que subestimava o desvio-padrão
 > do TWAP de fechamento em 2 a 3,6 vezes para todo `seconds_left > 60` — o
@@ -8,14 +8,17 @@
 > mecânica da superconfiança que o 1.3 mede, e explica por que o encolhimento
 > da §2d saiu "MISTO e SEM ORDEM".
 >
-> Corrigido, com o protocolo de remediação registrado ANTES de rodar em
-> **§2d-ter**. Até essa rodada existir, todo número de 1.1 a 1.5 e do 2.3
-> nesta página é **histórico**, não corrente — **inclusive o +2,7125 da banda**,
-> porque a banda foi escolhida por uma curva calculada com o preditor
-> defeituoso.
+> Corrigido — mas o conserto **não é suficiente**, e a rodada de remediação
+> está **SUSPENSA**: a revisão do PR #44 mostrou que o modelo também erra o
+> OBSERVÁVEL, contra a §13.8 deste mesmo repositório. Ver §2d-ter, subseção
+> "o defeito maior". Até isso ser resolvido, todo número de 1.1 a 1.4 e do 2.3
+> nesta página é **histórico**, não corrente — **inclusive o +2,7125 da
+> banda**, porque a banda foi escolhida por uma curva calculada com o
+> preditor defeituoso.
 >
-> Seguem valendo: o 1.5 (estrutura de book, não passa pelo preditor), o 1.7,
-> 1.8 e 1.9 (rota maker), a âncora τ=0 e o `hourly.py`.
+> Seguem valendo: o **1.5** (estrutura de book, não passa pelo preditor — o
+> teto de 128 USDC contra 200 continua de pé), o 1.7, 1.8 e 1.9 (rota maker),
+> a âncora τ=0 e o `hourly.py`.
 
 **Status: SEGUNDO VEREDITO em 2026-08-26, sobre 24 h limpas — e ele DERRUBA
 o primeiro. Ver a seção logo abaixo.**
@@ -872,7 +875,7 @@ nome. Três razões, todas verificáveis sem olhar resultado nenhum:
 
 Registrado antes de rodar, para que não haja escolha depois:
 
-**Todos os números de 1.1 a 1.5 e do 2.3 caem.** `P(Up)` muda para todo
+**Todos os números de 1.1 a 1.4 e do 2.3 caem.** `P(Up)` muda para todo
 `t > 60`, o que inclui o balde `>240s` inteiro **e a banda operada 240-120 s
 inteira**. Muda a probabilidade, muda o edge, muda quais instantes passam do
 threshold, muda quais trades existem. Não há como reaproveitar nenhuma
@@ -919,6 +922,96 @@ rota taker volta a ter 4 ou 5 dos 5 e o 1.5 vira o único bloqueio — que é te
 de capacidade e não de sinal. Se 1.3 passar e o edge sumir, o veredito fica
 mais limpo do que era: não havia borda, havia superconfiança. Se 1.3 não
 passar, a §2d-bis está confirmada e a conclusão é modelo novo.
+
+#### O defeito maior, achado na revisão do PR #44 — a RODADA ACIMA ESTÁ SUSPENSA
+
+O conserto da variância está certo e continua no lugar, mas ele é **necessário
+e não suficiente**. A revisão automática apontou a premissa que eu não tinha
+conferido, e ela derruba mais coisa do que o termo que faltava.
+
+**O fato, verificável em três linhas de código.** O que alimenta o modelo não é
+preço bruto — é o próprio `twap_sixty`, que já vem suavizado:
+
+```
+backtest/runner.py:254-258   for ts_ns, preco_spot in stream:  vol.update(...)  twap.update(...)
+backtest/__main__.py:509,538 if tick.topic == TOPIC_TWAP_60:   self.streams[tick.asset].append((ts, tick.price))
+live/precos.py:113-116       self.twap.update(preco, ts_ns);   self.vol.update(preco, ts_ns)
+```
+
+A variável se chama `preco_spot`, e o nome é parte da causa: ela carrega o
+valor do stream `crypto_prices_twap_sixty`, não o spot. O `sigma_1s` é a
+volatilidade da série **já suavizada**, e o `spot` passado ao `prob_up_twap` é
+um ponto dessa mesma série.
+
+**E a §13.8 do `API_NOTES.md` já tinha resolvido isso — em 2026-08-21, com
+critério escrito antes e 152 janelas.** Ela diz, literalmente:
+
+> Janela TWAP resolve **Up** se o valor do stream `crypto_prices_twap_sixty`
+> **no instante do fechamento** for ≥ o valor do mesmo stream **no instante da
+> abertura**.
+>
+> **Não calcule média de 60 s. Nenhuma.** O tópico já é a média de 60 s da
+> Chainlink, entregue pronta.
+
+E mediu as duas famílias: `final_stream_no_fechamento` deu **1,0** de
+consistência; `final_media_60s` — média de 60 s recalculada por nós — deu
+**0,9648**, e nenhum τ chegou a 1,0.
+
+**O `prob_up_twap` faz exatamente o que a §13.8 proíbe.** `variance_factor` e
+`locked_mean_and_weight` modelam a liquidação como a média de 60 amostras
+futuras de um preço bruto. A liquidação real é **um ponto** de uma série que
+já é média. O modelo, portanto, não erra só a magnitude da variância: erra o
+observável.
+
+**A intuição do travamento é física e verdadeira — e não é computável com o
+dado que temos.** A 30 s do fechamento, o valor de liquidação cobre
+`[fecha−60, fecha]`, e metade disso já aconteceu: isso é real. Mas a parte
+travada é a média do **preço subjacente** naquele intervalo, e nós não
+observamos o subjacente. Fazer a média das nossas amostras de `twap_sixty`
+sobre os últimos 30 s é média de média, que é outro número. O travamento
+existe; o `locked_mean_and_weight` não o mede.
+
+**Consequência imediata, e é por isso que esta subseção existe:** a rodada de
+remediação registrada acima **não deve ser executada**. Ela levaria ~3,5 h
+para medir a calibração de um modelo ainda mal especificado, e o resultado não
+julgaria nem o conserto nem o preditor. Os seis critérios continuam válidos
+como estão escritos, para quando o observável estiver certo — **não foram
+afrouxados nem reescritos depois de ver número nenhum, porque não há número.**
+
+**O que o conserto da variância continua valendo.** Ele é uma derivação correta
+conferida contra a definição, e a rodada futura precisa dele de qualquer jeito
+para os horizontes acima de 60 s. Fica. O que muda é a alegação: ele era "a
+causa" do 1.3 e passa a ser **uma** das causas, e provavelmente não a maior.
+
+#### O caminho proposto — medir a variância em vez de derivá-la
+
+Registrado como proposta, não como decisão tomada.
+
+Dado o observável certo, o modelo vira `P(T_fecha ≥ âncora)` com `T` a própria
+série `twap_sixty`. O que falta é uma coisa só: **V(t) = Var(T_{agora+t} −
+T_agora)**, a variância de transição da série no horizonte `t`.
+
+Ela não precisa ser derivada, e derivá-la é justamente o que produziu os dois
+defeitos acima. Ela é **medível direto da gravação** — é a mesma metodologia
+que a §13.8 usou para a âncora: engenharia reversa sobre o dado gravado, em
+vez de suposição sobre o processo. E ela captura de graça o colapso de
+incerteza perto do fechamento, sem precisar decompor em travado e futuro.
+
+Três propriedades que a medição tem de exibir para a proposta se sustentar, e
+que a falsificam se não exibir:
+
+1. `V(t)` cresce com `t` de forma monótona.
+2. Para `t` grande, `V(t)` cresce aproximadamente linear em `t` — é o regime de
+   caminhada aleatória do subjacente, que a suavização de 60 s não altera.
+3. Para `t` pequeno, `V(t)` cresce **mais devagar que linear** — é a assinatura
+   da suavização, e é a versão medida do "travamento".
+
+Se as três aparecerem, `V(t)` substitui `variance_factor` e o
+`locked_mean_and_weight` sai do caminho da decisão. Se não aparecerem, a
+suposição de caminhada aleatória do subjacente também está errada, e aí a
+conclusão da §2d-bis — modelo novo — volta a valer, agora por um motivo
+medido.
+
 
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 

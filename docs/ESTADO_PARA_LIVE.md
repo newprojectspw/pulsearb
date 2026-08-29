@@ -10,11 +10,17 @@
 > da §2d: o tamanho do erro depende do horizonte, então nenhum fator único
 > de encolhimento podia corrigi-lo.
 >
-> Corrigido, com protocolo registrado antes de rodar em `VEREDITO_M2.md`
-> §2d-ter. **Enquanto a rodada de remediação não existir, os itens 1.1 a 1.4
-> e o 2.3 desta página são histórico, não estado corrente** — inclusive o
-> "+2,7125 na banda", porque a banda foi escolhida por uma curva calculada
-> com o preditor defeituoso.
+> Corrigido — **e não basta.** A revisão do PR #44 mostrou um defeito mais
+> fundo: o modelo estima a probabilidade de uma média de 60 amostras de preço
+> bruto, mas a §13.8 do `API_NOTES.md` já tinha VERIFICADO que a janela
+> resolve por **um ponto só** do stream `twap_sixty` no fechamento, sem média
+> nenhuma — e é esse mesmo stream já suavizado que alimenta o `sigma_1s` e o
+> "spot" do modelo. **A rodada de remediação está SUSPENSA** até o observável
+> ser o certo; rodá-la agora mediria um modelo ainda mal especificado.
+>
+> **Enquanto isso, os itens 1.1 a 1.4 e o 2.3 desta página são histórico, não
+> estado corrente** — inclusive o "+2,7125 na banda", porque a banda foi
+> escolhida por uma curva calculada com o preditor defeituoso.
 >
 > Continuam valendo, porque não passam pelo preditor: **1.5** (profundidade
 > de book), **1.6 a 1.10** (rota maker), a âncora, e todos os Blocos 0, 3, 4
