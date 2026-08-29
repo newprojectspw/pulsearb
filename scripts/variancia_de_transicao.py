@@ -50,7 +50,7 @@ from pulsearb.analysis.variancia_de_transicao import (
     curva_de_variancia,
     veredito_da_curva,
 )
-from pulsearb.backtest.__main__ import caminho_de_escrita
+from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.replay.reader import RecordingReader
 
@@ -218,8 +218,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sem-progresso", action="store_true")
     args = parser.parse_args(argv)
 
+    # A pasta da gravação também vem de fora do programa, e daqui ela vai
+    # parar num `glob`. `caminho_de_leitura` é o tratamento que o backtest já
+    # dá ao MESMO argumento (`recordings`): resolve para caminho canônico e
+    # confirma que existe, sem contê-lo numa raiz — a gravação mora em
+    # `~/pulsearb-dados` de propósito, e contê-la no diretório de trabalho
+    # quebraria o runbook. Reusar em vez de escrever um terceiro tratamento é
+    # a regra da casa: duas cópias divergem no dia em que uma é corrigida.
+    raiz = caminho_de_leitura(str(args.raiz))
     series, descartes = series_da_gravacao(
-        args.raiz, progresso=not args.sem_progresso, dia=args.dia
+        raiz, progresso=not args.sem_progresso, dia=args.dia
     )
     if not series:
         print("nenhum tick de twap_sixty com timestamp de origem", file=sys.stderr)
