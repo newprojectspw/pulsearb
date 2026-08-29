@@ -40,6 +40,109 @@ def test_variance_factor_casos_de_sanidade():
     assert variance_factor(1000) == pytest.approx(1000 / 3, rel=1e-2)
 
 
+def _fator_pela_definicao(seconds_left: int, janela: int = 60) -> float:
+    """Variância do TWAP de fechamento somando o coeficiente de cada choque.
+
+    Escrita do jeito mais burro possível de propósito: é a DEFINIÇÃO, não a
+    forma fechada. O TWAP do fechamento é a média das amostras nos instantes
+    `[t − 60, t)`; cada choque de 1 s entra em todas as amostras posteriores
+    a ele. Se a forma fechada do modelo divergir daqui, é a forma fechada que
+    está errada.
+
+    Devolve o fator em unidades de σ²·S², para comparar direto com o que
+    `prob_up_twap` multiplica.
+    """
+    instantes = list(range(max(0, seconds_left - janela), seconds_left)) or [0]
+    n = len(instantes)
+    coeficiente: dict[int, int] = {}
+    for i in instantes:
+        for j in range(1, i + 1):
+            coeficiente[j] = coeficiente.get(j, 0) + 1
+    return sum((c / n) ** 2 for c in coeficiente.values())
+
+
+def _fator_usado_pelo_modelo(seconds_left: float, janela: float = 60.0) -> float:
+    """O fator que `prob_up_twap` usa, lido de volta do desvio que ela aplica.
+
+    Roda o modelo com σ e S conhecidos e âncora a um desvio-padrão do spot,
+    invertendo Φ para recuperar o desvio — assim o teste cobra a função de
+    verdade, não uma cópia da fórmula.
+    """
+    sigma, spot = 1e-3, 100.0
+    est = prob_up_twap(
+        ancora=spot * 1.001,
+        spot=spot,
+        seconds_left=seconds_left,
+        sigma_1s=sigma,
+        window_seconds=janela,
+    )
+    # prob = 1 − Φ((ancora − spot)/desvio)  ⇒  desvio = (ancora − spot)/Φ⁻¹(1 − prob)
+    z = _inversa_normal(1.0 - est.prob_up)
+    desvio = (spot * 0.001) / z
+    return (desvio / (sigma * spot)) ** 2
+
+
+def _inversa_normal(p: float) -> float:
+    """Φ⁻¹ por bisseção. Só o teste precisa dela; não vale uma dependência."""
+    lo, hi = -12.0, 12.0
+    for _ in range(200):
+        meio = (lo + hi) / 2.0
+        if norm_cdf(meio) < p:
+            lo = meio
+        else:
+            hi = meio
+    return (lo + hi) / 2.0
+
+
+@pytest.mark.parametrize("seconds_left", [2, 10, 30, 59, 60, 61, 120, 180, 240, 300, 600])
+def test_variancia_do_twap_bate_com_a_definicao(seconds_left):
+    """O defeito de calibração de 2026-08-29, travado.
+
+    Até aqui o modelo usava `k(min(t, 60))` e nada mais. Com `t > 60` a janela
+    de fechamento ainda não começou — o preço caminha `t − 60` segundos antes
+    da primeira amostra —, e esse deslocamento é comum às 60 amostras, então
+    entra INTEIRO na variância da média. Sem ele o desvio ficava congelado no
+    valor de 60 s: 31 % do real a 240 s, 27 % a 300 s.
+
+    O efeito não era de PnL, era de calibração: com o desvio 3× menor que o
+    real, P(Up) satura em 0 e 1. Era isso que o critério 1.3 media como
+    superconfiança, e é isso que explica o viés "MISTO e SEM ORDEM" da §2d —
+    o tamanho do erro depende de `seconds_left`, então nenhum fator único de
+    encolhimento podia corrigir todas as faixas de uma vez.
+    """
+    assert _fator_usado_pelo_modelo(seconds_left) == pytest.approx(
+        _fator_pela_definicao(seconds_left), rel=1e-6
+    )
+
+
+def test_correcao_da_variancia_nao_toca_no_regime_abaixo_da_janela():
+    """Abaixo de 60 s a fórmula é a de antes — o termo novo é zero ali.
+
+    Importa porque `<30s` e `60-30s` são os baldes onde o TWAP tem fração
+    travada, que é a tese do modelo. Se a correção os movesse, ela estaria
+    consertando uma coisa e quebrando outra.
+    """
+    for t in (5, 15, 30, 45, 59):
+        assert _fator_usado_pelo_modelo(t) == pytest.approx(variance_factor(t), rel=1e-6)
+
+
+def test_previsao_deixa_de_saturar_nos_horizontes_longos():
+    """O sintoma que o 1.3 mediu: previsões despejadas nos extremos.
+
+    Com σ congelado no valor de 60 s, um desvio de 20 bps a 240 s do
+    fechamento dava P(Up) ≈ 0,99. Com a variância certa ele vale bem menos —
+    a mesma informação, sem a confiança que o modelo não tinha como ter.
+    """
+    comum = dict(spot=100.0, sigma_1s=2e-4, seconds_left=240.0)
+    alta = prob_up_twap(ancora=100.0 * (1 - 0.002), **comum)
+    baixa = prob_up_twap(ancora=100.0 * (1 + 0.002), **comum)
+
+    assert 0.5 < alta.prob_up < 0.95, alta.prob_up
+    assert 0.05 < baixa.prob_up < 0.5, baixa.prob_up
+    # Continua informativo: 20 bps a favor ainda vale bem mais que 20 contra.
+    assert alta.prob_up - baixa.prob_up > 0.3
+
+
 # ------------------------------------------------------------ volatilidade
 def test_realized_vol_estima_sigma():
     vol = RealizedVol(halflife_s=60)

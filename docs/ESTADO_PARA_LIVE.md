@@ -1,5 +1,31 @@
 # ESTADO — o que falta para operar com dinheiro real
 
+> ## ⛔ BLOCO 1 SUSPENSO EM 2026-08-29 — aguardando a rodada de remediação
+>
+> Achado um defeito no modelo (`prob_up_twap`): a variância do TWAP de
+> fechamento ignorava o tempo que o preço caminha ANTES de a janela de 60 s
+> começar. Para `seconds_left > 60` o desvio ficava congelado no valor de
+> 60 s — 31 % do real a 240 s, 27 % a 300 s. É a causa mecânica da
+> superconfiança que reprova o 1.3, e explica o viés "MISTO e SEM ORDEM"
+> da §2d: o tamanho do erro depende do horizonte, então nenhum fator único
+> de encolhimento podia corrigi-lo.
+>
+> Corrigido — **e não basta.** A revisão do PR #44 mostrou um defeito mais
+> fundo: o modelo estima a probabilidade de uma média de 60 amostras de preço
+> bruto, mas a §13.8 do `API_NOTES.md` já tinha VERIFICADO que a janela
+> resolve por **um ponto só** do stream `twap_sixty` no fechamento, sem média
+> nenhuma — e é esse mesmo stream já suavizado que alimenta o `sigma_1s` e o
+> "spot" do modelo. **A rodada de remediação está SUSPENSA** até o observável
+> ser o certo; rodá-la agora mediria um modelo ainda mal especificado.
+>
+> **Enquanto isso, os itens 1.1 a 1.4 e o 2.3 desta página são histórico, não
+> estado corrente** — inclusive o "+2,7125 na banda", porque a banda foi
+> escolhida por uma curva calculada com o preditor defeituoso.
+>
+> Continuam valendo, porque não passam pelo preditor: **1.5** (profundidade
+> de book), **1.6 a 1.10** (rota maker), a âncora, e todos os Blocos 0, 3, 4
+> e 5.
+
 **Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou. Sobre
 24 h de captação impecável o TAKER **irrestrito** mede −53,28 USDC. A §2d-bis
 do VEREDITO_M2 mandava procurar uma banda de horizonte com edge, e ela existe:

@@ -474,12 +474,40 @@ def test_raiz_barra_nao_rejeita_tudo(monkeypatch):
     Nenhum caminho resolvido começa com `//`, então OUTPUT_ROOT=/ (raiz
     suportada — é "qualquer lugar, de propósito") passava a rejeitar toda
     saída válida. A contenção continua: o caminho tem de estar sob a raiz.
+
+    O esperado é `Path(...).resolve()`, e não o literal `/tmp/rel.json`,
+    porque `caminho_de_escrita` devolve o caminho RESOLVIDO. No macOS `/tmp`
+    é symlink para `/private/tmp`, então o literal cobrava da função uma
+    resposta que ela nunca deu — o teste passava no Linux da CI e falhava na
+    maquina de analise, que e um Mac. E a mesma armadilha do `ru_maxrss`.
     """
     from pulsearb.backtest.__main__ import caminho_de_escrita
 
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", "/")
     # /tmp existe em qualquer maquina que roda a suite; nada e escrito.
-    assert str(caminho_de_escrita("tmp/rel.json")) == "/tmp/rel.json"
+    esperado = Path("/tmp/rel.json").resolve(strict=False)
+    assert caminho_de_escrita("tmp/rel.json") == esperado
+
+
+def test_symlink_no_caminho_resolve_para_o_destino_real(tmp_path, monkeypatch):
+    """A condicao do macOS, reproduzida em qualquer plataforma.
+
+    O teste acima so exercita symlink numa maquina cujo `/tmp` e link — ou
+    seja, no Mac e em nenhum lugar da CI. Este monta o link a mao, entao o
+    Linux tambem cobra que a funcao resolva antes de devolver, e a proxima
+    versao deste comportamento nao pode mais quebrar so no Mac.
+
+    A contencao continua valendo depois de resolver: o destino real tem de
+    estar sob a raiz.
+    """
+    from pulsearb.backtest.__main__ import caminho_de_escrita
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+
+    assert caminho_de_escrita("link/rel.json") == (real / "rel.json").resolve()
 
 
 def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
