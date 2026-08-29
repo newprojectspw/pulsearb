@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -64,6 +65,16 @@ PASSO_DO_PROGRESSO = 500_000
 #: Como o recorder nomeia as horas: `pulsearb-20260823-0000.jsonl.gz`.
 PADRAO_DO_DIA = "pulsearb-{dia}-[0-9][0-9][0-9][0-9].jsonl*"
 
+#: Forma aceita para `--dia`: oito dígitos, e só.
+#:
+#: O valor vem da linha de comando e é INTERPOLADO num glob. Sem esta trava,
+#: `--dia ../../etc` produziria o padrão `pulsearb-../../etc-[0-9]...` e a
+#: busca sairia da raiz — a mesma travessia que o M2.5 fechou no `--json` e
+#: que a contenção do `--curva-de-variancia` fechou na leitura. Validar
+#: ANTES contra um padrão fixo é o que impede o valor externo de chegar ao
+#: sistema de arquivos em forma nenhuma.
+PADRAO_DE_DIA = re.compile(r"[0-9]{8}")
+
 
 def arquivos_do_dia(raiz: Path, dia: str) -> list[Path]:
     """Os arquivos de UM dia, por nome exato — sem a margem de ±1 h.
@@ -78,6 +89,11 @@ def arquivos_do_dia(raiz: Path, dia: str) -> list[Path]:
     da curva que o calibra é exatamente o vazamento in-sample que a §2d
     proibiu. Uma hora em 23 é pouco; a regra não é sobre quanto, é sobre se.
     """
+    if not PADRAO_DE_DIA.fullmatch(dia):
+        raise ValueError(
+            f"dia inválido: {dia!r} — esperado YYYYMMDD, oito dígitos "
+            "(ex.: 20260823)"
+        )
     return sorted(raiz.glob(PADRAO_DO_DIA.format(dia=dia)))
 
 

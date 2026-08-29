@@ -303,3 +303,22 @@ def test_dia_sem_arquivo_falha_alto(tmp_path):
 
     with pytest.raises(SystemExit, match="20260101"):
         script.series_da_gravacao(tmp_path, progresso=False, dia="20260101")
+
+
+def test_dia_hostil_e_recusado_antes_do_glob(tmp_path):
+    """`--dia` é interpolado num glob, então é entrada que chega ao disco.
+
+    Sem a trava, `--dia ../../etc` produziria o padrão
+    `pulsearb-../../etc-[0-9][0-9][0-9][0-9].jsonl*` e a busca sairia da
+    raiz. Mesma travessia que o M2.5 fechou no `--json`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    for hostil in ("../../etc", "2026*", "20260823/..", "", "2026082", "abcdefgh"):
+        with pytest.raises(ValueError, match="dia inválido"):
+            script.arquivos_do_dia(tmp_path, hostil)
+
+    # E o válido continua passando.
+    (tmp_path / "pulsearb-20260823-0000.jsonl.gz").write_bytes(b"")
+    assert len(script.arquivos_do_dia(tmp_path, "20260823")) == 1
