@@ -211,6 +211,14 @@ class BacktestConfig:
     # calibração, para que o ECE reportado seja o do preditor encolhido de
     # verdade, ponto a ponto, e não a aproximação por faixas do resumo.
     fator_de_encolhimento: float | None = None
+    #: §2d-ter: as curvas V(t) MEDIDAS, uma por ativo. `None` = o modelo
+    #: derivado de antes, byte a byte. Quando vem, o jogo TWAP passa a usar a
+    #: variância medida e para de calcular média nenhuma (API_NOTES §13.8).
+    #:
+    #: A curva TEM de vir de período anterior ao avaliado. Medir e avaliar no
+    #: mesmo dia é in-sample — a mesma regra que a §2d fixou para o fator de
+    #: encolhimento. O relatório publica a origem para que isso seja audível.
+    curvas_de_variancia: Any = None
 
     def na_faixa(self, seconds_left: float) -> bool:
         """Este instante está na faixa de tempo restante autorizada?"""
@@ -290,6 +298,15 @@ class BacktestRunner:
         report: BacktestReport,
     ) -> None:
         cfg = self.config
+        # Falha fechada: pediram variância medida e este ativo não tem curva.
+        # A janela INTEIRA sai — inclusive da calibração, que é medida antes
+        # do gate de confiabilidade. Deixá-la entrar com o modelo velho
+        # envenenaria justamente o número que o critério 1.3 lê.
+        if cfg.curvas_de_variancia is not None and (
+            cfg.curvas_de_variancia.para(janela.asset) is None
+        ):
+            report.janelas_sem_curva[janela.asset] += 1
+            return
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
@@ -369,8 +386,8 @@ class BacktestRunner:
             and (ts_ns - ultima_entrada_ns) < cfg.intervalo_min_entre_entradas_s * 1e9
         )
 
-    @staticmethod
     def _estimar(
+        self,
         janela: WindowState,
         twap: TwapTracker,
         vol: RealizedVol,
@@ -387,6 +404,7 @@ class BacktestRunner:
         # A escolha entre os jogos mora em `engine/decisao.py`, compartilhada
         # com o motor ao vivo. Duas cópias fariam SHADOW e backtest divergirem
         # por código, e a divergência pareceria diferença de mercado.
+        curvas = self.config.curvas_de_variancia
         return estimar_prob_up(
             jogo=janela.jogo,
             ancora=janela.ancora,
@@ -394,6 +412,7 @@ class BacktestRunner:
             vol=vol,
             preco_spot=preco_spot,
             seconds_left=seconds_left,
+            curva=curvas.para(janela.asset) if curvas is not None else None,
         )
 
     def _candidatos_com_edge(

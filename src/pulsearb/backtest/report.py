@@ -201,6 +201,11 @@ class BacktestReport:
     janelas_com_oportunidade: dict[str, set[str]] = field(
         default_factory=lambda: defaultdict(set)
     )
+    #: ativo → janelas puladas por não haver curva de variância medida para
+    #: ele. Contado e publicado em vez de cair no modelo derivado: as duas
+    #: físicas no mesmo relatório seriam duas populações no mesmo número, que
+    #: é a forma exata do defeito que a §2d-bis achou no 1.4.
+    janelas_sem_curva: Counter[str] = field(default_factory=Counter)
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -276,6 +281,7 @@ class BacktestReport:
     def to_dict(self) -> dict[str, Any]:
         n = len(self.trades)
         return {
+            "janelas_sem_curva_de_variancia": dict(self.janelas_sem_curva),
             "resumo": {
                 "janelas_avaliadas": self.janelas_avaliadas,
                 "sinais_gerados": self.sinais_gerados,

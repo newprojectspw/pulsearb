@@ -164,6 +164,30 @@ class Progresso:
 TOKEN_DURACAO_PADRAO = 300
 
 
+def _curvas_de_variancia(caminho: str | None) -> Any:
+    """Carrega as curvas V(t) medidas, ou `None` se não foi pedido.
+
+    Falha ALTO em vez de seguir sem curva: quem passou `--curva-de-variancia`
+    escolheu um modelo, e cair no derivado porque o arquivo não abriu seria a
+    troca de modelo mais silenciosa possível — o relatório sairia com números
+    plausíveis medidos pela física errada.
+    """
+    if not caminho:
+        return None
+    from pulsearb.engine.variancia import curvas_do_relatorio
+
+    origem = Path(caminho).name
+    with open(caminho, encoding="utf-8") as arquivo:
+        curvas = curvas_do_relatorio(json.load(arquivo), origem=origem)
+    if not len(curvas):
+        raise SystemExit(
+            f"nenhuma curva avaliável em {caminho} — rode "
+            "scripts/variancia_de_transicao.py sobre uma gravação com os dois "
+            "regimes medidos (curto e >= 2 horizontes longos)"
+        )
+    return curvas
+
+
 def _fator_de_encolhimento_valido(bruto: str) -> float:
     """Rejeita fator fora de (0, 1] NO PARSE, não horas depois.
 
@@ -1591,6 +1615,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--curva-de-variancia",
+        dest="curva_de_variancia",
+        default=None,
+        help=(
+            "caminho do relatório de scripts/variancia_de_transicao.py. "
+            "Liga o modelo com variância MEDIDA (§2d-ter): o jogo TWAP para "
+            "de derivar a variância e de calcular média nenhuma, como a "
+            "§13.8 do API_NOTES manda. A curva DEVE vir de período anterior "
+            "ao avaliado — medir e avaliar no mesmo dia é in-sample. Ativo "
+            "sem curva tem a janela inteira pulada e contada, nunca caindo "
+            "no modelo derivado em silêncio."
+        ),
+    )
+    parser.add_argument(
         "--qualidade-minima",
         dest="qualidade_minima",
         choices=("alta", "media", "baixa"),
@@ -1845,11 +1883,18 @@ def main(argv: list[str] | None = None) -> int:
     validacao["veredito"] = veredito_ancora["veredito"]
     validacao["lacunas_do_stream"] = lacunas
 
+    # Entra no cfg_base, e não só no runner principal, pela mesma razão que a
+    # FaixaDeOperacao entrou: se a sensibilidade de latência e as curvas de
+    # edge e de capacidade rodassem com a variância derivada enquanto o 1.1
+    # roda com a medida, o relatório teria critérios sobre FÍSICAS diferentes
+    # — a versão mais silenciosa possível do defeito do 1.4.
+    curvas = _curvas_de_variancia(args.curva_de_variancia)
     cfg_base = {
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
         "max_entradas_por_janela": max(1, args.max_entradas),
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+        "curvas_de_variancia": curvas,
     }
     restricao_pedida = (
         args.tempo_restante_max is not None or args.tempo_restante_min is not None
@@ -2017,6 +2062,19 @@ def main(argv: list[str] | None = None) -> int:
                 "M2.2) zerou 200 de 200 janelas reais medindo corrida entre "
                 "`best_bid_ask` e `price_change`. Criterios em VEREDITO_M2 "
                 "§2c, escritos antes dos numeros."
+            ),
+        },
+        "modelo_de_variancia": {
+            "medida": curvas is not None,
+            "origem": curvas.origem if curvas is not None else None,
+            "ativos_com_curva": sorted(curvas.por_ativo) if curvas is not None else [],
+            "nota": (
+                "medida=false e o modelo DERIVADO, que subestima a variancia "
+                "em 39 a 48 vezes na banda operada (VEREDITO_M2 2d-ter). "
+                "medida=true usa V(t) do arquivo em `origem` — que precisa "
+                "ser de periodo ANTERIOR ao avaliado, senao e in-sample. "
+                "Ativo sem curva tem a janela pulada, e a conta sai em "
+                "`janelas_sem_curva_de_variancia`."
             ),
         },
         "ancora": {
