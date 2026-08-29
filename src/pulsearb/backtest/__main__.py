@@ -257,16 +257,33 @@ def recusar_curva_in_sample(curvas: Any, janelas: list[Any]) -> None:
     """
     if curvas is None or not janelas:
         return
-    dias_avaliados = {
-        datetime.fromtimestamp(j.open_ts_ns / 1e9, tz=UTC).strftime("%Y%m%d")
-        for j in janelas
-    }
-    if curvas.dia_medido in dias_avaliados:
+    try:
+        medido = datetime.strptime(curvas.dia_medido, "%Y%m%d").replace(tzinfo=UTC)
+    except (TypeError, ValueError) as erro:
         raise SystemExit(
-            f"curva IN-SAMPLE: medida em {curvas.dia_medido}, que é um dos "
-            f"dias avaliados ({sorted(dias_avaliados)}).\n"
-            "A §2d-ter exige curva de período ANTERIOR ao avaliado. Meça "
-            "outro dia com --dia, ou avalie outro dia."
+            f"`dia_medido` inválido na curva: {curvas.dia_medido!r} — "
+            "esperado YYYYMMDD"
+        ) from erro
+
+    dias_avaliados = sorted(
+        {
+            datetime.fromtimestamp(j.open_ts_ns / 1e9, tz=UTC).strftime("%Y%m%d")
+            for j in janelas
+        }
+    )
+    primeiro = datetime.strptime(dias_avaliados[0], "%Y%m%d").replace(tzinfo=UTC)
+    # ESTRITAMENTE anterior, e não apenas "fora do conjunto avaliado".
+    #
+    # Achado em review: a versão anterior conferia pertinência ao conjunto, e
+    # uma curva de 25/08 avaliando 24/08 passava. Isso é pior que in-sample —
+    # é olhar o futuro, e sairia rotulada de fora da amostra.
+    if medido >= primeiro:
+        raise SystemExit(
+            f"curva NÃO é anterior ao avaliado: medida em {curvas.dia_medido}, "
+            f"e o primeiro dia avaliado é {dias_avaliados[0]} "
+            f"(avaliados: {dias_avaliados}).\n"
+            "A §2d-ter exige período ESTRITAMENTE anterior. Curva do mesmo "
+            "dia é in-sample; curva de dia posterior é olhar o futuro."
         )
 
 

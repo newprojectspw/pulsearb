@@ -494,12 +494,16 @@ def test_faixa_de_operacao_carrega_a_curva_para_a_config():
 
 
 # ------------------------------- a curva nao pode calibrar o proprio dia
-def test_curva_do_dia_avaliado_e_recusada():
+def test_curva_tem_de_ser_ESTRITAMENTE_anterior_ao_avaliado():
     """A §2d-ter registrou isso ANTES de existir número: fora da amostra.
 
-    Sem esta trava, `--curva-de-variancia relatorios/VARIANCIA_24AGO.json`
-    numa rodada do dia 24 completaria com sucesso, e o relatório registraria
-    só um nome de arquivo em `origem`. Nome de arquivo é convenção, não fato.
+    Duas formas de errar, e a segunda é pior:
+
+    - **mesmo dia** é in-sample, o que a §2d proibiu para o encolhimento;
+    - **dia posterior** é olhar o futuro — e a primeira versão desta trava
+      deixava passar, porque conferia pertinência ao conjunto avaliado em vez
+      de ordem. Uma curva de 25/08 avaliando 24/08 sairia rotulada de fora da
+      amostra (achado em review).
     """
     from datetime import UTC, datetime
 
@@ -511,20 +515,59 @@ def test_curva_do_dia_avaliado_e_recusada():
                 datetime.strptime(dia, "%Y%m%d").replace(tzinfo=UTC).timestamp() * 1e9
             )
 
-    curvas = CurvasPorAtivo(
-        por_ativo={"btc": curva_btc()}, origem="X", dia_medido="20260824"
-    )
-    with pytest.raises(SystemExit, match="IN-SAMPLE"):
-        recusar_curva_in_sample(curvas, [_Janela("20260824")])
+    def _curvas(dia):
+        return CurvasPorAtivo(
+            por_ativo={"btc": curva_btc()}, origem="X", dia_medido=dia
+        )
+
+    avaliado = [_Janela("20260824")]
+
+    # Mesmo dia: in-sample.
+    with pytest.raises(SystemExit, match="ESTRITAMENTE anterior"):
+        recusar_curva_in_sample(_curvas("20260824"), avaliado)
+
+    # Dia POSTERIOR: olhar o futuro.
+    with pytest.raises(SystemExit, match="ESTRITAMENTE anterior"):
+        recusar_curva_in_sample(_curvas("20260825"), avaliado)
 
     # Dia anterior: passa.
-    fora = CurvasPorAtivo(
-        por_ativo={"btc": curva_btc()}, origem="X", dia_medido="20260823"
-    )
-    recusar_curva_in_sample(fora, [_Janela("20260824")])
+    recusar_curva_in_sample(_curvas("20260823"), avaliado)
+
+    # Formato inválido não é aceito em silêncio.
+    with pytest.raises(SystemExit, match="inválido"):
+        recusar_curva_in_sample(_curvas("23 de agosto"), avaliado)
 
     # Sem curva, nada a conferir.
-    recusar_curva_in_sample(None, [_Janela("20260824")])
+    recusar_curva_in_sample(None, avaliado)
+
+
+def test_modelo_medido_nao_espera_o_aquecimento_do_ewma():
+    """O σ não entra na conta, então não pode decidir se ela vale.
+
+    Manter o portão descartaria os ~20 primeiros ticks de CADA janela do
+    backtest — que cria um `RealizedVol` novo por janela — enquanto ao vivo o
+    rastreador persiste entre janelas. Assimetria entre backtest e SHADOW
+    inventada por um número que ninguém usa, e bem na PRIMEIRA entrada, que é
+    a única que a v1 faz (achado em review).
+    """
+    est = prob_up_twap_medido(
+        ancora=118_050.0,
+        spot=118_000.0,
+        seconds_left=240.0,
+        curva=curva_btc(),
+        vol_ready=False,
+    )
+    assert est.confiavel is True
+
+    # O caminho derivado continua exigindo o aquecimento — lá o σ é a conta.
+    derivado = prob_up_twap(
+        ancora=118_050.0,
+        spot=118_000.0,
+        seconds_left=240.0,
+        sigma_1s=2e-4,
+        vol_ready=False,
+    )
+    assert derivado.confiavel is False
 
 
 def test_relatorio_sem_dia_medido_e_recusado(tmp_path, monkeypatch):

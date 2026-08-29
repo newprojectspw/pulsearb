@@ -243,7 +243,19 @@ def prob_up_twap_medido(
     pronto, como propriedade medida da série.
 
     `sigma_1s` entra só para o relatório continuar publicando o que a
-    volatilidade estava marcando; ele NÃO participa mais da conta.
+    volatilidade estava marcando; ele NÃO participa mais da conta — e por isso
+    `vol_ready` também não decide se a estimativa é confiável aqui.
+
+    **Por que `confiavel` não olha mais o aquecimento do EWMA.** No caminho
+    derivado, `vol_ready=False` quer dizer "menos de 20 retornos observados, o
+    σ não descreve nada ainda", e recusar é certo. Aqui o σ não entra na
+    conta: a incerteza vem da curva, que foi medida sobre 24 h de gravação e
+    já está pronta quando a janela abre. Manter o portão descartaria os ~20
+    primeiros ticks de CADA janela do backtest — porque o `BacktestRunner`
+    cria um `RealizedVol` novo por janela — enquanto ao vivo o rastreador
+    persiste entre janelas e não teria a mesma perda. Seria uma assimetria
+    entre backtest e SHADOW inventada por um número que ninguém usa, e ela
+    cairia justamente na PRIMEIRA entrada, que é a única que a v1 faz.
     """
     if spot <= 0 or ancora <= 0:
         raise ValueError(f"preços devem ser positivos (spot={spot}, ancora={ancora})")
@@ -278,7 +290,7 @@ def prob_up_twap_medido(
         # não "nada está travado".
         peso_travado=0.0,
         sigma_1s=sigma_1s,
-        confiavel=vol_ready,
+        confiavel=True,
     )
 
 
