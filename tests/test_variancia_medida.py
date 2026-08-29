@@ -411,3 +411,92 @@ def test_relatorio_sem_curva_avaliavel_falha_alto(tmp_path, monkeypatch):
         _curvas_de_variancia("relatorios/vazio.json")
 
     assert _curvas_de_variancia(None) is None
+
+
+# ------------------------- a física tem de alcançar TODOS os diagnósticos
+def test_todos_os_diagnosticos_herdam_a_curva():
+    """Achado em review do PR #46, e é o defeito do 1.4 um nível acima.
+
+    Sem isto, uma rodada com `--curva-de-variancia` publicava
+    `modelo_de_variancia.medida: true` e media o 1.1 com a variância MEDIDA
+    enquanto o 1.4 (sensibilidade de latência), a curva de edge, a de
+    capacidade e a de horizonte rodavam com a DERIVADA. As duas diferem por
+    39 a 48 vezes.
+
+    O teste morde do jeito mais direto possível: uma curva que não cobre o
+    ativo da gravação. Se o diagnóstico recebeu a curva, ele pula tudo e não
+    opera; se ficou com o modelo derivado, ele opera — e a diferença aparece
+    como trade onde não devia haver nenhum.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from tests.synthetic import gerar_gravacao
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.backtest.runner import (
+        FaixaDeOperacao,
+        sensibilidade_latencia,
+        varredura_de_horizonte,
+        varredura_de_tamanho,
+        varredura_de_threshold,
+    )
+    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
+    from pulsearb.replay.reader import RecordingReader
+
+    with tempfile.TemporaryDirectory() as tmp:
+        diretorio = Path(tmp) / "rec"
+        diretorio.mkdir()
+        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+        index = RecordingIndex(RecordingReader(diretorio))
+        index.build()
+        janelas = [j for j in index.janelas() if j.resolveu_up is not None]
+        for janela in janelas:
+            janela.ancora = compute_anchor(
+                AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
+            )
+
+        so_eth = CurvasPorAtivo(
+            por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
+            origem="teste",
+        )
+        faixa = FaixaDeOperacao(curvas_de_variancia=so_eth)
+
+        # 1.4 — sensibilidade de latência
+        for celula in sensibilidade_latencia(
+            janelas, index.streams, latencias_ms=(300.0, 600.0), operacao=faixa
+        ).values():
+            assert celula["trades"] == 0, celula
+
+        # curva de edge por threshold
+        for report in varredura_de_threshold(
+            janelas, index.streams, thresholds=(0.02, 0.05), operacao=faixa
+        ).values():
+            assert not report.trades
+
+        # 1.5 — curva de capacidade (o retorno traz `por_tamanho` e notas)
+        capacidade = varredura_de_tamanho(
+            janelas, index.streams, tamanhos=(5.0, 25.0), operacao=faixa
+        )
+        for celula in capacidade["por_tamanho"].values():
+            assert celula["trades"] == 0, celula
+
+        # curva de horizonte
+        for banda in varredura_de_horizonte(
+            janelas, index.streams, curvas_de_variancia=so_eth
+        ).values():
+            assert banda["trades"] == 0, banda
+
+        # E o controle: SEM curva nenhuma, os mesmos diagnósticos operam.
+        sem_curva = sensibilidade_latencia(
+            janelas, index.streams, latencias_ms=(300.0,), operacao=FaixaDeOperacao()
+        )
+        assert any(c["trades"] > 0 for c in sem_curva.values()), sem_curva
+
+
+def test_faixa_de_operacao_carrega_a_curva_para_a_config():
+    from pulsearb.backtest.runner import FaixaDeOperacao
+
+    curvas = CurvasPorAtivo(por_ativo={"btc": curva_btc()}, origem="teste")
+    assert FaixaDeOperacao(curvas_de_variancia=curvas).config().curvas_de_variancia is curvas
+    assert FaixaDeOperacao().config().curvas_de_variancia is None

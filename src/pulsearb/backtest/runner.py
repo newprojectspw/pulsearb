@@ -529,12 +529,22 @@ class FaixaDeOperacao:
     tempo_restante_max_s: float | None = None
     max_entradas_por_janela: int = 1
     intervalo_min_entre_entradas_s: float = 30.0
+    #: As curvas V(t) medidas, pelo MESMO motivo que a banda anda junto.
+    #:
+    #: Achado em review do PR #46: sem este campo, uma rodada com
+    #: `--curva-de-variancia` publicava `modelo_de_variancia.medida: true` e
+    #: media o 1.1 com a variância medida enquanto o 1.4, a curva de edge e a
+    #: de capacidade rodavam com a derivada. As duas diferem por 39 a 48×.
+    #: É o defeito do 1.4 de novo, um nível acima: não mais duas populações
+    #: no mesmo relatório, mas duas FÍSICAS.
+    curvas_de_variancia: Any = None
 
     def config(self, **extra: Any) -> BacktestConfig:
         """A `BacktestConfig` desta faixa, com os campos do cenário por cima."""
         return BacktestConfig(
             tempo_restante_min_s=self.tempo_restante_min_s,
             tempo_restante_max_s=self.tempo_restante_max_s,
+            curvas_de_variancia=self.curvas_de_variancia,
             max_entradas_por_janela=self.max_entradas_por_janela,
             intervalo_min_entre_entradas_s=self.intervalo_min_entre_entradas_s,
             **extra,
@@ -621,6 +631,7 @@ def varredura_de_horizonte(
     latencia_ms: float = LATENCIA_PADRAO_MS,
     max_entradas_por_janela: int = 1,
     intervalo_min_entre_entradas_s: float = 30.0,
+    curvas_de_variancia: Any = None,
 ) -> dict[str, Any]:
     """PnL e hit_rate do preditor CRU forçado a operar em CADA banda de tempo.
 
@@ -644,6 +655,7 @@ def varredura_de_horizonte(
                 intervalo_min_entre_entradas_s=intervalo_min_entre_entradas_s,
                 tempo_restante_min_s=minimo,
                 tempo_restante_max_s=maximo,
+                curvas_de_variancia=curvas_de_variancia,
             )
         ).run(janelas, streams)
         n = len(report.trades)

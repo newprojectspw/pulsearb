@@ -1953,6 +1953,7 @@ def main(argv: list[str] | None = None) -> int:
     # `>240s` — dois critérios do mesmo relatório sobre populações diferentes.
     # Irrestrita por default: rodada sem `--tempo-restante-*` fica idêntica.
     faixa_operada = FaixaDeOperacao(
+        curvas_de_variancia=curvas,
         tempo_restante_min_s=args.tempo_restante_min,
         tempo_restante_max_s=args.tempo_restante_max,
         max_entradas_por_janela=max(1, args.max_entradas),
@@ -2000,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
     comparacao_encolhimento = None
     if args.fator_de_encolhimento is not None:
         cfg_encolhimento = {
+            "curvas_de_variancia": curvas,
             "threshold_edge": args.threshold,
             "latencia_ms": args.latencia_ms,
             "tempo_restante_min_s": args.tempo_restante_min,
@@ -2046,6 +2048,7 @@ def main(argv: list[str] | None = None) -> int:
         args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
     )
     cfg_entradas = {
+        "curvas_de_variancia": curvas,
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
         "tempo_restante_min_s": args.tempo_restante_min,
@@ -2208,6 +2211,7 @@ def main(argv: list[str] | None = None) -> int:
                 latencia_ms=args.latencia_ms,
                 max_entradas_por_janela=max(1, args.max_entradas),
                 intervalo_min_entre_entradas_s=max(0.0, args.intervalo_entradas),
+                curvas_de_variancia=curvas,
             )
         ),
         **(
