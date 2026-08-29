@@ -28,12 +28,28 @@ retornos de 1s). A contribuição futura à média é a integral do preço ao lo
 dos segundos restantes; sob caminhada aleatória, a média dessas amostras tem:
 
     E[média_futura]  = S           (preço atual, martingale)
-    Var[média_futura] = σ²·S²·k(m) com k(m) = (m−1)(2m−1)/(6m) para m amostras
+    Var[média_futura] = σ²·S²·(espera + k(m))
+
+com `m = min(t, 60)` amostras, `espera = max(0, t − 60)` e
+k(m) = (m−1)(2m−1)/(6m).
 
 O termo k(m) vem de Var[(1/m)·Σ S_i] com S_i = S·(1 + Σ_{j≤i} ε_j): os
 retornos se acumulam, então amostras tardias carregam mais variância. Para
 m grande, k(m) → m/3 — a média futura tem 1/3 da variância do preço final,
 que é a razão de o TWAP ser mais previsível que o spot.
+
+O termo `espera` é a parte que faltava até 2026-08-29, e faltava só quando
+`t > 60`. Com `t ≤ 60` a janela de fechamento já começou e `espera = 0` — a
+fórmula é a mesma de antes. Com `t > 60` ela ainda NÃO começou: o preço
+caminha `t − 60` segundos antes da primeira amostra da média, e esse
+deslocamento é **comum às 60 amostras**, então entra inteiro na variância da
+média em vez de ser diluído por 60. Sem ele o desvio ficava congelado no
+valor de 60 s para qualquer horizonte — 31 % do real a 240 s, 27 % a 300 s —,
+o modelo despejava as previsões nos extremos e o critério 1.3 media a
+superconfiança que isso produz.
+
+`tests/test_m2_engine.py` confere a fórmula fechada contra a soma direta dos
+coeficientes de cada choque, que é a definição e não depende desta derivação.
 
 `P(Up) = P(TWAP_final ≥ âncora)` — o **≥** é literal: empate resolve Up
 (API_NOTES 12.4).
@@ -237,9 +253,18 @@ def prob_up_twap(
     # Média esperada do TWAP final = parte travada + parte futura (martingale).
     esperado = locked_weight * locked_mean + futuro_weight * spot
 
-    # Quantas amostras futuras entram na média final.
+    # Quantas amostras futuras entram na média final, e por quanto tempo o
+    # preço ainda anda ANTES de a janela de fechamento começar.
+    #
+    # O segundo termo era o defeito: com `t > 60` a janela de fechamento não
+    # começa agora, começa daqui a `t − 60` segundos, e o preço caminha esse
+    # tempo todo antes. Esse deslocamento é comum às 60 amostras — entra
+    # inteiro na variância da média, não dividido por 60. Usar só `k(60)`
+    # congelava o desvio no valor de 60 s: a 240 s o modelo usava 31 % do
+    # desvio real, e a 300 s, 27 %. Daí a superconfiança medida no 1.3.
     m = min(seconds_left, window_seconds)
-    var_futuro = (sigma_1s**2) * (spot**2) * variance_factor(m)
+    espera_s = max(0.0, seconds_left - window_seconds)
+    var_futuro = (sigma_1s**2) * (spot**2) * (espera_s + variance_factor(m))
     # Só a parte futura carrega incerteza; a travada é constante.
     desvio = futuro_weight * math.sqrt(max(var_futuro, 0.0))
 
