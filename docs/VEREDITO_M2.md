@@ -1012,6 +1012,28 @@ suposição de caminhada aleatória do subjacente também está errada, e aí a
 conclusão da §2d-bis — modelo novo — volta a valer, agora por um motivo
 medido.
 
+As três são julgadas em CÓDIGO (`veredito_da_curva`), não a olho na tabela, e
+duas ressalvas ficam registradas porque a revisão do PR #44 as cobrou:
+
+- **Sem os dois regimes medidos não há veredito.** Se a gravação não alcança
+  dois horizontes longos, `ha_suavizacao` sai **nulo**, e não falso. "Não deu
+  para medir" saindo como "medi e não há" é o defeito do
+  `cobertura_da_gravacao` que reportava 1,0 num relatório com 3.601 s de
+  silêncio, e o do `erro` que um preditor constante gabaritava. A concordância
+  entre ativos também não conta quem não foi avaliado.
+- **A propriedade 2 é o que separa suavização de outro processo.** Uma série
+  com momento (retornos autocorrelacionados) tem `V(t)/t` crescendo em todo
+  horizonte e daria razão longo/curto acima de 400 sem ter nada de suavizada.
+  O limite conhecido: um processo de memória curta (~100 s) já está no regime
+  assintótico entre 240 e 600 s e passa na linearidade. A checagem separa o
+  que se parece com suavização **no horizonte medido**; não prova a origem
+  física do achatamento.
+
+E a medição usa o relógio do SERVIDOR (`src_timestamp_ms`), não o da chegada
+local — a conta é toda sobre distância entre observações, e `ts_wall_ns`
+carrega latência de rede, pausa do processo e ajuste do relógio da máquina.
+Tick sem timestamp de origem é descartado e CONTADO no relatório.
+
 
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 

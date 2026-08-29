@@ -175,8 +175,9 @@ def test_script_le_a_gravacao_e_mede(tmp_path, monkeypatch):
 
     gerar_gravacao(tmp_path / "rec" / "gravacao.jsonl.gz", n_janelas=8, duracao_s=300)
 
-    series = script.series_da_gravacao(tmp_path / "rec", progresso=False)
+    series, descartes = script.series_da_gravacao(tmp_path / "rec", progresso=False)
     assert series, "nenhum tick de twap_sixty encontrado na gravacao sintetica"
+    assert not descartes, descartes
 
     relatorio = script.medir(series, horizontes_s=(2, 5, 10, 30, 60))
     assert relatorio["ativos"] >= 1
@@ -185,3 +186,76 @@ def test_script_le_a_gravacao_e_mede(tmp_path, monkeypatch):
         assert medidos, curva
         # Variância cresce com o horizonte, em qualquer processo de preço.
         assert curva["veredito"]["monotona"]
+
+
+# ------------------------------------- o veredito nao inventa o que nao mediu
+def test_sem_horizonte_longo_o_veredito_nao_e_avaliavel():
+    """Ausência de evidência não pode sair como evidência de ausência.
+
+    É o defeito do `cobertura_da_gravacao` reportando 1,0 num relatório com
+    3.601 s de silêncio, e o do `erro` que um preditor constante gabaritava.
+    Aqui ele apareceria assim: gravação curta demais para medir 240 s, e o
+    relatório dizendo `ha_suavizacao: false` como se tivesse medido.
+    """
+    curva = curva_de_variancia(
+        _serie(_caminhada(3_000, 2e-4, semente=21)), horizontes_s=(2, 5, 10, 30, 60)
+    )
+    veredito = veredito_da_curva(curva)
+
+    assert veredito["avaliavel"] is False
+    assert veredito["ha_suavizacao"] is None
+    assert veredito["fator_de_suavizacao_medido"] is None
+
+
+def test_um_horizonte_longo_so_nao_basta_para_julgar_linearidade():
+    """Com um ponto no regime longo não há reta para conferir."""
+    curva = curva_de_variancia(
+        _serie(_caminhada(20_000, 2e-4, semente=22)), horizontes_s=(10, 30, 60, 240)
+    )
+    assert veredito_da_curva(curva)["avaliavel"] is False
+
+
+def test_serie_com_momento_nao_e_rotulada_de_suavizacao():
+    """V(t)/t subindo sem parar é OUTRO processo, não suavização.
+
+    A §2d-ter registrou três propriedades e a primeira versão do veredito só
+    conferia duas — a linearidade no regime longo ficou de fora, e o docstring
+    dizia que conferia as três.
+
+    Aqui os retornos são autocorrelacionados (AR(1) com φ = 0,998, memória de
+    ~500 s): a série tem momento, `V(t)/t` cresce em TODO horizonte, e a razão
+    longo/curto passa de 400. Sem a checagem de linearidade isso sairia como
+    "suavização, fator 428", que é atribuir o processo errado.
+
+    Limite conhecido desta checagem, registrado para não virar promessa: um
+    processo de memória CURTA (φ = 0,99, ~100 s) já está no regime assintótico
+    entre 240 e 600 s, passa na linearidade e é rotulado de suavização. A
+    checagem separa o que se parece com suavização no horizonte medido — não
+    prova a origem física do achatamento.
+    """
+    rng = random.Random(31)
+    retorno, preco, valores = 0.0, 100.0, []
+    for _ in range(20_000):
+        retorno = 0.998 * retorno + rng.gauss(0.0, 2e-5)
+        preco *= 1.0 + retorno
+        valores.append(preco)
+
+    veredito = veredito_da_curva(curva_de_variancia(_serie(valores)))
+    assert veredito["avaliavel"]
+    assert veredito["fator_de_suavizacao_medido"] > 100, veredito
+    assert veredito["linear_no_longo"] is False, veredito
+    assert veredito["ha_suavizacao"] is False, veredito
+
+
+def test_concordancia_nao_conta_ativo_que_nao_deu_para_avaliar():
+    """Um ativo sem amostra não vota — nem a favor nem contra."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    longa = _serie(_caminhada(20_000, 2e-4, semente=24))
+    curta = _serie(_caminhada(400, 2e-4, semente=25))
+    relatorio = script.medir({"btc": longa, "sol": curta})
+
+    concordancia = relatorio["concordam_sobre_suavizacao"]
+    assert concordancia["avaliados"] == 1
+    assert concordancia["sem_amostra_para_avaliar"] == 1

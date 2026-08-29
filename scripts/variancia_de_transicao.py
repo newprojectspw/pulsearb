@@ -63,10 +63,26 @@ PASSO_DO_PROGRESSO = 500_000
 
 def series_da_gravacao(
     raiz: Path, *, progresso: bool = True
-) -> dict[str, list[tuple[int, float]]]:
-    """Uma passada, guardando só os ticks de `twap_sixty` por ativo."""
+) -> tuple[dict[str, list[tuple[int, float]]], dict[str, int]]:
+    """Uma passada, guardando só os ticks de `twap_sixty` por ativo.
+
+    **O relógio é o do SERVIDOR (`src_timestamp_ms`), não o da chegada local.**
+    Aqui isso não é preferência de estilo: a medição é toda sobre DISTÂNCIA
+    entre observações, e `ts_wall_ns` carrega a latência da rede, a pausa do
+    processo e qualquer ajuste do relógio local. Um par de 240 s que chegou com
+    1 s de atraso viraria um par de 241 s — e a `tolerancia_s` recusaria, ou
+    pior, aceitaria o vizinho errado. O `live/precos.py` já anota por
+    `ts_servidor_ms`; o instrumento seguia o relógio errado.
+
+    Tick sem timestamp de origem (`src_timestamp_ms == 0`, que é o que o
+    `parse_rtds_event` põe quando o payload não traz `timestamp`) é
+    DESCARTADO e CONTADO. Aproveitá-lo caindo para a chegada local misturaria
+    duas réguas na mesma série, e o descarte silencioso é o defeito que o M2.8
+    já pagou.
+    """
     leitor = RecordingReader(raiz)
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    descartes: dict[str, int] = defaultdict(int)
     lidos = 0
     for record in leitor.iter_records(incluir_meta=False):
         lidos += 1
@@ -78,9 +94,13 @@ def series_da_gravacao(
                 flush=True,
             )
         tick = parse_rtds_event(record.payload, record.ts_mono_ns, record.ts_wall_ns)
-        if tick is not None and tick.topic == TOPIC_TWAP_60:
-            series[tick.asset].append((record.ts_wall_ns, tick.price))
-    return dict(series)
+        if tick is None or tick.topic != TOPIC_TWAP_60:
+            continue
+        if tick.src_timestamp_ms <= 0:
+            descartes[tick.asset] += 1
+            continue
+        series[tick.asset].append((tick.src_timestamp_ms * 1_000_000, tick.price))
+    return dict(series), dict(descartes)
 
 
 def medir(
@@ -109,15 +129,23 @@ def medir(
 
 def _concordancia(por_ativo: dict[str, Any]) -> dict[str, Any]:
     """Oito ativos concordando é evidência; um destoando é defeito de feed."""
-    vereditos = [c[CHAVE_VEREDITO]["ha_suavizacao"] for c in por_ativo.values()]
-    fatores = [
-        f
+    # Só entra na conta o ativo cujo veredito foi AVALIÁVEL. Um ativo com
+    # gravação curta demais para medir os dois regimes não é evidência de
+    # "não há suavização" — é ausência de evidência, e somar as duas coisas
+    # produziria `unanime: true` sobre zero medições.
+    avaliaveis = [
+        c[CHAVE_VEREDITO]
         for c in por_ativo.values()
-        if (f := c[CHAVE_VEREDITO]["fator_de_suavizacao_medido"]) is not None
+        if c[CHAVE_VEREDITO]["avaliavel"]
+    ]
+    vereditos = [v["ha_suavizacao"] for v in avaliaveis]
+    fatores = [
+        f for v in avaliaveis if (f := v["fator_de_suavizacao_medido"]) is not None
     ]
     return {
         "com_suavizacao": sum(vereditos),
-        "de": len(vereditos),
+        "avaliados": len(avaliaveis),
+        "sem_amostra_para_avaliar": len(por_ativo) - len(avaliaveis),
         "unanime": bool(vereditos) and (all(vereditos) or not any(vereditos)),
         "fator_minimo": min(fatores) if fatores else None,
         "fator_maximo": max(fatores) if fatores else None,
@@ -135,12 +163,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sem-progresso", action="store_true")
     args = parser.parse_args(argv)
 
-    series = series_da_gravacao(args.raiz, progresso=not args.sem_progresso)
+    series, descartes = series_da_gravacao(
+        args.raiz, progresso=not args.sem_progresso
+    )
     if not series:
-        print("nenhum tick de twap_sixty na gravacao", file=sys.stderr)
+        print("nenhum tick de twap_sixty com timestamp de origem", file=sys.stderr)
         return 2
 
     relatorio = medir(series)
+    relatorio["ticks_sem_timestamp_de_origem"] = descartes
     texto = json.dumps(relatorio, indent=2, ensure_ascii=False)
     if args.saida:
         destino = caminho_de_escrita(args.saida)
