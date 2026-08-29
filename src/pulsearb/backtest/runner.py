@@ -314,8 +314,16 @@ class BacktestRunner:
             if janela.jogo != JOGO_TWAP:
                 report.janelas_de_jogo_sem_curva[janela.asset] += 1
                 return
-            if cfg.curvas_de_variancia.para(janela.asset) is None:
+            curva_do_ativo = cfg.curvas_de_variancia.para(janela.asset)
+            if curva_do_ativo is None:
                 report.janelas_sem_curva[janela.asset] += 1
+                return
+            # A janela pergunta por horizontes até a sua duração. Além do
+            # maior horizonte MEDIDO, a curva extrapola — e extrapolação
+            # apresentada como medição é o que esta seção inteira existe para
+            # não fazer.
+            if janela.duracao_s > curva_do_ativo.horizonte_maximo_s:
+                report.janelas_alem_da_curva[janela.asset] += 1
                 return
         vol = RealizedVol()
         twap = TwapTracker()

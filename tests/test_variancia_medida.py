@@ -129,11 +129,11 @@ def test_curva_recusa_ponto_nao_positivo_e_curva_curta_demais():
 
 
 # ------------------------------------------------------- leitura do relatório
-def _relatorio(avaliavel: bool = True) -> dict:
+def _relatorio(avaliavel: bool = True, linear: bool = True) -> dict:
     return {
         "por_ativo": {
             "btc": {
-                "veredito": {"avaliavel": avaliavel},
+                "veredito": {"avaliavel": avaliavel, "linear_no_longo": linear},
                 "horizontes": [
                     {"horizonte_s": h, "variancia": v, "suficiente": True}
                     for h, v in PONTOS_BTC
@@ -148,6 +148,17 @@ def test_relatorio_vira_curva():
     assert len(curvas) == 1
     assert curvas.para("btc").variancia(240.0) == pytest.approx(1.844065257706601e-06)
     assert curvas.para("eth") is None
+
+
+def test_curva_que_reprovou_na_linearidade_fica_de_fora():
+    """Achado em review: `avaliavel` sozinho não sustenta a extrapolação.
+
+    A extrapolação acima do maior horizonte medido é LINEAR, e essa forma é a
+    propriedade 2 da §2d-ter — medida, não escolhida. Uma curva que reprovou
+    justamente nessa propriedade seria esticada pela forma que a própria
+    medição rejeitou, inventando variância com cara de medida.
+    """
+    assert len(curvas_do_relatorio(_relatorio(linear=False), origem="X")) == 0
 
 
 def test_ativo_sem_veredito_avaliavel_fica_de_fora():

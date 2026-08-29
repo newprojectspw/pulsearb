@@ -214,6 +214,12 @@ class BacktestReport:
     #: rodada marcada `medida: true` poria as duas físicas no mesmo PnL de
     #: manchete, que é o defeito que esta rodada existe para não cometer.
     janelas_de_jogo_sem_curva: Counter[str] = field(default_factory=Counter)
+    #: ativo → janelas puladas por durarem mais que o maior horizonte MEDIDO
+    #: da curva. Uma janela de 15 min ou de 4 h pergunta por horizontes além
+    #: dos 600 s medidos, e responder ali seria extrapolação apresentada como
+    #: medição. Cobrir essas durações exige medir horizontes maiores, não
+    #: esticar os que existem.
+    janelas_alem_da_curva: Counter[str] = field(default_factory=Counter)
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -291,6 +297,7 @@ class BacktestReport:
         return {
             "janelas_sem_curva_de_variancia": dict(self.janelas_sem_curva),
             "janelas_de_jogo_sem_curva": dict(self.janelas_de_jogo_sem_curva),
+            "janelas_alem_da_curva": dict(self.janelas_alem_da_curva),
             "resumo": {
                 "janelas_avaliadas": self.janelas_avaliadas,
                 "sinais_gerados": self.sinais_gerados,

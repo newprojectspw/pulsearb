@@ -41,6 +41,7 @@ import json
 import re
 import sys
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +63,6 @@ CHAVE_VEREDITO = "veredito"
 PASSO_DO_PROGRESSO = 500_000
 
 
-#: Como o recorder nomeia as horas: `pulsearb-20260823-0000.jsonl.gz`.
-PADRAO_DO_DIA = "pulsearb-{dia}-[0-9][0-9][0-9][0-9].jsonl*"
-
 #: Forma aceita para `--dia`: oito dígitos, e só.
 #:
 #: O valor vem da linha de comando e é INTERPOLADO num glob. Sem esta trava,
@@ -77,33 +75,70 @@ PADRAO_DE_DIA = re.compile(r"[0-9]{8}")
 
 
 def arquivos_do_dia(arquivos: list[Path], dia: str) -> list[Path]:
-    """Os arquivos de UM dia, por nome exato — sem a margem de ±1 h.
+    """Os arquivos que PODEM conter ticks do dia pedido.
 
-    Filtra uma lista que o `RecordingReader` já montou, em vez de fazer o
-    próprio `glob` a partir do caminho da linha de comando. A diferença é de
-    superfície: um `glob` sobre caminho externo é acesso ao disco guiado por
-    entrada de fora, e o padrão fixo do `--dia` fecha só metade disso — a
-    outra metade é a raiz, que NÃO pode ser contida numa pasta de trabalho
-    porque a gravação mora em `~/pulsearb-dados` de propósito. Filtrar por
-    nome é comparação de string: não abre caminho nenhum.
+    Inclui as horas do próprio dia **mais as duas horas de borda** — a 23h do
+    dia anterior e a 00h do seguinte. O nome do arquivo é aproximação: o
+    `RecordingReader` documenta que um evento de 13:59:59,9 pode estar no
+    arquivo das 14h. Ficar só nos nomes do dia deixaria entrar tick do dia
+    seguinte e sairia tick do dia pedido — e é justamente o vazamento que o
+    `--dia` existe para impedir.
 
-    O `RecordingReader` recorta por fatia de hora com uma hora de margem de
-    cada lado, e faz certo: o nome do arquivo é aproximação, e uma janela que
-    abre às 13:58 precisa do book da hora anterior.
+    Quem decide de fato é o `ticks_do_dia`, pelo relógio de origem. Aqui só se
+    escolhe o que abrir, e abrir duas horas a mais custa pouco.
 
-    Aqui a margem seria dano. Esta medição é estatística de PARES sobre uma
-    série longa — não tem borda de janela para preservar —, e a curva existe
-    para calibrar um veredito de OUTRO dia. Uma hora do dia avaliado dentro
-    da curva que o calibra é exatamente o vazamento in-sample que a §2d
-    proibiu. Uma hora em 23 é pouco; a regra não é sobre quanto, é sobre se.
+    Filtra a lista que o `RecordingReader` já montou, em vez de fazer o
+    próprio `glob` a partir do caminho da linha de comando: um `glob` sobre
+    caminho externo é acesso ao disco guiado por entrada de fora, e a raiz
+    NÃO pode ser contida numa pasta de trabalho — a gravação mora em
+    `~/pulsearb-dados` de propósito. Comparar nomes não abre caminho nenhum.
+    """
+    dia_utc = _dia_valido(dia)
+    marcas = tuple(
+        f"pulsearb-{(dia_utc + timedelta(days=delta)).strftime('%Y%m%d')}-"
+        for delta in (-1, 0, 1)
+    )
+    do_dia = f"pulsearb-{dia}-"
+    escolhidos = []
+    for arquivo in arquivos:
+        nome = arquivo.name
+        if nome.startswith(do_dia):
+            escolhidos.append(arquivo)
+        elif nome.startswith(marcas[0]) and nome[len(marcas[0]) :].startswith("23"):
+            escolhidos.append(arquivo)
+        elif nome.startswith(marcas[2]) and nome[len(marcas[2]) :].startswith("00"):
+            escolhidos.append(arquivo)
+    return sorted(escolhidos)
+
+
+def _dia_valido(dia: str) -> datetime:
+    """`--dia` vira data de verdade, e recusa o que não for oito dígitos.
+
+    O valor vem da linha de comando e é comparado contra nomes de arquivo.
+    Validar contra padrão fixo ANTES de qualquer uso é a regra que o M2.5
+    fixou para o `--json`.
     """
     if not PADRAO_DE_DIA.fullmatch(dia):
         raise ValueError(
             f"dia inválido: {dia!r} — esperado YYYYMMDD, oito dígitos "
             "(ex.: 20260823)"
         )
-    marca = f"pulsearb-{dia}-"
-    return sorted(p for p in arquivos if p.name.startswith(marca))
+    try:
+        return datetime.strptime(dia, "%Y%m%d").replace(tzinfo=UTC)
+    except ValueError as erro:
+        raise ValueError(f"dia inválido: {dia!r} — não é uma data") from erro
+
+
+def ticks_do_dia(dia: str, ts_ms: int) -> bool:
+    """O tick pertence ao dia pedido, pelo relógio de ORIGEM.
+
+    É o mesmo relógio que a medição usa para espaçar os pares. Usar o nome do
+    arquivo aqui misturaria duas réguas — e a que decide tem de ser a que o
+    dado carrega, não a que o recorder escolheu na hora de rotacionar.
+    """
+    return (
+        datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).strftime("%Y%m%d") == dia
+    )
 
 
 def series_da_gravacao(
@@ -134,7 +169,7 @@ def series_da_gravacao(
         if not leitor.files:
             raise SystemExit(
                 f"nenhum arquivo de {dia} na gravação — esperado nome no "
-                f"formato {PADRAO_DO_DIA.format(dia=dia)}"
+                f"formato pulsearb-{dia}-HHMM.jsonl.gz"
             )
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
     descartes: dict[str, int] = defaultdict(int)
@@ -153,6 +188,11 @@ def series_da_gravacao(
             continue
         if tick.src_timestamp_ms <= 0:
             descartes[tick.asset] += 1
+            continue
+        if dia and not ticks_do_dia(dia, tick.src_timestamp_ms):
+            # Veio de um arquivo de borda, mas o relógio de origem diz que é
+            # de outro dia. Fora — senão a curva out-of-sample carregaria
+            # observações do dia que ela vai calibrar.
             continue
         series[tick.asset].append((tick.src_timestamp_ms * 1_000_000, tick.price))
     return dict(series), dict(descartes)

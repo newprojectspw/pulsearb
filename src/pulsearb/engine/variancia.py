@@ -69,6 +69,11 @@ class CurvaDeVariancia:
                     f"curva de {self.asset!r} tem ponto não positivo: ({h}, {v})"
                 )
 
+    @property
+    def horizonte_maximo_s(self) -> float:
+        """O maior horizonte MEDIDO. Além dele, a curva extrapola."""
+        return self.pontos[-1][0]
+
     def variancia(self, seconds_left: float) -> float:
         """V(t) no horizonte pedido, em unidades de retorno relativo ao quadrado.
 
@@ -142,14 +147,20 @@ class CurvasPorAtivo:
 def curvas_do_relatorio(relatorio: dict[str, Any], *, origem: str) -> CurvasPorAtivo:
     """Lê a saída de `scripts/variancia_de_transicao.py`.
 
-    Só entram horizontes com `suficiente: true`. Ativo cujo veredito não foi
-    `avaliavel` fica de FORA — sem os dois regimes medidos a curva não cobre a
-    faixa que o modelo consulta, e uma curva pela metade extrapolada para o
-    resto seria pior que não ter curva, porque não se anunciaria.
+    Só entram horizontes com `suficiente: true`. Ativo fica de FORA quando o
+    veredito não é `avaliavel` — sem os dois regimes medidos a curva não cobre
+    a faixa que o modelo consulta — **ou** quando `linear_no_longo` é falso.
+
+    A segunda condição é achado de review, e é a que faltava. A extrapolação
+    acima do maior horizonte medido é LINEAR, e essa forma não é escolha de
+    conveniência: é a propriedade 2 da §2d-ter, medida. Uma curva que reprovou
+    justamente nessa propriedade estaria sendo extrapolada pela forma que a
+    própria medição rejeitou — inventando variância com cara de medida.
     """
     curvas: dict[str, CurvaDeVariancia] = {}
     for asset, dados in (relatorio.get("por_ativo") or {}).items():
-        if not (dados.get("veredito") or {}).get("avaliavel"):
+        veredito = dados.get("veredito") or {}
+        if not veredito.get("avaliavel") or not veredito.get("linear_no_longo"):
             continue
         pontos = tuple(
             (float(linha["horizonte_s"]), float(linha["variancia"]))

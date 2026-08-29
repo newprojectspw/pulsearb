@@ -262,19 +262,24 @@ def test_concordancia_nao_conta_ativo_que_nao_deu_para_avaliar():
 
 
 # ------------------------------------------ o recorte por dia, sem margem
-def test_dia_recorta_por_nome_exato_e_sem_margem(tmp_path):
-    """A curva que calibra o dia 24 não pode conter hora nenhuma do dia 24.
+def test_dia_abre_as_horas_de_borda_e_decide_pelo_relogio_de_origem(tmp_path):
+    """A curva que calibra o dia 24 não pode conter tick nenhum do dia 24.
 
-    O `arquivos_na_fatia` do reader recorta com ±1 h de margem, e faz certo
-    para o backtest — uma janela que abre às 13:58 precisa do book da hora
-    anterior. Aqui a margem seria vazamento in-sample, que é o que a §2d
-    proibiu. Este teste trava a diferença.
+    O nome do arquivo é aproximação — o `RecordingReader` documenta que um
+    evento de 13:59:59,9 pode estar no arquivo das 14h. Então a seleção por
+    nome abre as horas de BORDA (23h do dia anterior, 00h do seguinte) e quem
+    decide de fato é o relógio de ORIGEM do tick.
+
+    Ficar só nos nomes deixaria entrar tick do dia seguinte e sairia tick do
+    dia pedido — o vazamento que o `--dia` existe para impedir (achado em
+    review).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import variancia_de_transicao as script
 
     for nome in (
-        "pulsearb-20260823-2200.jsonl.gz",
+        "pulsearb-20260822-2300.jsonl.gz",
+        "pulsearb-20260823-0000.jsonl.gz",
         "pulsearb-20260823-2300.jsonl.gz",
         "pulsearb-20260824-0000.jsonl.gz",
         "pulsearb-20260824-0100.jsonl.gz",
@@ -282,19 +287,28 @@ def test_dia_recorta_por_nome_exato_e_sem_margem(tmp_path):
         (tmp_path / nome).write_bytes(b"")
 
     todos = sorted(tmp_path.glob("*.jsonl.gz"))
-    do_23 = script.arquivos_do_dia(todos, "20260823")
-    assert [p.name for p in do_23] == [
-        "pulsearb-20260823-2200.jsonl.gz",
-        "pulsearb-20260823-2300.jsonl.gz",
-    ]
-    # A hora 00:00 do dia 24 é vizinha da 23:00 do dia 23 e NÃO entra.
-    assert all("20260824" not in p.name for p in do_23)
+    escolhidos = [p.name for p in script.arquivos_do_dia(todos, "20260823")]
 
-    do_24 = script.arquivos_do_dia(todos, "20260824")
-    assert [p.name for p in do_24] == [
+    # As duas horas do dia, mais as duas bordas — e nada além disso.
+    assert escolhidos == [
+        "pulsearb-20260822-2300.jsonl.gz",
+        "pulsearb-20260823-0000.jsonl.gz",
+        "pulsearb-20260823-2300.jsonl.gz",
         "pulsearb-20260824-0000.jsonl.gz",
-        "pulsearb-20260824-0100.jsonl.gz",
     ]
+    assert "pulsearb-20260824-0100.jsonl.gz" not in escolhidos
+
+    # E o relógio de origem é quem separa de verdade.
+    from datetime import UTC, datetime
+
+    def ms(iso: str) -> int:
+        return int(datetime.fromisoformat(iso).replace(tzinfo=UTC).timestamp() * 1000)
+
+    assert script.ticks_do_dia("20260823", ms("2026-08-23T00:00:00"))
+    assert script.ticks_do_dia("20260823", ms("2026-08-23T23:59:59"))
+    # Um tick do dia 24 dentro do arquivo de borda do dia 23: FORA.
+    assert not script.ticks_do_dia("20260823", ms("2026-08-24T00:00:00"))
+    assert not script.ticks_do_dia("20260823", ms("2026-08-22T23:59:59"))
 
 
 def test_dia_sem_arquivo_falha_alto(tmp_path):
