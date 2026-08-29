@@ -1,32 +1,47 @@
 # ESTADO — o que falta para operar com dinheiro real
 
-**Semáforo de hoje: 🔴 VERMELHO** — o segundo veredito, sobre 24 h de
-captação impecável, **derrubou o primeiro**. O TAKER passava em 4 dos 5
-critérios com +102,92 USDC; no dia 24 ele mede **−53,28 USDC** e reprova em
-quatro (1.1, **1.3**, 1.4, 1.5). O MAKER fica barrado pelo 1.10 e pelo 1.6
-(não avaliável por construção) — o 1.9 passou a 0,20 % sob a emenda
-registrada no VEREDITO_M2.
+**Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou. Sobre
+24 h de captação impecável o TAKER **irrestrito** mede −53,28 USDC. A §2d-bis
+do VEREDITO_M2 mandava procurar uma banda de horizonte com edge, e ela existe:
+**240-120 s**, 640 trades, **+2,7125 USDC**, `hit_rate` 0,7063. Restrito a essa
+banda o placar do taker é **3 PASSA / 2 REPROVA** (1.1, 1.2, 1.4 ✅ · 1.3,
+1.5 ❌). Como o critério pré-registrado exige as CINCO, **o taker segue
+reprovado**. O MAKER continua barrado pelo 1.10 e pelo 1.6 (não avaliável por
+construção) — o 1.9 passou a 0,20 % sob a emenda registrada no VEREDITO_M2.
 Nenhuma das duas rotas sustenta ir a dinheiro real hoje.
 
-**A causa é o 1.3, e ela é mais funda que o PnL.** O erro de calibração real
-é 0,0694 contra uma taxa de taker que exige vencer 0,0175 — o ruído do
-próprio modelo é quatro vezes o edge que ele precisa produzir. Nem o
-threshold (12× de variação, sem tendência) nem a latência (1000 ms melhor
-que 600 ms) mudam o resultado, que é a assinatura de não haver sinal para
-filtrar.
+**O que reprova agora não é PnL nem latência — é 1.3 e 1.5.** Na banda o edge
+de direção é real e decai de forma **monótona** com a latência (+3,3119 a
+150 ms → +0,4736 a 1000 ms): a assinatura de sinal sendo corroído, não de
+ruído. Mas o preditor **acerta a direção ~71 % das vezes e erra a
+probabilidade** — ECE de **0,207** na própria banda, com ~75 mil das ~79 mil
+previsões despejadas nos extremos (0-0,05 e 0,95-1,00) e viés **MISTO e SEM
+ORDEM** (11 faixas otimistas, 9 pessimistas), o que fecha também a saída do
+encolhimento (§2d). E o 1.5 é teto de **capacidade**: p50 de 128 USDC a 3 ticks
+contra os 200 exigidos — restringir horizonte não cria liquidez. **Nenhuma das
+duas causas se resolve escolhendo horizonte ou escala, que eram as duas
+hipóteses pré-registradas.** O taker está esgotado como rota nestes mercados.
 
 Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
 exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
 ligar o LIVE com a estratégia taker atual.
 
-Atualizado: 2026-08-26 · fonte dos números: **24 horas** de gravação real de
-2026-08-24, 695 trades, `pior_fracao_coberta 1,0` e 0 silêncios
-(`relatorios/M2_24AGO.json`). O veredito anterior, de 20 h com 837 s de
-silêncio e 42% dos snapshots descartados, está preservado em
+**Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
+ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
+pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
+1.6 (não avaliável sem posição na fila).
+
+Atualizado: 2026-08-29 · fonte dos números: **24 horas** de gravação real de
+2026-08-24, 126,7 M registros, `pior_fracao_coberta 1,0` e 0 silêncios —
+irrestrito em `relatorios/M2_24AGO.json` (695 trades), na banda em
+`relatorios/HORIZONTE_240_120_v2.json` (640 trades). O veredito anterior, de
+20 h com 837 s de silêncio e 42% dos snapshots descartados, está preservado em
 `docs/VEREDITO_M2.md` para comparação.
 
-> Como ler: **✅** passou com dado real · **❌** medido e reprovado ·
-> **⏳** sem amostra suficiente · **⬜** não existe / não começou.
+> Como ler: **✅** passou com dado real · **✅ *na banda*** passou só quando
+> restrito à faixa 240-120 s de tempo restante · **❌** medido e reprovado ·
+> **🟡** parcial · **⚠️** não avaliável por construção · **⏳** sem amostra
+> suficiente · **⬜** não existe / não começou.
 > Um item só vira ✅ com número de gravação real. Número de gravação
 > sintética não conta — é a regra que o M2 existe para fazer valer.
 
@@ -109,14 +124,14 @@ ativos, **0 silêncios**, 896 janelas conhecidas, 695 trades. A rodada levou
 73 min. A amostra anterior — 20 h de 23/08, com 837 s de silêncio e 42% dos
 snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 
-### TAKER — reprova em 4 dos 5
+### TAKER — na banda 240-120 s: 3 passa, 2 reprova (o critério exige as 5)
 
 | # | Critério | Exigido | Medido (24 h) | |
 |---|---|---|---|---|
-| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **−53,2777 USDC** (24 h de 24/08) | ❌ |
+| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | irrestrito **−53,2777**; **na banda 240-120s: +2,7125** | ✅ *na banda* |
 | 1.2 | Número de trades | ≥ 200 | **695** | ✅ |
-| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **0,0694** em `<30s` (20 faixas) | ❌ **e é a causa dos outros** |
-| 1.4 | Positivo também a 600 ms | sim | **−54,3953 USDC** | ❌ |
+| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | melhor balde **0,0694** (`<30s`, 20 faixas); **na banda operada: 0,207**, viés MISTO e SEM ORDEM | ❌ **é uma das duas causas que sobram** |
+| 1.4 | Positivo também a 600 ms | sim | **+1,3488 USDC** na banda (o −54,3953 era população errada, PR #41) | ✅ *na banda* |
 | 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
 
 **1.1 inverteu duas vezes, e a última leitura é a que tem lastro.** 5 h deram
@@ -126,8 +141,58 @@ não erra para os dois lados, porque o preenchimento simulado usa o último
 snapshot conhecido, que numa lacuna é sistematicamente melhor que o real.
 
 **E o −53,28 é entrada múltipla, não borda negativa.** `max_1_entradas` dá
-+2,7125, `max_3` dá −98,39 e `max_10` dá −221,64. Mas +2,71 em 640 trades é
-0,4 centavo por trade com drawdown de −108: ruído, não resgate.
++2,7125, `max_3` dá −98,39 e `max_10` dá −221,64. E +2,71 em 640 trades é
+0,4 centavo por trade com drawdown de −108 — o que a §2d-bis depois mostrou é
+que esses 640 trades são **exatamente** a banda 240-120 s, e que o número
+sobrevive à grade de latência inteira. É edge de direção real; o que ele não é
+é taker viável, pelas razões da seção seguinte.
+
+### A banda 240-120 s — o que a §2d-bis achou, e o que ela não salva
+
+A `curva_de_horizonte` forçou o preditor bruto em cada faixa de tempo restante.
+Deu edge em **exatamente uma**:
+
+| banda | trades | PnL USDC | hit |
+|---|---|---|---|
+| > 240 s | 695 | −53,28 | — |
+| **240-120 s** | **640** | **+2,7125** | **0,7063** |
+| 120-60 s | — | −0,17 | — |
+| 60-30 s | — | −49,16 | — |
+| < 30 s | — | −5,41 | — |
+
+Dois caminhos independentes batem ao centavo: a célula 240-120 s da curva e o
+`faixa_de_tempo.comparacao.restrito` da rodada com `--tempo-restante-min 120
+--tempo-restante-max 240`.
+
+Sensibilidade a latência **dentro da banda** — decaimento monótono, positivo em
+toda a grade:
+
+| latência | trades | PnL USDC |
+|---|---|---|
+| 150 ms | 640 | +3,3119 |
+| 300 ms | 640 | +2,7125 |
+| 600 ms | 640 | **+1,3488** ← o 1.4 |
+| 1000 ms | 640 | +0,4736 |
+
+**A lacuna de medição que invalidava o 1.4, achada e fechada (PR #41).** O 1.4
+lê `sensibilidade_latencia.600ms`, e esse bloco — junto com `curva_de_edge` e
+`curva_de_capacidade` — rodava a própria configuração só com threshold e
+latência, **ignorando `--tempo-restante-*`**. Numa rodada restrita o 1.1 saía da
+banda e o 1.4 de `>240s`: dois critérios do mesmo relatório sobre populações
+diferentes, sem aviso. O 1.4 publicava −54,3953 — os 695 trades de `>240s`, não
+os 640 da banda —, e por isso **nunca era de fato remedido**, como a §2d-bis
+mandava. Corrigido em `FaixaDeOperacao` (runner): os três diagnósticos herdam a
+banda operada, e a rodada irrestrita fica idêntica à de antes (travado em
+`test_m2_e2e`). Com a correção, **o 1.4 passa: +1,3488**.
+
+**Ressalva de sobreajuste.** O `curva_de_edge` restrito é positivo de 0,01 a
+0,05, melhor em 0,03 (+3,0489), e negativo a partir de 0,08. Esse 0,03 foi
+escolhido OLHANDO esta amostra; adotá-lo exige repetir em dia independente,
+senão é sobreajuste. O threshold registrado segue **0,02**.
+
+**E um dia não é veredito.** Tudo acima é 2026-08-24. Uma banda que passa aqui
+autoriza o próximo experimento — remedir 1.1-1.5 restrito a ela em **dias
+independentes** —, não dinheiro real.
 
 O texto abaixo é da leitura de 20 h e fica como registro do que se acreditava
 então:
@@ -168,8 +233,14 @@ observações:
 numa faixa só. Quem o denuncia é `faixas_ocupadas`. Por isso 1.3 virou
 CONJUNÇÃO: `calibracao_avaliavel` (≥ 3 faixas com amostra) **e** ECE abaixo do
 limiar. Com `calibracao_avaliavel` false o critério fica **não avaliado**, que
-não é o mesmo que reprovado. **Falta rodar de novo sobre a gravação para saber
-em que pé o modelo está.**
+não é o mesmo que reprovado.
+
+**Rodou, e o veredito é reprovação, não "não avaliado".** `calibracao_avaliavel`
+veio **true** — 20 faixas ocupadas no melhor balde, 20 na banda operada —, então
+a conjunção foi de fato exercida, e o ECE ficou em 0,0694 no melhor balde e
+**0,207 na banda 240-120 s**. O preditor não é constante disfarçado; ele é
+**confiante e errado**, com ~75 mil das ~79 mil previsões nos extremos. O 1.3
+reprova com informação, que é o que o M2.13 existia para garantir.
 
 **1.5 é o único critério de borda que reprova, e é o mais duro.** É teto de
 CAPACIDADE. O backtest move 1.651,59 USDC em 568 trades — **2,91 USDC por
@@ -246,7 +317,7 @@ frente, que só o `silencio_final_s` não via.
 |---|---|---|
 | 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py`, coberto por 24 testes |
 | 2.2 | Modelo horário | ✅ `engine/hourly.py` |
-| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA** — 0,0694 no balde `<30s`, erro CRESCENTE com a confiança (−0,0105 → +0,1554) |
+| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA** — 0,0694 no melhor balde (`<30s`); **0,207 na banda operada**, viés MISTO e SEM ORDEM, ~75 mil de ~79 mil previsões nos extremos |
 
 ### O 2.3 mudou de natureza, não só de estado
 
@@ -270,10 +341,11 @@ todo numa faixa só.
 **E a amostra deixou de faltar.** São 24 horas contínuas e limpas do dia 24,
 mais 23 do dia 23 e 5 do dia 25.
 
-Ou seja: o que falta no 2.3 **não é código nem dado**. É rodar o backtest com o
-instrumento novo sobre a gravação que já existe. A mesma rodada fecha o 2.3 do
-M3 e o critério 1.3 do M2, que hoje está marcado **não avaliado** justamente
-por causa disto.
+Ou seja: o que faltava no 2.3 **não era código nem dado** — era rodar o
+backtest com o instrumento novo sobre a gravação que já existia. **Rodou.** A
+mesma rodada fechou o 2.3 do M3 e tirou o critério 1.3 do M2 do limbo do "não
+avaliado": ele está **avaliado e reprovado**, com `calibracao_avaliavel` true e
+ECE 0,207 na banda operada.
 
 ---
 
@@ -585,39 +657,53 @@ do primeiro dólar real.
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
-| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ⬜ escrito e **provado**, bloqueado no quality gate |
+| 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
 
-Sobre 5.3: o único check que aparece nos PRs é o SonarCloud, que vem do
-GitHub App e faz análise estática — **não executa a suíte**. Os testes só
-rodam na máquina de quem está editando, e um commit que quebre o backtest
-chega ao `main` com o quality gate verde. Para um projeto que vai mexer com
-dinheiro real, "passou no meu ambiente" não é verificação.
+Sobre 5.3: até o PR #40 o único check que aparecia era o SonarCloud, que vem
+do GitHub App e faz análise estática — **não executa a suíte**. Os testes só
+rodavam na máquina de quem estava editando, e um commit que quebrasse o
+backtest chegava ao `main` com o quality gate verde. Para um projeto que vai
+mexer com dinheiro real, "passou no meu ambiente" não é verificação.
 
-O workflow existe e **funcionou**: rodou no PR #19 e passou, com `ruff` limpo
-e 395 testes verdes no servidor. Ele roda os mesmos alvos do `make check`
-(`ruff check src tests scripts` + `pytest`) e instala o extra `analise` junto
+**Agora roda.** `.github/workflows/ci.yml` executa os mesmos alvos do
+`make check` (`ruff check src tests scripts` + `pytest`) a cada push, e o check
+`testes` saiu verde nos PRs #41, #42 e #43. Ele instala o extra `analise` junto
 com `dev` de propósito — sem pyarrow o teste de `replay/columnar.py` cai num
-`importorskip` e some do relatório, e a CI passaria rodando menos testes que
-a máquina do desenvolvedor.
+`importorskip` e some do relatório, e a CI passaria rodando menos testes que a
+máquina do desenvolvedor.
 
-**Por que ainda está ⬜:** o SonarCloud reprovou o PR com
-`C Security Rating on New Code`, e o único arquivo novo analisável por regra
-de segurança era esse workflow. Adicionar `permissions: contents: read`
-(menor privilégio para o `GITHUB_TOKEN`) **não** resolveu, e o ambiente de
-desenvolvimento não alcança `sonarcloud.io` para ler qual regra é. O workflow
-saiu deste PR para não segurar o trabalho do analisador, e volta num PR
-próprio quando o achado estiver em mãos. Hipótese seguinte, não testada:
-supply-chain — `actions/checkout@v5` e `actions/setup-python@v6` não fixadas
-por commit SHA.
+O achado que segurou o workflow antes — `C Security Rating on New Code` no
+SonarCloud, com `permissions: contents: read` não resolvendo — não voltou a
+aparecer. Fica o registro da hipótese nunca testada: supply-chain,
+`actions/checkout@v5` e `actions/setup-python@v6` não fixadas por commit SHA.
 
 ---
 
 ## Quando é OK avançar
 
-- **Para gravar 72 h:** basta o Bloco 0 fechar (0.5 a 0.7).
+- **Para gravar 72 h:** basta o Bloco 0 fechar — hoje só o 0.8 falta, e ele é
+  contador de tempo, não trabalho.
 - **Para escrever o M4:** o Bloco 1 precisa dar veredito **positivo** para
   taker ou maker. Se der negativo, **o projeto para — e isso é sucesso**:
-  custou 72 h de VPS em vez de meses de capital.
+  custou 72 h de VPS em vez de meses de capital. (O M4 foi escrito assim mesmo,
+  e isso está certo: ele é a máquina de medir sem arriscar. O que ele não
+  autoriza é ligar o LIVE.)
 - **Para ligar o LIVE:** Blocos 0 a 4 inteiros, sem exceção.
 
 Hoje nenhum dos três está liberado.
+
+## As três pendências que realmente travam, e o que destrava cada uma
+
+Todo o resto do quadro é ou trabalho já feito, ou trabalho que só depende de
+tempo de máquina. Estas três não:
+
+| Pendência | Natureza | O que destrava |
+|---|---|---|
+| **1.3 calibração** (ECE 0,207 na banda, viés MISTO e SEM ORDEM) | defeito do **sinal** — acerta a direção, erra a probabilidade | modelo novo, não mais dado nem mais varredura; a §2d já rejeitou o encolhimento e o "sem ordem" fecha a saída da escala |
+| **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
+| **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
+
+E uma quarta, que é metodológica e vale para qualquer resultado acima: **um dia
+não é veredito**. Repetir a banda 240-120 s em dias independentes é o único
+caminho que separa edge de sobreajuste, e nenhum número desta página passou por
+esse teste ainda.
