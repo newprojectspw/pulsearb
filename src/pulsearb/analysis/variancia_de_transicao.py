@@ -68,6 +68,15 @@ HORIZONTES_PADRAO: tuple[float, ...] = (1, 2, 5, 10, 30, 60, 120, 180, 240, 300,
 #: próximo sem admitir o horizonte errado.
 TOLERANCIA_PADRAO_S = 1.0
 
+#: Quanto `V(t)/t` pode variar entre horizontes longos e ainda contar como
+#: linear. Caminhada aleatória dá 1,0; 1,5 admite a folga amostral sem admitir
+#: uma série com deriva.
+LIMITE_DE_LINEARIDADE = 1.5
+
+#: A partir de quanto a razão longo/curto conta como suavização. Mesma folga:
+#: abaixo disso não se distingue de ruído de amostra.
+LIMITE_DE_SUAVIZACAO = 1.5
+
 #: Abaixo disto o horizonte não é reportado como medido. Não é limiar de
 #: veredito — é o piso para a variância amostral significar alguma coisa.
 MINIMO_DE_PARES = 200
@@ -215,19 +224,39 @@ def veredito_da_curva(curva: dict[str, Any]) -> dict[str, Any]:
     ]
     variancias = [(linha.horizonte_s, linha.variancia) for linha in medidos]
 
+    # Propriedade 1: V(t) cresce com t.
     monotona = all(b >= a for (_, a), (_, b) in pairwise(variancias))
 
-    # Sublinear no curto prazo: V(t)/t deve CRESCER com t se há suavização.
     por_segundo = [(linha.horizonte_s, linha.variancia_por_segundo) for linha in medidos]
-    curtos = [v for h, v in por_segundo if h <= 60]
-    longos = [v for h, v in por_segundo if h >= 240]
-    suavizacao = (
-        max(longos) / min(curtos) if curtos and longos and min(curtos) > 0 else None
-    )
+    curtos = [v for h, v in por_segundo if h <= 60 and v]
+    longos = [v for h, v in por_segundo if h >= 240 and v]
+
+    # Propriedade 2: no regime longo, V(t) é aproximadamente LINEAR em t — ou
+    # seja, V(t)/t praticamente não varia. Sem esta checagem, uma série com
+    # deriva ou não estacionária faria `variancia_por_segundo` subir sem parar
+    # e seria rotulada de suavização, que é outro processo. Precisa de dois
+    # horizontes longos para haver o que comparar.
+    linear_no_longo = len(longos) >= 2 and max(longos) / min(longos) <= LIMITE_DE_LINEARIDADE
+
+    # Só há veredito quando os DOIS regimes foram medidos. Sem isto, "não deu
+    # para medir" sairia como "medi e não há suavização" — que é o defeito do
+    # `cobertura_da_gravacao` reportando 1,0 num relatório com 3.601 s de
+    # silêncio, e o do `erro` que um preditor constante gabaritava.
+    avaliavel = bool(curtos) and len(longos) >= 2 and min(curtos) > 0
+
+    # Propriedade 3: no curto prazo V(t)/t é MENOR — a marca da suavização.
+    suavizacao = max(longos) / min(curtos) if avaliavel else None
 
     return {
+        "avaliavel": avaliavel,
         "monotona": monotona,
+        "linear_no_longo": linear_no_longo if avaliavel else None,
         "fator_de_suavizacao_medido": suavizacao,
-        "ha_suavizacao": bool(suavizacao and suavizacao > 1.5),
+        "ha_suavizacao": (
+            bool(suavizacao > LIMITE_DE_SUAVIZACAO and linear_no_longo)
+            if avaliavel
+            else None
+        ),
         "horizontes_medidos": len(medidos),
+        "horizontes_longos_medidos": len(longos),
     }
