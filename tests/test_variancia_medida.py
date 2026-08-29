@@ -45,6 +45,34 @@ def curva_btc() -> CurvaDeVariancia:
     return CurvaDeVariancia(asset="btc", pontos=PONTOS_BTC, origem="VARIANCIA_24AGO")
 
 
+@pytest.fixture
+def gravacao_ancorada(tmp_path):
+    """Janelas ancoradas mais os streams, de uma gravação sintética.
+
+    Extraída porque três testes montavam o mesmo bloco — e bloco repetido em
+    teste envelhece pior que em código: quando a montagem muda, um dos três
+    fica para trás e passa a testar outra coisa sem ninguém notar.
+    """
+    from tests.synthetic import gerar_gravacao
+
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
+    from pulsearb.replay.reader import RecordingReader
+
+    diretorio = tmp_path / "rec"
+    diretorio.mkdir()
+    gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+    index = RecordingIndex(RecordingReader(diretorio))
+    index.build()
+
+    janelas = [j for j in index.janelas() if j.resolveu_up is not None]
+    for janela in janelas:
+        janela.ancora = compute_anchor(
+            AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
+        )
+    return janelas, index.streams
+
+
 # ------------------------------------------------------------- interpolação
 def test_curva_devolve_o_medido_nos_pontos_medidos():
     curva = curva_btc()
@@ -292,7 +320,7 @@ def test_curvas_por_ativo_devolve_none_para_ativo_nao_medido():
 
 
 # ------------------------------------------------ o runner: falha FECHADA
-def test_janela_de_ativo_sem_curva_e_pulada_e_CONTADA():
+def test_janela_de_ativo_sem_curva_e_pulada_e_CONTADA(gravacao_ancorada):
     """Falha fechada, e barulhenta.
 
     A janela sai INTEIRA — inclusive da calibração, que o runner mede antes do
@@ -300,51 +328,31 @@ def test_janela_de_ativo_sem_curva_e_pulada_e_CONTADA():
     exatamente o número que o critério 1.3 lê, e o relatório não diria que
     metade das previsões veio de outra física.
     """
-    import tempfile
-    from pathlib import Path
-
-    from tests.synthetic import gerar_gravacao
-
     import pulsearb.backtest.runner as runner_mod
-    from pulsearb.backtest.__main__ import RecordingIndex
-    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
-    from pulsearb.replay.reader import RecordingReader
 
-    with tempfile.TemporaryDirectory() as tmp:
-        diretorio = Path(tmp) / "rec"
-        diretorio.mkdir()
-        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
-        index = RecordingIndex(RecordingReader(diretorio))
-        index.build()
-        janelas = [j for j in index.janelas() if j.resolveu_up is not None]
-        for janela in janelas:
-            janela.ancora = compute_anchor(
-                AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
-            )
-        assert janelas and all(j.asset == "btc" for j in janelas)
+    janelas, streams = gravacao_ancorada
+    assert janelas and all(j.asset == "btc" for j in janelas)
 
-        # Curvas que NÃO cobrem o btc: toda janela tem de sair.
-        so_eth = CurvasPorAtivo(
-            por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
-            origem="teste",
-        )
-        cfg = runner_mod.BacktestConfig(curvas_de_variancia=so_eth)
-        report = runner_mod.BacktestRunner(cfg).run(janelas, index.streams)
+    so_eth = CurvasPorAtivo(
+        por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
+        origem="teste",
+    )
+    report = runner_mod.BacktestRunner(
+        runner_mod.BacktestConfig(curvas_de_variancia=so_eth)
+    ).run(janelas, streams)
 
-        assert report.janelas_sem_curva["btc"] == len(janelas)
-        assert not report.trades
-        # E, o que mais importa: nada entrou na calibração.
-        assert report.to_dict()["janelas_sem_curva_de_variancia"] == {
-            "btc": len(janelas)
-        }
+    assert report.janelas_sem_curva["btc"] == len(janelas)
+    assert not report.trades
+    # E, o que mais importa: nada entrou na calibração.
+    assert report.to_dict()["janelas_sem_curva_de_variancia"] == {"btc": len(janelas)}
 
-        # Com a curva do btc presente, as janelas voltam a ser avaliadas.
-        com_btc = CurvasPorAtivo(por_ativo={"btc": curva_btc()}, origem="teste")
-        report2 = runner_mod.BacktestRunner(
-            runner_mod.BacktestConfig(curvas_de_variancia=com_btc)
-        ).run(janelas, index.streams)
-        assert not report2.janelas_sem_curva
-        assert report2.janelas_avaliadas > 0
+    # Com a curva do btc presente, as janelas voltam a ser avaliadas.
+    com_btc = CurvasPorAtivo(por_ativo={"btc": curva_btc()}, origem="teste")
+    report2 = runner_mod.BacktestRunner(
+        runner_mod.BacktestConfig(curvas_de_variancia=com_btc)
+    ).run(janelas, streams)
+    assert not report2.janelas_sem_curva
+    assert report2.janelas_avaliadas > 0
 
 
 # --------------------------------------- a contenção do caminho de entrada
@@ -414,7 +422,9 @@ def test_relatorio_sem_curva_avaliavel_falha_alto(tmp_path, monkeypatch):
 
 
 # ------------------------- a física tem de alcançar TODOS os diagnósticos
-def test_todos_os_diagnosticos_herdam_a_curva():
+
+
+def test_todos_os_diagnosticos_herdam_a_curva(gravacao_ancorada):
     """Achado em review do PR #46, e é o defeito do 1.4 um nível acima.
 
     Sem isto, uma rodada com `--curva-de-variancia` publicava
@@ -428,12 +438,6 @@ def test_todos_os_diagnosticos_herdam_a_curva():
     opera; se ficou com o modelo derivado, ele opera — e a diferença aparece
     como trade onde não devia haver nenhum.
     """
-    import tempfile
-    from pathlib import Path
-
-    from tests.synthetic import gerar_gravacao
-
-    from pulsearb.backtest.__main__ import RecordingIndex
     from pulsearb.backtest.runner import (
         FaixaDeOperacao,
         sensibilidade_latencia,
@@ -441,57 +445,44 @@ def test_todos_os_diagnosticos_herdam_a_curva():
         varredura_de_tamanho,
         varredura_de_threshold,
     )
-    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
-    from pulsearb.replay.reader import RecordingReader
 
-    with tempfile.TemporaryDirectory() as tmp:
-        diretorio = Path(tmp) / "rec"
-        diretorio.mkdir()
-        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
-        index = RecordingIndex(RecordingReader(diretorio))
-        index.build()
-        janelas = [j for j in index.janelas() if j.resolveu_up is not None]
-        for janela in janelas:
-            janela.ancora = compute_anchor(
-                AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
-            )
+    janelas, streams = gravacao_ancorada
+    so_eth = CurvasPorAtivo(
+        por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
+        origem="teste",
+    )
+    faixa = FaixaDeOperacao(curvas_de_variancia=so_eth)
 
-        so_eth = CurvasPorAtivo(
-            por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
-            origem="teste",
-        )
-        faixa = FaixaDeOperacao(curvas_de_variancia=so_eth)
+    # 1.4 — sensibilidade de latência
+    for celula in sensibilidade_latencia(
+        janelas, streams, latencias_ms=(300.0, 600.0), operacao=faixa
+    ).values():
+        assert celula["trades"] == 0, celula
 
-        # 1.4 — sensibilidade de latência
-        for celula in sensibilidade_latencia(
-            janelas, index.streams, latencias_ms=(300.0, 600.0), operacao=faixa
-        ).values():
-            assert celula["trades"] == 0, celula
+    # curva de edge por threshold
+    for report in varredura_de_threshold(
+        janelas, streams, thresholds=(0.02, 0.05), operacao=faixa
+    ).values():
+        assert not report.trades
 
-        # curva de edge por threshold
-        for report in varredura_de_threshold(
-            janelas, index.streams, thresholds=(0.02, 0.05), operacao=faixa
-        ).values():
-            assert not report.trades
+    # 1.5 — curva de capacidade
+    capacidade = varredura_de_tamanho(
+        janelas, streams, tamanhos=(5.0, 25.0), operacao=faixa
+    )
+    for celula in capacidade["por_tamanho"].values():
+        assert celula["trades"] == 0, celula
 
-        # 1.5 — curva de capacidade (o retorno traz `por_tamanho` e notas)
-        capacidade = varredura_de_tamanho(
-            janelas, index.streams, tamanhos=(5.0, 25.0), operacao=faixa
-        )
-        for celula in capacidade["por_tamanho"].values():
-            assert celula["trades"] == 0, celula
+    # curva de horizonte
+    for banda in varredura_de_horizonte(
+        janelas, streams, curvas_de_variancia=so_eth
+    ).values():
+        assert banda["trades"] == 0, banda
 
-        # curva de horizonte
-        for banda in varredura_de_horizonte(
-            janelas, index.streams, curvas_de_variancia=so_eth
-        ).values():
-            assert banda["trades"] == 0, banda
-
-        # E o controle: SEM curva nenhuma, os mesmos diagnósticos operam.
-        sem_curva = sensibilidade_latencia(
-            janelas, index.streams, latencias_ms=(300.0,), operacao=FaixaDeOperacao()
-        )
-        assert any(c["trades"] > 0 for c in sem_curva.values()), sem_curva
+    # E o controle: SEM curva nenhuma, os mesmos diagnósticos operam.
+    sem_curva = sensibilidade_latencia(
+        janelas, streams, latencias_ms=(300.0,), operacao=FaixaDeOperacao()
+    )
+    assert any(c["trades"] > 0 for c in sem_curva.values()), sem_curva
 
 
 def test_faixa_de_operacao_carrega_a_curva_para_a_config():
@@ -559,45 +550,28 @@ def test_relatorio_sem_dia_medido_e_recusado(tmp_path, monkeypatch):
     assert curvas.dia_medido == "20260823"
 
 
-def test_janela_horaria_nao_roda_com_a_curva_medida():
+def test_janela_horaria_nao_roda_com_a_curva_medida(gravacao_ancorada):
     """A curva descreve a liquidação do jogo TWAP, e só dele.
 
     A janela horária resolve pelo candle da Binance contra o preço de
     abertura — outro observável. Deixá-la cair no `prob_up_hourly` numa rodada
     marcada `medida: true` poria as duas físicas no mesmo PnL de manchete.
     """
-    import tempfile
-    from pathlib import Path
-
-    from tests.synthetic import gerar_gravacao
-
     import pulsearb.backtest.runner as runner_mod
-    from pulsearb.backtest.__main__ import RecordingIndex
-    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
-    from pulsearb.replay.reader import RecordingReader
 
-    with tempfile.TemporaryDirectory() as tmp:
-        diretorio = Path(tmp) / "rec"
-        diretorio.mkdir()
-        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
-        index = RecordingIndex(RecordingReader(diretorio))
-        index.build()
-        janelas = [j for j in index.janelas() if j.resolveu_up is not None]
-        for janela in janelas:
-            janela.ancora = compute_anchor(
-                AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
-            )
-            janela.jogo = "horario"  # a gravação sintética é twap; forçamos
+    janelas, streams = gravacao_ancorada
+    for janela in janelas:
+        janela.jogo = "horario"  # a gravação sintética é twap; forçamos
 
-        com_btc = CurvasPorAtivo(
-            por_ativo={"btc": curva_btc()}, origem="teste", dia_medido="20260823"
-        )
-        report = runner_mod.BacktestRunner(
-            runner_mod.BacktestConfig(curvas_de_variancia=com_btc)
-        ).run(janelas, index.streams)
+    com_btc = CurvasPorAtivo(
+        por_ativo={"btc": curva_btc()}, origem="teste", dia_medido="20260823"
+    )
+    report = runner_mod.BacktestRunner(
+        runner_mod.BacktestConfig(curvas_de_variancia=com_btc)
+    ).run(janelas, streams)
 
-        assert report.janelas_de_jogo_sem_curva["btc"] == len(janelas)
-        assert not report.trades
+    assert report.janelas_de_jogo_sem_curva["btc"] == len(janelas)
+    assert not report.trades
 
 
 def test_motor_ao_vivo_sem_curva_para_o_ativo_nao_opera():
