@@ -259,3 +259,47 @@ def test_concordancia_nao_conta_ativo_que_nao_deu_para_avaliar():
     concordancia = relatorio["concordam_sobre_suavizacao"]
     assert concordancia["avaliados"] == 1
     assert concordancia["sem_amostra_para_avaliar"] == 1
+
+
+# ------------------------------------------ o recorte por dia, sem margem
+def test_dia_recorta_por_nome_exato_e_sem_margem(tmp_path):
+    """A curva que calibra o dia 24 não pode conter hora nenhuma do dia 24.
+
+    O `arquivos_na_fatia` do reader recorta com ±1 h de margem, e faz certo
+    para o backtest — uma janela que abre às 13:58 precisa do book da hora
+    anterior. Aqui a margem seria vazamento in-sample, que é o que a §2d
+    proibiu. Este teste trava a diferença.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    for nome in (
+        "pulsearb-20260823-2200.jsonl.gz",
+        "pulsearb-20260823-2300.jsonl.gz",
+        "pulsearb-20260824-0000.jsonl.gz",
+        "pulsearb-20260824-0100.jsonl.gz",
+    ):
+        (tmp_path / nome).write_bytes(b"")
+
+    do_23 = script.arquivos_do_dia(tmp_path, "20260823")
+    assert [p.name for p in do_23] == [
+        "pulsearb-20260823-2200.jsonl.gz",
+        "pulsearb-20260823-2300.jsonl.gz",
+    ]
+    # A hora 00:00 do dia 24 é vizinha da 23:00 do dia 23 e NÃO entra.
+    assert all("20260824" not in p.name for p in do_23)
+
+    do_24 = script.arquivos_do_dia(tmp_path, "20260824")
+    assert [p.name for p in do_24] == [
+        "pulsearb-20260824-0000.jsonl.gz",
+        "pulsearb-20260824-0100.jsonl.gz",
+    ]
+
+
+def test_dia_sem_arquivo_falha_alto(tmp_path):
+    """Dia errado tem de parar, não medir a gravação inteira em silêncio."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    with pytest.raises(SystemExit, match="20260101"):
+        script.series_da_gravacao(tmp_path, progresso=False, dia="20260101")

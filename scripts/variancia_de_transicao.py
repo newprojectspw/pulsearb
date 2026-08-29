@@ -61,8 +61,28 @@ CHAVE_VEREDITO = "veredito"
 PASSO_DO_PROGRESSO = 500_000
 
 
+#: Como o recorder nomeia as horas: `pulsearb-20260823-0000.jsonl.gz`.
+PADRAO_DO_DIA = "pulsearb-{dia}-[0-9][0-9][0-9][0-9].jsonl*"
+
+
+def arquivos_do_dia(raiz: Path, dia: str) -> list[Path]:
+    """Os arquivos de UM dia, por nome exato — sem a margem de ±1 h.
+
+    O `RecordingReader` recorta por fatia de hora com uma hora de margem de
+    cada lado, e faz certo: o nome do arquivo é aproximação, e uma janela que
+    abre às 13:58 precisa do book da hora anterior.
+
+    Aqui a margem seria dano. Esta medição é estatística de PARES sobre uma
+    série longa — não tem borda de janela para preservar —, e a curva existe
+    para calibrar um veredito de OUTRO dia. Uma hora do dia avaliado dentro
+    da curva que o calibra é exatamente o vazamento in-sample que a §2d
+    proibiu. Uma hora em 23 é pouco; a regra não é sobre quanto, é sobre se.
+    """
+    return sorted(raiz.glob(PADRAO_DO_DIA.format(dia=dia)))
+
+
 def series_da_gravacao(
-    raiz: Path, *, progresso: bool = True
+    raiz: Path, *, progresso: bool = True, dia: str | None = None
 ) -> tuple[dict[str, list[tuple[int, float]]], dict[str, int]]:
     """Uma passada, guardando só os ticks de `twap_sixty` por ativo.
 
@@ -80,7 +100,16 @@ def series_da_gravacao(
     duas réguas na mesma série, e o descarte silencioso é o defeito que o M2.8
     já pagou.
     """
-    leitor = RecordingReader(raiz)
+    if dia:
+        arquivos = arquivos_do_dia(raiz, dia)
+        if not arquivos:
+            raise SystemExit(
+                f"nenhum arquivo de {dia} em {raiz} — esperado o padrão "
+                f"{PADRAO_DO_DIA.format(dia=dia)}"
+            )
+        leitor = RecordingReader(arquivos)
+    else:
+        leitor = RecordingReader(raiz)
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
     descartes: dict[str, int] = defaultdict(int)
     lidos = 0
@@ -160,11 +189,21 @@ def main(argv: list[str] | None = None) -> int:
         dest="saida",
         help="caminho RELATIVO da saída (contido como no backtest, M2.5)",
     )
+    parser.add_argument(
+        "--dia",
+        default=None,
+        help=(
+            "YYYYMMDD: mede só os arquivos daquele dia, por nome exato e sem "
+            "a margem de ±1 h. Use quando a curva vai calibrar o veredito de "
+            "OUTRO dia — misturar os dois é o vazamento in-sample que a §2d "
+            "proibiu para o fator de encolhimento."
+        ),
+    )
     parser.add_argument("--sem-progresso", action="store_true")
     args = parser.parse_args(argv)
 
     series, descartes = series_da_gravacao(
-        args.raiz, progresso=not args.sem_progresso
+        args.raiz, progresso=not args.sem_progresso, dia=args.dia
     )
     if not series:
         print("nenhum tick de twap_sixty com timestamp de origem", file=sys.stderr)
@@ -172,6 +211,10 @@ def main(argv: list[str] | None = None) -> int:
 
     relatorio = medir(series)
     relatorio["ticks_sem_timestamp_de_origem"] = descartes
+    # O dia sai no relatório para que a pergunta "esta curva calibra o
+    # veredito de que dia?" seja respondível pelo arquivo, e não pela memória
+    # de quem rodou.
+    relatorio["dia_medido"] = args.dia
     texto = json.dumps(relatorio, indent=2, ensure_ascii=False)
     if args.saida:
         destino = caminho_de_escrita(args.saida)
