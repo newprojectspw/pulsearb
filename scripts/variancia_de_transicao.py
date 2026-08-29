@@ -53,6 +53,9 @@ from pulsearb.backtest.__main__ import caminho_de_escrita
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.replay.reader import RecordingReader
 
+#: A chave sob a qual o veredito de cada ativo entra no relatório.
+CHAVE_VEREDITO = "veredito"
+
 #: De quantos em quantos registros o progresso sai. O silêncio de três horas
 #: do M2.15 foi caro o bastante para virar regra da casa.
 PASSO_DO_PROGRESSO = 500_000
@@ -94,7 +97,7 @@ def medir(
         curva = curva_de_variancia(
             serie, horizontes_s=horizontes_s, tolerancia_s=tolerancia_s
         )
-        curva["veredito"] = veredito_da_curva(curva)
+        curva[CHAVE_VEREDITO] = veredito_da_curva(curva)
         por_ativo[asset] = curva
 
     return {
@@ -106,11 +109,11 @@ def medir(
 
 def _concordancia(por_ativo: dict[str, Any]) -> dict[str, Any]:
     """Oito ativos concordando é evidência; um destoando é defeito de feed."""
-    vereditos = [c["veredito"]["ha_suavizacao"] for c in por_ativo.values()]
+    vereditos = [c[CHAVE_VEREDITO]["ha_suavizacao"] for c in por_ativo.values()]
     fatores = [
-        c["veredito"]["fator_de_suavizacao_medido"]
+        f
         for c in por_ativo.values()
-        if c["veredito"]["fator_de_suavizacao_medido"] is not None
+        if (f := c[CHAVE_VEREDITO]["fator_de_suavizacao_medido"]) is not None
     ]
     return {
         "com_suavizacao": sum(vereditos),

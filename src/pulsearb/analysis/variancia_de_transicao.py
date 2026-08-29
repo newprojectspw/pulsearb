@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from itertools import pairwise
 from typing import Any
 
@@ -70,6 +71,33 @@ TOLERANCIA_PADRAO_S = 1.0
 #: Abaixo disto o horizonte não é reportado como medido. Não é limiar de
 #: veredito — é o piso para a variância amostral significar alguma coisa.
 MINIMO_DE_PARES = 200
+
+
+@dataclass(frozen=True, slots=True)
+class LinhaDoHorizonte:
+    """Uma linha da curva. Dataclass e não dicionário solto de propósito.
+
+    A curva é lida em três lugares — `veredito_da_curva`, o script e os
+    testes —, e com dicionário cada leitura repete a mesma string de chave. É
+    a forma de erro que o M2.8 já pagou: uma chave escrita errada zerava a
+    conta rebate × markout, em silêncio, porque `dict.get` devolve `None` sem
+    reclamar. Atributo errado levanta.
+
+    `como_dicionario()` mantém o JSON idêntico — quem consome o relatório não
+    vê diferença nenhuma.
+    """
+
+    horizonte_s: float
+    n: int
+    suficiente: bool
+    n_independentes: int | None = None
+    media: float | None = None
+    variancia: float | None = None
+    variancia_por_segundo: float | None = None
+    razao_contra_o_modelo: float | None = None
+
+    def como_dicionario(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def fator_do_modelo(
@@ -131,14 +159,12 @@ def curva_de_variancia(
     span_s = (ts_ns[-1] - ts_ns[0]) / 1e9 if len(ts_ns) > 1 else 0.0
 
     referencia: float | None = None
-    linhas: list[dict[str, Any]] = []
+    linhas: list[LinhaDoHorizonte] = []
     for h in horizontes_s:
         retornos = _pares_no_horizonte(ts_ns, valores, h, tolerancia_s)
         n = len(retornos)
         if n < minimo_de_pares:
-            linhas.append(
-                {"horizonte_s": h, "n": n, "suficiente": False, "variancia": None}
-            )
+            linhas.append(LinhaDoHorizonte(horizonte_s=h, n=n, suficiente=False))
             continue
         media = sum(retornos) / n
         variancia = sum((r - media) ** 2 for r in retornos) / (n - 1)
@@ -148,29 +174,30 @@ def curva_de_variancia(
             # tem amostra — o mesmo estimador, não uma idealização de 1 s que
             # a cadência de ~0,86 s do RTDS pode nem oferecer.
             referencia = variancia / h
-        linha: dict[str, Any] = {
-            "horizonte_s": h,
-            "n": n,
-            "n_independentes": int(span_s // h) if h > 0 else 0,
-            "suficiente": True,
-            "media": media,
-            "variancia": variancia,
-            "variancia_por_segundo": variancia / h if h > 0 else None,
-            "razao_contra_o_modelo": None,
-        }
+        razao: float | None = None
         if referencia:
             esperado = referencia * fator_do_modelo(h)
-            linha["razao_contra_o_modelo"] = variancia / esperado if esperado > 0 else None
-        linhas.append(linha)
+            razao = variancia / esperado if esperado > 0 else None
+        linhas.append(
+            LinhaDoHorizonte(
+                horizonte_s=h,
+                n=n,
+                n_independentes=int(span_s // h) if h > 0 else 0,
+                suficiente=True,
+                media=media,
+                variancia=variancia,
+                variancia_por_segundo=variancia / h if h > 0 else None,
+                razao_contra_o_modelo=razao,
+            )
+        )
 
+    medidas = [linha for linha in linhas if linha.suficiente]
     return {
         "amostras": len(ts_ns),
         "span_s": round(span_s, 1),
         "variancia_de_1s": referencia,
-        "horizonte_da_referencia_s": next(
-            (x["horizonte_s"] for x in linhas if x.get("suficiente")), None
-        ),
-        "horizontes": linhas,
+        "horizonte_da_referencia_s": medidas[0].horizonte_s if medidas else None,
+        "horizontes": [linha.como_dicionario() for linha in linhas],
         "tolerancia_s": tolerancia_s,
     }
 
@@ -181,15 +208,17 @@ def veredito_da_curva(curva: dict[str, Any]) -> dict[str, Any]:
     Escritas ANTES da medição, no protocolo. Aqui elas viram teste, para que a
     leitura não dependa de olhar a tabela com boa vontade.
     """
-    medidos = [linha for linha in curva["horizontes"] if linha.get("suficiente")]
-    variancias = [(linha["horizonte_s"], linha["variancia"]) for linha in medidos]
+    medidos = [
+        LinhaDoHorizonte(**linha)
+        for linha in curva["horizontes"]
+        if linha.get("suficiente")
+    ]
+    variancias = [(linha.horizonte_s, linha.variancia) for linha in medidos]
 
     monotona = all(b >= a for (_, a), (_, b) in pairwise(variancias))
 
     # Sublinear no curto prazo: V(t)/t deve CRESCER com t se há suavização.
-    por_segundo = [
-        (linha["horizonte_s"], linha["variancia_por_segundo"]) for linha in medidos
-    ]
+    por_segundo = [(linha.horizonte_s, linha.variancia_por_segundo) for linha in medidos]
     curtos = [v for h, v in por_segundo if h <= 60]
     longos = [v for h, v in por_segundo if h >= 240]
     suavizacao = (
