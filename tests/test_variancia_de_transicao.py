@@ -281,7 +281,8 @@ def test_dia_recorta_por_nome_exato_e_sem_margem(tmp_path):
     ):
         (tmp_path / nome).write_bytes(b"")
 
-    do_23 = script.arquivos_do_dia(tmp_path, "20260823")
+    todos = sorted(tmp_path.glob("*.jsonl.gz"))
+    do_23 = script.arquivos_do_dia(todos, "20260823")
     assert [p.name for p in do_23] == [
         "pulsearb-20260823-2200.jsonl.gz",
         "pulsearb-20260823-2300.jsonl.gz",
@@ -289,7 +290,7 @@ def test_dia_recorta_por_nome_exato_e_sem_margem(tmp_path):
     # A hora 00:00 do dia 24 é vizinha da 23:00 do dia 23 e NÃO entra.
     assert all("20260824" not in p.name for p in do_23)
 
-    do_24 = script.arquivos_do_dia(tmp_path, "20260824")
+    do_24 = script.arquivos_do_dia(todos, "20260824")
     assert [p.name for p in do_24] == [
         "pulsearb-20260824-0000.jsonl.gz",
         "pulsearb-20260824-0100.jsonl.gz",
@@ -317,8 +318,8 @@ def test_dia_hostil_e_recusado_antes_do_glob(tmp_path):
 
     for hostil in ("../../etc", "2026*", "20260823/..", "", "2026082", "abcdefgh"):
         with pytest.raises(ValueError, match="dia inválido"):
-            script.arquivos_do_dia(tmp_path, hostil)
+            script.arquivos_do_dia([], hostil)
 
     # E o válido continua passando.
-    (tmp_path / "pulsearb-20260823-0000.jsonl.gz").write_bytes(b"")
-    assert len(script.arquivos_do_dia(tmp_path, "20260823")) == 1
+    valido = [tmp_path / "pulsearb-20260823-0000.jsonl.gz"]
+    assert len(script.arquivos_do_dia(valido, "20260823")) == 1

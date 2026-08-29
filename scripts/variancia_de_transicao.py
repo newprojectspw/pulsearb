@@ -76,8 +76,16 @@ PADRAO_DO_DIA = "pulsearb-{dia}-[0-9][0-9][0-9][0-9].jsonl*"
 PADRAO_DE_DIA = re.compile(r"[0-9]{8}")
 
 
-def arquivos_do_dia(raiz: Path, dia: str) -> list[Path]:
+def arquivos_do_dia(arquivos: list[Path], dia: str) -> list[Path]:
     """Os arquivos de UM dia, por nome exato — sem a margem de ±1 h.
+
+    Filtra uma lista que o `RecordingReader` já montou, em vez de fazer o
+    próprio `glob` a partir do caminho da linha de comando. A diferença é de
+    superfície: um `glob` sobre caminho externo é acesso ao disco guiado por
+    entrada de fora, e o padrão fixo do `--dia` fecha só metade disso — a
+    outra metade é a raiz, que NÃO pode ser contida numa pasta de trabalho
+    porque a gravação mora em `~/pulsearb-dados` de propósito. Filtrar por
+    nome é comparação de string: não abre caminho nenhum.
 
     O `RecordingReader` recorta por fatia de hora com uma hora de margem de
     cada lado, e faz certo: o nome do arquivo é aproximação, e uma janela que
@@ -94,7 +102,8 @@ def arquivos_do_dia(raiz: Path, dia: str) -> list[Path]:
             f"dia inválido: {dia!r} — esperado YYYYMMDD, oito dígitos "
             "(ex.: 20260823)"
         )
-    return sorted(raiz.glob(PADRAO_DO_DIA.format(dia=dia)))
+    marca = f"pulsearb-{dia}-"
+    return sorted(p for p in arquivos if p.name.startswith(marca))
 
 
 def series_da_gravacao(
@@ -116,16 +125,17 @@ def series_da_gravacao(
     duas réguas na mesma série, e o descarte silencioso é o defeito que o M2.8
     já pagou.
     """
+    leitor = RecordingReader(raiz)
     if dia:
-        arquivos = arquivos_do_dia(raiz, dia)
-        if not arquivos:
+        # Recorta a lista que o leitor montou. `files` é o que ele itera, e
+        # trocá-la aqui é o mesmo que tê-lo construído com ela — sem um
+        # segundo caminho de descoberta que pudesse divergir do primeiro.
+        leitor.files = arquivos_do_dia(leitor.files, dia)
+        if not leitor.files:
             raise SystemExit(
-                f"nenhum arquivo de {dia} em {raiz} — esperado o padrão "
-                f"{PADRAO_DO_DIA.format(dia=dia)}"
+                f"nenhum arquivo de {dia} na gravação — esperado nome no "
+                f"formato {PADRAO_DO_DIA.format(dia=dia)}"
             )
-        leitor = RecordingReader(arquivos)
-    else:
-        leitor = RecordingReader(raiz)
     series: dict[str, list[tuple[int, float]]] = defaultdict(list)
     descartes: dict[str, int] = defaultdict(int)
     lidos = 0
