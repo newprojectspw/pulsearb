@@ -1097,28 +1097,62 @@ Quando a gravação existir, rode:
 python -m pulsearb.backtest data/recordings --json relatorio.json
 ```
 
-E preencha esta tabela com os números do relatório:
+Tabela preenchida com a rodada **`HORIZONTE_240_120_v2`** (2026-08-29, 24 h,
+126.724.222 registros, banda 240-120s). Todas as medições estão **FEITAS**; o
+que resta pendente não é medição, é **fato externo** ou **decisão**.
 
 | Critério | Fonte no relatório | Resultado |
 |---|---|---|
-| Âncora de abertura identificada | `ancora.veredito` | _pendente_ |
-| PnL líquido total | `backtest.resumo.pnl_liquido_usdc` | _pendente_ |
-| PnL por jogo (TWAP × horário) | `backtest.por_jogo` | _pendente_ |
-| Hit rate | `backtest.resumo.hit_rate` | _pendente_ |
-| Drawdown máximo | `backtest.resumo.max_drawdown_usdc` | _pendente_ |
-| Calibração por bucket | `backtest.calibracao` | _pendente_ |
-| Melhor threshold | `curva_de_edge.melhor_threshold` | _pendente_ |
-| Sensibilidade a latência | `sensibilidade_latencia` | _pendente_ |
-| Sinais × preenchíveis | `backtest.funil_de_sinais` | _pendente_ |
-| Mudança de tick | `medicoes.tick` | hipótese dos extremos **refutada** (n=15); tempo restante pendente |
-| Atraso de liquidação por jogo | `medicoes.atraso_liquidacao` | _pendente_ |
-| Profundidade do book | `medicoes.profundidade` | _pendente_ |
-| Memória e retenção do backtest | `gravacao.memoria` | _pendente_ |
-| **Integridade do livro reconstruído** | `integridade.divergencia_topo_book` | _pendente_ |
-| **Offset de relógio** | `integridade.offset_relogio_ms` | _pendente_ |
-| **Rewards simulados** | `rota_maker.rewards` | _pendente_ |
-| **Markout (seleção adversa)** | `medicoes.markout` | _pendente_ |
-| **Conta fechada do maker** | `rota_maker.conta_fechada` | _pendente_ |
+| Âncora de abertura identificada | `ancora.veredito` | ✅ **CONFIRMADA**, τ=0 explica 100% de 768 janelas |
+| PnL líquido total | `backtest.resumo.pnl_liquido_usdc` | ✅ medido: **+2,7125 USDC** (640 trades) |
+| PnL por jogo (TWAP × horário) | `backtest.por_jogo` | ✅ medido: só `twap` (n=640); horário sem trade na banda |
+| Hit rate | `backtest.resumo.hit_rate` | ✅ medido: **0,7063** |
+| Drawdown máximo | `backtest.resumo.max_drawdown_usdc` | ✅ medido: **−50,1547 USDC** |
+| Calibração por bucket | `backtest.calibracao` | ✅ medido: 5 baldes, todos avaliáveis; melhor ECE 0,0694 |
+| Melhor threshold | `curva_de_edge.melhor_threshold` | ✅ medido: **0,03** (+3,0489) — *in-sample*, não adotado |
+| Sensibilidade a latência | `sensibilidade_latencia` | ✅ medido **na banda**: +3,31 / +2,71 / +1,35 / +0,47 |
+| Sinais × preenchíveis | `backtest.funil_de_sinais` | ✅ medido: 640 → 640, conversão **1,0** (zero descarte) |
+| Mudança de tick | `medicoes.tick` | ✅ medido: extremos **refutados** (n=485); p50 a 68,8 s do fim |
+| Atraso de liquidação por jogo | `medicoes.atraso_liquidacao` | ✅ medido: twap p50 147,3 s; horário p50 166,1 s (1,1×) |
+| Profundidade do book | `medicoes.profundidade` | ✅ medido: p50 3t **128,0 / 50,0 / 28,7 / 27,0** — nenhuma ≥ 200 |
+| Memória e retenção do backtest | `gravacao.memoria` | ✅ medido: 1,97 M snapshots, 0 raleamentos, resolução 0,0 ms |
+| **Integridade do livro reconstruído** | `integridade.divergencia_topo_book` | ✅ medido: julgada **0,20%** (< 1%); 767 janelas alta / 46 média |
+| **Offset de relógio** | `integridade.offset_relogio_ms` | ✅ medido: p50 **2,80 ms**, mediana estável — sem deriva |
+| **Rewards simulados** | `rota_maker.rewards` | ⚠️ medido **sob hipótese** — fórmula não confirmada (ver 1.10) |
+| **Markout (seleção adversa)** | `medicoes.markout` | ✅ medido: **−0,1974 c/share** @5s (246.504 execuções) |
+| **Conta fechada do maker** | `rota_maker.conta_fechada` | ❌ **NÃO FECHÁVEL** — faltam 3 termos (fila não observável) |
+
+### Placar dos 10 critérios pré-registrados
+
+| | Taker (na banda 240-120s) | Maker |
+|---|---|---|
+| ✅ **PASSA** | **3** — 1.1 (+2,7125), 1.2 (640), 1.4 (+1,3488) | **3** — 1.7 (−0,1974), 1.8 (65,9 h), 1.9 (0,20%) |
+| ❌ **REPROVA** | **2** — 1.3 (calibração), 1.5 (profundidade) | **1** — 1.10 (fórmula não confirmada) |
+| ⏳ **NÃO AVALIÁVEL** | 0 | **1** — 1.6 (conta não fecha) |
+
+**Total: 6 de 10 verdes, 3 reprovados, 1 não avaliável.** Como cada rota exige as
+CINCO do seu bloco, **nenhuma das duas está viável** — mas as reprovas têm
+naturezas diferentes, e é isso que decide o que vem depois.
+
+### O que ainda está pendente — e por quê
+
+Nenhuma pendência é de medição. Sobraram três, todas fora do alcance de rodar o
+backtest de novo:
+
+1. **1.10 — fórmula de reward (fato externo).** `docs.polymarket.com` está
+   bloqueado neste ambiente. Enquanto não for confirmada, todo o bloco
+   `rota_maker.rewards` (e o 1.6 que depende dele) permanece **hipótese**, não
+   medição. Destrava com acesso à documentação oficial, não com mais dado.
+2. **1.6 — conta fechada do maker (limite estrutural).** Faltam três termos —
+   `volume_taker_usdc`, `custo_de_markout` em USDC e `capital_imobilizado` — e os
+   dois primeiros exigem saber QUAIS cotações teriam sido executadas, o que
+   depende de **posição na fila**. O WS entrega níveis agregados, não ordens: a
+   fila não é observável na gravação. Fechar exige outra fonte de dado ou um
+   modelo de fila assumido (e declarado).
+3. **Repetição em dia independente (validade).** Tudo acima é **um dia**. O edge
+   de +2,71 na banda, o fator de encolhimento e o threshold 0,03 foram todos
+   vistos NESTA amostra. Nada disso vira decisão de dinheiro sem repetir em
+   gravação independente — a ressalva de sempre da §2d-bis.
 
 ### Regras de decisão, definidas ANTES de ver os números
 
