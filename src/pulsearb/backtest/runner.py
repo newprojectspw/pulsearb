@@ -485,18 +485,62 @@ class BacktestRunner:
         return None
 
 
+@dataclass(frozen=True)
+class FaixaDeOperacao:
+    """A faixa de tempo restante e a política de entradas em que se opera.
+
+    Existe para uma coisa só: fazer os diagnósticos que ALIMENTAM critérios
+    do VEREDITO_M2 (a sensibilidade de latência, que sustenta o 1.4; a curva
+    de edge; a de capacidade, que acompanha o 1.5) medirem a MESMA população
+    que o backtest principal — e não uma diferente.
+
+    O defeito que isto fecha era silencioso e do pior tipo: numa rodada com
+    `--tempo-restante-min/max`, o `report` principal operava na banda pedida,
+    mas `sensibilidade_latencia` rodava a sua própria config só com threshold
+    e latência — irrestrita. O 1.1 (@300ms) saía da banda; o 1.4 (@600ms) saía
+    de `>240s`. Dois critérios lado a lado no mesmo relatório, medindo coisas
+    diferentes, sem nada avisando. O §2d-bis manda remedir 1.1–1.5 restrito à
+    banda; sem isto, o 1.4 nunca era remedido.
+
+    Default = irrestrito e entrada única: reproduz byte a byte o comportamento
+    anterior, então rodada sem `--tempo-restante-*` não muda em nada.
+    """
+
+    tempo_restante_min_s: float | None = None
+    tempo_restante_max_s: float | None = None
+    max_entradas_por_janela: int = 1
+    intervalo_min_entre_entradas_s: float = 30.0
+
+    def config(self, **extra: Any) -> BacktestConfig:
+        """A `BacktestConfig` desta faixa, com os campos do cenário por cima."""
+        return BacktestConfig(
+            tempo_restante_min_s=self.tempo_restante_min_s,
+            tempo_restante_max_s=self.tempo_restante_max_s,
+            max_entradas_por_janela=self.max_entradas_por_janela,
+            intervalo_min_entre_entradas_s=self.intervalo_min_entre_entradas_s,
+            **extra,
+        )
+
+
 def sensibilidade_latencia(
     janelas: list[WindowState],
     streams: dict[str, list[tuple[int, float]]],
     *,
     latencias_ms: tuple[float, ...] = LATENCIAS_MS_PADRAO,
     threshold: float = 0.02,
+    operacao: FaixaDeOperacao | None = None,
 ) -> dict[str, Any]:
-    """A tabela de PnL nos quatro cenários de latência (M2.D)."""
+    """A tabela de PnL nos quatro cenários de latência (M2.D).
+
+    `operacao` é a faixa em que o backtest principal opera. Passá-la é o que
+    faz o 1.4 (que lê `600ms.pnl_liquido_usdc`) medir a MESMA população que o
+    1.1 — ver `FaixaDeOperacao`. Ausente = irrestrito (comportamento legado).
+    """
+    faixa = operacao or FaixaDeOperacao()
     saida: dict[str, Any] = {}
     for latencia in latencias_ms:
         runner = BacktestRunner(
-            BacktestConfig(threshold_edge=threshold, latencia_ms=latencia)
+            faixa.config(threshold_edge=threshold, latencia_ms=latencia)
         )
         report = runner.run(janelas, streams)
         saida[f"{latencia:.0f}ms"] = {
@@ -513,11 +557,17 @@ def varredura_de_threshold(
     *,
     thresholds: tuple[float, ...] = THRESHOLDS_PADRAO,
     latencia_ms: float = LATENCIA_PADRAO_MS,
+    operacao: FaixaDeOperacao | None = None,
 ) -> dict[float, BacktestReport]:
-    """Um relatório por threshold, para a curva de edge (M2.D)."""
+    """Um relatório por threshold, para a curva de edge (M2.D).
+
+    `operacao` mantém a curva de edge na MESMA faixa do backtest principal;
+    sem ela a curva descreveria uma população diferente da dos critérios.
+    """
+    faixa = operacao or FaixaDeOperacao()
     return {
         threshold: BacktestRunner(
-            BacktestConfig(threshold_edge=threshold, latencia_ms=latencia_ms)
+            faixa.config(threshold_edge=threshold, latencia_ms=latencia_ms)
         ).run(janelas, streams)
         for threshold in thresholds
     }
@@ -596,6 +646,7 @@ def varredura_de_tamanho(
     tamanhos: tuple[float, ...] = TAMANHOS_PADRAO,
     threshold: float = 0.02,
     latencia_ms: float = LATENCIA_PADRAO_MS,
+    operacao: FaixaDeOperacao | None = None,
 ) -> dict[str, Any]:
     """A curva de CAPACIDADE: o que acontece com a borda quando se sobe o tamanho.
 
@@ -625,10 +676,11 @@ def varredura_de_tamanho(
     disso. A curva é, portanto, OTIMISTA — o teto real é mais baixo que o
     medido aqui, nunca mais alto.
     """
+    faixa = operacao or FaixaDeOperacao()
     saida: dict[str, Any] = {}
     for tamanho in tamanhos:
         report = BacktestRunner(
-            BacktestConfig(
+            faixa.config(
                 threshold_edge=threshold,
                 latencia_ms=latencia_ms,
                 shares_por_trade=tamanho,

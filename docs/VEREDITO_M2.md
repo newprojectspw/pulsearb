@@ -688,6 +688,60 @@ decide** — a mesma disciplina do ajuste do encolhimento.
 próximo experimento (remedir 1.1–1.5 restrito a ela em dias independentes), não
 dinheiro real. O diagnóstico decide **qual trabalho vem a seguir**, como a 2d.
 
+#### Resultado da varredura e da remediação na banda (2026-08-29, 24 h, 126,7 M registros)
+
+A `curva_de_horizonte` deu edge em **exatamente uma banda**, a **240-120s**
+(n = 640, `hit_rate` 0,7063, `pnl_liquido_usdc` +2,7125, `pnl_por_share`
++0,000848), e em nenhuma outra: >240s −53,28, 120-60s −0,17, 60-30s −49,16,
+<30s −5,41. Caiu, portanto, no galho **"ALGUMA banda tem edge → o defeito é de
+horizonte"**. A rodada restrita à banda (`--tempo-restante-min 120
+--tempo-restante-max 240`) confirmou o número por um segundo caminho: o
+`faixa_de_tempo.comparacao.restrito` bate com a célula 240-120s da curva ao
+centavo (640 trades, +2,7125, 0,7063). O edge é real e robusto à fiação.
+
+**Mas o edge de direção não vira taker viável.** Remedindo 1.1–1.5 restrito à
+banda:
+
+| crit. | medido na banda 240-120s | veredito |
+|---|---|---|
+| 1.1 PnL @300 ms | +2,7125 USDC | ✅ |
+| 1.2 trades | 640 (≥ 200) | ✅ |
+| 1.3 calibração | melhor balde 0,0694; a própria banda 0,207; viés **MISTO e SEM ORDEM** | ❌ |
+| 1.4 PnL @600 ms | *ver lacuna abaixo* | — |
+| 1.5 profundidade p50 3t | melhor 128 USDC (300 s), < 200 exigidos | ❌ |
+
+O 1.3 e o 1.5 reprovam por causas que **não são de horizonte nem de escala**,
+e por isso não têm conserto nesta rota:
+
+- **1.3** é defeito **estrutural do preditor**. Na banda ele despeja ~75 mil das
+  ~79 mil previsões nos extremos (0–0,05 e 0,95–1,00) e erra o alvo em 0,207 de
+  ECE; acerta a direção ~71 % das vezes, mas os *números de probabilidade que
+  cospe são ruído*. O "SEM ORDEM" fecha a saída da escala: não há encolhimento
+  que acerte todas as faixas (11 otimistas, 9 pessimistas). Confirma a 2d.
+- **1.5** é teto de **capacidade** (profundidade de book), independente de banda
+  — restringir o horizonte não cria liquidez. Só a `curva_de_capacidade`
+  (`--varredura-de-tamanho`) poderia contestar o limiar, e o p50 de 128 contra
+  200 não sugere que contestaria.
+
+**Lacuna de medição encontrada e FECHADA (não altera o veredito).** O 1.4 lê
+`sensibilidade_latencia.600ms`, e esse bloco — junto com `curva_de_edge` e
+`curva_de_capacidade` — rodava a sua **própria** configuração só com threshold e
+latência, **ignorando `--tempo-restante-*`**. Numa rodada restrita, o 1.1 saía da
+banda e o 1.4 de `>240s`: dois critérios do mesmo relatório sobre populações
+diferentes, sem aviso. Ou seja, a §2d-bis mandava remedir 1.4 na banda e o 1.4
+**nunca era remedido**. Corrigido em `FaixaDeOperacao` (runner): os três
+diagnósticos agora herdam a banda operada; rodada irrestrita fica idêntica à de
+antes (travado em `test_m2_e2e`). O número honesto do 1.4 **na banda** sai da
+próxima rodada com o código corrigido — mas não muda o desfecho: **1.3 e 1.5 já
+reprovam o taker sozinhos, e nenhum depende do 1.4.**
+
+**Desfecho.** A banda 240-120s tem edge de direção, porém a rota **taker**
+reprova mesmo nela — por calibração (defeito de sinal, 2d) e por profundidade
+(teto de capacidade). O taker está esgotado como rota nestes mercados. A próxima
+decisão pré-registrada — encerrar o taker no registro, ou virar para a rota
+maker (hoje travada em 1.6 NÃO AVALIÁVEL e 1.10 REPROVA, docs bloqueadas) — é de
+Paulo, não minha.
+
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
 O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por
