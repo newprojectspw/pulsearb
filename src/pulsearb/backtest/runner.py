@@ -523,6 +523,72 @@ def varredura_de_threshold(
     }
 
 
+#: As bandas de tempo restante, IDÊNTICAS às do `bucket_tempo` do relatório
+#: (engine/twap.py): >240s, 240-120s, 120-60s, 60-30s, <30s. Cada tupla é
+#: (rótulo, mínimo, máximo) na convenção de `na_faixa` — `None` = sem limite
+#: daquele lado. As bordas são meio-abertas no bucket e fechadas no `na_faixa`,
+#: mas o instante exato de fronteira é medida-zero em segundos contínuos, então
+#: as bandas coincidem na prática.
+BANDAS_DE_HORIZONTE: tuple[tuple[str, float | None, float | None], ...] = (
+    (">240s", 240.0, None),
+    ("240-120s", 120.0, 240.0),
+    ("120-60s", 60.0, 120.0),
+    ("60-30s", 30.0, 60.0),
+    ("<30s", None, 30.0),
+)
+
+#: Piso de amostra para LER o `hit_rate` de uma banda como sinal, não ruído.
+#: Registrado antes dos números (VEREDITO_M2 §2d-bis): com n >= 40 a
+#: meia-largura do IC de 95% do hit_rate em p=0,5 é 1,96*sqrt(0,25/40) ≈ 0,155,
+#: então uma banda que passa de 0,5 com n >= 40 não passou por sorte de amostra.
+MINIMO_DE_TRADES_POR_BANDA = 40
+
+
+def varredura_de_horizonte(
+    janelas: list[WindowState],
+    streams: dict[str, list[tuple[int, float]]],
+    *,
+    threshold: float = 0.02,
+    latencia_ms: float = LATENCIA_PADRAO_MS,
+    max_entradas_por_janela: int = 1,
+    intervalo_min_entre_entradas_s: float = 30.0,
+) -> dict[str, Any]:
+    """PnL e hit_rate do preditor CRU forçado a operar em CADA banda de tempo.
+
+    `por_bucket_tempo` do relatório principal mede onde a v1 OPEROU — e como
+    ela entra uma vez por janela varrendo da abertura ao fechamento, opera no
+    primeiro instante elegível, quase sempre em `>240s`. Este bloco tira esse
+    viés: cada banda roda como sua PRÓPRIA rodada, restrita àquela faixa, e a
+    entrada cai no primeiro instante DENTRO da banda. Assim a comparação entre
+    bandas mede horizonte, não ordem de chegada.
+
+    Cru de propósito: o encolhimento foi rejeitado (§2d). A pergunta agora é se
+    o SINAL, sem correção de escala, tem edge em algum horizonte.
+    """
+    saida: dict[str, Any] = {}
+    for nome, minimo, maximo in BANDAS_DE_HORIZONTE:
+        report = BacktestRunner(
+            BacktestConfig(
+                threshold_edge=threshold,
+                latencia_ms=latencia_ms,
+                max_entradas_por_janela=max_entradas_por_janela,
+                intervalo_min_entre_entradas_s=intervalo_min_entre_entradas_s,
+                tempo_restante_min_s=minimo,
+                tempo_restante_max_s=maximo,
+            )
+        ).run(janelas, streams)
+        n = len(report.trades)
+        shares = sum(t.shares for t in report.trades)
+        saida[nome] = {
+            "trades": n,
+            "pnl_liquido_usdc": round(report.pnl_liquido, 4),
+            "pnl_por_share": round(report.pnl_liquido / shares, 6) if shares else None,
+            "hit_rate": round(report.hit_rate, 4) if n else None,
+            "amostra_suficiente": n >= MINIMO_DE_TRADES_POR_BANDA,
+        }
+    return saida
+
+
 def varredura_de_tamanho(
     janelas: list[WindowState],
     streams: dict[str, list[tuple[int, float]]],

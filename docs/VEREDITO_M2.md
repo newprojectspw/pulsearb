@@ -610,6 +610,84 @@ parâmetro. Este resultado é tão publicável quanto o outro.
 autoriza dinheiro real: um único dia avaliado, com o fator vindo de três dias.
 O que ele decide é qual trabalho vem a seguir.
 
+### 2d-bis. A remediação FALSIFICOU a escala, e o diagnóstico de horizonte — ESCRITO ANTES DE RODAR (2026-08-29)
+
+O protocolo 2d rodou. Fator **0,62** ajustado fora da amostra em 21–23 (balde
+`240-120s`, o de maior `n`), aplicado ao dia 24. As três condições, lidas pelo
+`resumo_m2.py --encolhido`:
+
+| # | Exigido | Medido | |
+|---|---|---|---|
+| 1.1 | PnL positivo | **−62,49 USDC** | ✗ |
+| 1.2 | ≥ 200 trades | 695 | ✓ |
+| 1.3 | ECE < 0,05 em balde avaliável | **0,0211** em `240-120s` (14 faixas) | ✓ |
+
+É, letra por letra, o **ramo de falseamento** que a 2d escreveu antes de
+qualquer número: *1.3 corrigido, 1.1 negativo → o defeito não é de escala*. E o
+mecanismo ficou visível na tabela de confiabilidade do balde operado:
+
+- **O erro troca de sinal.** Nas faixas de baixa confiança (0,15–0,50) o
+  preditor é *subconfiante* (realizado > previsto); nas de alta (0,55–0,85),
+  *superconfiante*. Um fator único de encolhimento conserta uma metade e piora
+  a outra — o motor rotula **MISTO e SEM ORDEM**. Encolher levou o `hit_rate`
+  de 0,71 (controle) para **0,44**, abaixo do acaso, e o PnL de −53,28 (cru)
+  para −62,49.
+- **O ECE baixo é, em parte, artefato de massa.** 74 mil das ~80 mil previsões
+  caem em dois baldes de ponta (0,15–0,20 e 0,80–0,85), ambos quase perfeitos;
+  os baldes do meio, com erros de ±0,18, carregam centenas cada. O viés médio
+  ponderado é −0,0074 ≈ 0.
+- **Calibração ≠ edge.** Calibração é sobre todas as previsões; PnL é sobre o
+  subconjunto que o gatilho escolhe por `|p' − preço|`. Um preditor calibrado
+  no agregado ainda perde se a divergência modelo-vs-mercado não prevê o
+  desfecho — que é o que 0,44 de `hit_rate` diz.
+
+**A hipótese de escala está rejeitada, com causa.** O M3 muda o preditor, não a
+confiança dele. A primeira pergunta a montante, escolhida por Paulo entre três
+direções, é de **horizonte**: o edge não existe *em lugar nenhum*, ou existe
+*num horizonte que a v1 não opera*?
+
+**O diagnóstico, e a regra de leitura, fixados agora — antes dos números.**
+
+O `por_bucket_tempo` do relatório principal **não responde** isso: a v1 entra
+uma vez por janela varrendo da abertura ao fechamento, então opera no primeiro
+instante elegível, quase sempre em `>240s`. Ele mede ordem de chegada, não
+horizonte. O instrumento é a **`curva_de_horizonte`**: o preditor **cru** (sem
+encolhimento — a escala está morta) forçado a operar em CADA banda de tempo
+restante como sua própria rodada, restrita àquela faixa. As bandas são as
+mesmas do `bucket_tempo`: `>240s`, `240-120s`, `120-60s`, `60-30s`, `<30s`.
+
+Por banda medo: `trades`, `hit_rate`, `pnl_liquido_usdc`, `pnl_por_share`.
+
+**Regra de leitura (registrada antes de ver as bandas):** uma banda **tem
+edge** se, e só se, as três valerem juntas —
+
+- `pnl_liquido_usdc` > 0, **e**
+- `hit_rate` > 0,5, **e**
+- `trades` ≥ **40** (`amostra_suficiente`).
+
+O piso de 40 não é gosto: com `n ≥ 40`, a meia-largura do IC de 95 % do
+`hit_rate` em p = 0,5 é 1,96·√(0,25/40) ≈ 0,155, então uma banda que passa de
+0,5 com `n ≥ 40` não passou por sorte de amostra. Banda com PnL > 0 e
+`hit_rate` > 0,5 mas `n` < 40 é **sinal fraco: publica como sensibilidade, não
+decide** — a mesma disciplina do ajuste do encolhimento.
+
+**Decisão do M3 (fixada agora):**
+
+- **Se ALGUMA banda tem edge** → o defeito é de horizonte. O M3 passa a operar
+  naquela banda e **remede 1.1–1.5 restrito a ela** (a política de entrada
+  muda de "primeiro instante elegível" para "dentro da banda"). É o melhor
+  desfecho possível deste diagnóstico.
+- **Se NENHUMA banda tem edge** → o preditor cru não tem edge em horizonte
+  nenhum. Somado à escala já rejeitada, sobra que **o sinal, e não sua
+  confiança nem seu horizonte, é o defeito**. O M3 então **troca o preditor**
+  (mira o meio da curva, 0,20–0,80, onde o erro é sem-ordem) **ou re-escopa**
+  para outro mercado/horizonte — e a escolha entre esses dois é a próxima
+  decisão pré-registrada, de Paulo, não minha.
+
+**A ressalva de sempre.** Um dia avaliado. Uma banda que passe aqui autoriza o
+próximo experimento (remedir 1.1–1.5 restrito a ela em dias independentes), não
+dinheiro real. O diagnóstico decide **qual trabalho vem a seguir**, como a 2d.
+
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
 O primeiro backtest sobre a gravação real excluiu **200 de 200 janelas** por

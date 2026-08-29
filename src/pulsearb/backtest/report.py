@@ -380,6 +380,55 @@ class BacktestReport:
         }
 
 
+def curva_de_horizonte(por_banda: dict[str, Any]) -> dict[str, Any]:
+    """O veredito de horizonte sobre a varredura, com a regra registrada na §2d-bis.
+
+    `por_banda` é a saída de `varredura_de_horizonte`: cada banda de tempo
+    restante com `trades`, `pnl_liquido_usdc`, `hit_rate`, `amostra_suficiente`.
+    A regra de leitura, fixada ANTES dos números: uma banda TEM EDGE se, e só
+    se, `pnl_liquido_usdc > 0` E `hit_rate > 0.5` E `amostra_suficiente`
+    (n >= 40). Banda que passa em PnL e hit mas não em amostra é sinal fraco —
+    entra em `sinal_fraco`, publicada como sensibilidade, e NÃO decide.
+    """
+    com_edge: list[str] = []
+    fraco: list[str] = []
+    for banda, dados in por_banda.items():
+        pnl = dados.get("pnl_liquido_usdc")
+        hit = dados.get("hit_rate")
+        if pnl is None or hit is None or pnl <= 0 or hit <= 0.5:
+            continue
+        if dados.get("amostra_suficiente"):
+            com_edge.append(banda)
+        else:
+            fraco.append(banda)
+    algum = bool(com_edge)
+    return {
+        "por_banda": por_banda,
+        "bandas_com_edge": com_edge,
+        "alguma_banda_com_edge": algum,
+        "sinal_fraco": fraco,
+        "nota": (
+            "Diagnostico de horizonte (VEREDITO_M2 §2d-bis, registrado antes "
+            "dos numeros). Cada banda e o preditor CRU (sem encolhimento, que "
+            "foi rejeitado na §2d) forcado a operar so naquela faixa de tempo "
+            "restante — remove o vies de primeira-chegada do `por_bucket_tempo`, "
+            "que mede onde a v1 OPEROU e nao onde o edge vive. Regra de leitura: "
+            "uma banda TEM EDGE sse pnl_liquido_usdc > 0 E hit_rate > 0,5 E "
+            "amostra_suficiente (n >= 40, para o IC de 95% do hit_rate nao "
+            "cruzar 0,5 por acaso). Banda com pnl>0 e hit>0,5 mas n<40 e sinal "
+            "fraco: publica como sensibilidade, NAO decide. "
+            + (
+                "ALGUMA banda tem edge: o defeito e de horizonte, e o M3 opera "
+                "naquela banda e remede 1.1-1.5 restrito a ela."
+                if algum
+                else "NENHUMA banda tem edge: somado a escala ja rejeitada, o "
+                "preditor cru nao tem edge em horizonte nenhum — o M3 troca o "
+                "preditor ou re-escopa."
+            )
+        ),
+    }
+
+
 def curva_de_edge_por_threshold(
     trades_por_threshold: dict[float, BacktestReport],
 ) -> dict[str, Any]:

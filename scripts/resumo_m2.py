@@ -740,6 +740,69 @@ def _imprimir_criterios(titulo: str, criterios: list[Criterio], exige: str) -> N
     print()
 
 
+#: Ordem de leitura das bandas: do mais longe do fechamento ao mais perto.
+_ORDEM_DAS_BANDAS = (">240s", "240-120s", "120-60s", "60-30s", "<30s")
+
+
+def _imprimir_horizonte(relatorio: dict[str, Any]) -> None:
+    """A curva de horizonte: o preditor CRU forcado a operar em cada banda.
+
+    Responde a pergunta do M3 escolhida por Paulo — o edge nao existe em lugar
+    nenhum, ou existe num horizonte que a v1 nao opera? A regra de leitura ja
+    esta no relatorio (`alguma_banda_com_edge`), computada pela §2d-bis; aqui
+    so a torno legivel.
+    """
+    curva = relatorio.get("curva_de_horizonte") or {}
+    por_banda = curva.get("por_banda") or {}
+    if not por_banda:
+        return
+    print("=" * 74)
+    print("EDGE POR HORIZONTE  (preditor CRU, uma rodada por banda — §2d-bis)")
+    print("=" * 74)
+    print(f"  {'banda':<12}{'trades':>8}{'hit':>9}{'PnL USDC':>12}"
+          f"{'PnL/share':>12}  edge?")
+    ordenadas = [b for b in _ORDEM_DAS_BANDAS if b in por_banda]
+    ordenadas += [b for b in por_banda if b not in _ORDEM_DAS_BANDAS]
+    com_edge = set(curva.get("bandas_com_edge") or [])
+    fraco = set(curva.get("sinal_fraco") or [])
+    for banda in ordenadas:
+        d = por_banda[banda]
+        hit = d.get("hit_rate")
+        pnl = d.get("pnl_liquido_usdc")
+        pps = d.get("pnl_por_share")
+        marca = (
+            "SIM" if banda in com_edge
+            else "fraco (n<40)" if banda in fraco
+            else "nao"
+        )
+        print(
+            f"  {banda:<12}{d.get('trades', 0):>8}"
+            f"{(f'{hit:.4f}' if hit is not None else '   -'):>9}"
+            f"{(f'{pnl:.4f}' if pnl is not None else '   -'):>12}"
+            f"{(f'{pps:.6f}' if pps is not None else '   -'):>12}  {marca}"
+        )
+    print()
+    if curva.get("alguma_banda_com_edge"):
+        print(
+            f"  >> EDGE EM {', '.join(sorted(com_edge))}: o defeito e de "
+            "HORIZONTE. O M3 opera nessa(s)\n     banda(s) e remede 1.1-1.5 "
+            "restrito a ela(s)."
+        )
+    else:
+        print(
+            "  >> NENHUMA banda tem edge (pnl>0 E hit>0,5 E n>=40). Somado a\n"
+            "     escala ja rejeitada (§2d), o preditor CRU nao tem edge em\n"
+            "     horizonte nenhum — o M3 troca o preditor ou re-escopa."
+        )
+    if fraco:
+        print(
+            f"  sinal fraco (publica, NAO decide): {', '.join(sorted(fraco))} "
+            "— pnl>0 e hit>0,5\n     mas n<40, dentro do ruido do proprio "
+            "hit_rate."
+        )
+    print()
+
+
 def _imprimir_captacao(relatorio: dict[str, Any]) -> None:
     gravacao = relatorio.get("gravacao") or {}
     print("=" * 74)
@@ -868,6 +931,11 @@ def main(argv: list[str] | None = None) -> None:
     with caminho_do_relatorio(argumentos[0]).open(encoding="utf-8") as arquivo:
         relatorio = json.load(arquivo)
 
+    # O diagnostico de horizonte e sobre o preditor CRU e mora no topo do
+    # relatorio; `--encolhido` reatribui `relatorio` a variante encolhida, que
+    # nao o tem. Guardo o topo antes de trocar.
+    relatorio_topo = relatorio
+
     if variante_encolhida:
         variante = relatorio_da_variante_encolhida(relatorio)
         if variante is None:
@@ -888,6 +956,8 @@ def main(argv: list[str] | None = None) -> None:
         "TAKER VIAVEL exige as CINCO",
     )
     _imprimir_diagnostico_da_calibracao(relatorio)
+    if not variante_encolhida:
+        _imprimir_horizonte(relatorio_topo)
     _imprimir_criterios(
         "OS 5 CRITERIOS DO MAKER",
         criterios_do_maker(relatorio),

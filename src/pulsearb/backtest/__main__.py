@@ -48,7 +48,7 @@ from pulsearb.analysis.measurements import (
 )
 from pulsearb.analysis.rewards import simular as simular_rewards
 from pulsearb.backtest.book import OrderBook
-from pulsearb.backtest.report import curva_de_edge_por_threshold
+from pulsearb.backtest.report import curva_de_edge_por_threshold, curva_de_horizonte
 from pulsearb.backtest.runner import (
     LIMITE_SNAPSHOTS_PADRAO,
     NIVEIS_RETIDOS_PADRAO,
@@ -58,6 +58,7 @@ from pulsearb.backtest.runner import (
     BookTimeline,
     WindowState,
     sensibilidade_latencia,
+    varredura_de_horizonte,
     varredura_de_tamanho,
     varredura_de_threshold,
 )
@@ -2076,6 +2077,16 @@ def main(argv: list[str] | None = None) -> int:
         "curva_de_edge": curva_de_edge_por_threshold(
             varredura_de_threshold(
                 integras, index.streams, latencia_ms=args.latencia_ms
+            )
+        ),
+        "curva_de_horizonte": curva_de_horizonte(
+            varredura_de_horizonte(
+                integras,
+                index.streams,
+                threshold=args.threshold,
+                latencia_ms=args.latencia_ms,
+                max_entradas_por_janela=max(1, args.max_entradas),
+                intervalo_min_entre_entradas_s=max(0.0, args.intervalo_entradas),
             )
         ),
         **(
