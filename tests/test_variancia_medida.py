@@ -345,3 +345,69 @@ def test_janela_de_ativo_sem_curva_e_pulada_e_CONTADA():
         ).run(janelas, index.streams)
         assert not report2.janelas_sem_curva
         assert report2.janelas_avaliadas > 0
+
+
+# --------------------------------------- a contenção do caminho de entrada
+def test_curva_fora_da_raiz_e_recusada(tmp_path, monkeypatch):
+    """`--curva-de-variancia` é entrada de fora do programa, como o `--json`.
+
+    O M2.5 fechou a travessia na escrita; a leitura tinha o mesmo buraco.
+    Ler `/etc/qualquer/coisa.json` não sobrescreve nada, mas o nome do
+    arquivo sai no relatório em `modelo_de_variancia.origem`.
+    """
+    from pulsearb.backtest.__main__ import (
+        ENV_RAIZ_DE_SAIDA,
+        caminho_de_relatorio_lido,
+    )
+
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    for hostil in ("/etc/passwd.json", "../fora.json", "~/segredo.json", "sem-sufixo"):
+        with pytest.raises(ValueError):
+            caminho_de_relatorio_lido(hostil)
+
+
+def test_curva_dentro_da_raiz_e_aceita(tmp_path, monkeypatch):
+    from pulsearb.backtest.__main__ import (
+        ENV_RAIZ_DE_SAIDA,
+        caminho_de_relatorio_lido,
+    )
+
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    (tmp_path / "relatorios").mkdir()
+    alvo = tmp_path / "relatorios" / "VARIANCIA_23AGO.json"
+    alvo.write_text("{}", encoding="utf-8")
+
+    assert caminho_de_relatorio_lido("relatorios/VARIANCIA_23AGO.json") == alvo.resolve()
+
+
+def test_curva_inexistente_diz_o_que_esta_errado(tmp_path, monkeypatch):
+    """Erro que nomeia o problema, em vez de FileNotFoundError lá na frente."""
+    from pulsearb.backtest.__main__ import (
+        ENV_RAIZ_DE_SAIDA,
+        caminho_de_relatorio_lido,
+    )
+
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    with pytest.raises(ValueError, match="não existe"):
+        caminho_de_relatorio_lido("relatorios/nao-existe.json")
+
+
+def test_relatorio_sem_curva_avaliavel_falha_alto(tmp_path, monkeypatch):
+    """Pedir o modelo medido e não ter curva não pode virar modelo derivado.
+
+    Seria a troca de modelo mais silenciosa possível: o relatório sairia com
+    números de aparência normal, medidos pela física errada.
+    """
+    import json as _json
+
+    from pulsearb.backtest.__main__ import ENV_RAIZ_DE_SAIDA, _curvas_de_variancia
+
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    (tmp_path / "relatorios").mkdir()
+    alvo = tmp_path / "relatorios" / "vazio.json"
+    alvo.write_text(_json.dumps(_relatorio(avaliavel=False)), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        _curvas_de_variancia("relatorios/vazio.json")
+
+    assert _curvas_de_variancia(None) is None

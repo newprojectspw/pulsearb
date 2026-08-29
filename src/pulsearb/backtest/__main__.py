@@ -164,6 +164,52 @@ class Progresso:
 TOKEN_DURACAO_PADRAO = 300
 
 
+def caminho_de_relatorio_lido(bruto: str) -> Path:
+    """Monta o caminho de um relatório de ENTRADA a partir da raiz permitida.
+
+    Espelho do `caminho_de_escrita`, e pelo mesmo motivo: o argumento de
+    `--curva-de-variancia` vem de fora do programa, e entregá-lo ao sistema
+    de arquivos do jeito que chega é a mesma travessia de caminho que o M2.5
+    fechou no `--json`. Ler `/etc/qualquer/coisa.json` não sobrescreve nada,
+    mas expõe conteúdo de fora da raiz na mensagem de erro e no relatório
+    (o nome do arquivo sai em `origem`).
+
+    **Por que não reusa o `caminho_de_leitura`.** Aquele serve ao argumento
+    `recordings`, que é uma pasta fora da raiz DE PROPÓSITO — a gravação mora
+    em `~/pulsearb-m2`, e contê-la no diretório de trabalho quebraria o
+    runbook. Este aqui lê um relatório que o próprio projeto escreveu sob a
+    raiz, então a contenção do `--json` se aplica inteira. São duas regras
+    diferentes porque são dois tipos de entrada diferentes, e juntá-las
+    afrouxaria a mais estrita.
+
+    A contenção está na forma canônica que a análise de fluxo reconhece como
+    sanitização de S2083 — validar ANTES contra o padrão fixo, montar a
+    partir da raiz confiável, e conferir o prefixo depois de resolver. Vale
+    a mesma nota do `caminho_de_escrita` sobre `Path.is_relative_to`: faz a
+    mesma conta e o motor de taint não o conhece.
+    """
+    relativo = bruto.strip().removeprefix("./")
+    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
+        raise ValueError(
+            f"nome de entrada inválido: {bruto!r}\n"
+            "esperado: caminho relativo terminando em .json, com letras, "
+            "dígitos, '-', '_' e '.' (ex.: relatorios/VARIANCIA_23AGO.json).\n"
+            f"para ler de outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
+        )
+    raiz = raiz_de_saida()
+    caminho = raiz / relativo
+    raiz_resolvida = raiz.resolve(strict=False)
+    resolvido = caminho.resolve(strict=False)
+    prefixo = str(raiz_resolvida)
+    if not prefixo.endswith(os.sep):
+        prefixo += os.sep
+    if not str(resolvido).startswith(prefixo):
+        raise ValueError(f"entrada fora da raiz permitida: {resolvido}")
+    if not resolvido.is_file():
+        raise ValueError(f"arquivo de entrada não existe: {resolvido}")
+    return resolvido
+
+
 def _curvas_de_variancia(caminho: str | None) -> Any:
     """Carrega as curvas V(t) medidas, ou `None` se não foi pedido.
 
@@ -176,8 +222,9 @@ def _curvas_de_variancia(caminho: str | None) -> Any:
         return None
     from pulsearb.engine.variancia import curvas_do_relatorio
 
-    origem = Path(caminho).name
-    with open(caminho, encoding="utf-8") as arquivo:
+    destino = caminho_de_relatorio_lido(caminho)
+    origem = destino.name
+    with destino.open(encoding="utf-8") as arquivo:
         curvas = curvas_do_relatorio(json.load(arquivo), origem=origem)
     if not len(curvas):
         raise SystemExit(
