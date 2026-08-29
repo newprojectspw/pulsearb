@@ -40,6 +40,11 @@ Isto fecha o item 2.3 do M3.
 | 1.4 | PnL líquido @600 ms | positivo | +101,1759 | **−54,3953** | ❌ |
 | 1.5 | Profundidade p50 3 ticks | ≥ 200 USDC | 87,8 / 41,8 / 31,3 / 35,7 | **128,0 / 50,0 / 28,7 / 27,0** | ❌ |
 
+> Esta tabela é a da rodada **IRRESTRITA** (695 trades, bucket `>240s`). Para os
+> mesmos critérios remedidos dentro da banda com edge (240-120s, 640 trades),
+> onde o 1.4 passa a **+1,3488**, ver §2d-bis — são populações diferentes e não
+> devem ser lidas na mesma linha.
+
 O TAKER exige as CINCO. **Reprova em quatro.**
 
 **O sinal não inverteu por pouco: inverteu por 156 USDC**, com 127 trades a
@@ -707,7 +712,7 @@ banda:
 | 1.1 PnL @300 ms | +2,7125 USDC | ✅ |
 | 1.2 trades | 640 (≥ 200) | ✅ |
 | 1.3 calibração | melhor balde 0,0694; a própria banda 0,207; viés **MISTO e SEM ORDEM** | ❌ |
-| 1.4 PnL @600 ms | *ver lacuna abaixo* | — |
+| 1.4 PnL @600 ms | **+1,3488 USDC** (remedido na banda) | ✅ |
 | 1.5 profundidade p50 3t | melhor 128 USDC (300 s), < 200 exigidos | ❌ |
 
 O 1.3 e o 1.5 reprovam por causas que **não são de horizonte nem de escala**,
@@ -723,21 +728,46 @@ e por isso não têm conserto nesta rota:
   (`--varredura-de-tamanho`) poderia contestar o limiar, e o p50 de 128 contra
   200 não sugere que contestaria.
 
-**Lacuna de medição encontrada e FECHADA (não altera o veredito).** O 1.4 lê
+**Lacuna de medição encontrada, FECHADA e REMEDIDA.** O 1.4 lê
 `sensibilidade_latencia.600ms`, e esse bloco — junto com `curva_de_edge` e
 `curva_de_capacidade` — rodava a sua **própria** configuração só com threshold e
 latência, **ignorando `--tempo-restante-*`**. Numa rodada restrita, o 1.1 saía da
 banda e o 1.4 de `>240s`: dois critérios do mesmo relatório sobre populações
 diferentes, sem aviso. Ou seja, a §2d-bis mandava remedir 1.4 na banda e o 1.4
-**nunca era remedido**. Corrigido em `FaixaDeOperacao` (runner): os três
-diagnósticos agora herdam a banda operada; rodada irrestrita fica idêntica à de
-antes (travado em `test_m2_e2e`). O número honesto do 1.4 **na banda** sai da
-próxima rodada com o código corrigido — mas não muda o desfecho: **1.3 e 1.5 já
-reprovam o taker sozinhos, e nenhum depende do 1.4.**
+**nunca era remedido** — ele publicava −54,3953 USDC, que são os 695 trades de
+`>240s`, não os 640 da banda. Corrigido em `FaixaDeOperacao` (runner): os três
+diagnósticos herdam a banda operada; rodada irrestrita fica idêntica à de antes
+(travado em `test_m2_e2e`).
 
-**Desfecho.** A banda 240-120s tem edge de direção, porém a rota **taker**
-reprova mesmo nela — por calibração (defeito de sinal, 2d) e por profundidade
-(teto de capacidade). O taker está esgotado como rota nestes mercados. A próxima
+**Com a correção, o 1.4 PASSA na banda** (rodada `HORIZONTE_240_120_v2`), e a
+sensibilidade de latência ganha uma forma que o número velho escondia:
+
+| latência | trades | PnL USDC |
+|---|---|---|
+| 150 ms | 640 | +3,3119 |
+| 300 ms | 640 | +2,7125 |
+| 600 ms | 640 | +1,3488 |
+| 1000 ms | 640 | +0,4736 |
+
+**Decaimento monótono e positivo em toda a grade** — a assinatura de um edge de
+direção real sendo corroído por latência, não de ruído. O `curva_de_edge`
+restrito também passou a fazer sentido: positivo de 0,01 a 0,05 (melhor em 0,03,
++3,0489) e negativo a partir de 0,08. **Ressalva:** esse 0,03 foi escolhido
+OLHANDO esta amostra; adotá-lo exige repetir em dia independente, senão é
+sobreajuste — o threshold registrado segue 0,02.
+
+**O placar final do taker na banda é 3 PASSA / 2 REPROVA** (1.1, 1.2, 1.4 ✅;
+1.3, 1.5 ❌). Como o critério exige as CINCO, o veredito não muda — mas a causa
+ficou mais nítida: o que reprova não é PnL nem latência, é **calibração** e
+**capacidade**.
+
+**Desfecho.** A banda 240-120s tem edge de direção — positivo em toda a grade de
+latência e com 640 trades —, porém a rota **taker** reprova mesmo nela, em 1.3 e
+1.5. E as duas causas são de natureza diferente do que a §2d-bis podia consertar:
+calibração é **defeito do sinal** (o preditor acerta a direção e erra a
+probabilidade) e profundidade é **teto de capacidade** (liquidez do book). Nenhuma
+das duas se resolve escolhendo horizonte ou escala, que eram as duas hipóteses
+pré-registradas. O taker está esgotado como rota nestes mercados. A próxima
 decisão pré-registrada — encerrar o taker no registro, ou virar para a rota
 maker (hoje travada em 1.6 NÃO AVALIÁVEL e 1.10 REPROVA, docs bloqueadas) — é de
 Paulo, não minha.
