@@ -19,6 +19,7 @@ from pulsearb.backtest.__main__ import RecordingIndex, main
 from pulsearb.backtest.runner import (
     BacktestConfig,
     BacktestRunner,
+    FaixaDeOperacao,
     sensibilidade_latencia,
     varredura_de_tamanho,
     varredura_de_threshold,
@@ -172,6 +173,95 @@ def test_sensibilidade_de_latencia_roda_os_quatro_cenarios(indexado):
         )
     tabela = sensibilidade_latencia(janelas, indexado.streams)
     assert set(tabela) == {"150ms", "300ms", "600ms", "1000ms"}
+
+
+def _ancoradas(indexado):
+    janelas = [j for j in indexado.janelas() if j.resolveu_up is not None]
+    for janela in janelas:
+        janela.ancora = compute_anchor(
+            AnchorHypothesis.ULTIMO_ANTES, indexado.streams["btc"], janela.open_ts_ns
+        )
+    return janelas
+
+
+def test_sensibilidade_respeita_a_faixa_de_operacao(indexado):
+    """O 1.4 (@600ms) tem de sair da MESMA banda que o 1.1 (@300ms).
+
+    A sensibilidade de latencia ALIMENTA o criterio 1.4. Antes desta trava ela
+    rodava sempre irrestrita — mesmo numa rodada com --tempo-restante-*: o 1.1
+    saia da banda pedida e o 1.4 de `>240s`, dois criterios do mesmo relatorio
+    medindo populacoes diferentes, sem nada avisando. Aqui cada celula com a
+    faixa tem de bater com um runner restrito montado a mao, E diferir da
+    tabela irrestrita — senao a faixa nao esta mordendo.
+    """
+    janelas = _ancoradas(indexado)
+    faixa = FaixaDeOperacao(tempo_restante_max_s=30.0)
+    com_faixa = sensibilidade_latencia(
+        janelas, indexado.streams, latencias_ms=(300.0, 600.0), operacao=faixa
+    )
+    irrestrita = sensibilidade_latencia(
+        janelas, indexado.streams, latencias_ms=(300.0, 600.0)
+    )
+    for latencia in (300.0, 600.0):
+        esperado = BacktestRunner(
+            BacktestConfig(latencia_ms=latencia, tempo_restante_max_s=30.0)
+        ).run(janelas, indexado.streams)
+        celula = com_faixa[f"{latencia:.0f}ms"]
+        assert celula["trades"] == len(esperado.trades)
+        assert celula["pnl_liquido_usdc"] == round(esperado.pnl_liquido, 4)
+        # a faixa MORDE: 3 trades restritos contra 8 irrestritos no sintetico.
+        assert celula["trades"] < irrestrita[f"{latencia:.0f}ms"]["trades"]
+
+
+def test_faixa_de_operacao_default_e_irrestrita(indexado):
+    """Sem `operacao`, os tres diagnosticos reproduzem o comportamento legado.
+
+    A trava so vale se `operacao=None` NAO muda nada: rodada sem
+    --tempo-restante-* tem de sair identica a de antes desta mudanca.
+    """
+    janelas = _ancoradas(indexado)
+    padrao = FaixaDeOperacao()  # irrestrita, entrada unica
+    assert sensibilidade_latencia(
+        janelas, indexado.streams
+    ) == sensibilidade_latencia(janelas, indexado.streams, operacao=padrao)
+
+    sem = varredura_de_threshold(janelas, indexado.streams, thresholds=(0.02,))
+    com = varredura_de_threshold(
+        janelas, indexado.streams, thresholds=(0.02,), operacao=padrao
+    )
+    assert len(sem[0.02].trades) == len(com[0.02].trades)
+
+    a = varredura_de_tamanho(janelas, indexado.streams, tamanhos=(5.0,))
+    b = varredura_de_tamanho(
+        janelas, indexado.streams, tamanhos=(5.0,), operacao=padrao
+    )
+    assert a["por_tamanho"]["5shares"]["trades"] == b["por_tamanho"]["5shares"]["trades"]
+
+
+def test_curva_de_edge_e_capacidade_respeitam_a_faixa(indexado):
+    """A curva de edge e a de capacidade tambem seguem a banda operada.
+
+    Mesma doenca do 1.4: numa rodada restrita, deixa-las irrestritas poria no
+    relatorio numeros que descrevem outra populacao que a dos criterios.
+    """
+    janelas = _ancoradas(indexado)
+    faixa = FaixaDeOperacao(tempo_restante_max_s=30.0)
+
+    curva = varredura_de_threshold(
+        janelas, indexado.streams, thresholds=(0.02,), operacao=faixa
+    )
+    esperado = BacktestRunner(
+        BacktestConfig(threshold_edge=0.02, tempo_restante_max_s=30.0)
+    ).run(janelas, indexado.streams)
+    assert len(curva[0.02].trades) == len(esperado.trades)
+
+    cap = varredura_de_tamanho(
+        janelas, indexado.streams, tamanhos=(5.0,), operacao=faixa
+    )
+    cap_esperado = BacktestRunner(
+        BacktestConfig(shares_por_trade=5.0, tempo_restante_max_s=30.0)
+    ).run(janelas, indexado.streams)
+    assert cap["por_tamanho"]["5shares"]["trades"] == len(cap_esperado.trades)
 
 
 def test_cli_completo(gravacao, tmp_path, capsys, monkeypatch):

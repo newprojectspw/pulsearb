@@ -56,6 +56,7 @@ from pulsearb.backtest.runner import (
     BacktestConfig,
     BacktestRunner,
     BookTimeline,
+    FaixaDeOperacao,
     WindowState,
     sensibilidade_latencia,
     varredura_de_horizonte,
@@ -1853,6 +1854,18 @@ def main(argv: list[str] | None = None) -> int:
     restricao_pedida = (
         args.tempo_restante_max is not None or args.tempo_restante_min is not None
     )
+    # A MESMA faixa que o `report` principal opera, para os diagnósticos que
+    # alimentam critérios do VEREDITO_M2 medirem a MESMA população que ele:
+    # sensibilidade de latência (1.4), curva de edge, curva de capacidade
+    # (1.5). Sem isto, uma rodada restrita media o 1.1 na banda e o 1.4 em
+    # `>240s` — dois critérios do mesmo relatório sobre populações diferentes.
+    # Irrestrita por default: rodada sem `--tempo-restante-*` fica idêntica.
+    faixa_operada = FaixaDeOperacao(
+        tempo_restante_min_s=args.tempo_restante_min,
+        tempo_restante_max_s=args.tempo_restante_max,
+        max_entradas_por_janela=max(1, args.max_entradas),
+        intervalo_min_entre_entradas_s=max(0.0, args.intervalo_entradas),
+    )
     runner = BacktestRunner(
         BacktestConfig(
             **cfg_base,
@@ -2072,11 +2085,14 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
         "sensibilidade_latencia": sensibilidade_latencia(
-            integras, index.streams, threshold=args.threshold
+            integras, index.streams, threshold=args.threshold, operacao=faixa_operada
         ),
         "curva_de_edge": curva_de_edge_por_threshold(
             varredura_de_threshold(
-                integras, index.streams, latencia_ms=args.latencia_ms
+                integras,
+                index.streams,
+                latencia_ms=args.latencia_ms,
+                operacao=faixa_operada,
             )
         ),
         "curva_de_horizonte": curva_de_horizonte(
@@ -2097,6 +2113,7 @@ def main(argv: list[str] | None = None) -> int:
                     tamanhos=tamanhos_da_varredura,
                     threshold=args.threshold,
                     latencia_ms=args.latencia_ms,
+                    operacao=faixa_operada,
                 )
             }
             if tamanhos_da_varredura
