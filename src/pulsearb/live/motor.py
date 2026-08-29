@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.backtest.runner import edge_liquido
-from pulsearb.engine.decisao import estimar_prob_up
+from pulsearb.engine.decisao import JOGO_TWAP, estimar_prob_up
 from pulsearb.execution.executor import Executor
 from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.precos import PrecosAoVivo
@@ -47,6 +47,15 @@ PULOU_SEM_LIVRO = "sem_livro_confiavel"
 PULOU_SEM_EDGE = "edge_abaixo_do_threshold"
 PULOU_JA_OPEROU = "ja_operou_nesta_janela"
 PULOU_FORA_DA_FAIXA = "fora_da_faixa_de_tempo"
+#: Configurado para a variância MEDIDA e não há curva para este ativo, ou a
+#: janela é de um jogo que a curva não cobre.
+#:
+#: Falha fechada, e não queda para o modelo derivado: os dois diferem por 39 a
+#: 48 vezes na variância (§2d-ter). O SHADOW existe para comparar com o
+#: backtest; se ele decidisse por outra física, a divergência apareceria como
+#: diferença de mercado quando seria diferença de modelo — que é exatamente o
+#: que a regra do "mesmo caminho" existe para impedir.
+PULOU_SEM_CURVA = "sem_curva_de_variancia"
 
 
 @dataclass
@@ -62,6 +71,13 @@ class ConfigDoMotor:
     #: modelo não sabe.
     tempo_restante_max_s: float | None = 240.0
     tempo_restante_min_s: float | None = None
+    #: As curvas V(t) medidas, por ativo. `None` = o modelo derivado.
+    #:
+    #: TEM de casar com o que o backtest usou. Rodar o SHADOW no derivado
+    #: depois de validar a estratégia no medido recria ao vivo a diferença de
+    #: 39 a 48× que a §2d-ter mediu — e o diário do shadow atribuiria a
+    #: divergência ao mercado.
+    curvas_de_variancia: Any = None
 
     def na_faixa(self, seconds_left: float) -> bool:
         if self.tempo_restante_max_s is not None and (
@@ -160,6 +176,16 @@ class MotorAoVivo:
             self._pular(PULOU_SEM_PRECO)
             return False
 
+        curva = None
+        if self.config.curvas_de_variancia is not None:
+            if janela.jogo != JOGO_TWAP:
+                self._pular(PULOU_SEM_CURVA)
+                return False
+            curva = self.config.curvas_de_variancia.para(janela.asset)
+            if curva is None:
+                self._pular(PULOU_SEM_CURVA)
+                return False
+
         estimativa = estimar_prob_up(
             jogo=janela.jogo,
             ancora=ancora,
@@ -167,6 +193,7 @@ class MotorAoVivo:
             vol=ativo.vol,
             preco_spot=spot,
             seconds_left=seconds_left,
+            curva=curva,
         )
         if not estimativa.confiavel:
             # `vol_ready=False`: menos de 20 retornos observados. O modelo

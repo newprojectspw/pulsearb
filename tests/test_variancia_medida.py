@@ -500,3 +500,120 @@ def test_faixa_de_operacao_carrega_a_curva_para_a_config():
     curvas = CurvasPorAtivo(por_ativo={"btc": curva_btc()}, origem="teste")
     assert FaixaDeOperacao(curvas_de_variancia=curvas).config().curvas_de_variancia is curvas
     assert FaixaDeOperacao().config().curvas_de_variancia is None
+
+
+# ------------------------------- a curva nao pode calibrar o proprio dia
+def test_curva_do_dia_avaliado_e_recusada():
+    """A §2d-ter registrou isso ANTES de existir número: fora da amostra.
+
+    Sem esta trava, `--curva-de-variancia relatorios/VARIANCIA_24AGO.json`
+    numa rodada do dia 24 completaria com sucesso, e o relatório registraria
+    só um nome de arquivo em `origem`. Nome de arquivo é convenção, não fato.
+    """
+    from datetime import UTC, datetime
+
+    from pulsearb.backtest.__main__ import recusar_curva_in_sample
+
+    class _Janela:
+        def __init__(self, dia: str) -> None:
+            self.open_ts_ns = int(
+                datetime.strptime(dia, "%Y%m%d").replace(tzinfo=UTC).timestamp() * 1e9
+            )
+
+    curvas = CurvasPorAtivo(
+        por_ativo={"btc": curva_btc()}, origem="X", dia_medido="20260824"
+    )
+    with pytest.raises(SystemExit, match="IN-SAMPLE"):
+        recusar_curva_in_sample(curvas, [_Janela("20260824")])
+
+    # Dia anterior: passa.
+    fora = CurvasPorAtivo(
+        por_ativo={"btc": curva_btc()}, origem="X", dia_medido="20260823"
+    )
+    recusar_curva_in_sample(fora, [_Janela("20260824")])
+
+    # Sem curva, nada a conferir.
+    recusar_curva_in_sample(None, [_Janela("20260824")])
+
+
+def test_relatorio_sem_dia_medido_e_recusado(tmp_path, monkeypatch):
+    """Curva que não declara o dia não pode provar que é anterior."""
+    import json as _json
+
+    from pulsearb.backtest.__main__ import ENV_RAIZ_DE_SAIDA, _curvas_de_variancia
+
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    (tmp_path / "relatorios").mkdir()
+    alvo = tmp_path / "relatorios" / "sem-dia.json"
+    alvo.write_text(_json.dumps(_relatorio()), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="dia_medido"):
+        _curvas_de_variancia("relatorios/sem-dia.json")
+
+    # Com o campo, carrega e o dia vem junto.
+    bruto = _relatorio()
+    bruto["dia_medido"] = "20260823"
+    alvo2 = tmp_path / "relatorios" / "com-dia.json"
+    alvo2.write_text(_json.dumps(bruto), encoding="utf-8")
+    curvas = _curvas_de_variancia("relatorios/com-dia.json")
+    assert curvas.dia_medido == "20260823"
+
+
+def test_janela_horaria_nao_roda_com_a_curva_medida():
+    """A curva descreve a liquidação do jogo TWAP, e só dele.
+
+    A janela horária resolve pelo candle da Binance contra o preço de
+    abertura — outro observável. Deixá-la cair no `prob_up_hourly` numa rodada
+    marcada `medida: true` poria as duas físicas no mesmo PnL de manchete.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from tests.synthetic import gerar_gravacao
+
+    import pulsearb.backtest.runner as runner_mod
+    from pulsearb.backtest.__main__ import RecordingIndex
+    from pulsearb.engine.anchor import AnchorHypothesis, compute_anchor
+    from pulsearb.replay.reader import RecordingReader
+
+    with tempfile.TemporaryDirectory() as tmp:
+        diretorio = Path(tmp) / "rec"
+        diretorio.mkdir()
+        gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+        index = RecordingIndex(RecordingReader(diretorio))
+        index.build()
+        janelas = [j for j in index.janelas() if j.resolveu_up is not None]
+        for janela in janelas:
+            janela.ancora = compute_anchor(
+                AnchorHypothesis.ULTIMO_ANTES, index.streams["btc"], janela.open_ts_ns
+            )
+            janela.jogo = "horario"  # a gravação sintética é twap; forçamos
+
+        com_btc = CurvasPorAtivo(
+            por_ativo={"btc": curva_btc()}, origem="teste", dia_medido="20260823"
+        )
+        report = runner_mod.BacktestRunner(
+            runner_mod.BacktestConfig(curvas_de_variancia=com_btc)
+        ).run(janelas, index.streams)
+
+        assert report.janelas_de_jogo_sem_curva["btc"] == len(janelas)
+        assert not report.trades
+
+
+def test_motor_ao_vivo_sem_curva_para_o_ativo_nao_opera():
+    """SHADOW e backtest têm de decidir pela MESMA física.
+
+    Cair no derivado ao vivo depois de validar no medido recriaria a
+    diferença de 39 a 48× entre os dois — e o diário do shadow atribuiria a
+    divergência ao mercado.
+    """
+    from pulsearb.live.motor import PULOU_SEM_CURVA, ConfigDoMotor
+
+    cfg = ConfigDoMotor(
+        curvas_de_variancia=CurvasPorAtivo(
+            por_ativo={"eth": CurvaDeVariancia(asset="eth", pontos=PONTOS_BTC)},
+            origem="teste",
+        )
+    )
+    assert cfg.curvas_de_variancia.para("btc") is None
+    assert PULOU_SEM_CURVA == "sem_curva_de_variancia"

@@ -232,7 +232,42 @@ def _curvas_de_variancia(caminho: str | None) -> Any:
             "scripts/variancia_de_transicao.py sobre uma gravação com os dois "
             "regimes medidos (curto e >= 2 horizontes longos)"
         )
+    if not curvas.dia_medido:
+        raise SystemExit(
+            f"{caminho} não declara `dia_medido` — sem ele não há como provar "
+            "que a curva é de período ANTERIOR ao avaliado, e a §2d-ter exige "
+            "isso.\nRode de novo com --dia YYYYMMDD; nome de arquivo é "
+            "convenção, não fato."
+        )
     return curvas
+
+
+def recusar_curva_in_sample(curvas: Any, janelas: list[Any]) -> None:
+    """Refuta a rodada se a curva foi medida num dia que ela vai avaliar.
+
+    A §2d-ter registrou, ANTES de qualquer número: a curva vem de período
+    anterior ao avaliado. É a mesma regra que a §2d fixou para o fator de
+    encolhimento, e pelo mesmo motivo — calibrar no próprio período é ajuste
+    in-sample, e o resultado não prova nada sobre o dia seguinte.
+
+    A conferência é contra os dias das JANELAS avaliadas, não contra o nome do
+    arquivo nem contra a pasta: o que importa é a população que o veredito vai
+    ler. Falha alto, e não como aviso: um aviso no meio de 3,5 h de log é um
+    aviso que ninguém lê, e o número sai parecendo válido.
+    """
+    if curvas is None or not janelas:
+        return
+    dias_avaliados = {
+        datetime.fromtimestamp(j.open_ts_ns / 1e9, tz=UTC).strftime("%Y%m%d")
+        for j in janelas
+    }
+    if curvas.dia_medido in dias_avaliados:
+        raise SystemExit(
+            f"curva IN-SAMPLE: medida em {curvas.dia_medido}, que é um dos "
+            f"dias avaliados ({sorted(dias_avaliados)}).\n"
+            "A §2d-ter exige curva de período ANTERIOR ao avaliado. Meça "
+            "outro dia com --dia, ou avalie outro dia."
+        )
 
 
 def _fator_de_encolhimento_valido(bruto: str) -> float:
@@ -1966,6 +2001,9 @@ def main(argv: list[str] | None = None) -> int:
             tempo_restante_max_s=args.tempo_restante_max,
         )
     )
+    # ANTES de rodar: 3,5 h de processamento para descobrir no fim que a
+    # curva era do próprio dia avaliado seria o pior momento possível.
+    recusar_curva_in_sample(curvas, integras)
     report = runner.run(integras, index.streams)
 
     # M2.6 BUG 2.3: as duas rodadas lado a lado, sempre. Reportar só a
@@ -2117,6 +2155,7 @@ def main(argv: list[str] | None = None) -> int:
         "modelo_de_variancia": {
             "medida": curvas is not None,
             "origem": curvas.origem if curvas is not None else None,
+            "dia_medido": curvas.dia_medido if curvas is not None else None,
             "ativos_com_curva": sorted(curvas.por_ativo) if curvas is not None else [],
             "nota": (
                 "medida=false e o modelo DERIVADO, que subestima a variancia "

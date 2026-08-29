@@ -125,6 +125,12 @@ class CurvasPorAtivo:
 
     por_ativo: dict[str, CurvaDeVariancia]
     origem: str = "desconhecida"
+    #: O dia YYYYMMDD em que a curva foi MEDIDA, vindo do relatório.
+    #:
+    #: `None` quer dizer que o relatório não declarou — e um relatório que não
+    #: declara não pode provar que é anterior ao avaliado. Nome de arquivo é
+    #: convenção, não fato: `VARIANCIA_23AGO.json` pode conter qualquer coisa.
+    dia_medido: str | None = None
 
     def para(self, asset: str) -> CurvaDeVariancia | None:
         return self.por_ativo.get(asset)
@@ -152,4 +158,9 @@ def curvas_do_relatorio(relatorio: dict[str, Any], *, origem: str) -> CurvasPorA
         )
         if len(pontos) >= 2:
             curvas[asset] = CurvaDeVariancia(asset=asset, pontos=pontos, origem=origem)
-    return CurvasPorAtivo(por_ativo=curvas, origem=origem)
+    dia = relatorio.get("dia_medido")
+    return CurvasPorAtivo(
+        por_ativo=curvas,
+        origem=origem,
+        dia_medido=dia if isinstance(dia, str) else None,
+    )

@@ -22,7 +22,11 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
 from pulsearb.backtest.report import BacktestReport, Trade
-from pulsearb.engine.decisao import encolher_para_a_base, estimar_prob_up
+from pulsearb.engine.decisao import (
+    JOGO_TWAP,
+    encolher_para_a_base,
+    estimar_prob_up,
+)
 from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.engine.twap import RealizedVol, TwapTracker
 
@@ -302,11 +306,17 @@ class BacktestRunner:
         # A janela INTEIRA sai — inclusive da calibração, que é medida antes
         # do gate de confiabilidade. Deixá-la entrar com o modelo velho
         # envenenaria justamente o número que o critério 1.3 lê.
-        if cfg.curvas_de_variancia is not None and (
-            cfg.curvas_de_variancia.para(janela.asset) is None
-        ):
-            report.janelas_sem_curva[janela.asset] += 1
-            return
+        if cfg.curvas_de_variancia is not None:
+            # A curva descreve a liquidação do jogo TWAP. A janela horária
+            # resolve por outro observável (candle da Binance contra a
+            # abertura), e cairia no modelo derivado — duas físicas no mesmo
+            # PnL de manchete, sem aviso.
+            if janela.jogo != JOGO_TWAP:
+                report.janelas_de_jogo_sem_curva[janela.asset] += 1
+                return
+            if cfg.curvas_de_variancia.para(janela.asset) is None:
+                report.janelas_sem_curva[janela.asset] += 1
+                return
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
