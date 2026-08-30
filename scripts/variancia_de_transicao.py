@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Mede V(t) do `twap_sixty` sobre a gravação — o instrumento da §2d-ter.
 
-    python scripts/variancia_de_transicao.py ~/pulsearb-m2 \
-        --json relatorios/VARIANCIA_24AGO.json
+**Para alimentar o modelo** (é este o comando que serve ao veredito):
+
+    python scripts/variancia_de_transicao.py ~/pulsearb-dados \
+        --dia 20260823 --json relatorios/VARIANCIA_23AGO.json
+
+**Sem `--dia`, o relatório é EXPLORATÓRIO e o backtest o recusa.** Não é
+capricho: sem o dia medido não há como provar que a curva é de período
+anterior ao avaliado, e a §2d-ter exige isso. Serve para olhar a forma da
+curva sobre a gravação inteira — foi assim que as três propriedades foram
+verificadas —, mas não entra em `--curva-de-variancia`.
 
 Uma passada só, e só sobre os ticks do RTDS: não reconstrói book nenhum, não
 casa janela com resolução, não decide trade. Por isso custa uma fração do que
@@ -259,10 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         "--dia",
         default=None,
         help=(
-            "YYYYMMDD: mede só os arquivos daquele dia, por nome exato e sem "
-            "a margem de ±1 h. Use quando a curva vai calibrar o veredito de "
-            "OUTRO dia — misturar os dois é o vazamento in-sample que a §2d "
-            "proibiu para o fator de encolhimento."
+            "YYYYMMDD: mede só o dia pedido, decidindo pelo relógio de "
+            "ORIGEM de cada tick. OBRIGATÓRIO para o relatório servir de "
+            "entrada do `--curva-de-variancia`: sem ele o backtest recusa a "
+            "curva, porque não há como provar que é de período anterior ao "
+            "avaliado (§2d-ter). Sem `--dia` o relatório é exploratório."
         ),
     )
     parser.add_argument("--sem-progresso", action="store_true")
@@ -289,6 +298,16 @@ def main(argv: list[str] | None = None) -> int:
     # veredito de que dia?" seja respondível pelo arquivo, e não pela memória
     # de quem rodou.
     relatorio["dia_medido"] = args.dia
+    if not args.dia:
+        # Avisa AGORA, e não três horas depois quando o backtest recusar. O
+        # M2.15 já pagou por descobrir tarde o que dava para saber cedo.
+        print(
+            "AVISO: sem --dia, este relatorio e EXPLORATORIO. O backtest "
+            "recusa curva sem `dia_medido`, porque sem ele nao ha como provar "
+            "que e de periodo anterior ao avaliado (VEREDITO_M2 2d-ter).",
+            file=sys.stderr,
+            flush=True,
+        )
     texto = json.dumps(relatorio, indent=2, ensure_ascii=False)
     if args.saida:
         destino = caminho_de_escrita(args.saida)

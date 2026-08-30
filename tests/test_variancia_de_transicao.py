@@ -337,3 +337,29 @@ def test_dia_hostil_e_recusado_antes_do_glob(tmp_path):
     # E o válido continua passando.
     valido = [tmp_path / "pulsearb-20260823-0000.jsonl.gz"]
     assert len(script.arquivos_do_dia(valido, "20260823")) == 1
+
+
+def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(tmp_path, capsys):
+    """O comando documentado tem de produzir relatório utilizável.
+
+    Achado em review: o docstring do módulo mostrava o comando SEM `--dia`, e
+    o relatório dele é justamente o que o backtest recusa. Quem seguisse a
+    documentação descobriria isso três horas depois. Agora o aviso sai na
+    hora, e `dia_medido: null` diz o que o relatório é.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from tests.synthetic import gerar_gravacao
+
+    import variancia_de_transicao as script
+
+    diretorio = tmp_path / "rec"
+    diretorio.mkdir()
+    gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+
+    saida = tmp_path / "relatorios"
+    saida.mkdir()
+    codigo = script.main(
+        [str(diretorio), "--sem-progresso", "--json", "relatorios/exploratorio.json"]
+    )
+    assert codigo == 0
+    assert "EXPLORATORIO" in capsys.readouterr().err
