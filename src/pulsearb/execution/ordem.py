@@ -37,6 +37,7 @@ aqui é a montagem dos campos.
 from __future__ import annotations
 
 import secrets
+import time
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import Any
@@ -89,6 +90,16 @@ BYTES32_ZERO = "0x" + "00" * 32
 #: lógica assinada duas vezes produz dois salts, logo duas assinaturas, logo
 #: duas ordens distintas para o contrato.
 BITS_DO_SALT = 53
+
+
+def agora_em_ms() -> int:
+    """`[VERIFICADO]` `orders.py`: `_current_timestamp_ms`. MILISSEGUNDOS.
+
+    Existe como função nomeada para que o `int(time.time() * 1000)` apareça
+    uma vez só: escrito à mão em cada ponto de uso, mais cedo ou mais tarde
+    alguém escreve `int(time.time())` e manda um número mil vezes menor.
+    """
+    return int(time.time() * 1000)
 
 
 def novo_salt() -> int:
@@ -200,7 +211,13 @@ class OrdemNaoAssinada:
     #: `timestamp=_current_timestamp_ms()`. O nome engana de duas formas:
     #: não é a expiração (essa é `expiracao`, campo separado que NÃO entra na
     #: struct assinada), e é em MILISSEGUNDOS, não segundos.
-    timestamp_ms: int = 0
+    #:
+    #: **Sem default, e é de propósito** (achado P2 do Codex no #52). Um
+    #: default de `0` assinaria `timestamp: 0` — uma ordem com aparência
+    #: válida que o servidor recusa, e nada no nosso lado apontaria o campo.
+    #: Quem monta a ordem usa `agora_em_ms()`; esquecer vira `TypeError` na
+    #: construção, que é onde o erro custa menos.
+    timestamp_ms: int
     #: Expiração em epoch; `0` = não expira. Vai no corpo do fio, mas **não**
     #: é assinada — não está em `_ORDER_FIELDS`.
     expiracao: int = 0

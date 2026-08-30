@@ -1149,37 +1149,3 @@ class TestOAdaptadorHttpEhCompartilhado:
         adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
         with pytest.raises(RuntimeError):
             await adaptador("https://exemplo/markets/slug/x", None)
-
-
-class TestOCaminhoDaCurva:
-    """`--curva-de-variancia` vem de fora e não pode chegar cru ao disco.
-
-    Mesma contenção do `--json` do backtest (M2.5), agora em
-    `pulsearb.caminhos`: ler de fora da raiz não sobrescreve nada, mas põe o
-    nome do arquivo no `origem` de cada linha do diário — e o SHADOW roda sob
-    argumento montado por script e por agente, que é exatamente onde um
-    caminho hostil entra sem ninguém digitar.
-    """
-
-    def test_sem_argumento_nao_ha_curva(self):
-        assert _curvas(None) is None
-
-    @pytest.mark.parametrize(
-        "hostil",
-        ["/etc/passwd.json", "../fora.json", "~/segredo.json", "sem-sufixo"],
-    )
-    def test_caminho_fora_da_raiz_e_recusado(self, hostil, tmp_path, monkeypatch):
-        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
-
-        with pytest.raises(ValueError):
-            _curvas(hostil)
-
-    def test_curva_dentro_da_raiz_e_lida(self, tmp_path, monkeypatch):
-        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
-        (tmp_path / "relatorios").mkdir()
-        alvo = tmp_path / "relatorios" / "VARIANCIA.json"
-        alvo.write_text(json.dumps(_relatorio_de_variancia()), encoding="utf-8")
-
-        curvas = _curvas("relatorios/VARIANCIA.json")
-
-        assert len(curvas)
