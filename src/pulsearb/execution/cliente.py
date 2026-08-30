@@ -41,6 +41,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from pulsearb.execution.auth import CredenciaisL2, assinar_l2
+from pulsearb.markets.http import DestinoNaoPermitido
 from pulsearb.obs.logging import get_logger
 from pulsearb.risk import OrdemPretendida
 
@@ -364,3 +365,70 @@ class ClienteDeOrdens:
             id_do_cliente=identificador,
             detalhe={"status": status},
         )
+
+
+def fazer_transporte(http: Any, *, base_do_clob: str) -> Transporte:
+    """Adapta um `httpx.AsyncClient` ao contrato `Transporte`.
+
+    Mora aqui pela mesma razão que `fazer_http_get_json` mora em
+    `markets/http.py`: o que ele decide não é encanação, é **semântica de
+    falha**. E aqui a semântica é a mais cara do projeto.
+
+    ## A tradução que importa
+
+    | o que acontece | vira | por quê |
+    |---|---|---|
+    | resposta chegou, qualquer status | `(status, json)` | quem classifica é `_resultado` |
+    | timeout, conexão caiu, DNS | `ErroDeTransporte` → **INCERTA** | não sabemos se entrou |
+    | corpo não é JSON | `(status, None)` | o status ainda informa |
+
+    **Erro de rede NUNCA vira `(status, None)` com status inventado.** Se esta
+    função devolvesse, digamos, `(0, None)` num timeout, `_resultado` leria
+    "menor que 400" e classificaria como recusa — e recusa autoriza reenvio.
+    Uma ordem que talvez esteja no livro seria enviada de novo. É por isso que
+    o único caminho de saída de uma falha de rede aqui é levantar.
+
+    ## Allowlist
+
+    Mesma defesa em profundidade da descoberta: aconteça o que acontecer na
+    montagem do caminho, o POST só sai para o CLOB configurado. A barra final
+    no prefixo barra o truque de sufixo de domínio
+    (`clob.polymarket.com.malicioso.com`).
+    """
+    base = base_do_clob.rstrip("/")
+    if not base:
+        raise ValueError("base do CLOB vazia: o transporte sairia para lugar nenhum")
+    permitido = base + "/"
+
+    async def transporte(
+        caminho: str, cabecalhos: dict[str, str], corpo: bytes
+    ) -> tuple[int, dict[str, Any] | None]:
+        url = base + caminho
+        if not url.startswith(permitido):
+            raise DestinoNaoPermitido(
+                f"destino fora do CLOB configurado: {url!r} (permitido: {permitido!r})"
+            )
+        try:
+            resposta = await http.post(
+                url,
+                # `content=`, e NÃO `json=`. Esta é a linha que a regra do
+                # `auth.py` protege: `json=` reserializaria o dicionário e os
+                # bytes no fio deixariam de ser os bytes assinados. O servidor
+                # recusaria com 401 e nada apontaria a causa.
+                content=corpo,
+                headers={**cabecalhos, "Content-Type": "application/json"},
+            )
+        except Exception as erro:
+            # Larga de propósito: timeout, conexão recusada, DNS, TLS, reset —
+            # todos significam a MESMA coisa aqui ("não sei se chegou"), e
+            # enumerar as classes do httpx deixaria a de fora virar recusa.
+            raise ErroDeTransporte(f"{type(erro).__name__}: {erro}") from erro
+
+        try:
+            return resposta.status_code, resposta.json()
+        except ValueError:
+            # Corpo ilegível não apaga o status: um 400 com HTML de proxy
+            # continua sendo recusa, e um 502 continua sendo incerteza.
+            return resposta.status_code, None
+
+    return transporte

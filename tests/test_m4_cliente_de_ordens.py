@@ -22,6 +22,7 @@ from pulsearb.execution.cliente import (
     ErroDeTransporte,
     EstadoDoEnvio,
     conferir_ordem,
+    fazer_transporte,
     id_do_cliente,
 )
 from pulsearb.risk import OrdemPretendida
@@ -408,3 +409,129 @@ class TestOTimeoutDeclaradoEAplicado:
 
         assert segunda.motivo == MOTIVOS_DE_RECUSA.JA_ENVIADA
         assert segunda.detalhe["estado_anterior"] == str(EstadoDoEnvio.INCERTA)
+
+
+class TestOTransporteReal:
+    """3.5 — o adaptador de produção. Sem rede: `httpx.MockTransport`."""
+
+    BASE = "https://clob.polymarket.com"
+
+    def _http(self, manipulador):
+        import httpx
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(manipulador))
+
+    async def test_o_corpo_no_fio_e_o_corpo_ASSINADO(self):
+        """A linha que a regra do `auth.py` protege.
+
+        `json=` reserializaria o dicionário e os bytes no fio deixariam de ser
+        os bytes assinados. O servidor recusaria com 401 e nada apontaria a
+        causa. Por isso o transporte usa `content=`.
+        """
+        import httpx
+
+        vistos = {}
+
+        def manipulador(pedido):
+            vistos["corpo"] = pedido.content
+            vistos["assinatura"] = pedido.headers.get("poly_signature")
+            vistos["tipo"] = pedido.headers.get("content-type")
+            return httpx.Response(200, json={"success": True, "orderID": "o1"})
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+            cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+            resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.ACEITA
+        assert resultado.order_id == "o1"
+        esperado = corpo_canonico(
+            {
+                "tokenId": "tok-up",
+                "clientId": id_do_cliente(_ordem(), janela="j1"),
+                "orderType": "FOK",
+            }
+        )
+        assert vistos["corpo"] == esperado
+        assert vistos["assinatura"]
+        assert vistos["tipo"] == "application/json"
+
+    async def test_falha_de_rede_vira_INCERTA_e_nao_recusa(self):
+        """O teste que mais importa deste adaptador.
+
+        Se ele devolvesse um status inventado num timeout, `_resultado` leria
+        "menor que 400" e classificaria como RECUSA — e recusa autoriza
+        reenvio. Uma ordem que talvez esteja no livro sairia de novo.
+        """
+        import httpx
+
+        def manipulador(pedido):
+            raise httpx.ConnectTimeout("o servidor nao respondeu")
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+            cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+            resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+        assert resultado.precisa_reconciliar is True
+
+    @pytest.mark.parametrize(
+        "excecao",
+        [
+            "ConnectError",
+            "ReadTimeout",
+            "RemoteProtocolError",
+            "PoolTimeout",
+        ],
+    )
+    async def test_qualquer_falha_de_transporte_e_INCERTA(self, excecao):
+        """Enumerar as classes do httpx deixaria a de fora virar recusa —
+        que é o defeito caro. Por isso a captura é larga."""
+        import httpx
+
+        def manipulador(pedido):
+            raise getattr(httpx, excecao)("falhou")
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+            cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+            resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+
+    async def test_corpo_ilegivel_NAO_apaga_o_status(self):
+        """Um 502 com HTML de proxy continua sendo incerteza; um 400 continua
+        sendo recusa."""
+        import httpx
+
+        def manipulador(pedido):
+            return httpx.Response(502, text="<html>bad gateway</html>")
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+            cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+            resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+
+    async def test_o_POST_so_sai_para_o_CLOB_configurado(self):
+        """Defesa em profundidade, como na descoberta."""
+        import httpx
+
+        from pulsearb.markets.http import DestinoNaoPermitido
+
+        def manipulador(pedido):
+            return httpx.Response(200, json={"success": True})
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+
+            with pytest.raises(DestinoNaoPermitido):
+                await transporte("../../outro-host/order", {}, b"{}")
+
+    async def test_base_vazia_e_erro_na_construcao(self):
+        """O transporte sairia para lugar nenhum, e o erro apareceria só na
+        primeira ordem — que é o pior momento possível."""
+        with pytest.raises(ValueError):
+            fazer_transporte(object(), base_do_clob="")
