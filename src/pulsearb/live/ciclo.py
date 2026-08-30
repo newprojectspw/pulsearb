@@ -86,6 +86,14 @@ class CicloAoVivo:
 
     motor: MotorAoVivo
     silencio_do_preco_s: float = SILENCIO_DO_PRECO_S
+    #: Ativos que este ciclo opera. `None` = aceita todos.
+    #:
+    #: NÃO é redundante com o `assets` do `RtdsFeed`: aquele filtra o
+    #: `on_tick`, e o `on_event` — que é por onde o ciclo recebe — é chamado
+    #: INCONDICIONALMENTE depois (`feeds/base.py`). Sem este filtro aqui, um
+    #: ativo que o bot nem opera entra no `feeds_saudaveis`, que fecha pelo
+    #: pior, e emudecer bloquearia intenções de BTC/ETH saudáveis.
+    ativos_operados: frozenset[str] | None = None
 
     #: Última chegada de tick de `twap_sixty`, por ativo (ns de parede).
     ultimo_preco_ns: dict[str, int] = field(default_factory=dict)
@@ -108,6 +116,10 @@ class CicloAoVivo:
         tick = parse_rtds_event(event.parsed, event.ts_mono_ns, event.ts_wall_ns)
         if tick is None:
             self._contar("rtds_nao_e_preco")
+            return
+        if self.ativos_operados is not None and tick.asset not in self.ativos_operados:
+            # O RTDS transmite todos os símbolos; só os operados importam.
+            self._contar("preco_de_outro_ativo")
             return
         if tick.topic != TOPIC_TWAP_60:
             # `crypto_prices` (spot Binance) chega pelo mesmo fio. Não entra:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -183,7 +184,8 @@ class TestOsCincoAchadosDaRevisao:
             async def discover(self):
                 return [_mercado_falso("0xaa", {"Up": "t-up"}, fecha=self.fim)]
 
-        processo = _processo(tmp_path, _CicloFalso())
+        ciclo = _CicloFalso()
+        processo = _processo(tmp_path, ciclo)
         processo.poly = _Poly()
 
         # Janela aberta: assina.
@@ -198,6 +200,9 @@ class TestOsCincoAchadosDaRevisao:
         )
         assert processo.poly.desassinados == ["t-up"]
         assert processo.tokens_assinados == set()
+        # O livro sai junto: `LivrosAoVivo` não expira sozinho, e 24 h de
+        # rotação deixariam milhares de `OrderBook` mortos.
+        assert ciclo.motor.livros.esquecidos == ["t-up"]
 
     async def test_P2_dentro_da_carencia_NAO_desassina(self, tmp_path):
         """A resolução não chega no instante do fechamento.
@@ -367,9 +372,12 @@ class TestOsTresAchadosDaSegundaRevisao:
         ciclo = montar_ciclo(settings, caminho_do_diario=tmp_path / "d.jsonl")
         processo = ProcessoShadow(settings, ciclo)
 
-        assinados = set(processo.rtds_feeds[0].assets)
-        assert assinados == {"btc", "eth"}
-        assert "sol" not in assinados
+        assert set(processo.rtds_feeds[0].assets) == {"btc", "eth"}
+        # E — o que realmente importa — o CICLO filtra. O `assets` do feed só
+        # afeta o `on_tick`; o `on_event`, por onde o ciclo recebe, é chamado
+        # incondicionalmente (`feeds/base.py`). Sem o filtro no ciclo a
+        # correção seria só aparente.
+        assert ciclo.ativos_operados == frozenset({"btc", "eth"})
         # E os extras seguem existindo na config, para o recorder.
         assert set(settings.all_price_assets) >= {"sol", "hype"}
 
@@ -414,6 +422,15 @@ class TestOsTresAchadosDaSegundaRevisao:
         assert ciclo.motor.pulos.get(PULOU_ABAIXO_DO_MINIMO) == 1
 
 
+class _LivrosFalsos:
+    def __init__(self) -> None:
+        self.esquecidos: list[str] = []
+
+    def esquecer(self, token_id: str) -> bool:
+        self.esquecidos.append(token_id)
+        return True
+
+
 class _CicloFalso:
     """Conta os passos sem decidir nada."""
 
@@ -421,6 +438,7 @@ class _CicloFalso:
         self.passos = 0
         self.explode = explode
         self.descobertas: list[list] = []
+        self.motor = SimpleNamespace(livros=_LivrosFalsos())
 
     def passo(self, **_):
         self.passos += 1

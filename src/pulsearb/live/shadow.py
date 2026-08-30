@@ -114,7 +114,11 @@ def montar_ciclo(
         # mercado que exige 5 — ordem que a corretora rejeita.
         config=config or ConfigDoMotor(curvas_de_variancia=curvas_de_variancia),
     )
-    return CicloAoVivo(motor=motor)
+    return CicloAoVivo(
+        motor=motor,
+        # O feed não filtra o `on_event` — ver `CicloAoVivo.ativos_operados`.
+        ativos_operados=frozenset(a.lower() for a in settings.assets),
+    )
 
 
 class ProcessoShadow:
@@ -247,6 +251,9 @@ class ProcessoShadow:
             self.tokens_assinados -= encerrados
             for token in encerrados:
                 self.desassinar_apos.pop(token, None)
+                # O livro também sai: `LivrosAoVivo` não expira sozinho, e
+                # 24 h de rotação deixariam milhares de `OrderBook` mortos.
+                self.ciclo.motor.livros.esquecer(token)
 
     async def laco_de_relato(self, deadline: float) -> None:
         while time.monotonic() < deadline:
@@ -292,10 +299,21 @@ class ProcessoShadow:
                 asyncio.create_task(self.laco_de_relato(deadline)),
             ]
             try:
-                await asyncio.gather(*tarefas)
+                # `wait` com prazo, e não `gather`: uma descoberta em voo pode
+                # ficar pendurada em vários HTTP de 15 s em sequência, e o
+                # `gather` esperaria a tarefa mais lenta terminar sozinha —
+                # estourando `--duration` por minutos se a Gamma estiver lenta.
+                # O prazo aqui é duro: passou, cancela.
+                await asyncio.wait(
+                    tarefas, timeout=max(0.0, deadline - time.monotonic())
+                )
             finally:
                 for tarefa in tarefas:
                     tarefa.cancel()
+                # Espera o cancelamento assentar antes de fechar os sockets:
+                # tarefa cancelada no meio de um `await` da rede reclamaria em
+                # cima de um feed já parado.
+                await asyncio.gather(*tarefas, return_exceptions=True)
                 for feed in self.rtds_feeds:
                     await feed.stop()
                 await self.poly.stop()

@@ -182,6 +182,46 @@ class TestRoteamento:
         assert ciclo.contagem["livro"] == 1
 
 
+class TestFiltroDeAtivoOperado:
+    """O `assets` do feed NÃO filtra o `on_event`.
+
+    Em `feeds/base.py`, `_handle_message` filtra por ativo — e o `on_event`,
+    que é por onde o ciclo recebe, é chamado INCONDICIONALMENTE depois. Passar
+    `settings.assets` ao feed portanto não basta: sem o filtro aqui, um ativo
+    que o bot nem opera entra no `feeds_saudaveis`, que fecha pelo pior, e
+    emudecer bloquearia intenções de BTC/ETH saudáveis.
+    """
+
+    def test_ativo_fora_da_lista_e_ignorado_e_contado(self, ciclo):
+        ciclo.ativos_operados = frozenset({"btc", "eth"})
+
+        ciclo.on_feed_event(_evento_rtds("sol"))
+
+        assert ciclo.contagem["preco_de_outro_ativo"] == 1
+        assert "sol" not in ciclo.motor.precos.por_ativo
+        assert "sol" not in ciclo.ultimo_preco_ns
+
+    def test_ativo_ignorado_NAO_derruba_a_saude_do_feed(self, ciclo):
+        """O ponto inteiro do filtro."""
+        ciclo.ativos_operados = frozenset({"btc"})
+        agora = ABRE_NS + int(30 * 1e9)
+
+        ciclo.on_feed_event(_evento_rtds("sol", chegada_ns=ABRE_NS))
+        ciclo.on_feed_event(
+            _evento_rtds("btc", chegada_ns=agora - 1_000_000_000)
+        )
+
+        assert ciclo.feeds_saudaveis(agora_ns=agora) is True
+
+    def test_sem_lista_aceita_todos(self, ciclo):
+        """`None` = sem restrição, para reprodução de gravação e testes."""
+        assert ciclo.ativos_operados is None
+
+        ciclo.on_feed_event(_evento_rtds("sol"))
+
+        assert ciclo.contagem["preco"] == 1
+
+
 class TestDeduplicacaoDoTickRepetido:
     """O RTDS é assinado em N conexões redundantes (default 2).
 

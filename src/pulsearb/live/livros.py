@@ -118,6 +118,17 @@ class LivrosAoVivo:
         atual.ultimo_evento_ns = ts_ns
 
     # ────────────────────────────────────────────────────────────── consulta
+    def esquecer(self, token_id: str) -> bool:
+        """Solta o livro de um token que não interessa mais.
+
+        `por_token` não expira sozinho. Numa rodada de 24 h cada mercado que
+        rotaciona deixaria o `OrderBook` inteiro para trás — milhares de
+        livros mortos ocupando memória e sendo percorridos por todo `resumo`.
+
+        Quem chama é quem sabe que a janela acabou: o processo, ao desassinar.
+        """
+        return self.por_token.pop(token_id, None) is not None
+
     def confiavel(self, token_id: str, *, agora_ns: int) -> bool:
         registro = self.por_token.get(token_id)
         return registro is not None and registro.confiavel(
