@@ -529,7 +529,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 53 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
@@ -601,10 +601,7 @@ dizendo que está tudo bem.
 LIVE passaram a recusar por `relogio_nao_monitorado`. Os testes passaram a
 instalar a fonte, como o ciclo ao vivo terá de fazer.
 
-**O que ainda falta:** (a) o NTP verificado do item 1 acima; (b) o ciclo ao
-vivo construir o `PortaoDeRisco` passando a fonte — não há ponto de construção
-hoje, é o mesmo buraco do 3.13. Enquanto não existir, o LIVE recusaria tudo,
-que é o lado certo para errar.
+~~**O que ainda faltava:**~~ **Fechado.** (a) NTP verificado → **5.4 ✅** (`risk/sincronia.py`, daemon NTP, 14 testes); (b) ciclo ao vivo construir o `PortaoDeRisco` passando a fonte → **`live/shadow.py` ✅** (`relogio_do_servidor=precos.relogio`). O 3.10 virou ✅.
 
 ### 3.4 e 5.4 fecharam — a autorização para LIVE existe antes do cliente
 
