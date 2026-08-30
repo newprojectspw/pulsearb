@@ -61,8 +61,13 @@ def raiz_de_saida() -> Path:
 PADRAO_SAIDA = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 
 
-def caminho_de_escrita(bruto: str) -> Path:
+def caminho_de_escrita(bruto: str, *, extensoes: tuple[str, ...] = (".json",)) -> Path:
     """Monta o caminho de SAÍDA a partir da raiz permitida.
+
+    `extensoes` existe porque o mesmo tratamento vale para o diário do SHADOW
+    (`--diario`, `.jsonl`), que é escrito no disco vindo da linha de comando
+    exatamente como o `--json` do backtest. O default mantém os chamadores
+    antigos idênticos.
 
     O argumento é lido como caminho **relativo à raiz** (`--json
     relatorio.json`, `--json relatorios/2026-08-20-13.json`), nunca como
@@ -74,10 +79,11 @@ def caminho_de_escrita(bruto: str) -> Path:
     some sem ninguém notar.
     """
     relativo = bruto.strip().removeprefix("./")
-    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
+    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(extensoes):
+        esperadas = " ou ".join(extensoes)
         raise ValueError(
             f"nome de saída inválido: {bruto!r}\n"
-            "esperado: caminho relativo terminando em .json, com letras, "
+            f"esperado: caminho relativo terminando em {esperadas}, com letras, "
             "dígitos, '-', '_' e '.' (ex.: relatorios/2026-08-20-13.json).\n"
             f"para gravar em outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
         )

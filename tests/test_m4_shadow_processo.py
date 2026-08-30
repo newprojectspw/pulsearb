@@ -613,7 +613,12 @@ class TestUmDiarioPorRodada:
 
     def test_caminho_explicito_e_respeitado(self, monkeypatch, tmp_path, capsys):
         """Anexar a um caminho dado é como se retoma uma rodada de propósito —
-        a correção não pode tirar isso."""
+        a correção não pode tirar isso.
+
+        O caminho é RELATIVO à raiz: `--diario` é escrito no disco vindo da
+        linha de comando, então passa pela mesma contenção que o `--json` do
+        backtest e o `--curva-de-variancia` (#53). Absoluto é recusado.
+        """
         vistos = []
 
         monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
@@ -641,11 +646,11 @@ class TestUmDiarioPorRodada:
 
         from pulsearb.live.shadow import main
 
-        escolhido = str(tmp_path / "meu-diario.jsonl")
+        escolhido = "meu-diario.jsonl"
         main(["--duration", "1s", "--diario", escolhido])
         capsys.readouterr()
 
-        assert vistos == [Path(escolhido)]
+        assert vistos == [tmp_path / escolhido]
 
     def test_sem_a_opcao_cada_rodada_ganha_o_seu(
         self, monkeypatch, tmp_path, capsys
@@ -1297,3 +1302,47 @@ class TestOCaminhoDaCurva:
         curvas = _curvas("relatorios/VARIANCIA.json")
 
         assert len(curvas)
+
+
+class TestOCaminhoDoDiarioNaoVaiCRU:
+    """Mesma classe do achado que o #53 fechou no `--curva-de-variancia`, e o
+    `--diario` tinha ficado de fora — com ESCRITA em vez de leitura.
+
+    `--diario /etc/cron.d/qualquer.jsonl` era travessia de caminho no processo
+    que abre socket. O Sonar aponta isto como S2083.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _numa_pasta_temporaria(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.SHADOW)),
+        )
+
+    @pytest.mark.parametrize(
+        "caminho",
+        [
+            "/etc/cron.d/qualquer.jsonl",
+            "../fora-da-raiz.jsonl",
+            "data/../../fora.jsonl",
+        ],
+    )
+    def test_caminho_perigoso_vira_codigo_2_e_nao_traceback(
+        self, caminho, capsys
+    ):
+        """Quem roda o SHADOW por script lê o stderr, não a pilha."""
+        from pulsearb.live.shadow import main
+
+        assert main(["--duration", "1s", "--diario", caminho]) == 2
+
+        erro = capsys.readouterr().err
+        assert "inválido" in erro or "fora da raiz" in erro
+
+    def test_o_default_gerado_NAO_passa_pela_contencao(self):
+        """Ele não vem de fora: é montado a partir de uma raiz literal. Passá-lo
+        pela contenção só acoplaria o default à variável de ambiente da raiz."""
+        from pulsearb.live.shadow import caminho_do_diario_da_rodada
+
+        assert caminho_do_diario_da_rodada().startswith("data/shadow/diario-")

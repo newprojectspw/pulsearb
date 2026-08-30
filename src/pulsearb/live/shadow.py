@@ -47,7 +47,7 @@ from typing import Any
 
 import httpx
 
-from pulsearb.caminhos import caminho_de_relatorio_lido
+from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
 from pulsearb.execution.executor import escolher_executor
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
@@ -519,13 +519,27 @@ def main(argv: list[str] | None = None) -> int:
     # traceback. Quem roda o SHADOW por script lê o stderr, não a pilha.
     try:
         curvas = _curvas(args.curva_de_variancia)
+        # O `--diario` é ESCRITO no disco vindo da linha de comando —
+        # exatamente o mesmo padrão que o #53 fechou no `--curva-de-variancia`
+        # e o M2.5 no `--json` do backtest. `--diario /etc/cron.d/qualquer` era
+        # travessia de caminho no processo que abre socket, e com escrita em
+        # vez de leitura.
+        #
+        # O default gerado não passa por aqui de propósito: ele não vem de
+        # fora, é montado por `caminho_do_diario_da_rodada` a partir de uma
+        # raiz literal.
+        caminho_do_diario = (
+            caminho_de_escrita(args.diario, extensoes=(".jsonl",))
+            if args.diario
+            else Path(caminho_do_diario_da_rodada())
+        )
     except ValueError as erro:
         print(str(erro), file=sys.stderr)
         return 2
 
     ciclo = montar_ciclo(
         settings,
-        caminho_do_diario=Path(args.diario or caminho_do_diario_da_rodada()),
+        caminho_do_diario=caminho_do_diario,
         curvas_de_variancia=curvas,
     )
     processo = ProcessoShadow(settings, ciclo)
