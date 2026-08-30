@@ -11,6 +11,7 @@ KILL
 # Dados gravados pelo recorder (M2) e saídas de análise
 data/
 recordings/
+relatorios/
 *.parquet
 *.jsonl
 *.sqlite
