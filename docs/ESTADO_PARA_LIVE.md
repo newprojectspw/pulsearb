@@ -169,7 +169,7 @@ edge para restringir a (`bandas_com_edge: []`).
 | 1.2 | Número de trades | ≥ 200 | **688** | ✅ |
 | 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **os cinco baldes passam**: 0,0126 (`<30s`) · 0,0285 · 0,0319 · 0,0452 · 0,0493, todos com 20 faixas ocupadas | ✅ **resolvido pela §2d-ter** |
 | 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
-| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
+| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **139,0 (5m) · 63,0 (15m) · 30,9 (1h) · 24,0 (4h)** (M2_25AGO 5h, 0000–0500 UTC) · antes 128,0/50,0/28,7/27,0 (M2_24AGO 24h) — conclusão idêntica | ❌ |
 
 **⬇️ Daqui até o fim do Bloco 1 é histórico. A tabela acima é o estado
 corrente.** Os números de 1.1 a 1.4 vinham do preditor com a variância
