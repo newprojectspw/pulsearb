@@ -14,10 +14,16 @@
 > 688 trades, PnL −67,27, `bandas_com_edge: []` e `hit_rate` 0,4172. O taker
 > reprova agora por 1.1, 1.4 e 1.5.
 >
-> **Todo número de 1.1 a 1.4 e do 2.3 abaixo desta linha é HISTÓRICO** — vem do
-> preditor com variância derivada, e fica no documento porque é o registro de
-> como se chegou aqui. **Inclusive o +2,7125 da banda**, que era artefato da
-> superconfiança. O estado corrente está na §2d-ter e no `ESTADO_PARA_LIVE.md`.
+> **O que é histórico, exatamente:** os números de 1.1 a 1.4 e do 2.3 nas
+> seções de veredito abaixo — o **SEGUNDO VEREDITO** (24 h de 24/08) e tudo o
+> que vem depois dele até a §2d-ter. Vêm do preditor com variância derivada, e
+> ficam no documento porque são o registro de como se chegou aqui. **Inclusive
+> o +2,7125 da banda**, que era artefato da superconfiança.
+>
+> **Duas partes deste arquivo NÃO são histórico**, apesar de virem depois: a
+> subseção "O RESULTADO" da §2d-ter, e o placar corrente em "Placar dos 10
+> critérios pré-registrados" — os dois estão rotulados no lugar. Fora daqui, o
+> estado corrente está no `ESTADO_PARA_LIVE.md`.
 >
 > Nunca passaram pelo preditor, e seguem valendo como estão: o **1.5**
 > (estrutura de book — o teto de 128 USDC contra 200 continua de pé), o 1.7,
