@@ -730,63 +730,104 @@ class MonitorDeIntegridade:
             ("bid", best_bid, nosso_bid),
             ("ask", best_ask, nosso_ask),
         ):
-            if afirmado is None:
-                continue
-            if not estado.com_snapshot:
-                # Sem snapshot inicial não há reconstrução: comparar seria
-                # comparar contra chute. Não entra em `comparacoes` nem em
-                # `divergencias` — não é a reconstrução errando, é a ausência
-                # dela. Vira TEMPO sem livro, que é o que a marca de
-                # qualidade cobra.
-                if alinhado:
-                    self.observacoes_sem_snapshot += 1
-                    self.sem_livro_por_causa[
-                        "apos_perda" if estado.aguardando_resync else "sem_snapshot"
-                    ] += 1
-                    estado.abrir_sem_livro(carimbo)
-                continue
-            populacao.comparacoes += 1
-            if nosso is not None and abs(afirmado - nosso) <= self.tolerancia:
-                if alinhado:
-                    self._fechar_aberta(estado, lado, carimbo)
-                    estado.fechar_sem_livro(carimbo)
-                continue
-            magnitude = abs(afirmado - nosso) if nosso is not None else float("inf")
-            motivo = estado.livro.motivo_vazio[lado] if nosso is None else None
-            divergencia = Divergencia(
-                asset_id=asset_id,
-                ts_ns=ts_ns,
-                lado=lado,
-                servidor=afirmado,
-                reconstruido=nosso,
-                magnitude=magnitude,
-                motivo_vazio=motivo,
+            divergencia = self._conferir_lado(
+                asset_id,
+                estado,
+                ts_ns,
+                carimbo,
+                lado,
+                afirmado,
+                nosso,
                 origem=origem,
+                alinhado=alinhado,
+                populacao=populacao,
             )
-            populacao.registrar(magnitude, motivo)
-            if alinhado:
-                self.divergencias_por_token[asset_id] += 1
-                estado.divergencias += 1
-                if math.isinf(magnitude):
-                    if MOTIVOS_DE_LADO_VAZIO.get(motivo or "", True):
-                        estado.abrir_sem_livro(carimbo)
-                    else:
-                        # Truncagem de profundidade: o livro existe e está
-                        # certo até onde vai. Não conta tempo contra o token.
-                        estado.fechar_sem_livro(carimbo)
-                    # Lado vazio não conta tempo divergente: é outra doença,
-                    # e misturar as duas populações foi o erro do M2.2.
-                    self._fechar_aberta(estado, lado, carimbo)
-                else:
-                    estado.pior_magnitude = max(estado.pior_magnitude, magnitude)
-                    if magnitude > self.magnitude_minima:
-                        self._abrir_ou_estender(estado, lado, carimbo, magnitude)
-                    else:
-                        self._fechar_aberta(estado, lado, carimbo)
-            if len(self.amostras) < self.max_amostras:
-                self.amostras.append(divergencia)
-            achados.append(divergencia)
+            if divergencia is not None:
+                achados.append(divergencia)
         return achados
+
+    def _conferir_lado(
+        self,
+        asset_id: str,
+        estado: _EstadoDoToken,
+        ts_ns: int,
+        carimbo: float,
+        lado: str,
+        afirmado: float | None,
+        nosso: float | None,
+        *,
+        origem: str,
+        alinhado: bool,
+        populacao: _Populacao,
+    ) -> Divergencia | None:
+        """Confere UM lado do livro. `None` = nada a registrar neste lado."""
+        if afirmado is None:
+            return None
+        if not estado.com_snapshot:
+            # Sem snapshot inicial não há reconstrução: comparar seria comparar
+            # contra chute. Não entra em `comparacoes` nem em `divergencias` —
+            # não é a reconstrução errando, é a ausência dela. Vira TEMPO sem
+            # livro, que é o que a marca de qualidade cobra.
+            if alinhado:
+                self.observacoes_sem_snapshot += 1
+                self.sem_livro_por_causa[
+                    "apos_perda" if estado.aguardando_resync else "sem_snapshot"
+                ] += 1
+                estado.abrir_sem_livro(carimbo)
+            return None
+        populacao.comparacoes += 1
+        if nosso is not None and abs(afirmado - nosso) <= self.tolerancia:
+            if alinhado:
+                self._fechar_aberta(estado, lado, carimbo)
+                estado.fechar_sem_livro(carimbo)
+            return None
+        magnitude = abs(afirmado - nosso) if nosso is not None else float("inf")
+        motivo = estado.livro.motivo_vazio[lado] if nosso is None else None
+        divergencia = Divergencia(
+            asset_id=asset_id,
+            ts_ns=ts_ns,
+            lado=lado,
+            servidor=afirmado,
+            reconstruido=nosso,
+            magnitude=magnitude,
+            motivo_vazio=motivo,
+            origem=origem,
+        )
+        populacao.registrar(magnitude, motivo)
+        if alinhado:
+            self._contabilizar(asset_id, estado, lado, carimbo, magnitude, motivo)
+        if len(self.amostras) < self.max_amostras:
+            self.amostras.append(divergencia)
+        return divergencia
+
+    def _contabilizar(
+        self,
+        asset_id: str,
+        estado: _EstadoDoToken,
+        lado: str,
+        carimbo: float,
+        magnitude: float,
+        motivo: str | None,
+    ) -> None:
+        """A contabilidade de tempo da divergência, só na população alinhada."""
+        self.divergencias_por_token[asset_id] += 1
+        estado.divergencias += 1
+        if not math.isinf(magnitude):
+            estado.pior_magnitude = max(estado.pior_magnitude, magnitude)
+            if magnitude > self.magnitude_minima:
+                self._abrir_ou_estender(estado, lado, carimbo, magnitude)
+            else:
+                self._fechar_aberta(estado, lado, carimbo)
+            return
+        if MOTIVOS_DE_LADO_VAZIO.get(motivo or "", True):
+            estado.abrir_sem_livro(carimbo)
+        else:
+            # Truncagem de profundidade: o livro existe e está certo até onde
+            # vai. Não conta tempo contra o token.
+            estado.fechar_sem_livro(carimbo)
+        # Lado vazio não conta tempo divergente: é outra doença, e misturar as
+        # duas populações foi o erro do M2.2.
+        self._fechar_aberta(estado, lado, carimbo)
 
     @staticmethod
     def _abrir_ou_estender(

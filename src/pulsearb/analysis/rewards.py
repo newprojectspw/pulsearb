@@ -334,6 +334,33 @@ def simular_serie(
     return resultado
 
 
+@dataclass(slots=True)
+class _SemPool:
+    """A contabilidade das janelas que NÃO têm pool de reward.
+
+    M2.6 BUG 5: `janelas_com_pool_de_reward: 0` saía sem dizer por quê, e zero
+    silencioso é indistinguível de bug. Cada recusa nomeia a causa, e os
+    campos vistos vão junto — se algum mudou de nome no fio, é aqui que
+    aparece.
+    """
+
+    motivos: Counter[str] = field(default_factory=Counter)
+    formas: Counter[str] = field(default_factory=Counter)
+    presentes: Counter[str] = field(default_factory=Counter)
+    ausentes: Counter[str] = field(default_factory=Counter)
+    duracoes: Counter[str] = field(default_factory=Counter)
+
+    def registrar(self, meta: dict[str, Any]) -> None:
+        self.motivos[_motivo_sem_pool(meta)] += 1
+        for chave in CHAVES_DE_REWARD:
+            if meta.get(chave) is not None:
+                self.presentes[chave] += 1
+            else:
+                self.ausentes[chave] += 1
+        self.formas[_forma_do_bruto(meta)] += 1
+        self.duracoes[str(meta.get("duracao_s") or "?")] += 1
+
+
 def simular(
     janelas: list[Any],
     *,
@@ -368,29 +395,14 @@ def simular(
     sensibilidade: dict[str, dict[str, float]] = defaultdict(dict)
     competicao: dict[str, list[float]] = defaultdict(list)
     janelas_com_pool = 0
-    motivos: Counter[str] = Counter()
-    formas: Counter[str] = Counter()
-    duracoes_sem_pool: Counter[str] = Counter()
+    sem_pool = _SemPool()
     duracoes_com_pool: Counter[str] = Counter()
-    presentes: Counter[str] = Counter()
-    ausentes: Counter[str] = Counter()
 
     for janela in janelas:
         meta = getattr(janela, "reward_meta", None) or {}
         base = ParametrosDeReward.do_mercado(meta, cadencia_s=cadencia_s)
         if base is None:
-            # M2.6 BUG 5: `janelas_com_pool_de_reward: 0` saía sem dizer por
-            # quê, e zero silencioso é indistinguível de bug. Cada recusa
-            # passa a nomear a causa, e os valores vistos vão junto — se o
-            # campo mudou de nome no fio, é aqui que aparece.
-            motivos[_motivo_sem_pool(meta)] += 1
-            for chave in CHAVES_DE_REWARD:
-                if meta.get(chave) is not None:
-                    presentes[chave] += 1
-                else:
-                    ausentes[chave] += 1
-            formas[_forma_do_bruto(meta)] += 1
-            duracoes_sem_pool[str(meta.get("duracao_s") or "?")] += 1
+            sem_pool.registrar(meta)
             continue
         janelas_com_pool += 1
         duracoes_com_pool[str(meta.get('duracao_s') or '?')] += 1
@@ -421,12 +433,12 @@ def simular(
     saida["janelas_com_pool_de_reward"] = janelas_com_pool
     saida["duracoes_com_pool"] = dict(duracoes_com_pool)
     saida["janelas_sem_pool_de_reward"] = {
-        "total": sum(motivos.values()),
-        "por_motivo": dict(motivos),
-        "campos_presentes": dict(presentes),
-        "campos_ausentes": dict(ausentes),
-        "forma_do_rewards_bruto": dict(formas),
-        "duracoes_sem_pool": dict(duracoes_sem_pool),
+        "total": sum(sem_pool.motivos.values()),
+        "por_motivo": dict(sem_pool.motivos),
+        "campos_presentes": dict(sem_pool.presentes),
+        "campos_ausentes": dict(sem_pool.ausentes),
+        "forma_do_rewards_bruto": dict(sem_pool.formas),
+        "duracoes_sem_pool": dict(sem_pool.duracoes),
         "nota": (
             "M2.6 BUG 5. A cadeia do dado esta INTEIRA e foi conferida: a "
             "descoberta guarda `raw_gamma`, o recorder extrai "

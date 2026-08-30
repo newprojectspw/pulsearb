@@ -270,3 +270,49 @@ class TestPortaoDoLivro:
             _ordem(), feeds_saudaveis=True, melhor_bid=0.40, melhor_ask=0.60
         )
         assert decisao.motivo == MOTIVOS.SPREAD_ANOMALO
+
+
+class TestOEncadeamentoDosPortoes:
+    """A refatoração que dividiu `avaliar_risco` em dois grupos, travada.
+
+    Os portões passaram a rodar em `_portoes_do_sistema` e
+    `_portoes_da_ordem`, cada um devolvendo `Decisao | None`. Isso introduz
+    uma armadilha que não existia antes: encadear os dois por veracidade
+    (`sistema() or ordem() or Decisao(True)`) funciona hoje só porque
+    `Decisao` não define `__bool__`. No dia em que alguém der a ela um
+    `__bool__` que devolva `pode` — a leitura mais natural do mundo —, toda
+    recusa viraria falsa e TODOS os portões de risco abririam em silêncio.
+    """
+
+    def test_uma_recusa_e_verdadeira_como_objeto(self, tmp_path):
+        """Se este teste quebrar, o encadeamento por `or` estaria invertido.
+
+        O código usa `is not None` justamente para não depender disto. O teste
+        existe para que a quebra apareça aqui, com este texto, em vez de
+        aparecer como um bot que passou a operar sem travas.
+        """
+        recusa = _avaliar(_portao(tmp_path), melhor_bid=None, melhor_ask=None)
+        assert not recusa.pode
+        assert bool(recusa) is True
+
+    def test_ordem_mal_formada_vem_antes_de_qualquer_portao(self, tmp_path):
+        kill = tmp_path / "KILL"
+        kill.write_text("parar agora", encoding="utf-8")
+        decisao = _portao(tmp_path, kill=kill).avaliar_risco(
+            _ordem(shares=0.0), feeds_saudaveis=True, **LIVRO_SADIO
+        )
+        assert decisao.motivo == MOTIVOS.ORDEM_MAL_FORMADA
+
+    def test_portao_de_sistema_vence_portao_de_ordem(self, tmp_path):
+        """Kill acionado E preço fora da faixa: o motivo registrado é o kill.
+
+        A ordem entre os dois grupos não é estética. O diário quer o motivo
+        mais geral que se aplica: "a chave está puxada" explica a recusa
+        inteira, "o preço está fora da faixa" explicaria só esta ordem.
+        """
+        kill = tmp_path / "KILL"
+        kill.write_text("parar agora", encoding="utf-8")
+        decisao = _portao(tmp_path, kill=kill, preco_maximo=0.60).avaliar_risco(
+            _ordem(preco=0.95), feeds_saudaveis=True, **LIVRO_SADIO
+        )
+        assert decisao.motivo == MOTIVOS.KILL_ACIONADO

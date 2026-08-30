@@ -367,6 +367,31 @@ class PortaoDeRisco:
                 {"shares": ordem.shares, "preco_limite": ordem.preco_limite},
             )
 
+        # ORDEM DOS GRUPOS, e ela é deliberada: primeiro o que impede operar
+        # de todo (chave, disjuntor, pausa, feed, livro), depois o que impede
+        # ESTA ordem (preço, stake, tetos). O diário fica mais útil quando o
+        # motivo registrado é o mais geral que se aplica.
+        #
+        # `is not None` em vez de `or`: uma recusa é um objeto `Decisao` cujo
+        # campo principal é `pode=False`. Encadear por veracidade funcionaria
+        # hoje e inverteria TODOS os portões no dia em que alguém desse a
+        # `Decisao` um `__bool__` que devolvesse `pode` — falha silenciosa, no
+        # arquivo onde ela é menos aceitável.
+        recusa = self._portoes_do_sistema(feeds_saudaveis, melhor_bid, melhor_ask)
+        if recusa is not None:
+            return recusa
+        recusa = self._portoes_da_ordem(ordem)
+        if recusa is not None:
+            return recusa
+        return Decisao(True)
+
+    def _portoes_do_sistema(
+        self,
+        feeds_saudaveis: bool,
+        melhor_bid: float | None,
+        melhor_ask: float | None,
+    ) -> Decisao | None:
+        """O que impede operar de todo, independente da ordem pedida."""
         # A chave de emergência vem antes de tudo que é automático: se uma
         # pessoa puxou, a razão dela vale mais que qualquer conta nossa.
         if self._kill_acionado():
@@ -395,10 +420,10 @@ class PortaoDeRisco:
         if not feeds_saudaveis:
             return Decisao(False, MOTIVOS.FEED_PARADO, {})
 
-        recusa_do_livro = self._portao_do_spread(melhor_bid, melhor_ask)
-        if recusa_do_livro is not None:
-            return recusa_do_livro
+        return self._portao_do_spread(melhor_bid, melhor_ask)
 
+    def _portoes_da_ordem(self, ordem: OrdemPretendida) -> Decisao | None:
+        """O que impede ESTA ordem: preço, tamanho e os três tetos."""
         if not (
             self.settings.preco_minimo <= ordem.preco_limite <= self.settings.preco_maximo
         ):
@@ -459,7 +484,7 @@ class PortaoDeRisco:
                 },
             )
 
-        return Decisao(True)
+        return None
 
     # ──────────────────────────────────────────────────────────── contabilidade
     def registrar_envio(self, ordem: OrdemPretendida) -> None:

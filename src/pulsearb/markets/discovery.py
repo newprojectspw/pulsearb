@@ -250,6 +250,113 @@ def validate_window_match(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _Taxas:
+    """A fee resolvida entre Gamma e CLOB, com os gates que ela levantou."""
+
+    rate: float
+    exponent: float
+    taker_only: bool
+    rebate: float | None
+
+
+def _tokens_por_outcome(
+    gamma: dict[str, Any], clob_compact: dict[str, Any] | None
+) -> tuple[dict[str, str], list[str]]:
+    """token↔outcome pelo campo `o` do CLOB, NUNCA por posição.
+
+    Fallback: o pareamento outcomes×clobTokenIds da Gamma, que é a única
+    opção lá — e por isso mesmo o caminho menos confiável dos dois.
+    """
+    token_by_outcome: dict[str, str] = {}
+    if clob_compact and isinstance(clob_compact.get("t"), list):
+        for entry in clob_compact["t"]:
+            if isinstance(entry, dict) and "t" in entry and "o" in entry:
+                token_by_outcome[str(entry["o"])] = str(entry["t"])
+    if not token_by_outcome:
+        outcomes = _parse_maybe_json_list(gamma.get("outcomes"))
+        token_ids = _parse_maybe_json_list(gamma.get("clobTokenIds"))
+        if outcomes and len(outcomes) == len(token_ids):
+            token_by_outcome = dict(zip(outcomes, token_ids, strict=True))
+    gates = [] if set(token_by_outcome) == {"Up", "Down"} else ["tokens_up_down_incompletos"]
+    return token_by_outcome, gates
+
+
+def _taxas(
+    gamma: dict[str, Any], clob_compact: dict[str, Any] | None
+) -> tuple[_Taxas, list[str]]:
+    """GATE central: sem fee legível, não opera.
+
+    Gamma e CLOB podem trazer a mesma fee. Se as duas trazem e discordam, o
+    dado está podre e o mercado sai — é o mesmo critério do `acceptingOrders`.
+    """
+    gates: list[str] = []
+    rate: float | None = None
+    exponent: float | None = None
+    taker_only = False
+    rebate: float | None = None
+
+    schedule = gamma.get("feeSchedule")
+    if isinstance(schedule, dict):
+        rate = _as_float(schedule.get("rate"))
+        exponent = _as_float(schedule.get("exponent"))
+        taker_only = bool(schedule.get("takerOnly", False))
+        rebate = _as_float(schedule.get("rebateRate"))
+
+    fd = (clob_compact or {}).get("fd")
+    if isinstance(fd, dict):
+        clob_rate = _as_float(fd.get("r"))
+        clob_exp = _as_float(fd.get("e"))
+        if rate is None:
+            rate, exponent = clob_rate, clob_exp
+            taker_only = bool(fd.get("to", False))
+        elif clob_rate is not None and (clob_rate != rate or clob_exp != exponent):
+            gates.append("fee_divergente_gamma_vs_clob")
+
+    if rate is None or exponent is None:
+        gates.append("fee_schedule_ilegivel")
+        rate = float("nan")
+        exponent = float("nan")
+
+    return _Taxas(rate=rate, exponent=exponent, taker_only=taker_only, rebate=rebate), gates
+
+
+def _tick_e_minimo(
+    gamma: dict[str, Any], clob_compact: dict[str, Any] | None
+) -> tuple[float, float, list[str]]:
+    """Tick e tamanho mínimo, com o CLOB preferido sobre a Gamma."""
+    gates: list[str] = []
+    tick = _as_float((clob_compact or {}).get("mts")) or _as_float(
+        gamma.get("orderPriceMinTickSize")
+    )
+    min_size = _as_float((clob_compact or {}).get("mos")) or _as_float(gamma.get("orderMinSize"))
+    if tick is None:
+        gates.append("tick_size_ausente")
+        tick = float("nan")
+    if min_size is None:
+        gates.append("min_order_size_ausente")
+        min_size = float("nan")
+    return tick, min_size, gates
+
+
+def _aceitando_ordens(
+    gamma: dict[str, Any], clob_compact: dict[str, Any] | None
+) -> tuple[bool, list[str]]:
+    """Gamma e CLOB precisam CONCORDAR que o mercado aceita ordens.
+
+    Discordância entre as duas fontes é bandeira vermelha (mesmo tratamento da
+    fee divergente): na dúvida, não opera. Parte do filtro anti-zumbi (12.12)
+    — `closed=false` isolado não significa mercado vivo.
+    """
+    sinais = [
+        bool(value)
+        for value in (gamma.get("acceptingOrders"), (clob_compact or {}).get("ao"))
+        if value is not None
+    ]
+    accepting = bool(sinais) and all(sinais)
+    return accepting, [] if accepting else ["nao_aceitando_ordens"]
+
+
 def extract_market(
     gamma: dict[str, Any],
     clob_compact: dict[str, Any] | None,
@@ -284,73 +391,11 @@ def extract_market(
     elif end_epoch <= now_epoch:
         gates.append("zumbi_end_date_no_passado")
 
-    # --- token por outcome
-    token_by_outcome: dict[str, str] = {}
-    if clob_compact and isinstance(clob_compact.get("t"), list):
-        for entry in clob_compact["t"]:
-            if isinstance(entry, dict) and "t" in entry and "o" in entry:
-                token_by_outcome[str(entry["o"])] = str(entry["t"])
-    if not token_by_outcome:
-        outcomes = _parse_maybe_json_list(gamma.get("outcomes"))
-        token_ids = _parse_maybe_json_list(gamma.get("clobTokenIds"))
-        if outcomes and len(outcomes) == len(token_ids):
-            token_by_outcome = dict(zip(outcomes, token_ids, strict=True))
-    if set(token_by_outcome) != {"Up", "Down"}:
-        gates.append("tokens_up_down_incompletos")
-
-    # --- fee (GATE central: sem fee legível, não opera)
-    fee_rate: float | None = None
-    fee_exponent: float | None = None
-    fee_taker_only = False
-    fee_rebate: float | None = None
-
-    schedule = gamma.get("feeSchedule")
-    if isinstance(schedule, dict):
-        fee_rate = _as_float(schedule.get("rate"))
-        fee_exponent = _as_float(schedule.get("exponent"))
-        fee_taker_only = bool(schedule.get("takerOnly", False))
-        fee_rebate = _as_float(schedule.get("rebateRate"))
-
-    fd = (clob_compact or {}).get("fd")
-    if isinstance(fd, dict):
-        clob_rate = _as_float(fd.get("r"))
-        clob_exp = _as_float(fd.get("e"))
-        if fee_rate is None:
-            fee_rate, fee_exponent = clob_rate, clob_exp
-            fee_taker_only = bool(fd.get("to", False))
-        elif clob_rate is not None and (clob_rate != fee_rate or clob_exp != fee_exponent):
-            # Divergência entre Gamma e CLOB é sinal de dado podre: não opera.
-            gates.append("fee_divergente_gamma_vs_clob")
-
-    if fee_rate is None or fee_exponent is None:
-        gates.append("fee_schedule_ilegivel")
-        fee_rate = float("nan")
-        fee_exponent = float("nan")
-
-    # --- tick e mínimo (CLOB preferido)
-    tick = _as_float((clob_compact or {}).get("mts")) or _as_float(
-        gamma.get("orderPriceMinTickSize")
-    )
-    min_size = _as_float((clob_compact or {}).get("mos")) or _as_float(gamma.get("orderMinSize"))
-    if tick is None:
-        gates.append("tick_size_ausente")
-        tick = float("nan")
-    if min_size is None:
-        gates.append("min_order_size_ausente")
-        min_size = float("nan")
-
-    # acceptingOrders: Gamma e CLOB precisam CONCORDAR que está aceitando.
-    # Discordância entre as duas fontes é bandeira vermelha (mesmo tratamento
-    # da fee divergente): na dúvida, não opera. Parte do filtro anti-zumbi
-    # (12.12) — closed=false isolado não significa mercado vivo.
-    sinais = [
-        bool(value)
-        for value in (gamma.get("acceptingOrders"), (clob_compact or {}).get("ao"))
-        if value is not None
-    ]
-    accepting = bool(sinais) and all(sinais)
-    if not accepting:
-        gates.append("nao_aceitando_ordens")
+    token_by_outcome, gates_de_token = _tokens_por_outcome(gamma, clob_compact)
+    taxas, gates_de_taxa = _taxas(gamma, clob_compact)
+    tick, min_size, gates_de_tick = _tick_e_minimo(gamma, clob_compact)
+    accepting, gates_de_aceite = _aceitando_ordens(gamma, clob_compact)
+    gates += gates_de_token + gates_de_taxa + gates_de_tick + gates_de_aceite
 
     return DiscoveredMarket(
         slug=slug,
@@ -360,10 +405,10 @@ def extract_market(
         token_id_by_outcome=token_by_outcome,
         tick_size=tick,
         min_order_size=min_size,
-        fee_rate=fee_rate,
-        fee_exponent=fee_exponent,
-        fee_taker_only=fee_taker_only,
-        fee_rebate_rate=fee_rebate,
+        fee_rate=taxas.rate,
+        fee_exponent=taxas.exponent,
+        fee_taker_only=taxas.taker_only,
+        fee_rebate_rate=taxas.rebate,
         accepting_orders=accepting,
         end_date_iso=gamma.get("endDate"),
         operable=not gates,
@@ -416,53 +461,9 @@ class MarketDiscovery:
     ) -> list[DiscoveredMarket]:
         """Descobre janelas atuais/próximas. Devolve TODAS (operáveis ou não);
         quem consome filtra por .operable. Janela não-operável é logada."""
-        found: dict[str, DiscoveredMarket] = {}
-
-        # Fase 1: grade de slugs (barata, endereça direto o mercado).
-        now = int(self.clock())
-        for asset in self.assets:
-            for duration in self.probe_durations:
-                for start in grid_slots(now, duration, ahead=ahead):
-                    # A janela de 1h tem padrão de slug próprio (API_NOTES 12.2):
-                    # nominal, em America/New_York, nas variantes com e sem ano.
-                    candidates = (
-                        build_hourly_slugs(asset, start)
-                        if duration == HOURLY_DURATION_SECONDS
-                        else [build_slug(asset, duration, start)]
-                    )
-                    expected_end = float(start + duration)
-                    for slug in candidates:
-                        gamma = await self._get_gamma_by_slug(slug)
-                        if gamma is None:
-                            continue
-                        # A Gamma devolve 200 para slug de mercado antigo sem
-                        # sinalizar (12.12b): confere se é MESMO esta janela.
-                        motivo = validate_window_match(
-                            gamma, expected_end_epoch=expected_end, now_epoch=float(now)
-                        )
-                        if motivo is not None:
-                            self.log.info(
-                                "slug descartado: não é a janela pedida",
-                                slug_pedido=slug,
-                                slug_devolvido=gamma.get("slug"),
-                                end_date=gamma.get("endDate"),
-                                motivo=motivo,
-                            )
-                            break  # a variante existe, mas está morta: não insista
-                        market = await self._assemble(gamma)
-                        if market.condition_id:
-                            found[market.condition_id] = market
-                        break  # variante encontrada: não testa a outra
-
-        # Fase 2: fallback por keyset — pega durações fora da grade (ex.: a 1h
-        # com padrão de slug ainda desconhecido, API_NOTES 12.2).
+        found = await self._fase_da_grade(ahead=ahead)
         if keyset_fallback:
-            async for gamma in self._iter_keyset_updown():
-                condition_id = str(gamma.get("conditionId") or "")
-                if condition_id and condition_id not in found:
-                    market = await self._assemble(gamma)
-                    if market.condition_id:
-                        found[market.condition_id] = market
+            found.update(await self._fase_do_keyset(ja_achados=set(found)))
 
         for market in found.values():
             if not market.operable:
@@ -475,6 +476,72 @@ class MarketDiscovery:
         return list(found.values())
 
     # ------------------------------------------------------------------ interno
+    async def _fase_da_grade(self, *, ahead: int) -> dict[str, DiscoveredMarket]:
+        """Fase 1: grade de slugs — barata, endereça o mercado direto."""
+        found: dict[str, DiscoveredMarket] = {}
+        now = int(self.clock())
+        for asset in self.assets:
+            for duration in self.probe_durations:
+                for start in grid_slots(now, duration, ahead=ahead):
+                    market = await self._mercado_do_slot(asset, duration, start, now)
+                    if market is not None and market.condition_id:
+                        found[market.condition_id] = market
+        return found
+
+    async def _mercado_do_slot(
+        self, asset: str, duration: int, start: int, now: int
+    ) -> DiscoveredMarket | None:
+        """O mercado de UM slot da grade, testando as variantes de slug.
+
+        A janela de 1 h tem padrão de slug próprio (API_NOTES 12.2): nominal,
+        em America/New_York, nas variantes com e sem ano. Assim que uma
+        variante responde — viva ou morta — as outras não são testadas.
+        """
+        candidates = (
+            build_hourly_slugs(asset, start)
+            if duration == HOURLY_DURATION_SECONDS
+            else [build_slug(asset, duration, start)]
+        )
+        expected_end = float(start + duration)
+        for slug in candidates:
+            gamma = await self._get_gamma_by_slug(slug)
+            if gamma is None:
+                continue
+            # A Gamma devolve 200 para slug de mercado antigo sem sinalizar
+            # (12.12b): confere se é MESMO esta janela.
+            motivo = validate_window_match(
+                gamma, expected_end_epoch=expected_end, now_epoch=float(now)
+            )
+            if motivo is not None:
+                self.log.info(
+                    "slug descartado: não é a janela pedida",
+                    slug_pedido=slug,
+                    slug_devolvido=gamma.get("slug"),
+                    end_date=gamma.get("endDate"),
+                    motivo=motivo,
+                )
+                return None  # a variante existe, mas está morta: não insista
+            return await self._assemble(gamma)
+        return None
+
+    async def _fase_do_keyset(
+        self, *, ja_achados: set[str]
+    ) -> dict[str, DiscoveredMarket]:
+        """Fase 2: fallback por keyset.
+
+        Pega durações fora da grade — por exemplo a de 1 h quando o padrão de
+        slug ainda é desconhecido (API_NOTES 12.2).
+        """
+        found: dict[str, DiscoveredMarket] = {}
+        async for gamma in self._iter_keyset_updown():
+            condition_id = str(gamma.get("conditionId") or "")
+            if not condition_id or condition_id in ja_achados:
+                continue
+            market = await self._assemble(gamma)
+            if market.condition_id:
+                found[market.condition_id] = market
+        return found
+
     async def _get_gamma_by_slug(self, slug: str) -> dict[str, Any] | None:
         data = await self.http_get_json(f"{self.gamma_url}/markets/slug/{slug}", None)
         return data if isinstance(data, dict) else None

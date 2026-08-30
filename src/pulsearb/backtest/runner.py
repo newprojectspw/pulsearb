@@ -274,6 +274,26 @@ def _instantes_da_janela(
         yield ts_ns, preco_spot, seconds_left
 
 
+@dataclass(frozen=True, slots=True)
+class PortaoDaCurva:
+    """O veredito da curva de variância sobre UMA janela.
+
+    `entra` falso é falha fechada: a janela sai inteira, e o motivo já foi
+    contado no relatório. `alcance_s` é o maior horizonte MEDIDO — além dele
+    a curva extrapolaria, e o corte por instante acontece no laço.
+    `None` = sem curva configurada, sem recorte.
+    """
+
+    entra: bool
+    alcance_s: float | None = None
+
+
+#: A janela passou sem curva configurada: entra, e nada é recortado.
+SEM_RECORTE = PortaoDaCurva(entra=True)
+#: A janela foi recusada pela falha fechada.
+RECUSADA = PortaoDaCurva(entra=False)
+
+
 class BacktestRunner:
     """Roda um cenário sobre um conjunto de janelas já montadas."""
 
@@ -295,6 +315,40 @@ class BacktestRunner:
         return report
 
     # ------------------------------------------------------------- interno
+    def _portao_da_curva(
+        self, janela: WindowState, report: BacktestReport
+    ) -> PortaoDaCurva:
+        """Esta janela pode ser avaliada com a curva medida, e até onde?
+
+        Falha fechada: pediram variância medida e este ativo não tem curva, a
+        janela INTEIRA sai — inclusive da calibração, que é medida antes do
+        gate de confiabilidade. Deixá-la entrar com o modelo velho envenenaria
+        justamente o número que o critério 1.3 lê.
+        """
+        curvas = self.config.curvas_de_variancia
+        if curvas is None:
+            return SEM_RECORTE
+        # A curva descreve a liquidação do jogo TWAP. A janela horária resolve
+        # por outro observável (candle da Binance contra a abertura), e cairia
+        # no modelo derivado — duas físicas no mesmo PnL de manchete, sem
+        # aviso.
+        if janela.jogo != JOGO_TWAP:
+            report.janelas_de_jogo_sem_curva[janela.asset] += 1
+            return RECUSADA
+        curva_do_ativo = curvas.para(janela.asset)
+        if curva_do_ativo is None:
+            report.janelas_sem_curva[janela.asset] += 1
+            return RECUSADA
+        # O recorte por horizonte é por INSTANTE, no laço — não pela duração
+        # declarada da janela.
+        #
+        # Achado em review: descartar a janela inteira jogaria fora as janelas
+        # de 15 min e de 4 h por completo, e a estratégia opera só nos últimos
+        # 240 s delas — que a curva de 600 s cobre. Pior, o motor ao vivo
+        # continuaria operando essa população, e backtest e SHADOW voltariam a
+        # divergir por construção.
+        return PortaoDaCurva(entra=True, alcance_s=curva_do_ativo.horizonte_maximo_s)
+
     def _run_window(
         self,
         janela: WindowState,
@@ -302,41 +356,16 @@ class BacktestRunner:
         report: BacktestReport,
     ) -> None:
         cfg = self.config
-        # Falha fechada: pediram variância medida e este ativo não tem curva.
-        # A janela INTEIRA sai — inclusive da calibração, que é medida antes
-        # do gate de confiabilidade. Deixá-la entrar com o modelo velho
-        # envenenaria justamente o número que o critério 1.3 lê.
-        if cfg.curvas_de_variancia is not None:
-            # A curva descreve a liquidação do jogo TWAP. A janela horária
-            # resolve por outro observável (candle da Binance contra a
-            # abertura), e cairia no modelo derivado — duas físicas no mesmo
-            # PnL de manchete, sem aviso.
-            if janela.jogo != JOGO_TWAP:
-                report.janelas_de_jogo_sem_curva[janela.asset] += 1
-                return
-            curva_do_ativo = cfg.curvas_de_variancia.para(janela.asset)
-            if curva_do_ativo is None:
-                report.janelas_sem_curva[janela.asset] += 1
-                return
-            # O recorte por horizonte é por INSTANTE, mais abaixo — não pela
-            # duração declarada da janela.
-            #
-            # Achado em review: descartar a janela inteira jogaria fora as
-            # janelas de 15 min e de 4 h por completo, e a estratégia opera só
-            # nos últimos 240 s delas — que a curva de 600 s cobre. Pior, o
-            # motor ao vivo continuaria operando essa população, e backtest e
-            # SHADOW voltariam a divergir por construção.
+        portao = self._portao_da_curva(janela, report)
+        if not portao.entra:
+            return
+        alcance = portao.alcance_s
+
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
         entradas = 0
         ultima_entrada_ns = 0
-
-        alcance = (
-            curva_do_ativo.horizonte_maximo_s
-            if cfg.curvas_de_variancia is not None
-            else None
-        )
 
         for ts_ns, preco_spot, seconds_left in _instantes_da_janela(
             janela, stream, vol, twap

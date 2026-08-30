@@ -57,6 +57,69 @@ def _dist(valores: list[float]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------- M2.E.1
+def _series_por_slug(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, list[tuple[float, float, float | None]]]:
+    """Cada janela vira uma série de (tempo_restante, tick, preço)."""
+    series: dict[str, list[tuple[float, float, float | None]]] = defaultdict(list)
+    for snapshot in snapshots:
+        janelas = snapshot.get("janelas")
+        if not isinstance(janelas, list):
+            continue
+        for janela in janelas:
+            ponto = _ponto_da_janela(janela)
+            if ponto is not None:
+                series[ponto[0]].append(ponto[1])
+    return series
+
+
+def _ponto_da_janela(
+    janela: Any,
+) -> tuple[str, tuple[float, float, float | None]] | None:
+    """(slug, ponto) de um registro de janela, ou `None` se ilegível.
+
+    Tempo restante ausente vira NaN em vez de descartar a observação: o tick
+    dela ainda conta para a distribuição, e é a distribuição que responde se o
+    afinamento acontece nos extremos de preço.
+    """
+    if not isinstance(janela, dict):
+        return None
+    slug = janela.get("slug")
+    tick = janela.get("tick_size")
+    if not isinstance(slug, str) or not isinstance(tick, (int, float)):
+        return None
+    restante = janela.get("_seconds_left")
+    preco = janela.get("best_ask")
+    return slug, (
+        float(restante) if isinstance(restante, (int, float)) else float("nan"),
+        float(tick),
+        float(preco) if isinstance(preco, (int, float)) else None,
+    )
+
+
+def _mudancas_da_serie(
+    slug: str, pontos: list[tuple[float, float, float | None]]
+) -> list[dict[str, Any]]:
+    """As transições de tick dentro de UMA janela, na ordem em que ocorreram."""
+    if len({tick for _, tick, _ in pontos}) <= 1:
+        return []
+    mudancas: list[dict[str, Any]] = []
+    anterior = pontos[0][1]
+    for restante, tick, preco in pontos[1:]:
+        if tick != anterior:
+            mudancas.append(
+                {
+                    "slug": slug,
+                    "de": anterior,
+                    "para": tick,
+                    "seconds_left": restante,
+                    "preco_no_momento": preco,
+                }
+            )
+            anterior = tick
+    return mudancas
+
+
 def medir_mudanca_de_tick(
     snapshots: list[dict[str, Any]],
     *,
@@ -73,47 +136,14 @@ def medir_mudanca_de_tick(
     72h) e nesse caso a contagem tirada da série seria a de TRANSIÇÕES, não a
     de observações. Passar a contagem verdadeira evita esse falseamento.
     """
-    series: dict[str, list[tuple[float, float, float | None]]] = defaultdict(list)
-    for snapshot in snapshots:
-        janelas = snapshot.get("janelas")
-        if not isinstance(janelas, list):
-            continue
-        for janela in janelas:
-            if not isinstance(janela, dict):
-                continue
-            slug = janela.get("slug")
-            tick = janela.get("tick_size")
-            restante = janela.get("_seconds_left")
-            preco = janela.get("best_ask")
-            if isinstance(slug, str) and isinstance(tick, (int, float)):
-                series[slug].append(
-                    (
-                        float(restante) if isinstance(restante, (int, float)) else float("nan"),
-                        float(tick),
-                        float(preco) if isinstance(preco, (int, float)) else None,
-                    )
-                )
+    series = _series_por_slug(snapshots)
 
     ticks_vistos: dict[str, int] = defaultdict(int)
     mudancas: list[dict[str, Any]] = []
     for slug, pontos in series.items():
         for _, tick, _ in pontos:
             ticks_vistos[f"{tick:g}"] += 1
-        distintos = {tick for _, tick, _ in pontos}
-        if len(distintos) > 1:
-            anterior = pontos[0][1]
-            for restante, tick, preco in pontos[1:]:
-                if tick != anterior:
-                    mudancas.append(
-                        {
-                            "slug": slug,
-                            "de": anterior,
-                            "para": tick,
-                            "seconds_left": restante,
-                            "preco_no_momento": preco,
-                        }
-                    )
-                    anterior = tick
+        mudancas.extend(_mudancas_da_serie(slug, pontos))
 
     afinou = [m for m in mudancas if m["para"] < m["de"]]
     tempos = [m["seconds_left"] for m in afinou if not math.isnan(m["seconds_left"])]
