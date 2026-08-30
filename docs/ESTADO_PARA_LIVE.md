@@ -27,13 +27,17 @@ cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 por ausência de borda e por capacidade, não mais por calibração. O MAKER
 continua barrado pelo 1.10 e pelo 1.6 (não avaliável por construção).
 
-**O teste mais duro da rodada foi a latência, e ele inverteu.** Com o modelo
-defeituoso o PnL da banda decaía monotonicamente com a latência (+3,3119 a
-150 ms → +0,4736 a 1000 ms), e essa era a assinatura que eu citava como
-evidência de sinal direcional real. Com o modelo medido o PnL **melhora** com
-latência (−67,94 a 150 ms → −55,78 a 1000 ms). Sinal que fica menos ruim quanto
-mais atrasado chega não tem direção: chegar tarde apenas negocia menos ruído.
-**O +2,7125 era o simulador apostando com convicção onde não havia
+**A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
+banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
+1000 ms), e eu citava esse decaimento como evidência de sinal direcional real.
+Com o modelo medido o PnL **melhora** com latência (−67,94 a 150 ms → −55,78 a
+1000 ms). O que isso estabelece é que **a evidência que eu invocava antes não
+sobrevive** — mesmo instrumento, sinal oposto. O que NÃO estabelece é ausência
+de direção: a varredura mantém o sinal fixo e troca só o book do fill, então
+ela mexe no preço de entrada e na coorte de trades ao mesmo tempo (ver §2d-ter
+do `VEREDITO_M2.md`). Quem carrega a conclusão é o resto — PnL negativo nas
+**cinco** bandas e `hit_rate` 0,4172, abaixo de 0,5 no lado escolhido pelo
+modelo. **O +2,7125 era o simulador apostando com convicção onde não havia
 informação** — desvio-padrão 6,3× pequeno demais, `P(Up)` saturado em 0 e 1, e
 amostra pequena fazendo o resto.
 
@@ -745,7 +749,7 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.1 / 1.4 ausência de borda** (PnL −67,27, nenhuma banda positiva) | resultado de **medição**, não defeito | nada conhecido. Com o preditor calibrado o sinal não tem direção — e a sensibilidade à latência INVERTEU (melhora com atraso), que é a assinatura de ruído, não de borda corroída |
+| **1.1 / 1.4 ausência de borda** (PnL −67,27 nas cinco bandas, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
 

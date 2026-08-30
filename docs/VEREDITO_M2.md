@@ -11,8 +11,8 @@
 >
 > **Resultado (§2d-ter, subseção "O RESULTADO"):** o **1.3 passa** nos cinco
 > baldes (ECE 0,0126–0,0493, contra 0,207 na banda) — **e a borda some junto**:
-> 688 trades, PnL −67,27, `bandas_com_edge: []`, e a sensibilidade à latência
-> invertida. O taker reprova agora por 1.1, 1.4 e 1.5.
+> 688 trades, PnL −67,27, `bandas_com_edge: []` e `hit_rate` 0,4172. O taker
+> reprova agora por 1.1, 1.4 e 1.5.
 >
 > **Todo número de 1.1 a 1.4 e do 2.3 abaixo desta linha é HISTÓRICO** — vem do
 > preditor com variância derivada, e fica no documento porque é o registro de
@@ -1233,12 +1233,30 @@ reprovar.
 Nenhuma positiva. O +2,7125 que a §2d-bis registrou na banda de horizonte não
 sobrevive à correção do preditor.
 
-**A sensibilidade à latência inverteu, e isso é o teste mais duro que a
-rodada oferece.** Com o modelo derivado, o PnL decaía monotonicamente com a
-latência — assinatura de borda direcional real, e eu citei isso como
-evidência. Com o modelo medido, o PnL **melhora** com latência (−67,94 a 150 ms,
-−55,78 a 1000 ms). Sinal que fica menos ruim quanto mais atrasado é sinal que
-não tem direção: é ruído sendo negociado, e chegar tarde apenas negocia menos.
+**A sensibilidade à latência inverteu.** Com o modelo derivado, o PnL decaía
+monotonicamente com a latência, e eu citei esse decaimento como evidência de
+borda direcional real. Com o modelo medido, o PnL **melhora** com latência
+(−67,94 a 150 ms, −55,78 a 1000 ms). O que isso estabelece com segurança é que
+**a evidência que eu invocava antes não sobrevive**: era o mesmo instrumento,
+lido nos dois sentidos, e ele agora aponta para o lado oposto.
+
+**O que isso NÃO estabelece, e a revisão do PR #47 pegou.** A varredura de
+latência não é um teste de direção. Em `_tentar_entrada` o sinal é calculado
+em `t` e fica FIXO; o que a latência muda é o book usado no fill,
+`timeline.at(t + latência)`. Isso mexe em duas coisas de uma vez: o preço de
+entrada, e se a ordem preenche. Se o ask melhora no intervalo, o PnL sobe com
+latência mesmo com sinal direcional; e fill que falha empurra a entrada para
+outro instante, mudando a COORTE de trades entre os cenários. Uma inclinação
+positiva, sozinha, não separa "não há direção" de "a execução ficou mais
+barata" nem de "as coortes são outras".
+
+**Então o que carrega a conclusão de ausência de borda é o resto**, não a
+inclinação: PnL negativo nas **cinco** bandas de horizonte, e `hit_rate` de
+0,4172 — abaixo de 0,5 no lado que o modelo escolheu. **O teste direto continua
+por fazer**, e fica registrado como próximo passo: acurácia direcional ou
+markout sobre coorte pareada entre latências (o relatório já publica `trades` e
+`hit_rate` por cenário em `sensibilidade_latencia`; falta a comparação por
+coorte). Até ele existir, a inclinação da latência é indício, não prova.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
