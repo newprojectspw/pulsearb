@@ -38,12 +38,12 @@ import sys
 from itertools import pairwise
 from typing import Any, NamedTuple
 
-from pulsearb.backtest.__main__ import (
+from pulsearb.backtest.report import MINIMO_DE_FAIXAS
+from pulsearb.caminhos import (
     ENV_RAIZ_DE_SAIDA,
     PADRAO_SAIDA,
     raiz_de_saida,
 )
-from pulsearb.backtest.report import MINIMO_DE_FAIXAS
 from pulsearb.engine.decisao import BASE_DO_ENCOLHIMENTO
 
 # Os limiares do VEREDITO_M2 "Regras de decisão", escritos ANTES dos números.

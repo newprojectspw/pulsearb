@@ -9,19 +9,55 @@ mora na fábrica.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from pulsearb.caminhos import ENV_RAIZ_DE_SAIDA
 from pulsearb.execution.executor import ExecutorSombra
 from pulsearb.live.ciclo import CicloAoVivo
 from pulsearb.live.motor import ConfigDoMotor
 from pulsearb.live.shadow import (
     ProcessoShadow,
+    _curvas,
     montar_ciclo,
 )
 from pulsearb.settings import FeedSettings, Mode, RiskSettings, Settings
+
+#: V(t) do btc medida em 24 h (relatorios/VARIANCIA_24AGO.json), cortada nos
+#: horizontes que bastam para a curva ser avaliável — o que se testa aqui é o
+#: caminho até o arquivo, não a forma da curva.
+_PONTOS_BTC = (
+    (1.0, 2.352126724427579e-10),
+    (2.0, 6.766494738216218e-10),
+    (5.0, 3.878150567744716e-09),
+    (10.0, 1.483584639264751e-08),
+    (30.0, 1.1616900502179133e-07),
+    (60.0, 3.690323096354988e-07),
+    (120.0, 8.898465093595007e-07),
+    (180.0, 1.3675723240230315e-06),
+)
+
+
+def _relatorio_de_variancia() -> dict:
+    return {
+        "por_ativo": {
+            "btc": {
+                "veredito": {
+                    "avaliavel": True,
+                    "monotona": True,
+                    "linear_no_longo": True,
+                    "ha_suavizacao": True,
+                },
+                "horizontes": [
+                    {"horizonte_s": h, "variancia": v, "suficiente": True}
+                    for h, v in _PONTOS_BTC
+                ],
+            }
+        }
+    }
 
 
 def _settings(tmp_path, modo=Mode.SHADOW, feeds=None, **risco):
@@ -68,11 +104,11 @@ class TestAFabrica:
         `escolher_executor` recusa LIVE pela autorização; a fábrica não tem
         como contorná-lo porque é dele que o executor vem.
         """
+        settings = _settings(tmp_path, modo=Mode.LIVE)
+        diario = tmp_path / "diario.jsonl"
+
         with pytest.raises(NotImplementedError) as erro:
-            montar_ciclo(
-                _settings(tmp_path, modo=Mode.LIVE),
-                caminho_do_diario=tmp_path / "diario.jsonl",
-            )
+            montar_ciclo(settings, caminho_do_diario=diario)
 
         assert "LIVE NAO autorizado" in str(erro.value)
 
@@ -1113,3 +1149,37 @@ class TestOAdaptadorHttpEhCompartilhado:
         adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
         with pytest.raises(RuntimeError):
             await adaptador("https://exemplo/markets/slug/x", None)
+
+
+class TestOCaminhoDaCurva:
+    """`--curva-de-variancia` vem de fora e não pode chegar cru ao disco.
+
+    Mesma contenção do `--json` do backtest (M2.5), agora em
+    `pulsearb.caminhos`: ler de fora da raiz não sobrescreve nada, mas põe o
+    nome do arquivo no `origem` de cada linha do diário — e o SHADOW roda sob
+    argumento montado por script e por agente, que é exatamente onde um
+    caminho hostil entra sem ninguém digitar.
+    """
+
+    def test_sem_argumento_nao_ha_curva(self):
+        assert _curvas(None) is None
+
+    @pytest.mark.parametrize(
+        "hostil",
+        ["/etc/passwd.json", "../fora.json", "~/segredo.json", "sem-sufixo"],
+    )
+    def test_caminho_fora_da_raiz_e_recusado(self, hostil, tmp_path, monkeypatch):
+        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+
+        with pytest.raises(ValueError):
+            _curvas(hostil)
+
+    def test_curva_dentro_da_raiz_e_lida(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+        (tmp_path / "relatorios").mkdir()
+        alvo = tmp_path / "relatorios" / "VARIANCIA.json"
+        alvo.write_text(json.dumps(_relatorio_de_variancia()), encoding="utf-8")
+
+        curvas = _curvas("relatorios/VARIANCIA.json")
+
+        assert len(curvas)

@@ -59,7 +59,8 @@ from pulsearb.analysis.variancia_de_transicao import (
     curva_de_variancia,
     veredito_da_curva,
 )
-from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
+from pulsearb.backtest.__main__ import caminho_de_leitura
+from pulsearb.caminhos import caminho_de_escrita
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.replay.reader import RecordingReader
 

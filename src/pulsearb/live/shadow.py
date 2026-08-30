@@ -46,6 +46,7 @@ from typing import Any
 
 import httpx
 
+from pulsearb.caminhos import caminho_de_relatorio_lido
 from pulsearb.execution.executor import escolher_executor
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
@@ -411,12 +412,19 @@ def _curvas(caminho: str | None) -> Any:
     Cair no modelo derivado porque o arquivo não abriu recriaria ao vivo a
     diferença de 39 a 48× que a §2d-ter mediu — e o diário atribuiria a
     divergência ao mercado.
+
+    O caminho vem da linha de comando, então passa pela mesma contenção que o
+    backtest usa no `--curva-de-variancia` (`pulsearb.caminhos`): validado
+    contra o padrão fixo ANTES de virar caminho, montado a partir da raiz
+    permitida e conferido depois de resolver. Sem isso, `--curva-de-variancia
+    /etc/qualquer/coisa.json` leria de fora da raiz e devolveria o nome do
+    arquivo no `origem` de cada linha do diário.
     """
     if not caminho:
         return None
     from pulsearb.engine.variancia import curvas_do_relatorio
 
-    destino = Path(caminho)
+    destino = caminho_de_relatorio_lido(caminho)
     with destino.open(encoding="utf-8") as arquivo:
         curvas = curvas_do_relatorio(json.load(arquivo), origem=destino.name)
     if not len(curvas):
@@ -484,10 +492,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         settings = settings.model_copy(update={"mode": Mode.SHADOW})
 
+    # Mesma forma do backtest: caminho recusado vira mensagem e código 2, não
+    # traceback. Quem roda o SHADOW por script lê o stderr, não a pilha.
+    try:
+        curvas = _curvas(args.curva_de_variancia)
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return 2
+
     ciclo = montar_ciclo(
         settings,
         caminho_do_diario=Path(args.diario or caminho_do_diario_da_rodada()),
-        curvas_de_variancia=_curvas(args.curva_de_variancia),
+        curvas_de_variancia=curvas,
     )
     processo = ProcessoShadow(settings, ciclo)
     estado = asyncio.run(processo.run(args.duration))
