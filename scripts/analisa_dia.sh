@@ -3,6 +3,7 @@
 #
 #   ./scripts/analisa_dia.sh 20260824
 #   ./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2
+#   ./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json
 #
 # Roda NA MÁQUINA DE ANÁLISE (o Mac).
 #
@@ -26,9 +27,10 @@
 # comando curto sem caractere especial nenhum.
 set -euo pipefail
 
-DIA="${1:?uso: $0 YYYYMMDD [dados] [saida]}"
+DIA="${1:?uso: $0 YYYYMMDD [dados] [saida] [curva-de-variancia.json]}"
 DADOS="${2:-$HOME/pulsearb-dados}"
 STAGE="${3:-$HOME/pulsearb-m2}"
+CURVA="${4:-}"
 
 LIMITE_POR_TOKEN="${PULSEARB_LIMITE_POR_TOKEN:-20000}"
 NIVEIS="${PULSEARB_NIVEIS:-103}"
@@ -46,6 +48,7 @@ echo "==> dia $DIA"
 echo "    dados     $DADOS"
 echo "    relatorio $RELATORIO_ABS"
 echo "    log       $LOG"
+[ -n "$CURVA" ] && echo "    curva     $CURVA"
 echo
 
 # ── 1. as horas que existem, com o gzip conferido ────────────────────────
@@ -78,10 +81,13 @@ echo "==> $horas_ok hora(s) integra(s), $horas_ruins pulada(s)"
 # ── 2. lançar ────────────────────────────────────────────────────────────
 mkdir -p "$RAIZ/relatorios"
 cd "$RAIZ"
+CURVA_ARGS=()
+[ -n "$CURVA" ] && CURVA_ARGS=(--curva-de-variancia "$CURVA")
 nohup python -m pulsearb.backtest "$STAGE" \
   --limite-por-token "$LIMITE_POR_TOKEN" \
   --niveis-por-lado "$NIVEIS" \
   --json "$RELATORIO" \
+  "${CURVA_ARGS[@]}" \
   > "$LOG" 2>&1 &
 pid=$!
 echo "==> lancado, PID $pid"
@@ -108,7 +114,11 @@ for _ in $(seq 1 60); do
     echo "==> rodando. Para acompanhar:"
     echo "    tail -f $LOG"
     echo "==> quando terminar:"
-    echo "    python scripts/resumo_m2.py $RELATORIO"
+    if [ -n "$CURVA" ]; then
+      echo "    python scripts/resumo_m2.py $RELATORIO  # curva: $CURVA"
+    else
+      echo "    python scripts/resumo_m2.py $RELATORIO"
+    fi
     echo "    (a partir de $RAIZ)"
     exit 0
   fi

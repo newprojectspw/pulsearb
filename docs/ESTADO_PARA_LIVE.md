@@ -453,7 +453,10 @@ Agora é um comando curto, sem caractere especial nenhum:
 
 ```
 ./scripts/analisa_dia.sh 20260824
+./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json
 ```
+
+O quarto argumento é opcional: se passado, o `--curva-de-variancia` é repassado ao backtest. É o que o M2.2 exige para re-rodar com a variância medida em vez da derivada.
 
 Ele monta os links **só das horas cujo gzip abre inteiro** — a hora corrente e
 a que morreu no meio de uma escrita reprovam, e incluí-las envenenaria a
@@ -1019,7 +1022,7 @@ saber o que deixou de travar é parte do estado:
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
 | **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
-| ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais |
+| ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 
 E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
 não é veredito**. A rodada de 30/08 é o primeiro número desta página com
