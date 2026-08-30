@@ -307,6 +307,95 @@ class TestOEstado:
         assert isinstance(ciclo, CicloAoVivo)
 
 
+class TestAAllowlistDeDestino:
+    """As URLs da descoberta são montadas por concatenação, e parte do que
+    entra nelas vem do FIO. `seguro_na_url` protege UM ponto de construção;
+    esta checagem protege o DESTINO, que é o que realmente importa.
+
+    Defesa em profundidade de propósito: um campo novo interpolado numa URL
+    amanhã não passa pelo `seguro_na_url` — mas passa por aqui.
+    """
+
+    BASES = ("https://gamma-api.polymarket.com", "https://clob.polymarket.com")
+
+    def _adaptador(self, registrar=None):
+        from pulsearb.markets.http import fazer_http_get_json
+
+        class _Resposta:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"ok": True}
+
+        class _Http:
+            async def get(self, url, params=None):
+                if registrar is not None:
+                    registrar.append(url)
+                return _Resposta()
+
+        return fazer_http_get_json(_Http(), bases=self.BASES)
+
+    async def test_endpoint_configurado_passa(self):
+        pedidas: list[str] = []
+        adaptador = self._adaptador(pedidas)
+
+        assert await adaptador(
+            "https://gamma-api.polymarket.com/markets/slug/btc", None
+        ) == {"ok": True}
+        assert pedidas == ["https://gamma-api.polymarket.com/markets/slug/btc"]
+
+    @pytest.mark.parametrize(
+        ("url", "porque"),
+        [
+            (
+                "https://gamma-api.polymarket.com.exemplo-malicioso.com/x",
+                "sufixo de dominio — o truque que a barra final barra",
+            ),
+            ("http://169.254.169.254/latest/meta-data/", "metadados da nuvem"),
+            ("https://exemplo-malicioso.com/x", "host qualquer"),
+            ("file:///etc/passwd", "esquema local"),
+            ("http://gamma-api.polymarket.com/x", "http em vez de https"),
+        ],
+    )
+    async def test_destino_de_fora_e_RECUSADO(self, url, porque):
+        from pulsearb.markets.http import DestinoNaoPermitido
+
+        pedidas: list[str] = []
+        adaptador = self._adaptador(pedidas)
+
+        with pytest.raises(DestinoNaoPermitido):
+            await adaptador(url, None)
+        # E a requisição não chegou a sair.
+        assert pedidas == [], porque
+
+    async def test_a_barra_final_e_o_que_barra_o_sufixo(self):
+        """Sem ela, `...polymarket.com.evil.com` casaria com o prefixo.
+
+        Este teste existe para que alguém que "simplifique" o `rstrip("/") +
+        "/"` veja a consequência aqui, e não em produção.
+        """
+        from pulsearb.markets.http import DestinoNaoPermitido
+
+        adaptador = self._adaptador()
+
+        with pytest.raises(DestinoNaoPermitido):
+            await adaptador("https://gamma-api.polymarket.comX/y", None)
+
+    def test_allowlist_vazia_e_recusada_na_construcao(self):
+        """Uma allowlist vazia recusaria tudo em silêncio no primeiro uso.
+
+        Falhar na construção transforma um bot que não descobre nada e não
+        diz por quê num erro imediato e legível.
+        """
+        from pulsearb.markets.http import fazer_http_get_json
+
+        with pytest.raises(ValueError, match="allowlist vazia"):
+            fazer_http_get_json(object(), bases=())
+
+
 class TestOAdaptadorHttpEhCompartilhado:
     """O tratamento de 404 é semântica, não encanação.
 
@@ -329,7 +418,8 @@ class TestOAdaptadorHttpEhCompartilhado:
             async def get(self, url, params=None):
                 return _Resposta()
 
-        assert await fazer_http_get_json(_Http())("qualquer", None) is None
+        adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
+        assert await adaptador("https://exemplo/markets/slug/x", None) is None
 
     async def test_erro_de_verdade_levanta(self):
         from pulsearb.markets.http import fazer_http_get_json
@@ -344,5 +434,6 @@ class TestOAdaptadorHttpEhCompartilhado:
             async def get(self, url, params=None):
                 return _Resposta()
 
+        adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
         with pytest.raises(RuntimeError):
-            await fazer_http_get_json(_Http())("qualquer", None)
+            await adaptador("https://exemplo/markets/slug/x", None)

@@ -221,7 +221,13 @@ class ProcessoShadow:
             headers={"User-Agent": self.settings.user_agent}, timeout=15.0
         ) as http:
             discovery = MarketDiscovery(
-                http_get_json=fazer_http_get_json(http),
+                http_get_json=fazer_http_get_json(
+                    http,
+                    bases=(
+                        self.settings.endpoints.gamma,
+                        self.settings.endpoints.clob,
+                    ),
+                ),
                 gamma_url=self.settings.endpoints.gamma,
                 clob_url=self.settings.endpoints.clob,
                 assets=self.settings.assets,
