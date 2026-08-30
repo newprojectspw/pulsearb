@@ -50,15 +50,18 @@ ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
 pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
 1.6 (não avaliável sem posição na fila).
 
-Atualizado: 2026-08-30 · fonte dos números: **24 horas** de gravação real de
-2026-08-24, 126,7 M registros, `pior_fracao_coberta 1,0` e 0 silêncios —
-irrestrito em `relatorios/M2_24AGO.json` (695 trades), na banda em
-`relatorios/HORIZONTE_240_120_v2.json` (640 trades). O veredito anterior, de
-20 h com 837 s de silêncio e 42% dos snapshots descartados, está preservado em
-`docs/VEREDITO_M2.md` para comparação.
+Atualizado: 2026-08-30 · fonte dos números correntes:
+**`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
+2026-08-24 (126,7 M registros, `pior_fracao_coberta 1,0`, 0 silêncios),
+avaliadas com o preditor de variância **medida** sobre a curva de 23/08
+(`relatorios/VARIANCIA_23AGO.json`), 688 trades. As rodadas do preditor
+derivado — `M2_24AGO.json` (695 trades) e `HORIZONTE_240_120_v2.json`
+(640 trades) — passaram a ser **histórico**, e é delas que vêm os números de
+tudo o que vier depois da tabela de critérios do Bloco 1. O veredito de 20 h, com 837 s de silêncio e
+42% dos snapshots descartados, segue em `docs/VEREDITO_M2.md`.
 
-> Como ler: **✅** passou com dado real · **✅ *na banda*** passou só quando
-> restrito à faixa 240-120 s de tempo restante · **❌** medido e reprovado ·
+> Como ler: **✅** passou com dado real · **✅ *na banda*** (só no histórico)
+> passou apenas restrito à faixa 240-120 s de tempo restante · **❌** medido e reprovado ·
 > **🟡** parcial · **⚠️** não avaliável por construção · **⏳** sem amostra
 > suficiente · **⬜** não existe / não começou.
 > Um item só vira ✅ com número de gravação real. Número de gravação
@@ -139,11 +142,14 @@ Critérios escritos **antes** dos números, em `VEREDITO_M2.md`. Não são
 negociáveis depois do resultado.
 
 Amostra: **24 horas de 2026-08-24**, `pior_fracao_coberta` 1,0 nos oito
-ativos, **0 silêncios**, 896 janelas conhecidas, 695 trades. A rodada levou
-73 min. A amostra anterior — 20 h de 23/08, com 837 s de silêncio e 42% dos
-snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
+ativos, **0 silêncios**, 896 janelas conhecidas, **688 trades** com o preditor
+de variância medida. A amostra anterior — 20 h de 23/08, com 837 s de silêncio
+e 42% dos snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 
-### TAKER — na banda 240-120 s: 3 passa, 2 reprova (o critério exige as 5)
+### TAKER — 2 passa, 3 reprova (o critério exige as 5)
+
+Sem restrição de banda: com o preditor corrigido não há banda de horizonte com
+edge para restringir a (`bandas_com_edge: []`).
 
 | # | Critério | Exigido | Medido (24 h, modelo MEDIDO) | |
 |---|---|---|---|---|
@@ -153,7 +159,7 @@ snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 | 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
 | 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
 
-**Leia esta tabela como o estado corrente; a de baixo é o histórico.** Os
+**⬇️ Daqui para baixo é histórico. A tabela acima é o estado corrente.** Os
 números de 1.1 a 1.4 vinham do preditor com a variância derivada, que
 subestimava o desvio-padrão em 6,3×. O que está abaixo desta linha — o
 "+2,7125 na banda", o decaimento monótono com a latência, o ECE de 0,207 —
@@ -340,9 +346,9 @@ frente, que só o `silencio_final_s` não via.
 
 | # | Item | Estado |
 |---|---|---|
-| 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py`, coberto por 24 testes |
+| 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py` — variância agora **medida** (`engine/variancia.py`), não derivada; a derivada errava por 39–48× |
 | 2.2 | Modelo horário | ✅ `engine/hourly.py` |
-| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA** — 0,0694 no melhor balde (`<30s`); **0,207 na banda operada**, viés MISTO e SEM ORDEM, ~75 mil de ~79 mil previsões nos extremos |
+| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA e CALIBRADA** — ECE de **0,0126 a 0,0493** nos cinco baldes, 20 faixas ocupadas em cada. *(Com o preditor derivado eram 0,0694 no melhor balde e 0,207 na banda operada, viés MISTO e SEM ORDEM — ver abaixo.)* |
 
 ### O 2.3 mudou de natureza, não só de estado
 
@@ -369,8 +375,16 @@ mais 23 do dia 23 e 5 do dia 25.
 Ou seja: o que faltava no 2.3 **não era código nem dado** — era rodar o
 backtest com o instrumento novo sobre a gravação que já existia. **Rodou.** A
 mesma rodada fechou o 2.3 do M3 e tirou o critério 1.3 do M2 do limbo do "não
-avaliado": ele está **avaliado e reprovado**, com `calibracao_avaliavel` true e
-ECE 0,207 na banda operada.
+avaliado": ele ficou **avaliado e reprovado**, com `calibracao_avaliavel` true
+e ECE 0,207 na banda operada.
+
+**E em 30/08 o 1.3 deixou de reprovar.** O ECE de 0,207 não era defeito do
+sinal: era a variância derivada subestimando o desvio-padrão em 6,3×, o que
+saturava `P(Up)` nos extremos — exatamente as ~75 mil previsões de ~79 mil
+citadas acima. Com a `V(t)` medida em dia anterior ao avaliado (§2d-ter do
+`VEREDITO_M2.md`), o ECE cai para 0,0126–0,0493 nos cinco baldes. Os números
+dos três parágrafos anteriores descrevem o instrumento antigo e ficam como
+registro de como se chegou aqui.
 
 ---
 
