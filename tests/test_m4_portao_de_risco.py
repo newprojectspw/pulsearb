@@ -382,3 +382,86 @@ class TestPortaoDoRelogio:
         decisao = _avaliar(portao, _ordem(), feeds_saudaveis=False)
 
         assert decisao.motivo == MOTIVOS.FEED_PARADO
+
+
+class TestOEnsaioNaoContaminaORegistroReal:
+    """Achado P1 do Codex no #52.
+
+    `ExecutorSombra` chama `registrar_envio` de propósito — sem isso os tetos
+    por janela e de exposição nunca seriam exercitados, e o ensaio não
+    ensaiaria a parte que mais importa. Só que `registrar_envio` GRAVA, e o
+    caminho vinha do mesmo `caminho_do_registro` que o LIVE usará.
+    """
+
+    def test_LIVE_escreve_no_caminho_configurado(self, tmp_path):
+        """O dinheiro real fica onde a configuração mandou. Sem sufixo."""
+        portao = _portao(tmp_path, modo=Mode.LIVE)
+
+        assert portao.caminho == tmp_path / "registro.json"
+
+    @pytest.mark.parametrize("modo", [Mode.SHADOW, Mode.SIM])
+    def test_ensaio_ganha_arquivo_proprio(self, tmp_path, modo):
+        portao = _portao(tmp_path, modo=modo)
+
+        assert portao.caminho == tmp_path / f"registro.{modo.value.lower()}.json"
+
+    def test_o_ensaio_NAO_toca_no_arquivo_do_LIVE(self, tmp_path):
+        """O teste que importa: contaminação, não nomenclatura.
+
+        A sequência concreta: SHADOW aprova intenção, `registrar_envio` grava,
+        o processo morre antes de a janela fechar. `_liquidar` só roda com o
+        processo vivo — depois de reiniciar, aquele slug já passou e nunca
+        mais será liquidado. Com um arquivo só, a exposição sintética ficaria
+        presa no registro do dinheiro real, para sempre, e o teto passaria a
+        recusar intenção legítima.
+        """
+        real = tmp_path / "registro.json"
+        ensaio = _portao(tmp_path, modo=Mode.SHADOW)
+
+        ensaio.registrar_envio(_ordem(shares=5.0, preco=0.50))
+
+        assert not real.exists()
+        assert ensaio.caminho is not None and ensaio.caminho.exists()
+        assert ensaio.registro.exposicao_total_usdc == pytest.approx(2.5)
+
+    def test_o_LIVE_nao_herda_a_exposicao_do_ensaio(self, tmp_path):
+        """E o outro lado da mesma moeda, que é o pior dos dois.
+
+        PnL, sequência de perdas e disjuntor de um ensaio entrando no registro
+        durável do dinheiro real corromperiam o histórico de segurança.
+        """
+        ensaio = _portao(tmp_path, modo=Mode.SHADOW)
+        ensaio.registrar_envio(_ordem(shares=5.0, preco=0.50))
+
+        real = _portao(tmp_path, modo=Mode.LIVE)
+
+        assert real.registro.exposicao_total_usdc == 0.0
+        assert real.registro.gasto_por_janela == {}
+
+    def test_o_KILL_continua_compartilhado(self, tmp_path):
+        """A assimetria é de propósito.
+
+        A chave de emergência existe para parar TUDO. Um KILL por modo faria
+        `touch KILL` numa sessão ssh parar metade do que está rodando —
+        exatamente o contrário do que a chave promete.
+        """
+        kill = tmp_path / "KILL"
+        portoes = [
+            PortaoDeRisco(
+                RiskSettings(),
+                modo,
+                caminho_do_registro=tmp_path / "registro.json",
+                caminho_do_kill=kill,
+                hoje="2026-08-25",
+                relogio_do_servidor=_RelogioFalso(),
+            )
+            for modo in (Mode.LIVE, Mode.SHADOW, Mode.SIM)
+        ]
+
+        assert {p.caminho_do_kill for p in portoes} == {kill}
+
+    def test_sem_caminho_configurado_segue_sem_caminho(self, tmp_path):
+        """`None` é memória, e memória não contamina ninguém."""
+        portao = PortaoDeRisco(RiskSettings(), Mode.SHADOW, hoje="2026-08-25")
+
+        assert portao.caminho is None

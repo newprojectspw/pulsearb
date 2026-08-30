@@ -201,6 +201,38 @@ def _hoje_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def caminho_do_registro_do_modo(caminho: Path | None, modo: Mode) -> Path | None:
+    """O registro de risco de um ENSAIO nunca é o do dinheiro real.
+
+    Achado do Codex no #52, e procede em duas frentes. `ExecutorSombra` chama
+    `registrar_envio` de propósito — sem isso os tetos por janela e de
+    exposição nunca seriam exercitados e o ensaio não ensaiaria a parte que
+    mais importa. Só que `registrar_envio` GRAVA, e o caminho vinha do mesmo
+    `settings.risk.caminho_do_registro` que o LIVE usará:
+
+    - SHADOW morto no meio de uma janela deixa exposição sintética no arquivo.
+      `_liquidar` só roda com o processo vivo; depois de reiniciar, aquele
+      slug já passou e nunca mais será liquidado. A exposição fica presa para
+      sempre, e o teto passa a recusar intenção legítima.
+    - Pior: PnL, sequência de perdas e disjuntor de um ensaio entrariam no
+      registro durável do dinheiro real — e o real, no do ensaio.
+
+    Por que aqui e não na fábrica do SHADOW: `montar_ciclo` é hoje o ÚNICO
+    lugar que constrói o portão, mas a entrada do LIVE ainda vai ser escrita.
+    Deixar a separação na fábrica seria confiar em disciplina de quem
+    constrói — que é exatamente a classe de erro que este achado é. O portão
+    já recebe o modo; então é ele quem decide, e nenhuma entrada futura
+    consegue esquecer.
+
+    O KILL **não** entra nesta separação, e a assimetria é de propósito: a
+    chave de emergência existe para parar TUDO. Um KILL por modo faria
+    `touch KILL` numa sessão ssh parar metade do que está rodando.
+    """
+    if caminho is None or modo is Mode.LIVE:
+        return caminho
+    return caminho.with_name(f"{caminho.stem}.{modo.value.lower()}{caminho.suffix}")
+
+
 class PortaoDeRisco:
     """Consulte antes de CADA ordem. Não há caminho legítimo que o contorne."""
 
@@ -217,7 +249,8 @@ class PortaoDeRisco:
     ) -> None:
         self.settings = settings
         self.modo = modo
-        self.caminho = caminho_do_registro
+        # Ensaio e dinheiro real não dividem registro. Ver a função.
+        self.caminho = caminho_do_registro_do_modo(caminho_do_registro, modo)
         self.caminho_do_kill = caminho_do_kill
         self._hoje = hoje or _hoje_utc()
         self._relogio = relogio
