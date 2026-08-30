@@ -532,7 +532,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o ciclo existe** desde 2026-08-30 (`live/ciclo.py`, 15 testes); falta o processo que abre os sockets e o roda por 24 h |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -704,10 +704,50 @@ estão velhos — "feed parado" sem dizer qual não é alarme acionável.
 Sem nenhum preço ainda, a saúde é `false`: bot recém-subido não sabe nada, e
 não saber não autoriza.
 
-**O que ainda falta para o 3.13:** o processo que abre os sockets, roda a
-descoberta e chama `passo()` numa cadência — e o roda por 24 h sem cair. O
-recorder já tem toda essa fiação (957 linhas); o ciclo foi desenhado para ser o
-consumidor dela.
+#### E o processo que lhe dá rede — `live/shadow.py`
+
+O ciclo não abre socket por design. `ProcessoShadow` é quem abre, e reusa a
+fiação do recorder — `RtdsFeed`, `PolyMarketWsFeed`, `MarketDiscovery`, as
+mesmas classes que gravaram as 24 h do M2. Se o SHADOW abrisse os sockets por
+outro caminho, uma diferença de assinatura ou de reconexão faria a população
+que ele vê divergir da que o backtest leu, e a comparação entre os dois
+perderia o sentido.
+
+```
+python -m pulsearb.live.shadow --duration 86400 \
+    --curva-de-variancia relatorios/VARIANCIA_23AGO.json
+```
+
+**A ligação que a fábrica faz, e que é a mais fácil de esquecer:** o
+`PortaoDeRisco` recebe `relogio_do_servidor=precos.relogio` — a MESMA
+instância que o ciclo alimenta tick a tick. Sem ela a trava de relógio diria
+"não sei" a cada ordem, o diário sairia com `relogio_nao_monitorado` em toda
+linha, e nenhum dos portões que interessam seria exercitado. Há teste travando
+a identidade da instância, porque uma cópia não recebe os ticks.
+
+**Três cadências, e cada uma tem um número por trás:**
+
+| Laço | Cadência | Por quê |
+|---|---|---|
+| decisão | 1 s | o feed entrega 1,061 tick/s por ativo; decidir mais rápido que o dado chega não muda nada |
+| descoberta | 30 s | janela de 5 min descoberta com 30 s de atraso ainda sobra 4,5 min, e a faixa operada são os últimos 240 s |
+| relato | 60 s | estado no log sem poluir |
+
+O custo da primeira é até ~1 s de atraso a mais que o backtest — dentro da
+grade de latência que o M2 já mediu (150 a 1000 ms).
+
+**Um passo que levanta NÃO derruba o processo.** O SHADOW existe para rodar
+24 h e mostrar o que aconteceu; cair no primeiro evento estranho entregaria
+zero informação sobre as outras 23 horas. O erro sai nomeado no log e o laço
+segue — e há um teste que trava isso, para que ninguém "limpe" o `try/except`
+achando que ele esconde bug.
+
+**Janela não-operável também é assinada.** O motor decide se opera e o diário
+quer o motivo; não ver o livro de uma janela recusada trocaria "recusei por X"
+por "não sei nada sobre ela", que é justamente o que o M2 quer medir.
+
+**O que ainda falta para o 3.13:** rodar. As 24 h contínuas exigem máquina e
+tempo, não código.
 
 ### As peças que o ciclo casa
 
