@@ -296,7 +296,7 @@ fixou antes de existir dado. Nenhuma duração passa.
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
-| 1.10 | Fórmula de reward confirmada na doc | sim | não | ❌ |
+| 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
 **O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas
 sem pool de reward.** As 5 que têm são todas de 4 h. Em 5 min, 15 min e 1 h
@@ -529,7 +529,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 53 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. **`replay/ao_vivo.py` fecha o "mesmo caminho"** (PR #55, 2026-08-30): `ReplayCiclo` alimenta o `CicloAoVivo` com qualquer gravação usando o relógio DA gravação — `agora_ns = record.ts_wall_ns`, não `time.time_ns()`. O teste de "mesmo caminho" prova por amostra real (2026-08-24 20:00) que as séries E18 do replay e do caminho direto são byte-a-byte idênticas. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
@@ -601,10 +601,7 @@ dizendo que está tudo bem.
 LIVE passaram a recusar por `relogio_nao_monitorado`. Os testes passaram a
 instalar a fonte, como o ciclo ao vivo terá de fazer.
 
-**O que ainda falta:** (a) o NTP verificado do item 1 acima; (b) o ciclo ao
-vivo construir o `PortaoDeRisco` passando a fonte — não há ponto de construção
-hoje, é o mesmo buraco do 3.13. Enquanto não existir, o LIVE recusaria tudo,
-que é o lado certo para errar.
+~~**O que ainda faltava:**~~ **Fechado.** (a) NTP verificado → **5.4 ✅** (`risk/sincronia.py`, daemon NTP, 14 testes); (b) ciclo ao vivo construir o `PortaoDeRisco` passando a fonte → **`live/shadow.py` ✅** (`relogio_do_servidor=precos.relogio`). O 3.10 virou ✅.
 
 ### 3.4 e 5.4 fecharam — a autorização para LIVE existe antes do cliente
 
@@ -974,7 +971,7 @@ do primeiro dólar real.
 | # | Item | Estado |
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
-| 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
+| 5.2 | Imagem Docker efetivamente construída | 🟡 `deploy/Dockerfile` existe e `.dockerignore` foi adicionado (2026-08-30) — sem ele o contexto incluía `.venv/` e `data/`, podendo passar de vários GB. Falta: build nunca rodou; job `docker` em `ci.yml` escrito mas pendente de scope `workflow` no token OAuth; deploy na VPS |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
 | 5.4 | **NTP/chrony verificado na máquina que opera** | ✅ **2026-08-30** — `risk/sincronia.py` pergunta ao daemon (systemd, chrony, macOS), 14 testes. **Não determinado conta como não sincronizado**, e o LIVE recusa por isso. Falta só habilitar NTP na VPS |
 
@@ -1022,7 +1019,7 @@ saber o que deixou de travar é parte do estado:
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
 | **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
-| **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
+| ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. Falta re-rodar o M2.2 com dados reais |
 
 E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
 não é veredito**. A rodada de 30/08 é o primeiro número desta página com
