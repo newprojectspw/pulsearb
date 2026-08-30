@@ -17,6 +17,7 @@ import contextlib
 import random
 import sys
 import time
+from pathlib import Path
 
 import uvicorn
 
@@ -72,7 +73,12 @@ async def _fake_feed_loop(state: DashboardState) -> None:
 
 
 async def run(settings: Settings, fake_feeds: bool) -> None:
-    state = DashboardState(mode=settings.mode.value)
+    state = DashboardState(
+        mode=settings.mode.value,
+        # Sem isto o botão do 3.11 nasce indisponível: a página mostraria a
+        # caixa de parada e ela não pararia nada.
+        caminho_do_kill=Path(settings.risk.caminho_do_kill),
+    )
     app = create_app(state)
     server = uvicorn.Server(
         uvicorn.Config(
