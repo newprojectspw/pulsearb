@@ -6,6 +6,11 @@ uma máquina de perder dinheiro que já funciona; um portão sem cliente é um
 teste que não custa nada.
 """
 
+from pulsearb.risk.autorizacao import (
+    FRASE_DE_ACEITE,
+    AutorizacaoParaLive,
+    autorizacao_para_live,
+)
 from pulsearb.risk.gates import (
     MOTIVOS,
     Decisao,
@@ -15,9 +20,12 @@ from pulsearb.risk.gates import (
 )
 
 __all__ = [
+    "FRASE_DE_ACEITE",
     "MOTIVOS",
+    "AutorizacaoParaLive",
     "Decisao",
     "OrdemPretendida",
     "PortaoDeRisco",
     "RegistroDoDia",
+    "autorizacao_para_live",
 ]
