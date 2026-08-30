@@ -259,3 +259,107 @@ def test_concordancia_nao_conta_ativo_que_nao_deu_para_avaliar():
     concordancia = relatorio["concordam_sobre_suavizacao"]
     assert concordancia["avaliados"] == 1
     assert concordancia["sem_amostra_para_avaliar"] == 1
+
+
+# ------------------------------------------ o recorte por dia, sem margem
+def test_dia_abre_as_horas_de_borda_e_decide_pelo_relogio_de_origem(tmp_path):
+    """A curva que calibra o dia 24 não pode conter tick nenhum do dia 24.
+
+    O nome do arquivo é aproximação — o `RecordingReader` documenta que um
+    evento de 13:59:59,9 pode estar no arquivo das 14h. Então a seleção por
+    nome abre as horas de BORDA (23h do dia anterior, 00h do seguinte) e quem
+    decide de fato é o relógio de ORIGEM do tick.
+
+    Ficar só nos nomes deixaria entrar tick do dia seguinte e sairia tick do
+    dia pedido — o vazamento que o `--dia` existe para impedir (achado em
+    review).
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    for nome in (
+        "pulsearb-20260822-2300.jsonl.gz",
+        "pulsearb-20260823-0000.jsonl.gz",
+        "pulsearb-20260823-2300.jsonl.gz",
+        "pulsearb-20260824-0000.jsonl.gz",
+        "pulsearb-20260824-0100.jsonl.gz",
+    ):
+        (tmp_path / nome).write_bytes(b"")
+
+    todos = sorted(tmp_path.glob("*.jsonl.gz"))
+    escolhidos = [p.name for p in script.arquivos_do_dia(todos, "20260823")]
+
+    # As duas horas do dia, mais as duas bordas — e nada além disso.
+    assert escolhidos == [
+        "pulsearb-20260822-2300.jsonl.gz",
+        "pulsearb-20260823-0000.jsonl.gz",
+        "pulsearb-20260823-2300.jsonl.gz",
+        "pulsearb-20260824-0000.jsonl.gz",
+    ]
+    assert "pulsearb-20260824-0100.jsonl.gz" not in escolhidos
+
+    # E o relógio de origem é quem separa de verdade.
+    from datetime import UTC, datetime
+
+    def ms(iso: str) -> int:
+        return int(datetime.fromisoformat(iso).replace(tzinfo=UTC).timestamp() * 1000)
+
+    assert script.ticks_do_dia("20260823", ms("2026-08-23T00:00:00"))
+    assert script.ticks_do_dia("20260823", ms("2026-08-23T23:59:59"))
+    # Um tick do dia 24 dentro do arquivo de borda do dia 23: FORA.
+    assert not script.ticks_do_dia("20260823", ms("2026-08-24T00:00:00"))
+    assert not script.ticks_do_dia("20260823", ms("2026-08-22T23:59:59"))
+
+
+def test_dia_sem_arquivo_falha_alto(tmp_path):
+    """Dia errado tem de parar, não medir a gravação inteira em silêncio."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    with pytest.raises(SystemExit, match="20260101"):
+        script.series_da_gravacao(tmp_path, progresso=False, dia="20260101")
+
+
+def test_dia_hostil_e_recusado_antes_do_glob(tmp_path):
+    """`--dia` é interpolado num glob, então é entrada que chega ao disco.
+
+    Sem a trava, `--dia ../../etc` produziria o padrão
+    `pulsearb-../../etc-[0-9][0-9][0-9][0-9].jsonl*` e a busca sairia da
+    raiz. Mesma travessia que o M2.5 fechou no `--json`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import variancia_de_transicao as script
+
+    for hostil in ("../../etc", "2026*", "20260823/..", "", "2026082", "abcdefgh"):
+        with pytest.raises(ValueError, match="dia inválido"):
+            script.arquivos_do_dia([], hostil)
+
+    # E o válido continua passando.
+    valido = [tmp_path / "pulsearb-20260823-0000.jsonl.gz"]
+    assert len(script.arquivos_do_dia(valido, "20260823")) == 1
+
+
+def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(tmp_path, capsys):
+    """O comando documentado tem de produzir relatório utilizável.
+
+    Achado em review: o docstring do módulo mostrava o comando SEM `--dia`, e
+    o relatório dele é justamente o que o backtest recusa. Quem seguisse a
+    documentação descobriria isso três horas depois. Agora o aviso sai na
+    hora, e `dia_medido: null` diz o que o relatório é.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from tests.synthetic import gerar_gravacao
+
+    import variancia_de_transicao as script
+
+    diretorio = tmp_path / "rec"
+    diretorio.mkdir()
+    gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
+
+    saida = tmp_path / "relatorios"
+    saida.mkdir()
+    codigo = script.main(
+        [str(diretorio), "--sem-progresso", "--json", "relatorios/exploratorio.json"]
+    )
+    assert codigo == 0
+    assert "EXPLORATORIO" in capsys.readouterr().err

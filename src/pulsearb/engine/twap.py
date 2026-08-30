@@ -67,6 +67,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 # Janela do TWAP usada pela Polymarket em TODAS as durações observadas
 # (API_NOTES 12.3). É parâmetro, não constante mágica: entra por argumento.
@@ -208,6 +209,89 @@ class TwapEstimate:
         if t > 30:
             return "60-30s"
         return "<30s"
+
+
+def prob_up_twap_medido(
+    *,
+    ancora: float,
+    spot: float,
+    seconds_left: float,
+    curva: Any,
+    sigma_1s: float = 0.0,
+    vol_ready: bool = True,
+) -> TwapEstimate:
+    """P(Up) com a variância MEDIDA, e sem inventar média nenhuma.
+
+    A liquidação é `T_fecha ≥ âncora`, com `T` a própria série `twap_sixty` —
+    §13.8 do `API_NOTES.md`, VERIFICADO em 152 janelas, que diz literalmente
+    "não calcule média de 60 s. Nenhuma". Então:
+
+        E[T_fecha]   = T_agora           (martingale)
+        Var[T_fecha] = V(t) · T_agora²   (medida, não derivada)
+
+    Compare com o `prob_up_twap`: ele decompõe em parte travada e parte
+    futura, e aplica `k(m)`, a variância da MÉDIA de m amostras. Essa redução
+    por média não existe na liquidação real — daí o erro já valer 11,5× a dois
+    segundos do fechamento, onde nenhum termo de espera entra.
+
+    **O travamento continua existindo, e continua sendo capturado — medido em
+    vez de calculado.** A 30 s do fim, metade do valor de liquidação já
+    aconteceu, e é por isso que `V(30)` é 36 vezes menor por segundo que
+    `V(600)`. O que o `locked_mean_and_weight` tentava computar dos nossos
+    próprios pontos (e não podia, porque a parte travada é a média do
+    SUBJACENTE e nós só observamos a série já suavizada) a curva entrega
+    pronto, como propriedade medida da série.
+
+    `sigma_1s` entra só para o relatório continuar publicando o que a
+    volatilidade estava marcando; ele NÃO participa mais da conta — e por isso
+    `vol_ready` também não decide se a estimativa é confiável aqui.
+
+    **Por que `confiavel` não olha mais o aquecimento do EWMA.** No caminho
+    derivado, `vol_ready=False` quer dizer "menos de 20 retornos observados, o
+    σ não descreve nada ainda", e recusar é certo. Aqui o σ não entra na
+    conta: a incerteza vem da curva, que foi medida sobre 24 h de gravação e
+    já está pronta quando a janela abre. Manter o portão descartaria os ~20
+    primeiros ticks de CADA janela do backtest — porque o `BacktestRunner`
+    cria um `RealizedVol` novo por janela — enquanto ao vivo o rastreador
+    persiste entre janelas e não teria a mesma perda. Seria uma assimetria
+    entre backtest e SHADOW inventada por um número que ninguém usa, e ela
+    cairia justamente na PRIMEIRA entrada, que é a única que a v1 faz.
+    """
+    if spot <= 0 or ancora <= 0:
+        raise ValueError(f"preços devem ser positivos (spot={spot}, ancora={ancora})")
+
+    seconds_left = max(0.0, seconds_left)
+    if seconds_left <= 0.0:
+        return TwapEstimate(
+            prob_up=1.0 if spot >= ancora else 0.0,
+            twap_atual=spot,
+            spot=spot,
+            ancora=ancora,
+            seconds_left=0.0,
+            peso_travado=1.0,
+            sigma_1s=sigma_1s,
+            confiavel=True,
+        )
+
+    desvio = curva.desvio(seconds_left, spot)
+    if desvio <= 0.0:
+        prob = 1.0 if spot >= ancora else 0.0
+    else:
+        prob = 1.0 - norm_cdf((ancora - spot) / desvio)
+
+    return TwapEstimate(
+        prob_up=min(max(prob, 0.0), 1.0),
+        twap_atual=spot,
+        spot=spot,
+        ancora=ancora,
+        seconds_left=seconds_left,
+        # Não há decomposição travado/futuro neste caminho: a curva já
+        # incorpora o colapso de incerteza. Publicar 0 aqui é dizer isso, e
+        # não "nada está travado".
+        peso_travado=0.0,
+        sigma_1s=sigma_1s,
+        confiavel=True,
+    )
 
 
 def prob_up_twap(

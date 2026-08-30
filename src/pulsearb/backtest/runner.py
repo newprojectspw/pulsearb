@@ -22,7 +22,11 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
 from pulsearb.backtest.report import BacktestReport, Trade
-from pulsearb.engine.decisao import encolher_para_a_base, estimar_prob_up
+from pulsearb.engine.decisao import (
+    JOGO_TWAP,
+    encolher_para_a_base,
+    estimar_prob_up,
+)
 from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.engine.twap import RealizedVol, TwapTracker
 
@@ -211,6 +215,14 @@ class BacktestConfig:
     # calibração, para que o ECE reportado seja o do preditor encolhido de
     # verdade, ponto a ponto, e não a aproximação por faixas do resumo.
     fator_de_encolhimento: float | None = None
+    #: §2d-ter: as curvas V(t) MEDIDAS, uma por ativo. `None` = o modelo
+    #: derivado de antes, byte a byte. Quando vem, o jogo TWAP passa a usar a
+    #: variância medida e para de calcular média nenhuma (API_NOTES §13.8).
+    #:
+    #: A curva TEM de vir de período anterior ao avaliado. Medir e avaliar no
+    #: mesmo dia é in-sample — a mesma regra que a §2d fixou para o fator de
+    #: encolhimento. O relatório publica a origem para que isso seja audível.
+    curvas_de_variancia: Any = None
 
     def na_faixa(self, seconds_left: float) -> bool:
         """Este instante está na faixa de tempo restante autorizada?"""
@@ -290,15 +302,52 @@ class BacktestRunner:
         report: BacktestReport,
     ) -> None:
         cfg = self.config
+        # Falha fechada: pediram variância medida e este ativo não tem curva.
+        # A janela INTEIRA sai — inclusive da calibração, que é medida antes
+        # do gate de confiabilidade. Deixá-la entrar com o modelo velho
+        # envenenaria justamente o número que o critério 1.3 lê.
+        if cfg.curvas_de_variancia is not None:
+            # A curva descreve a liquidação do jogo TWAP. A janela horária
+            # resolve por outro observável (candle da Binance contra a
+            # abertura), e cairia no modelo derivado — duas físicas no mesmo
+            # PnL de manchete, sem aviso.
+            if janela.jogo != JOGO_TWAP:
+                report.janelas_de_jogo_sem_curva[janela.asset] += 1
+                return
+            curva_do_ativo = cfg.curvas_de_variancia.para(janela.asset)
+            if curva_do_ativo is None:
+                report.janelas_sem_curva[janela.asset] += 1
+                return
+            # O recorte por horizonte é por INSTANTE, mais abaixo — não pela
+            # duração declarada da janela.
+            #
+            # Achado em review: descartar a janela inteira jogaria fora as
+            # janelas de 15 min e de 4 h por completo, e a estratégia opera só
+            # nos últimos 240 s delas — que a curva de 600 s cobre. Pior, o
+            # motor ao vivo continuaria operando essa população, e backtest e
+            # SHADOW voltariam a divergir por construção.
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
         entradas = 0
         ultima_entrada_ns = 0
 
+        alcance = (
+            curva_do_ativo.horizonte_maximo_s
+            if cfg.curvas_de_variancia is not None
+            else None
+        )
+
         for ts_ns, preco_spot, seconds_left in _instantes_da_janela(
             janela, stream, vol, twap
         ):
+            # Além do maior horizonte MEDIDO a curva extrapola, e extrapolação
+            # apresentada como medição é o que esta seção existe para não
+            # fazer. Fora ANTES de estimar, para não entrar na calibração —
+            # que é medida antes do portão de confiabilidade.
+            if alcance is not None and seconds_left > alcance:
+                report.instantes_alem_da_curva[janela.asset] += 1
+                continue
             est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
             if cfg.fator_de_encolhimento is not None:
                 # ANTES da calibração e do edge, de propósito: encolher só o
@@ -369,8 +418,8 @@ class BacktestRunner:
             and (ts_ns - ultima_entrada_ns) < cfg.intervalo_min_entre_entradas_s * 1e9
         )
 
-    @staticmethod
     def _estimar(
+        self,
         janela: WindowState,
         twap: TwapTracker,
         vol: RealizedVol,
@@ -387,6 +436,7 @@ class BacktestRunner:
         # A escolha entre os jogos mora em `engine/decisao.py`, compartilhada
         # com o motor ao vivo. Duas cópias fariam SHADOW e backtest divergirem
         # por código, e a divergência pareceria diferença de mercado.
+        curvas = self.config.curvas_de_variancia
         return estimar_prob_up(
             jogo=janela.jogo,
             ancora=janela.ancora,
@@ -394,6 +444,7 @@ class BacktestRunner:
             vol=vol,
             preco_spot=preco_spot,
             seconds_left=seconds_left,
+            curva=curvas.para(janela.asset) if curvas is not None else None,
         )
 
     def _candidatos_com_edge(
@@ -510,12 +561,22 @@ class FaixaDeOperacao:
     tempo_restante_max_s: float | None = None
     max_entradas_por_janela: int = 1
     intervalo_min_entre_entradas_s: float = 30.0
+    #: As curvas V(t) medidas, pelo MESMO motivo que a banda anda junto.
+    #:
+    #: Achado em review do PR #46: sem este campo, uma rodada com
+    #: `--curva-de-variancia` publicava `modelo_de_variancia.medida: true` e
+    #: media o 1.1 com a variância medida enquanto o 1.4, a curva de edge e a
+    #: de capacidade rodavam com a derivada. As duas diferem por 39 a 48×.
+    #: É o defeito do 1.4 de novo, um nível acima: não mais duas populações
+    #: no mesmo relatório, mas duas FÍSICAS.
+    curvas_de_variancia: Any = None
 
     def config(self, **extra: Any) -> BacktestConfig:
         """A `BacktestConfig` desta faixa, com os campos do cenário por cima."""
         return BacktestConfig(
             tempo_restante_min_s=self.tempo_restante_min_s,
             tempo_restante_max_s=self.tempo_restante_max_s,
+            curvas_de_variancia=self.curvas_de_variancia,
             max_entradas_por_janela=self.max_entradas_por_janela,
             intervalo_min_entre_entradas_s=self.intervalo_min_entre_entradas_s,
             **extra,
@@ -602,6 +663,7 @@ def varredura_de_horizonte(
     latencia_ms: float = LATENCIA_PADRAO_MS,
     max_entradas_por_janela: int = 1,
     intervalo_min_entre_entradas_s: float = 30.0,
+    curvas_de_variancia: Any = None,
 ) -> dict[str, Any]:
     """PnL e hit_rate do preditor CRU forçado a operar em CADA banda de tempo.
 
@@ -625,6 +687,7 @@ def varredura_de_horizonte(
                 intervalo_min_entre_entradas_s=intervalo_min_entre_entradas_s,
                 tempo_restante_min_s=minimo,
                 tempo_restante_max_s=maximo,
+                curvas_de_variancia=curvas_de_variancia,
             )
         ).run(janelas, streams)
         n = len(report.trades)

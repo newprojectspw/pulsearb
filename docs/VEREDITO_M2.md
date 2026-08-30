@@ -1012,6 +1012,97 @@ suposição de caminhada aleatória do subjacente também está errada, e aí a
 conclusão da §2d-bis — modelo novo — volta a valer, agora por um motivo
 medido.
 
+#### RESULTADO da medição de V(t) — 2026-08-29, 24 h de 24/08, 651.995 ticks
+
+**As três propriedades apareceram, nos oito ativos, sem exceção.**
+`relatorios/VARIANCIA_24AGO.json`, com `sem_amostra_para_avaliar: 0` e
+`ticks_sem_timestamp_de_origem: {}` — nenhum ativo ficou sem veredito e nenhum
+tick foi descartado por falta de relógio de origem.
+
+| ativo | avaliável | linear no longo | há suavização | fator |
+|---|---|---|---|---|
+| bnb | ✅ | ✅ | ✅ | 34,84 |
+| btc | ✅ | ✅ | ✅ | 36,10 |
+| doge | ✅ | ✅ | ✅ | 38,81 |
+| eth | ✅ | ✅ | ✅ | 34,13 |
+| hype | ✅ | ✅ | ✅ | 45,65 |
+| sol | ✅ | ✅ | ✅ | 35,79 |
+| xrp | ✅ | ✅ | ✅ | 34,58 |
+| zec | ✅ | ✅ | ✅ | 38,43 |
+
+`unanime: true`, fator entre **34,1 e 45,6**. Oito ativos concordando não é
+coincidência de um feed.
+
+A curva do btc, que é o ativo operado:
+
+| t (s) | V(t) | V(t)/t | razão contra o modelo |
+|---|---|---|---|
+| 1 | 2,352e-10 | 2,352e-10 | — (referência) |
+| 2 | 6,766e-10 | 3,383e-10 | 11,51 |
+| 5 | 3,878e-09 | 7,756e-10 | 13,74 |
+| 10 | 1,484e-08 | 1,484e-09 | 22,13 |
+| 30 | 1,162e-07 | 3,872e-09 | 51,96 |
+| 60 | 3,690e-07 | 6,151e-09 | **80,45** |
+| 120 | 8,898e-07 | 7,415e-09 | 47,59 |
+| 180 | 1,368e-06 | 7,598e-09 | 41,68 |
+| **240** | 1,844e-06 | 7,684e-09 | **39,30** |
+| 300 | 2,356e-06 | 7,853e-09 | 38,60 |
+| 600 | 5,094e-06 | 8,491e-09 | 38,71 |
+
+**Propriedade 1 — monótona:** V(t) cresce de 2,35e-10 a 5,09e-6 sem uma
+inversão.
+
+**Propriedade 2 — linear no regime longo:** V(t)/t em 240, 300 e 600 s dá
+7,684 · 7,853 · 8,491 (e-9), variação de **1,10×** entre os extremos. É o
+regime de caminhada aleatória do subjacente, que a suavização de 60 s não
+altera. Passa com folga no limite de 1,5.
+
+**Propriedade 3 — sublinear no curto:** V(1)/1 é **36× menor** que V(600)/600.
+É a marca da suavização, e é a versão MEDIDA do travamento que o
+`locked_mean_and_weight` tentava calcular e não podia.
+
+#### O tamanho do erro, agora medido em vez de suposto
+
+Na banda operada, o modelo subestima a variância em **39 a 48 vezes** —
+**6,3 a 6,9 vezes no desvio-padrão**:
+
+| `seconds_left` | razão na variância | erro no desvio |
+|---|---|---|
+| 120 s | 47,6× | 6,9× |
+| 240 s | 39,3× | 6,3× |
+| 300 s | 38,6× | 6,2× |
+
+Com o desvio 6 vezes menor que o real, o z-score infla 6 vezes e `P(Up)`
+satura em 0 e 1. **É a explicação completa da superconfiança que o 1.3 mede** —
+e o conserto da variância da §2d-ter, sozinho, cobria só uma fatia dela.
+
+**São três erros compostos, e a medição os resolve de uma vez:**
+
+1. O `variance_factor` aplica uma REDUÇÃO por média que não existe na
+   liquidação real. A §13.8 já dizia: a janela resolve por um ponto, não por
+   uma média que nós calculemos. Por isso a razão já é 11,5× a **2 segundos**,
+   onde o termo de espera da §2d-ter nem entra: ali o modelo acha que a
+   variância é 0,25 de um movimento de 1 s, quando é 2,9 vezes ele.
+2. Faltava o tempo de espera antes da janela de fechamento (§2d-ter). O pico de
+   **80×** em 60 s é exatamente onde `k(60)` é mais errado.
+3. O `sigma_1s` é medido sobre a série já suavizada, e vale ~1/36 da
+   volatilidade do subjacente.
+
+#### A restrição que sobra, e ela é de método
+
+A curva foi medida em **24/08**, que é o mesmo dia que o veredito avalia. Usar
+os dois no mesmo dia é ajuste in-sample — exatamente o que a §2d proibiu para
+o fator de encolhimento ("o fator vem de calibração medida em período ANTERIOR
+ao avaliado").
+
+Então a `V(t)` que entra no modelo tem de ser medida em **outro dia**. Há 23 h
+de 23/08 gravadas. A regra registrada agora, antes de rodar: **mede em 23/08,
+avalia em 24/08.** A curva de 24/08 fica como controle — se as duas
+discordarem muito, a própria estabilidade de V(t) entre dias vira pergunta
+aberta, e isso é resultado, não obstáculo.
+
+
+
 As três são julgadas em CÓDIGO (`veredito_da_curva`), não a olho na tabela, e
 duas ressalvas ficam registradas porque a revisão do PR #44 as cobrou:
 

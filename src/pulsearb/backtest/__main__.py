@@ -164,6 +164,129 @@ class Progresso:
 TOKEN_DURACAO_PADRAO = 300
 
 
+def caminho_de_relatorio_lido(bruto: str) -> Path:
+    """Monta o caminho de um relatório de ENTRADA a partir da raiz permitida.
+
+    Espelho do `caminho_de_escrita`, e pelo mesmo motivo: o argumento de
+    `--curva-de-variancia` vem de fora do programa, e entregá-lo ao sistema
+    de arquivos do jeito que chega é a mesma travessia de caminho que o M2.5
+    fechou no `--json`. Ler `/etc/qualquer/coisa.json` não sobrescreve nada,
+    mas expõe conteúdo de fora da raiz na mensagem de erro e no relatório
+    (o nome do arquivo sai em `origem`).
+
+    **Por que não reusa o `caminho_de_leitura`.** Aquele serve ao argumento
+    `recordings`, que é uma pasta fora da raiz DE PROPÓSITO — a gravação mora
+    em `~/pulsearb-m2`, e contê-la no diretório de trabalho quebraria o
+    runbook. Este aqui lê um relatório que o próprio projeto escreveu sob a
+    raiz, então a contenção do `--json` se aplica inteira. São duas regras
+    diferentes porque são dois tipos de entrada diferentes, e juntá-las
+    afrouxaria a mais estrita.
+
+    A contenção está na forma canônica que a análise de fluxo reconhece como
+    sanitização de S2083 — validar ANTES contra o padrão fixo, montar a
+    partir da raiz confiável, e conferir o prefixo depois de resolver. Vale
+    a mesma nota do `caminho_de_escrita` sobre `Path.is_relative_to`: faz a
+    mesma conta e o motor de taint não o conhece.
+    """
+    relativo = bruto.strip().removeprefix("./")
+    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
+        raise ValueError(
+            f"nome de entrada inválido: {bruto!r}\n"
+            "esperado: caminho relativo terminando em .json, com letras, "
+            "dígitos, '-', '_' e '.' (ex.: relatorios/VARIANCIA_23AGO.json).\n"
+            f"para ler de outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
+        )
+    raiz = raiz_de_saida()
+    caminho = raiz / relativo
+    raiz_resolvida = raiz.resolve(strict=False)
+    resolvido = caminho.resolve(strict=False)
+    prefixo = str(raiz_resolvida)
+    if not prefixo.endswith(os.sep):
+        prefixo += os.sep
+    if not str(resolvido).startswith(prefixo):
+        raise ValueError(f"entrada fora da raiz permitida: {resolvido}")
+    if not resolvido.is_file():
+        raise ValueError(f"arquivo de entrada não existe: {resolvido}")
+    return resolvido
+
+
+def _curvas_de_variancia(caminho: str | None) -> Any:
+    """Carrega as curvas V(t) medidas, ou `None` se não foi pedido.
+
+    Falha ALTO em vez de seguir sem curva: quem passou `--curva-de-variancia`
+    escolheu um modelo, e cair no derivado porque o arquivo não abriu seria a
+    troca de modelo mais silenciosa possível — o relatório sairia com números
+    plausíveis medidos pela física errada.
+    """
+    if not caminho:
+        return None
+    from pulsearb.engine.variancia import curvas_do_relatorio
+
+    destino = caminho_de_relatorio_lido(caminho)
+    origem = destino.name
+    with destino.open(encoding="utf-8") as arquivo:
+        curvas = curvas_do_relatorio(json.load(arquivo), origem=origem)
+    if not len(curvas):
+        raise SystemExit(
+            f"nenhuma curva avaliável em {caminho} — rode "
+            "scripts/variancia_de_transicao.py sobre uma gravação com os dois "
+            "regimes medidos (curto e >= 2 horizontes longos)"
+        )
+    if not curvas.dia_medido:
+        raise SystemExit(
+            f"{caminho} não declara `dia_medido` — sem ele não há como provar "
+            "que a curva é de período ANTERIOR ao avaliado, e a §2d-ter exige "
+            "isso.\nRode de novo com --dia YYYYMMDD; nome de arquivo é "
+            "convenção, não fato."
+        )
+    return curvas
+
+
+def recusar_curva_in_sample(curvas: Any, janelas: list[Any]) -> None:
+    """Refuta a rodada se a curva foi medida num dia que ela vai avaliar.
+
+    A §2d-ter registrou, ANTES de qualquer número: a curva vem de período
+    anterior ao avaliado. É a mesma regra que a §2d fixou para o fator de
+    encolhimento, e pelo mesmo motivo — calibrar no próprio período é ajuste
+    in-sample, e o resultado não prova nada sobre o dia seguinte.
+
+    A conferência é contra os dias das JANELAS avaliadas, não contra o nome do
+    arquivo nem contra a pasta: o que importa é a população que o veredito vai
+    ler. Falha alto, e não como aviso: um aviso no meio de 3,5 h de log é um
+    aviso que ninguém lê, e o número sai parecendo válido.
+    """
+    if curvas is None or not janelas:
+        return
+    try:
+        medido = datetime.strptime(curvas.dia_medido, "%Y%m%d").replace(tzinfo=UTC)
+    except (TypeError, ValueError) as erro:
+        raise SystemExit(
+            f"`dia_medido` inválido na curva: {curvas.dia_medido!r} — "
+            "esperado YYYYMMDD"
+        ) from erro
+
+    dias_avaliados = sorted(
+        {
+            datetime.fromtimestamp(j.open_ts_ns / 1e9, tz=UTC).strftime("%Y%m%d")
+            for j in janelas
+        }
+    )
+    primeiro = datetime.strptime(dias_avaliados[0], "%Y%m%d").replace(tzinfo=UTC)
+    # ESTRITAMENTE anterior, e não apenas "fora do conjunto avaliado".
+    #
+    # Achado em review: a versão anterior conferia pertinência ao conjunto, e
+    # uma curva de 25/08 avaliando 24/08 passava. Isso é pior que in-sample —
+    # é olhar o futuro, e sairia rotulada de fora da amostra.
+    if medido >= primeiro:
+        raise SystemExit(
+            f"curva NÃO é anterior ao avaliado: medida em {curvas.dia_medido}, "
+            f"e o primeiro dia avaliado é {dias_avaliados[0]} "
+            f"(avaliados: {dias_avaliados}).\n"
+            "A §2d-ter exige período ESTRITAMENTE anterior. Curva do mesmo "
+            "dia é in-sample; curva de dia posterior é olhar o futuro."
+        )
+
+
 def _fator_de_encolhimento_valido(bruto: str) -> float:
     """Rejeita fator fora de (0, 1] NO PARSE, não horas depois.
 
@@ -1591,6 +1714,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--curva-de-variancia",
+        dest="curva_de_variancia",
+        default=None,
+        help=(
+            "caminho do relatório de scripts/variancia_de_transicao.py. "
+            "Liga o modelo com variância MEDIDA (§2d-ter): o jogo TWAP para "
+            "de derivar a variância e de calcular média nenhuma, como a "
+            "§13.8 do API_NOTES manda. A curva DEVE vir de período anterior "
+            "ao avaliado — medir e avaliar no mesmo dia é in-sample. Ativo "
+            "sem curva tem a janela inteira pulada e contada, nunca caindo "
+            "no modelo derivado em silêncio."
+        ),
+    )
+    parser.add_argument(
         "--qualidade-minima",
         dest="qualidade_minima",
         choices=("alta", "media", "baixa"),
@@ -1845,11 +1982,18 @@ def main(argv: list[str] | None = None) -> int:
     validacao["veredito"] = veredito_ancora["veredito"]
     validacao["lacunas_do_stream"] = lacunas
 
+    # Entra no cfg_base, e não só no runner principal, pela mesma razão que a
+    # FaixaDeOperacao entrou: se a sensibilidade de latência e as curvas de
+    # edge e de capacidade rodassem com a variância derivada enquanto o 1.1
+    # roda com a medida, o relatório teria critérios sobre FÍSICAS diferentes
+    # — a versão mais silenciosa possível do defeito do 1.4.
+    curvas = _curvas_de_variancia(args.curva_de_variancia)
     cfg_base = {
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
         "max_entradas_por_janela": max(1, args.max_entradas),
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+        "curvas_de_variancia": curvas,
     }
     restricao_pedida = (
         args.tempo_restante_max is not None or args.tempo_restante_min is not None
@@ -1861,6 +2005,7 @@ def main(argv: list[str] | None = None) -> int:
     # `>240s` — dois critérios do mesmo relatório sobre populações diferentes.
     # Irrestrita por default: rodada sem `--tempo-restante-*` fica idêntica.
     faixa_operada = FaixaDeOperacao(
+        curvas_de_variancia=curvas,
         tempo_restante_min_s=args.tempo_restante_min,
         tempo_restante_max_s=args.tempo_restante_max,
         max_entradas_por_janela=max(1, args.max_entradas),
@@ -1873,6 +2018,9 @@ def main(argv: list[str] | None = None) -> int:
             tempo_restante_max_s=args.tempo_restante_max,
         )
     )
+    # ANTES de rodar: 3,5 h de processamento para descobrir no fim que a
+    # curva era do próprio dia avaliado seria o pior momento possível.
+    recusar_curva_in_sample(curvas, integras)
     report = runner.run(integras, index.streams)
 
     # M2.6 BUG 2.3: as duas rodadas lado a lado, sempre. Reportar só a
@@ -1908,6 +2056,7 @@ def main(argv: list[str] | None = None) -> int:
     comparacao_encolhimento = None
     if args.fator_de_encolhimento is not None:
         cfg_encolhimento = {
+            "curvas_de_variancia": curvas,
             "threshold_edge": args.threshold,
             "latencia_ms": args.latencia_ms,
             "tempo_restante_min_s": args.tempo_restante_min,
@@ -1954,6 +2103,7 @@ def main(argv: list[str] | None = None) -> int:
         args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
     )
     cfg_entradas = {
+        "curvas_de_variancia": curvas,
         "threshold_edge": args.threshold,
         "latencia_ms": args.latencia_ms,
         "tempo_restante_min_s": args.tempo_restante_min,
@@ -2017,6 +2167,20 @@ def main(argv: list[str] | None = None) -> int:
                 "M2.2) zerou 200 de 200 janelas reais medindo corrida entre "
                 "`best_bid_ask` e `price_change`. Criterios em VEREDITO_M2 "
                 "§2c, escritos antes dos numeros."
+            ),
+        },
+        "modelo_de_variancia": {
+            "medida": curvas is not None,
+            "origem": curvas.origem if curvas is not None else None,
+            "dia_medido": curvas.dia_medido if curvas is not None else None,
+            "ativos_com_curva": sorted(curvas.por_ativo) if curvas is not None else [],
+            "nota": (
+                "medida=false e o modelo DERIVADO, que subestima a variancia "
+                "em 39 a 48 vezes na banda operada (VEREDITO_M2 2d-ter). "
+                "medida=true usa V(t) do arquivo em `origem` — que precisa "
+                "ser de periodo ANTERIOR ao avaliado, senao e in-sample. "
+                "Ativo sem curva tem a janela pulada, e a conta sai em "
+                "`janelas_sem_curva_de_variancia`."
             ),
         },
         "ancora": {
@@ -2103,6 +2267,7 @@ def main(argv: list[str] | None = None) -> int:
                 latencia_ms=args.latencia_ms,
                 max_entradas_por_janela=max(1, args.max_entradas),
                 intervalo_min_entre_entradas_s=max(0.0, args.intervalo_entradas),
+                curvas_de_variancia=curvas,
             )
         ),
         **(

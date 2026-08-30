@@ -201,6 +201,26 @@ class BacktestReport:
     janelas_com_oportunidade: dict[str, set[str]] = field(
         default_factory=lambda: defaultdict(set)
     )
+    #: ativo → janelas puladas por não haver curva de variância medida para
+    #: ele. Contado e publicado em vez de cair no modelo derivado: as duas
+    #: físicas no mesmo relatório seriam duas populações no mesmo número, que
+    #: é a forma exata do defeito que a §2d-bis achou no 1.4.
+    janelas_sem_curva: Counter[str] = field(default_factory=Counter)
+    #: ativo → janelas puladas por serem de um JOGO que a curva não cobre.
+    #:
+    #: A V(t) medida é da série `twap_sixty`, e descreve a liquidação do jogo
+    #: TWAP. A janela horária resolve pelo candle da Binance contra o preço de
+    #: abertura — outro observável. Deixá-la cair no `prob_up_hourly` numa
+    #: rodada marcada `medida: true` poria as duas físicas no mesmo PnL de
+    #: manchete, que é o defeito que esta rodada existe para não cometer.
+    janelas_de_jogo_sem_curva: Counter[str] = field(default_factory=Counter)
+    #: ativo → INSTANTES pulados por pedirem horizonte além do maior medido
+    #: na curva. Por instante, e não por janela: uma janela de 15 min ou de
+    #: 4 h é operada só nos últimos 240 s, que a curva de 600 s cobre —
+    #: descartá-la inteira jogaria fora a população que a estratégia usa, e o
+    #: motor ao vivo continuaria operando ali. Cobrir horizontes maiores exige
+    #: MEDIR horizontes maiores, não esticar os que existem.
+    instantes_alem_da_curva: Counter[str] = field(default_factory=Counter)
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -276,6 +296,9 @@ class BacktestReport:
     def to_dict(self) -> dict[str, Any]:
         n = len(self.trades)
         return {
+            "janelas_sem_curva_de_variancia": dict(self.janelas_sem_curva),
+            "janelas_de_jogo_sem_curva": dict(self.janelas_de_jogo_sem_curva),
+            "instantes_alem_da_curva": dict(self.instantes_alem_da_curva),
             "resumo": {
                 "janelas_avaliadas": self.janelas_avaliadas,
                 "sinais_gerados": self.sinais_gerados,

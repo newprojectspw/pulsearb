@@ -16,7 +16,9 @@ from pulsearb.engine.twap import (
     TwapEstimate,
     TwapTracker,
     prob_up_twap,
+    prob_up_twap_medido,
 )
+from pulsearb.engine.variancia import CurvaDeVariancia
 
 #: O alvo do encolhimento. É 0,5 e não a taxa-base MEDIDA de propósito: a
 #: taxa realizada do próprio período só se conhece depois dele (usá-la na
@@ -65,6 +67,7 @@ def estimar_prob_up(
     vol: RealizedVol,
     preco_spot: float,
     seconds_left: float,
+    curva: CurvaDeVariancia | None = None,
 ) -> TwapEstimate:
     """P(Up) neste instante, pelo jogo da janela.
 
@@ -72,7 +75,27 @@ def estimar_prob_up(
     fração da média já travada nos últimos 60 s; o horário compara contra o
     preço de abertura do candle. Só a escolha entre eles mora aqui — quem
     chama não precisa saber qual é.
+
+    `curva` liga o caminho da variância MEDIDA (§2d-ter). Quando ela vem, o
+    jogo TWAP usa `prob_up_twap_medido` — sem derivar variância e sem calcular
+    média nenhuma, como a §13.8 manda. Quando não vem, o comportamento é o de
+    antes, byte a byte.
+
+    **Curva ausente para o ativo não cai no modelo velho em silêncio.** Quem
+    escolhe operar com variância medida e não tem a curva daquele ativo recebe
+    uma estimativa marcada `confiavel=False`, e o portão de risco recusa. Cair
+    no modelo velho misturaria duas físicas no mesmo relatório sem aviso — a
+    mesma forma do defeito do 1.4, com duas populações no mesmo número.
     """
+    if jogo == JOGO_TWAP and curva is not None:
+        return prob_up_twap_medido(
+            ancora=ancora,
+            spot=preco_spot,
+            seconds_left=seconds_left,
+            curva=curva,
+            sigma_1s=vol.sigma_1s,
+            vol_ready=vol.ready,
+        )
     if jogo == JOGO_TWAP:
         locked_mean, locked_weight = twap.locked_mean_and_weight(seconds_left)
         return prob_up_twap(
