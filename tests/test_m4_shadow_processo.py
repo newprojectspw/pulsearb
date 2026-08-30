@@ -348,6 +348,12 @@ class TestOModoEDoProcessoNaoDoArquivo:
     gravava em `registro_do_dia.sim.json` e relatava modo SIM — desfazendo a
     separação de registro que este mesmo PR criou."""
 
+    @pytest.fixture(autouse=True)
+    def _numa_pasta_temporaria(self, tmp_path, monkeypatch):
+        """`main` sem `--diario` CRIA o arquivo. Sem isto a suite escreveria
+        em `data/shadow/` do repositorio a cada execucao."""
+        monkeypatch.chdir(tmp_path)
+
     def _rodar_main(self, monkeypatch, tmp_path, modo):
         vistos: list = []
 
@@ -477,6 +483,12 @@ class TestARodadaQueFalhaTerminaLogo:
         assert _time.monotonic() - inicio < 1.0
         assert cancelada.is_set()
 
+    @pytest.fixture(autouse=True)
+    def _numa_pasta_temporaria(self, tmp_path, monkeypatch):
+        """`main` sem `--diario` CRIA o arquivo. Sem isto a suite escreveria
+        em `data/shadow/` do repositorio a cada execucao."""
+        monkeypatch.chdir(tmp_path)
+
     def test_o_run_usa_FIRST_COMPLETED(self):
         """O teste acima prova a semântica do asyncio; este trava o uso.
 
@@ -502,6 +514,11 @@ class TestUmDiarioPorRodada:
     fossem uma — o mesmo formato do defeito do critério 1.4.
     """
 
+    @pytest.fixture(autouse=True)
+    def _numa_pasta_temporaria(self, tmp_path, monkeypatch):
+        """O gerador CRIA o arquivo. Sem isto os testes sujariam `data/`."""
+        monkeypatch.chdir(tmp_path)
+
     def test_duas_rodadas_seguidas_nao_dividem_arquivo(self):
         from datetime import UTC, datetime
 
@@ -512,6 +529,41 @@ class TestUmDiarioPorRodada:
 
         assert primeira != segunda
 
+    def test_o_MESMO_instante_ainda_da_arquivos_diferentes(self):
+        """Achado P2 do Codex, segunda rodada sobre o mesmo ponto.
+
+        Carimbo de um segundo consertou o caso comum e deixou o estreito:
+        dois processos iniciados no mesmo segundo — ou dois `--duration 0`
+        seguidos — recebiam o mesmo caminho, e o diário abre em APPEND.
+
+        A garantia não é o relógio: é `O_EXCL`. É o sistema de arquivos
+        decidindo, e por isso o teste passa o MESMO instante duas vezes.
+        """
+        from datetime import UTC, datetime
+
+        from pulsearb.live.shadow import caminho_do_diario_da_rodada
+
+        instante = datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC)
+
+        assert caminho_do_diario_da_rodada(instante) != caminho_do_diario_da_rodada(
+            instante
+        )
+
+    def test_o_arquivo_nasce_criado_e_vazio(self):
+        """Ele é a prova de que a rodada começou, mesmo que ela morra antes
+        da primeira intenção."""
+        from datetime import UTC, datetime
+        from pathlib import Path as _Path
+
+        from pulsearb.live.shadow import caminho_do_diario_da_rodada
+
+        caminho = _Path(
+            caminho_do_diario_da_rodada(datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC))
+        )
+
+        assert caminho.exists()
+        assert caminho.read_text() == ""
+
     def test_o_carimbo_e_do_instante_de_inicio(self):
         from datetime import UTC, datetime
 
@@ -521,7 +573,7 @@ class TestUmDiarioPorRodada:
             datetime(2026, 8, 30, 16, 20, 5, tzinfo=UTC)
         )
 
-        assert caminho == "data/shadow/diario-20260830-162005.jsonl"
+        assert caminho.startswith("data/shadow/diario-20260830-162005-")
 
     def test_caminho_explicito_e_respeitado(self, monkeypatch, tmp_path, capsys):
         """Anexar a um caminho dado é como se retoma uma rodada de propósito —

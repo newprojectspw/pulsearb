@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -140,22 +141,44 @@ PASTA_DOS_DIARIOS = "data/shadow"
 
 
 def caminho_do_diario_da_rodada(agora: datetime | None = None) -> str:
-    """Um arquivo por rodada, carimbado com o instante de início.
+    """Um arquivo por rodada, e a unicidade é PROVADA, não presumida.
 
-    Achado P2 do Codex no #52, e procede. O default era fixo, e
-    `ExecutorSombra._anotar` abre em modo **append**: uma rodada curta de
-    teste seguida do ensaio de 24 h escreviam as duas no mesmo arquivo, sem
-    identificador de rodada nem fronteira no JSONL. As contagens saíam
-    somadas e a comparação SHADOW × backtest passava a ler duas populações
-    como se fossem uma — o mesmo formato do defeito do critério 1.4.
+    Achado P2 do Codex no #52, duas rodadas seguidas sobre o mesmo ponto. O
+    default fixo somava rodadas porque `ExecutorSombra._anotar` abre em modo
+    **append**; carimbar com segundos consertou o caso comum e deixou o
+    estreito: dois processos iniciados no mesmo segundo — ou dois
+    `--duration 0` seguidos — recebiam o mesmo caminho e voltavam a somar.
 
-    Carimbar em vez de truncar é deliberado: truncar apagaria o diário da
-    rodada anterior, que é justamente o artefato que o ensaio existe para
-    produzir. Caminho explícito continua anexando, que é como se retoma uma
-    rodada de propósito.
+    Três camadas, e a terceira é a que garante:
+
+    1. microssegundos no carimbo, em vez de segundos;
+    2. o PID, que separa dois processos do mesmo instante;
+    3. **criação exclusiva** (`O_EXCL`): o arquivo é criado aqui, e se já
+       existir tenta-se o próximo sufixo. É o sistema de arquivos decidindo,
+       não o relógio — e é o único jeito de a unicidade não depender de
+       suposição sobre precisão de tempo.
+
+    O arquivo nasce vazio, e isso é útil por si: ele é a prova de que a
+    rodada começou, mesmo que ela morra antes da primeira intenção.
     """
     instante = agora or datetime.now(UTC)
-    return f"{PASTA_DOS_DIARIOS}/diario-{instante.strftime('%Y%m%d-%H%M%S')}.jsonl"
+    carimbo = instante.strftime("%Y%m%d-%H%M%S-%f")
+    pasta = Path(PASTA_DOS_DIARIOS)
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    for tentativa in range(100):
+        sufixo = "" if tentativa == 0 else f"-{tentativa}"
+        caminho = pasta / f"diario-{carimbo}-{os.getpid()}{sufixo}.jsonl"
+        try:
+            os.close(os.open(caminho, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError:
+            continue
+        return str(caminho)
+
+    raise RuntimeError(
+        f"nao consegui criar um diario exclusivo em {pasta} apos 100 tentativas — "
+        "rodar sem diario proprio somaria esta rodada com outra"
+    )
 
 
 class ProcessoShadow:
