@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -168,6 +169,15 @@ def conferir_ordem(ordem: OrdemPretendida, *, minimo_de_shares: float) -> str | 
     que o servidor recusaria de qualquer jeito — verificá-las aqui troca um
     timeout de rede por uma mensagem que diz o que está errado.
     """
+    if not math.isfinite(ordem.shares) or not math.isfinite(ordem.preco_limite):
+        # Achado P2 do Codex no #52. `NaN <= 0` é False e `NaN < minimo`
+        # também: os dois testes abaixo deixavam passar. E `json.dumps`
+        # serializa `NaN`/`Infinity` como literais que NÃO são JSON válido —
+        # a ordem sairia para o fio quebrando a promessa deste método.
+        return (
+            f"shares ou preco nao sao numeros finitos: "
+            f"shares={ordem.shares!r} preco={ordem.preco_limite!r}"
+        )
     if ordem.shares <= 0:
         return f"shares precisa ser positivo: {ordem.shares}"
     if ordem.shares < minimo_de_shares:

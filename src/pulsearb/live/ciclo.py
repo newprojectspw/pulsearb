@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.feeds.base import FeedEvent
-from pulsearb.feeds.poly_ws import eventos_do_payload
+from pulsearb.feeds.poly_ws import eventos_do_payload, resolucao_do_evento
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, e18_do_evento, parse_rtds_event
 from pulsearb.live.motor import MotorAoVivo
 from pulsearb.markets.discovery import DiscoveredMarket
@@ -173,6 +173,21 @@ class CicloAoVivo:
     def _on_poly(self, event: FeedEvent) -> None:
         vistos = 0
         for evento in eventos_do_payload(event.parsed):
+            # Achado P1 do Codex no #52. A resolução tem de chegar ao PORTÃO,
+            # não só ao livro: `_liquidar` fecha toda janela com `pnl=0.0`
+            # (correto — no fechamento o resultado ainda não se conhece), e
+            # se ninguém trouxer o PnL depois, `perdas_seguidas` e
+            # `pnl_realizado_usdc` ficam em zero para sempre. A pausa por
+            # sequência e o disjuntor de perda do dia NUNCA armariam no
+            # SHADOW, e o ensaio aprovaria o que o LIVE já teria recusado.
+            resolucao = resolucao_do_evento(evento)
+            if resolucao is not None:
+                if self.motor.resolver(resolucao):
+                    self._contar("resolucao")
+                else:
+                    self._contar("resolucao_sem_posicao")
+                vistos += 1
+                continue
             self.motor.livros.aplicar(evento, ts_ns=event.ts_wall_ns)
             vistos += 1
         if vistos:

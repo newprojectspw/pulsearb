@@ -28,7 +28,9 @@ from typing import Any
 
 from pulsearb.backtest.runner import edge_liquido
 from pulsearb.engine.decisao import JOGO_TWAP, estimar_prob_up
+from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.execution.executor import Executor
+from pulsearb.feeds.poly_ws import Resolucao, normalizar_condition_id
 from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.precos import PrecosAoVivo
 from pulsearb.live.rastreador import JanelaAoVivo, RastreadorDeJanelas
@@ -122,6 +124,43 @@ class ConfigDoMotor:
         )
 
 
+def _chave(condition_id: str) -> str:
+    """A grafia comparável do condition id.
+
+    A Gamma, o CLOB e o WS não prometem a mesma: `0xABE6…` e `abe6…` são o
+    mesmo mercado. Comparar sem normalizar falha em SILÊNCIO — que é o modo
+    de falha que `normalizar_condition_id` foi escrita para eliminar.
+    """
+    return normalizar_condition_id(condition_id) or condition_id
+
+
+@dataclass(frozen=True)
+class PosicaoAberta:
+    """O que se comprou numa janela, guardado até a resolução chegar.
+
+    Existe porque o PnL só se conhece depois do fechamento, e sem memória do
+    lado e do preço não há como convertê-lo — o disjuntor ficaria cego.
+    """
+
+    slug: str
+    token_up: str
+    token_down: str
+    lado_up: bool
+    shares: float
+    preco_pago: float
+    fee_usdc: float
+
+    def pnl_usdc(self, *, venceu_up: bool) -> float:
+        """A MESMA conta do backtest (`report.py: Trade.pnl_usdc`).
+
+        Share vencedora paga 1,00; perdedora paga 0. Duas contas diferentes
+        fariam o SHADOW e o backtest discordarem sobre o próprio resultado.
+        """
+        acertou = self.lado_up == venceu_up
+        payout = self.shares if acertou else 0.0
+        return payout - self.shares * self.preco_pago - self.fee_usdc
+
+
 @dataclass
 class MotorAoVivo:
     """Um `tick()` por vez. Sem rede, sem asyncio: só decisão.
@@ -139,6 +178,18 @@ class MotorAoVivo:
 
     #: Janelas em que já se entrou, por `condition_id`.
     ja_operadas: set[str] = field(default_factory=set)
+    #: A posição de cada janela operada, até a resolução chegar. Ver
+    #: `resolver`: sem isto o disjuntor do SHADOW nunca arma.
+    #:
+    #: **A chave é o condition id NORMALIZADO**, e a distinção é a mesma que
+    #: `normalizar_condition_id` existe para impedir: a Gamma entrega `0xAA…`
+    #: e o WS entrega `aa…`. Indexar pela grafia crua fazia toda resolução
+    #: cair em `resolucoes_sem_posicao` — em silêncio, e com o disjuntor
+    #: parado em zero exatamente como antes do conserto.
+    posicoes: dict[str, PosicaoAberta] = field(default_factory=dict)
+    #: Resoluções que chegaram para janela que não operamos. Contador, não
+    #: erro: assinamos o livro de janela recusada de propósito.
+    resolucoes_sem_posicao: int = 0
     pulos: dict[str, int] = field(default_factory=dict)
     tentativas: int = 0
 
@@ -175,6 +226,58 @@ class MotorAoVivo:
         self.executor.portao.registrar_resolucao(janela.slug, 0.0)
         self.precos.esquecer(janela.condition_id)
         self.ja_operadas.discard(janela.condition_id)
+        # `posicoes` NÃO é limpo aqui: a resolução chega DEPOIS do fechamento,
+        # e é ela que traz o PnL. Apagar aqui seria apagar a única memória de
+        # que houve posição — ver `resolver`.
+
+    def resolver(self, resolucao: Resolucao) -> bool:
+        """A resolução chegou: converte a posição em PnL e alimenta o portão.
+
+        Achado P1 do Codex no #52, e era um buraco no ensaio inteiro.
+        `_liquidar` fecha toda janela com `pnl=0.0` — correto, porque no
+        fechamento o resultado ainda não se conhece. Só que **nada** chamava
+        `registrar_resolucao` com o PnL de verdade depois: `perdas_seguidas` e
+        `pnl_realizado_usdc` ficavam parados em zero para sempre.
+
+        Consequência: a pausa por sequência de perdas e o disjuntor de perda
+        do dia **nunca armavam no SHADOW**. Depois das primeiras entradas
+        perdedoras, o ensaio aprovaria intenções que o estado de risco
+        equivalente em LIVE já teria recusado — e o ensaio existe justamente
+        para dizer o que o LIVE faria.
+
+        A conta é a MESMA do backtest (`report.py: Trade.pnl_usdc`):
+        `payout − custo − fee`, com a share vencedora pagando 1,00. Duas
+        contas diferentes fariam o SHADOW e o backtest discordarem sobre o
+        próprio resultado.
+
+        Chamar duas vezes para a mesma janela é seguro: a posição sai de
+        `posicoes` na primeira.
+        """
+        condition_id = resolucao.condition_id
+        if condition_id is None:
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        posicao = self.posicoes.pop(condition_id, None)
+        if posicao is None:
+            # Assinamos o livro de janela recusada de propósito, então
+            # resolução sem posição é o caso NORMAL, não um erro.
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        venceu_up = resolucao.venceu_up(posicao.token_up, posicao.token_down)
+        if venceu_up is None:
+            # Evento que não permite decidir o lado. Devolver a posição para
+            # `posicoes` deixa a próxima resolução (ou a consulta à Gamma)
+            # ainda poder liquidá-la — perder o PnL seria pior.
+            self.posicoes[condition_id] = posicao
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        self.executor.portao.registrar_resolucao(
+            posicao.slug, posicao.pnl_usdc(venceu_up=venceu_up)
+        )
+        return True
 
     def _elegivel(self, janela: JanelaAoVivo, *, agora_epoch: float) -> bool:
         """Esta janela merece ser avaliada? Cada não já sai contado.
@@ -328,6 +431,20 @@ class MotorAoVivo:
                 # sobem PnL e drawdown na mesma proporção — alavancagem, não
                 # borda.
                 self.ja_operadas.add(janela.condition_id)
+                self.posicoes[_chave(janela.condition_id)] = PosicaoAberta(
+                    slug=janela.slug,
+                    token_up=janela.token_up,
+                    token_down=janela.token_down,
+                    lado_up=lado_up,
+                    shares=ordem.shares,
+                    preco_pago=livro.best_ask,
+                    fee_usdc=ordem.shares
+                    * fee_pp_por_share(
+                        livro.best_ask,
+                        rate=janela.fee_rate,
+                        exponent=janela.fee_exponent,
+                    ),
+                )
             return True
 
         self._pular(PULOU_SEM_LIVRO if sem_livro else PULOU_SEM_EDGE)
