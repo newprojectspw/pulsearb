@@ -153,7 +153,7 @@ class PrecosAoVivo:
         ativo.anotar(valor_e18=valor_e18, ts_servidor_ms=ts_servidor_ms)
         if chegada_ms is not None:
             self.relogio.anotar(
-                ts_servidor_ms=ts_servidor_ms, chegada_ms=chegada_ms
+                asset=asset, ts_servidor_ms=ts_servidor_ms, chegada_ms=chegada_ms
             )
 
     def ancora_da_janela(
@@ -215,9 +215,7 @@ class PrecosAoVivo:
                 if p.serie_e18.fora_de_ordem
             },
             "ancoras_fixadas": len(self.ancoras),
-            "relogio_do_servidor": self.relogio.resumo(
-                agora_ms=int(time.time() * 1000)
-            ),
+            "anomalia_de_tempo": self.relogio.resumo(agora_ms=int(time.time() * 1000)),
             "sem_ancora": dict(sorted(self.sem_ancora.items())),
             "nota": (
                 "`serie_nao_alcanca_a_abertura` alto logo apos subir o bot e "
