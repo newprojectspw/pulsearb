@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 from pulsearb.obs.logging import get_logger
 from pulsearb.risk import Decisao, OrdemPretendida, PortaoDeRisco
+from pulsearb.risk.autorizacao import AutorizacaoParaLive, autorizacao_para_live
 from pulsearb.settings import Mode
 
 log = get_logger(__name__)
@@ -224,21 +225,29 @@ def escolher_executor(
     portao: PortaoDeRisco,
     *,
     caminho_do_diario: Path,
+    autorizacao: AutorizacaoParaLive | None = None,
 ) -> Executor:
-    """SIM e SHADOW ensaiam. LIVE ainda não existe, e falha alto.
+    """SIM e SHADOW ensaiam. LIVE exige autorização, e ainda não existe.
 
     Cair para SHADOW quando pedem LIVE seria a falha silenciosa mais cara
     possível: o operador acredita que está operando, o dinheiro não se move,
     e a descoberta vem quando alguém for conferir o saldo.
+
+    Para LIVE a mensagem traz **todos** os bloqueios de uma vez
+    (`risk/autorizacao.py`), e não só o primeiro. Consertar um por vez, cada
+    volta achando que é a última, é como se descobre tarde que faltavam
+    quatro. `autorizacao` pronta evita a sonda de NTP quando quem chama já a
+    obteve na subida.
     """
-    if modo is Mode.LIVE:
-        raise NotImplementedError(
-            "modo LIVE ainda nao existe — falta o cliente de ordens (M4 item "
-            "3.2), FOK e idempotencia (3.5) e a trava tripla (3.4). Este erro "
-            "e deliberado: cair para SHADOW em silencio faria o operador "
-            "acreditar que esta operando enquanto nada acontece."
-        )
-    return ExecutorSombra(portao, caminho_do_diario=caminho_do_diario, modo=modo)
+    if modo is not Mode.LIVE:
+        return ExecutorSombra(portao, caminho_do_diario=caminho_do_diario, modo=modo)
+
+    licenca = autorizacao or autorizacao_para_live(modo)
+    # `cliente_de_ordens_existe` é False enquanto 3.2/3.5 não existirem, então
+    # esta autorização NUNCA sai positiva hoje. O caminho abaixo existe para
+    # que a trava tripla seja exercitada e testada desde já, em vez de ser
+    # escrita às pressas no dia em que o cliente chegar.
+    raise NotImplementedError(licenca.explicar())
 
 
 def carregar_diario(caminho: Path) -> list[dict[str, Any]]:

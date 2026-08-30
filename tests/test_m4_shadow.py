@@ -17,7 +17,13 @@ from pulsearb.execution import (
     escolher_executor,
 )
 from pulsearb.execution.executor import carregar_diario
-from pulsearb.risk import MOTIVOS, OrdemPretendida, PortaoDeRisco
+from pulsearb.risk import (
+    MOTIVOS,
+    OrdemPretendida,
+    PortaoDeRisco,
+    autorizacao_para_live,
+)
+from pulsearb.risk.sincronia import Sincronia
 from pulsearb.settings import Mode, RiskSettings
 
 
@@ -104,12 +110,44 @@ class TestNaoEnvia:
 
         O operador acredita que está operando, o dinheiro não se move, e a
         descoberta vem quando alguém for conferir o saldo.
+
+        A mensagem passou a vir da autorização (`risk/autorizacao.py`), que
+        lista TODOS os bloqueios. Duas asserções e as duas são independentes
+        de máquina: o cliente de ordens não existe hoje em nenhuma, e a
+        recusa é sempre a mesma exceção.
         """
         portao = PortaoDeRisco(RiskSettings(), Mode.LIVE)
-        with pytest.raises(NotImplementedError, match="modo LIVE ainda nao existe"):
+        with pytest.raises(NotImplementedError) as erro:
             escolher_executor(
                 Mode.LIVE, portao, caminho_do_diario=tmp_path / "d.jsonl"
             )
+
+        assert "LIVE NAO autorizado" in str(erro.value)
+        assert "sem_cliente_de_ordens" in str(erro.value)
+
+    def test_a_recusa_de_live_lista_a_trava_tripla(self, tmp_path):
+        """Sem as variáveis de ambiente, os três bloqueios de intenção saem
+        juntos — e é isso que impede o operador de descobri-los um por um."""
+        portao = PortaoDeRisco(RiskSettings(), Mode.LIVE)
+        licenca = autorizacao_para_live(
+            Mode.LIVE,
+            env={},
+            sincronia=Sincronia(sincronizado=True, fonte="teste", detalhe="ok"),
+        )
+        with pytest.raises(NotImplementedError) as erro:
+            escolher_executor(
+                Mode.LIVE,
+                portao,
+                caminho_do_diario=tmp_path / "d.jsonl",
+                autorizacao=licenca,
+            )
+
+        mensagem = str(erro.value)
+        assert "sem_confirmacao_explicita" in mensagem
+        assert "sem_aceite_do_risco" in mensagem
+        assert "sem_cliente_de_ordens" in mensagem
+        # O relógio estava bom neste cenário: não deve aparecer.
+        assert "relogio_nao_sincronizado" not in mensagem
 
     def test_executor_sombra_recusa_ser_construido_como_live(self, tmp_path):
         portao = PortaoDeRisco(RiskSettings(), Mode.LIVE)

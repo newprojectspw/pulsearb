@@ -483,7 +483,7 @@ defeitos nele:
 | 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ⬜ |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 14 testes |
-| 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ⬜ |
+| 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | ⬜ |
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
 
@@ -529,7 +529,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
@@ -605,6 +605,59 @@ instalar a fonte, como o ciclo ao vivo terá de fazer.
 vivo construir o `PortaoDeRisco` passando a fonte — não há ponto de construção
 hoje, é o mesmo buraco do 3.13. Enquanto não existir, o LIVE recusaria tudo,
 que é o lado certo para errar.
+
+### 3.4 e 5.4 fecharam — a autorização para LIVE existe antes do cliente
+
+Mesma ordem que fechou o 3.1 e o 3.6 antes do cliente de ordens: **a licença
+vem antes da máquina**. Uma trava tripla escrita às pressas no dia em que o
+cliente chegar é uma trava que ninguém testou.
+
+`risk/autorizacao.py` responde uma pergunta só — *pode entrar em LIVE?* — e a
+responde com **todos** os bloqueios de uma vez:
+
+| Bloqueio | O que é | O que impede |
+|---|---|---|
+| `modo_nao_e_live` | configuração | o default nunca opera |
+| `sem_confirmacao_explicita` | `PULSEARB_CONFIRM_LIVE=1` | um `.env` copiado de outra máquina |
+| `sem_aceite_do_risco` | a frase exata, digitada | automação e engano de dedo |
+| `relogio_nao_sincronizado` | o daemon de NTP (5.4) | operar com `seconds_left` errado |
+| `sem_cliente_de_ordens` | 3.2 e 3.5 | acreditar que trava substitui código |
+
+**Três travas de intenção porque uma não basta e duas se copiam juntas.** A
+frase é comparada **exatamente**: `true`, `sim` e `eu aceito o risco` são
+recusados, e há sete testes parametrizados travando isso. Um booleano se digita
+sem pensar — é justamente o que a terceira trava existe para impedir. Espaço
+nas pontas passa, porque é artefato de terminal e não descuido.
+
+**Todos os bloqueios, e não o primeiro.** Reportar um por vez faria o operador
+consertar, rodar, descobrir o próximo — cada volta achando que era a última.
+Pior: enquanto o cliente de ordens não existisse, ele apareceria primeiro e a
+trava tripla nunca seria exercitada.
+
+**O 5.4 fecha a metade que o sensor de tempo não fecha.** `live/relogio.py`
+mede `latencia + offset` numa subtração só e as duas se cancelam — ver 3.10.
+Sincronia verificada vem de quem faz medição de duas vias: o daemon de NTP da
+máquina. `risk/sincronia.py` pergunta ao systemd, ao chrony e ao macOS, nessa
+ordem, e distingue três respostas em vez de duas:
+
+- **sincronizado** → passa
+- **daemon respondeu que não** → recusa, e o conserto é investigar rede/fonte
+- **não determinado** (sem daemon, formato desconhecido, timeout) → recusa, e o
+  conserto é instalar e habilitar NTP
+
+Colapsar os dois últimos em "não" mandaria o operador pelo caminho errado. E
+não determinado recusa igual: um relógio não verificado tem o mesmo efeito no
+`seconds_left` que um relógio errado — a diferença é só a nossa ignorância.
+
+Três defesas no subprocesso, porque rodar comando externo num processo que
+decide é coisa que dá errado: timeout obrigatório de 3 s, nunca levanta
+exceção, e **não roda no caminho quente** — é verificação de subida, e há um
+teste que quebra se alguém a chamar com a sincronia já em mãos.
+
+**O que isto NÃO faz:** autorizar. Com `cliente_de_ordens_existe=False`, que é
+o estado real, a autorização nunca sai positiva. O caminho positivo existe e é
+testado para que os testes de recusa provem alguma coisa — se tudo recusasse
+de qualquer jeito, eles não provariam nada.
 
 ### O que falta para o SHADOW rodar de verdade
 
@@ -780,7 +833,7 @@ do primeiro dólar real.
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
-| 5.4 | **NTP/chrony verificado na máquina que opera** | ⬜ **pré-condição do 3.10** — o sensor de anomalia de tempo NÃO certifica sincronia (latência e offset se cancelam; ver 3.10). Sem NTP verificado, um relógio 400 ms atrasado passa no portão. Verificar na subida e recusar LIVE se não sincronizado |
+| 5.4 | **NTP/chrony verificado na máquina que opera** | ✅ **2026-08-30** — `risk/sincronia.py` pergunta ao daemon (systemd, chrony, macOS), 14 testes. **Não determinado conta como não sincronizado**, e o LIVE recusa por isso. Falta só habilitar NTP na VPS |
 
 Sobre 5.3: até o PR #40 o único check que aparecia era o SonarCloud, que vem
 do GitHub App e faz análise estática — **não executa a suíte**. Os testes só
