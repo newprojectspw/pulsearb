@@ -161,6 +161,22 @@ class Resolucao:
         return None
 
 
+def eventos_do_payload(payload: Any) -> list[dict[str, Any]]:
+    """O CLOB manda ora um evento solto, ora um lote em array.
+
+    **Mora aqui porque as duas pontas precisam dela.** O backtest desempacota
+    assim para reconstruir o livro; o ciclo ao vivo desempacota igual para
+    alimentar o `LivrosAoVivo`. Duas cópias fariam um formato novo do servidor
+    quebrar uma ponta e não a outra — e a divergência apareceria como
+    diferença de mercado entre SHADOW e backtest.
+    """
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [e for e in payload if isinstance(e, dict)]
+    return []
+
+
 def normalizar_condition_id(valor: Any) -> str | None:
     """Chave comparável de condition id: minúsculas, sem `0x`, sem espaço.
 

@@ -532,7 +532,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
-| 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o ciclo existe** desde 2026-08-30 (`live/ciclo.py`, 15 testes); falta o processo que abre os sockets e o roda por 24 h |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -659,13 +659,67 @@ o estado real, a autorização nunca sai positiva. O caminho positivo existe e �
 testado para que os testes de recusa provem alguma coisa — se tudo recusasse
 de qualquer jeito, eles não provariam nada.
 
-### O que falta para o SHADOW rodar de verdade
+### O ciclo de decisão ao vivo existe — `live/ciclo.py`
 
-O executor existe e está testado, mas **não há ciclo de decisão ao vivo** para
-alimentá-lo. O `main.py` é dashboard mais feeds; quem tem ciclo ao vivo é o
-recorder (957 linhas: descoberta, rotação de janelas, assinatura, livro), e
-quem tem a lógica de decisão é o `BacktestRunner` — sobre gravação. O SHADOW
-precisa dos dois casados, e isso é um componente novo.
+Esta seção dizia, até 2026-08-30: *"o executor existe e está testado, mas não
+há ciclo de decisão ao vivo para alimentá-lo"*. As peças listadas abaixo
+estavam todas prontas; faltava **a orquestração**, e é ela que entrou.
+
+`CicloAoVivo` recebe `FeedEvent`s, roteia para o estado e chama o motor:
+
+| Evento | Vai para | Guarda |
+|---|---|---|
+| `rtds` + `crypto_prices_twap_sixty` | `precos.anotar` | só este tópico; e18 exato e carimbo do servidor obrigatórios |
+| `rtds` + outro tópico | contado, ignorado | `crypto_prices` (spot) não é a âncora |
+| `poly_ws` | `livros.aplicar` | mesmo `OrderBook` do critério 1.5 |
+| outra fonte | **contada** | "não chegou nada" e "não sei ler" têm consertos opostos |
+
+**Nenhum parser novo.** Cada evento é lido pela MESMA função do backtest —
+`parse_rtds_event`, `e18_do_evento`, `eventos_do_payload`, `LivrosAoVivo`. As
+duas últimas eram privadas dentro do `backtest/__main__.py` e mudaram de casa
+para `feeds/`; duas cópias fariam uma divergência de parsing aparecer como
+diferença de mercado, que é o que a comparação SHADOW×backtest existe para
+detectar.
+
+**Sem rede aqui dentro.** O ciclo não abre socket, não faz HTTP e não dorme.
+Isso não é elegância: é o que permite alimentá-lo com uma **reprodução de
+gravação** e rodar SHADOW e backtest sobre o MESMO dado. Um ciclo que só
+soubesse falar com a rede não poderia ser confrontado com nada — e a
+confrontação é a razão de o SHADOW existir.
+
+#### Um buraco que apareceu ao montar o ciclo, e não tinha dono
+
+`PrecosAoVivo` devolve o último preço de um ativo **sem olhar a idade dele**.
+Um ativo mudo entre sete saudáveis decidiria com preço velho, e nada mais no
+caminho pegaria: `livros` mede silêncio por token, mas preço não; o portão
+`feed_parado` olha o feed, não o ativo.
+
+O ciclo fecha isso calculando `feeds_saudaveis` **pelo pior ativo** — a mesma
+escolha do sensor de relógio, e pela mesma razão. Fechar tudo por causa de um é
+conservador e é o lado certo para errar: com entrada única por janela, o custo
+de parar é uma janela perdida; o de operar com preço velho é uma posição tomada
+contra um mercado que já se moveu. `precos_velhos_s` **nomeia** quais ativos
+estão velhos — "feed parado" sem dizer qual não é alarme acionável.
+
+Sem nenhum preço ainda, a saúde é `false`: bot recém-subido não sabe nada, e
+não saber não autoriza.
+
+**O que ainda falta para o 3.13:** o processo que abre os sockets, roda a
+descoberta e chama `passo()` numa cadência — e o roda por 24 h sem cair. O
+recorder já tem toda essa fiação (957 linhas); o ciclo foi desenhado para ser o
+consumidor dela.
+
+### As peças que o ciclo casa
+
+*Escrito enquanto elas eram construídas, e mantido: cada uma carrega uma
+decisão de projeto que continua valendo. O que mudou em 2026-08-30 é que o
+componente que as casa passou a existir — a seção acima.*
+
+O que ainda descreve o estado: o `main.py` é dashboard mais feeds, quem tem a
+fiação de rede é o recorder (957 linhas: descoberta, rotação de janelas,
+assinatura, livro), e quem tem a lógica de decisão sobre gravação é o
+`BacktestRunner`. O `CicloAoVivo` é o consumidor da primeira e o par ao vivo da
+segunda.
 
 Primeira peça pronta: **`live/rastreador.py`** — quais janelas estão abertas
 agora e quanto falta em cada uma.

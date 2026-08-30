@@ -80,6 +80,7 @@ from pulsearb.feeds.poly_ws import (
     EVENT_LAST_TRADE,
     EVENT_PRICE_CHANGE,
     Resolucao,
+    eventos_do_payload,
     normalizar_condition_id,
     resolucao_do_evento,
 )
@@ -684,7 +685,7 @@ class RecordingIndex:
         descarta por não pertencerem a janela nenhuma. Um livro corrompido
         num token fora de janela ainda é sinal de que a gravação teve perda.
         """
-        for evento in _eventos_do_payload(record.payload):
+        for evento in eventos_do_payload(record.payload):
             carimbo = _numero_bruto(evento.get("timestamp"))
             if carimbo:
                 self.relogio.observar(carimbo, record.ts_wall_ns)
@@ -777,7 +778,7 @@ class RecordingIndex:
         # O WS de mercado do CLOB entrega tanto um evento solto quanto um LOTE
         # em array. Tratar só o dict descartaria os lotes em silêncio — e é
         # justamente em rajada de atividade que eles aparecem.
-        for evento in _eventos_do_payload(record.payload):
+        for evento in eventos_do_payload(record.payload):
             tipo = evento.get("event_type")
             if tipo == EVENT_LAST_TRADE:
                 self._on_trade(evento, record.ts_wall_ns)
@@ -1366,15 +1367,6 @@ def _numero_bruto(valor: Any) -> float | None:
         except ValueError:
             return None
     return None
-
-
-def _eventos_do_payload(payload: Any) -> list[dict[str, Any]]:
-    """O CLOB manda ora um evento solto, ora um lote em array."""
-    if isinstance(payload, dict):
-        return [payload]
-    if isinstance(payload, list):
-        return [e for e in payload if isinstance(e, dict)]
-    return []
 
 
 def _rebate_medio(janelas: list[WindowState]) -> float:
