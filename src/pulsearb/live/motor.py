@@ -56,6 +56,13 @@ PULOU_FORA_DA_FAIXA = "fora_da_faixa_de_tempo"
 #: diferença de mercado quando seria diferença de modelo — que é exatamente o
 #: que a regra do "mesmo caminho" existe para impedir.
 PULOU_SEM_CURVA = "sem_curva_de_variancia"
+#: O instante pede horizonte maior que o maior MEDIDO na curva.
+#:
+#: Acontece nos primeiros minutos de uma janela de 15 min ou de 4 h. Não é
+#: defeito: é a curva sendo honesta sobre onde ela foi medida. O backtest
+#: recorta no mesmo ponto, e recortar em lugares diferentes faria os dois
+#: divergirem por construção.
+PULOU_ALEM_DA_CURVA = "alem_do_horizonte_medido"
 
 
 @dataclass
@@ -184,6 +191,13 @@ class MotorAoVivo:
             curva = self.config.curvas_de_variancia.para(janela.asset)
             if curva is None:
                 self._pular(PULOU_SEM_CURVA)
+                return False
+            # Além do maior horizonte MEDIDO a curva extrapola. O backtest
+            # recorta no mesmo ponto, por instante; recortar em lugares
+            # diferentes faria SHADOW e backtest divergirem por construção —
+            # que é o que a regra do "mesmo caminho" existe para impedir.
+            if seconds_left > curva.horizonte_maximo_s:
+                self._pular(PULOU_ALEM_DA_CURVA)
                 return False
 
         estimativa = estimar_prob_up(

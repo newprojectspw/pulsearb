@@ -151,16 +151,26 @@ def curvas_do_relatorio(relatorio: dict[str, Any], *, origem: str) -> CurvasPorA
     veredito não é `avaliavel` — sem os dois regimes medidos a curva não cobre
     a faixa que o modelo consulta — **ou** quando `linear_no_longo` é falso.
 
-    A segunda condição é achado de review, e é a que faltava. A extrapolação
-    acima do maior horizonte medido é LINEAR, e essa forma não é escolha de
-    conveniência: é a propriedade 2 da §2d-ter, medida. Uma curva que reprovou
-    justamente nessa propriedade estaria sendo extrapolada pela forma que a
-    própria medição rejeitou — inventando variância com cara de medida.
+    São exigidas as QUATRO marcas do veredito, e não só `avaliavel`:
+
+    - `avaliavel` — os dois regimes têm amostra. Sozinho ele diz que a
+      medição rodou, não que ela sustenta o modelo.
+    - `monotona` — V(t) crescendo com t. Uma curva que decresce não descreve
+      processo nenhum; interpolá-la seria aritmética sobre medição quebrada.
+    - `linear_no_longo` — é o que justifica a forma da extrapolação. Sem ela,
+      esticar a curva usaria exatamente a forma que a medição rejeitou.
+    - `ha_suavizacao` — a §2d-ter registrou as três propriedades como a
+      condição de ADOÇÃO do modelo medido, antes de existir número. Uma
+      medição que não a exibe não é curva ruim: é premissa diferente, e
+      merece decisão humana em vez de rodar em silêncio.
     """
     curvas: dict[str, CurvaDeVariancia] = {}
     for asset, dados in (relatorio.get("por_ativo") or {}).items():
         veredito = dados.get("veredito") or {}
-        if not veredito.get("avaliavel") or not veredito.get("linear_no_longo"):
+        if not all(
+            veredito.get(campo)
+            for campo in ("avaliavel", "monotona", "linear_no_longo", "ha_suavizacao")
+        ):
             continue
         pontos = tuple(
             (float(linha["horizonte_s"]), float(linha["variancia"]))

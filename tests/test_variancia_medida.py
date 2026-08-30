@@ -129,11 +129,19 @@ def test_curva_recusa_ponto_nao_positivo_e_curva_curta_demais():
 
 
 # ------------------------------------------------------- leitura do relatório
-def _relatorio(avaliavel: bool = True, linear: bool = True) -> dict:
+def _relatorio(
+    avaliavel: bool = True, linear: bool = True, monotona: bool = True,
+    suavizacao: bool = True,
+) -> dict:
     return {
         "por_ativo": {
             "btc": {
-                "veredito": {"avaliavel": avaliavel, "linear_no_longo": linear},
+                "veredito": {
+                    "avaliavel": avaliavel,
+                    "monotona": monotona,
+                    "linear_no_longo": linear,
+                    "ha_suavizacao": suavizacao,
+                },
                 "horizontes": [
                     {"horizonte_s": h, "variancia": v, "suficiente": True}
                     for h, v in PONTOS_BTC
@@ -159,6 +167,18 @@ def test_curva_que_reprovou_na_linearidade_fica_de_fora():
     medição rejeitou, inventando variância com cara de medida.
     """
     assert len(curvas_do_relatorio(_relatorio(linear=False), origem="X")) == 0
+
+
+def test_curva_que_reprovou_nas_outras_marcas_fica_de_fora():
+    """As QUATRO marcas do veredito, não só `avaliavel` (achado em review).
+
+    `monotona` falsa é medição quebrada — V(t) decrescente não descreve
+    processo nenhum. E `ha_suavizacao` falsa não é curva ruim: é a premissa
+    da §2d-ter mudando, e isso merece decisão humana, não uma rodada
+    silenciosa.
+    """
+    assert len(curvas_do_relatorio(_relatorio(monotona=False), origem="X")) == 0
+    assert len(curvas_do_relatorio(_relatorio(suavizacao=False), origem="X")) == 0
 
 
 def test_ativo_sem_veredito_avaliavel_fica_de_fora():
@@ -645,3 +665,42 @@ def test_motor_ao_vivo_sem_curva_para_o_ativo_nao_opera():
     )
     assert cfg.curvas_de_variancia.para("btc") is None
     assert PULOU_SEM_CURVA == "sem_curva_de_variancia"
+
+
+def test_recorte_por_horizonte_e_por_INSTANTE_nao_por_janela(gravacao_ancorada):
+    """Janela longa não é descartada inteira — só os instantes fora do alcance.
+
+    Achado em review do meu próprio conserto anterior: eu descartava a janela
+    pela duração declarada, e a estratégia opera só nos últimos 240 s dela,
+    que uma curva de 600 s cobre. Pior, o motor ao vivo continuaria operando
+    essa população, e backtest e SHADOW voltariam a divergir por construção.
+    """
+    import pulsearb.backtest.runner as runner_mod
+
+    janelas, streams = gravacao_ancorada
+    # Curva medida só até 60 s: quase todo instante da janela fica fora.
+    curta = CurvaDeVariancia(asset="btc", pontos=PONTOS_BTC[:6])
+    assert curta.horizonte_maximo_s == 60.0
+
+    report = runner_mod.BacktestRunner(
+        runner_mod.BacktestConfig(
+            curvas_de_variancia=CurvasPorAtivo(
+                por_ativo={"btc": curta}, origem="teste"
+            )
+        )
+    ).run(janelas, streams)
+
+    # A janela NÃO foi descartada inteira: instantes de dentro do alcance
+    # continuaram sendo avaliados.
+    assert report.janelas_avaliadas > 0
+    assert not report.janelas_sem_curva
+    # E os de fora foram cortados e contados.
+    assert report.instantes_alem_da_curva["btc"] > 0
+    assert report.to_dict()["instantes_alem_da_curva"]["btc"] > 0
+
+
+def test_motor_ao_vivo_recorta_no_mesmo_horizonte_que_o_backtest():
+    from pulsearb.live.motor import PULOU_ALEM_DA_CURVA
+
+    assert PULOU_ALEM_DA_CURVA == "alem_do_horizonte_medido"
+    assert curva_btc().horizonte_maximo_s == 600.0

@@ -318,22 +318,36 @@ class BacktestRunner:
             if curva_do_ativo is None:
                 report.janelas_sem_curva[janela.asset] += 1
                 return
-            # A janela pergunta por horizontes até a sua duração. Além do
-            # maior horizonte MEDIDO, a curva extrapola — e extrapolação
-            # apresentada como medição é o que esta seção inteira existe para
-            # não fazer.
-            if janela.duracao_s > curva_do_ativo.horizonte_maximo_s:
-                report.janelas_alem_da_curva[janela.asset] += 1
-                return
+            # O recorte por horizonte é por INSTANTE, mais abaixo — não pela
+            # duração declarada da janela.
+            #
+            # Achado em review: descartar a janela inteira jogaria fora as
+            # janelas de 15 min e de 4 h por completo, e a estratégia opera só
+            # nos últimos 240 s delas — que a curva de 600 s cobre. Pior, o
+            # motor ao vivo continuaria operando essa população, e backtest e
+            # SHADOW voltariam a divergir por construção.
         vol = RealizedVol()
         twap = TwapTracker()
         latencia_ns = int(cfg.latencia_ms * 1e6)
         entradas = 0
         ultima_entrada_ns = 0
 
+        alcance = (
+            curva_do_ativo.horizonte_maximo_s
+            if cfg.curvas_de_variancia is not None
+            else None
+        )
+
         for ts_ns, preco_spot, seconds_left in _instantes_da_janela(
             janela, stream, vol, twap
         ):
+            # Além do maior horizonte MEDIDO a curva extrapola, e extrapolação
+            # apresentada como medição é o que esta seção existe para não
+            # fazer. Fora ANTES de estimar, para não entrar na calibração —
+            # que é medida antes do portão de confiabilidade.
+            if alcance is not None and seconds_left > alcance:
+                report.instantes_alem_da_curva[janela.asset] += 1
+                continue
             est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
             if cfg.fator_de_encolhimento is not None:
                 # ANTES da calibração e do edge, de propósito: encolher só o
