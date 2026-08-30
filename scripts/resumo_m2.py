@@ -445,14 +445,13 @@ def criterios_do_maker(relatorio: dict[str, Any]) -> list[Criterio]:
         ),
         _criterio_da_divergencia(relatorio),
         # 1.10 nao e medicao: e um fato sobre a documentacao da Polymarket,
-        # que o relatorio nao tem como observar. Enquanto a formula for
-        # hipotese, ele REPROVA — e o relatorio diz isso de si mesmo no
-        # proprio `aviso`, que sai impresso para nao virar palavra minha.
+        # que o relatorio nao tem como observar. CONFIRMADA em 2026-08-30:
+        # S(v,s)=((v-s)/v)^2 x tamanho — ver API_NOTES §15.3 e analysis/rewards.py.
         Criterio(
             "1.10", "Formula de reward confirmada na doc", "sim",
-            "nao — segue como hipotese",
-            REPROVA,
-            "rota_maker.rewards.hipoteses (fato externo ao relatorio)",
+            "sim — CONFIRMADA 2026-08-30 (docs.polymarket.com §15.3)",
+            PASSA,
+            "fato externo ao relatorio (docs.polymarket.com — confirmado 2026-08-30)",
         ),
     ]
 
