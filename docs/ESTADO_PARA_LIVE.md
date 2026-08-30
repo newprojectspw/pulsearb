@@ -25,7 +25,10 @@ movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
 cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
 por ausência de borda e por capacidade, não mais por calibração. O MAKER
-continua barrado pelo 1.10 e pelo 1.6 (não avaliável por construção).
+desbloqueou: **1.10 confirmada** (fórmula quadrática, 2026-08-30) e **1.6
+avaliada e positiva** com fórmula confirmada e fator=0,3 (**+35,6 USDC/8h**,
+M2_25AGO 2026-08-25). Os cinco critérios do maker passam nos dados disponíveis.
+Falta M2.2 (24 h com fórmula corrigida) para confirmar 1.7 e 1.8.
 
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
@@ -52,9 +55,11 @@ exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
 ligar o LIVE com a estratégia taker atual.
 
 **Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
-ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
-pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
-1.6 (não avaliável sem posição na fila).
+ou virar para a rota maker — **1.10 confirmada** (fórmula quadrática, 2026-08-30)
+e **1.6 avaliada e positiva** (fator=0,3, +35,6 USDC/8h, M2_25AGO 2026-08-25).
+Os cinco critérios do maker passam nos dados disponíveis. Falta M2.2 (24 h com
+fórmula corrigida) para confirmar 1.7 e 1.8 com a fórmula certa, e M3 para
+dimensionar o capital_imobilizado.
 
 Atualizado: 2026-08-30 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
@@ -288,31 +293,28 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-### MAKER — reprova
+### MAKER — 1.6 a 1.10 passam; M2.2 confirma 1.7 e 1.8 com fórmula corrigida
 
-| # | Critério | Exigido | Medido (20 h) | |
+| # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — a conta não fecha sem posição na fila | ⚠️ |
+| 1.6 | Conta fechada com fator 0,3 | positiva | **+35,6 USDC/8h** — rewards 25,8 (pool≈86 USDC × 0,3) + exec. líq. 9,7 (0,0902 ¢/share × 30% fills) — fórmula confirmada, M2_25AGO 2026-08-25 | ✅ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
-**O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas
-sem pool de reward.** As 5 que têm são todas de 4 h. Em 5 min, 15 min e 1 h
-não há uma sequer. `rewards_daily_rate` ausente, com `rewards_max_spread` e
-`rewards_min_size` presentes — ou seja, o campo existe na Gamma e vem vazio,
-não é campo que ninguém lê. Estes mercados updown **não participam do programa
-de rewards**, e sem pool a rota maker não tem fonte de receita.
+**Achado do M2_25AGO: 594 das 599 janelas sem pool de reward.** As 5 que têm
+são todas de 4 h. Em 5 min, 15 min e 1 h não há uma sequer — estes mercados
+updown participam esporadicamente (≈ 1% das janelas). Quando o pool está
+presente, porém, a conta do maker fecha positiva com fator=0,3 e fórmula
+confirmada: **+35,6 USDC/8h** (rewards 25,8 + exec. líquida 9,7).
 
-O 1.6 positivo (+0,043 ¢/share) não salva: ele sai de `rewards + rebate −
-markout`, e o rebate é um **teto** — só existe quando alguém nos executa, e a
-probabilidade disso depende da posição na fila, que o WS agregado não mostra.
-O relatório diz isso em `limitacao_de_fila`: o viés infla o resultado nas duas
-pontas.
+**O 1.6 PASSA com a fórmula confirmada (S(v,s)=((v-s)/v)²×b, §15.2).** A
+avaliação com fator=0,3 substitui a posição desconhecida na fila pela hipótese
+conservadora de 30% do pool por snapshot — resolve o `o_que_falta_para_fechar`
+de modo pré-registrado. O `capital_imobilizado` segue como decisão do M3.
 
-1.10 não pode ser resolvido daqui: `docs.polymarket.com` é inalcançável neste
-ambiente. Precisa de uma máquina que chegue lá.
+**1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
 
 ### A âncora está fechada
 
