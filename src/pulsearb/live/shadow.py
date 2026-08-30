@@ -147,6 +147,9 @@ class ProcessoShadow:
         self.desassinar_apos: dict[str, float] = {}
         self.passos = 0
         self.descobertas = 0
+        #: Motivo pelo qual a rodada foi abortada, ou `None`. Quando existe,
+        #: `main` sai com código != 0: uma rodada sem saída não é sucesso.
+        self.falhou: str | None = None
         # REDUNDÂNCIA, como no recorder: N conexões ao MESMO endpoint. Não é
         # paranoia — conexão individual do RTDS já produziu lacunas de 30 a
         # 306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder
@@ -207,6 +210,25 @@ class ProcessoShadow:
                 self.ciclo.passo(
                     agora_epoch=time.time(), agora_ns=time.time_ns()
                 )
+            except OSError as erro:
+                # Achado P1 do Codex no #52. I/O do diário NÃO é "evento
+                # estranho": é a saída da rodada sumindo.
+                #
+                # A tolerância abaixo existe para um evento de mercado que o
+                # parser não entende — segue-se, e as outras 23 h continuam
+                # valendo. Diário sem poder escrever é o contrário disso: o
+                # processo rodaria as 24 h inteiras, sairia com código 0, e
+                # entregaria ZERO intenções. Pior, cada janela seria
+                # reavaliada para sempre, porque a execução nunca completa.
+                #
+                # Disco cheio e permissão errada chegam aqui como `OSError`,
+                # e `passo()` não faz outro I/O — o diário é o único.
+                self.falhou = f"diario nao gravavel: {type(erro).__name__}: {erro}"
+                log.error(
+                    "rodada interrompida: a saida nao esta sendo gravada",
+                    erro=self.falhou,
+                )
+                return
             except Exception as erro:
                 # Um passo que levanta NÃO derruba o processo: o SHADOW existe
                 # para rodar 24 h e mostrar o que aconteceu. Cair no primeiro
@@ -281,6 +303,9 @@ class ProcessoShadow:
             "passos": self.passos,
             "descobertas": self.descobertas,
             "tokens_assinados": len(self.tokens_assinados),
+            # Sai no JSON SEMPRE, inclusive `None`. Um campo que só aparece
+            # quando há erro é um campo que ninguém procura quando não há.
+            "falhou": self.falhou,
             **self.ciclo.resumo(agora_epoch=time.time(), agora_ns=time.time_ns()),
         }
 
@@ -401,6 +426,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Achado P2 do Codex no #52. Este processo É o SHADOW; a identidade dele
+    # não pode sair de um arquivo de configuração. O `config.yaml` versionado
+    # traz `mode: SIM`, então o comando documentado aqui criava um executor
+    # SIM, gravava em `registro_do_dia.sim.json` e relatava modo SIM —
+    # desfazendo a separação de registro que o próprio PR acabou de criar e
+    # misturando este ensaio de feed ao vivo com simulações sem relação.
+    #
+    # LIVE já foi recusado acima, com mensagem. Qualquer outro modo vira
+    # SHADOW, e a troca sai no log: silenciá-la esconderia de quem lê o
+    # relatório que o `config.yaml` dele não foi obedecido.
+    if settings.mode is not Mode.SHADOW:
+        log.info(
+            "modo forcado para SHADOW neste processo",
+            modo_da_configuracao=str(settings.mode),
+        )
+        settings = settings.model_copy(update={"mode": Mode.SHADOW})
+
     ciclo = montar_ciclo(
         settings,
         caminho_do_diario=Path(args.diario),
@@ -409,7 +451,11 @@ def main(argv: list[str] | None = None) -> int:
     processo = ProcessoShadow(settings, ciclo)
     estado = asyncio.run(processo.run(args.duration))
     print(json.dumps(estado, indent=2, ensure_ascii=False, default=str))
-    return 0
+    # Rodada sem saída NÃO é sucesso. Sair com 0 depois de 24 h que não
+    # gravaram nada faria o systemd (e quem lê o log) tratar como bem
+    # sucedida uma rodada que não produziu o único artefato que ela existe
+    # para produzir.
+    return 1 if processo.falhou else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

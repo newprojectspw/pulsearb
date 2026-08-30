@@ -34,7 +34,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from pulsearb.obs.logging import get_logger
 from pulsearb.settings import Mode, RiskSettings
+
+log = get_logger(__name__)
 
 # ─────────────────────────────────────────────────────────── motivos de recusa
 #
@@ -278,6 +281,32 @@ class PortaoDeRisco:
             registro.disjuntor_armado = True
             registro.disjuntor_motivo = f"registro do dia ilegivel: {erro}"
             return registro
+
+        if registro.gasto_por_janela and self.modo is not Mode.LIVE:
+            # Achado P1 do Codex no #52, segunda rodada: separar o arquivo não
+            # bastou, porque o arquivo separado continua sendo RECARREGADO.
+            #
+            # A sequência: SHADOW aprova intenções, o processo morre antes de
+            # `_liquidar` rodar, reinicia no mesmo dia. Aquelas janelas já
+            # fecharam, então os slugs nunca mais aparecem e nada as liquida.
+            # Com cinco delas o teto de posições recusa TODA intenção seguinte
+            # até a virada de UTC — e o ensaio de 24 h vira um ensaio de nada.
+            #
+            # Em ensaio a exposição é sintética: nenhuma ordem existiu, então
+            # não há o que reconciliar e descartá-la não perde informação.
+            # Em LIVE ela FICA, e é de propósito: ali pode haver posição real
+            # aberta, e travar o bot até uma pessoa reconciliar é o lado certo
+            # para errar.
+            #
+            # O que atravessa nos dois casos: disjuntor, sequência de perdas,
+            # pausa e PnL. Só a exposição em aberto é descartada.
+            log.warning(
+                "exposicao de ensaio descartada no arranque",
+                modo=str(self.modo),
+                janelas=len(registro.gasto_por_janela),
+                usdc=round(registro.exposicao_total_usdc, 4),
+            )
+            registro.gasto_por_janela = {}
 
         if registro.dia != self._hoje:
             # Dia virou: gasto e PnL zeram, mas o DISJUNTOR não. Se ele

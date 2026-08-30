@@ -465,3 +465,61 @@ class TestOEnsaioNaoContaminaORegistroReal:
         portao = PortaoDeRisco(RiskSettings(), Mode.SHADOW, hoje="2026-08-25")
 
         assert portao.caminho is None
+
+
+class TestExposicaoDeEnsaioNaoSobreviveAoReinicio:
+    """Achado P1 do Codex no #52, segunda rodada.
+
+    Separar o arquivo não bastou: o arquivo separado continua sendo
+    RECARREGADO, e a exposição sintética presa nele trava o ensaio seguinte.
+    """
+
+    def _com_exposicao(self, tmp_path, modo):
+        primeiro = _portao(tmp_path, modo=modo)
+        primeiro.registrar_envio(_ordem(slug="janela-que-fechou"))
+        return _portao(tmp_path, modo=modo)
+
+    @pytest.mark.parametrize("modo", [Mode.SHADOW, Mode.SIM])
+    def test_o_ensaio_arranca_sem_exposicao_presa(self, tmp_path, modo):
+        """A sequência: SHADOW aprova, o processo morre antes de `_liquidar`,
+        reinicia no mesmo dia. Aquela janela já fechou, o slug nunca mais
+        aparece, e nada a liquida. Com cinco delas o teto de posições recusa
+        toda intenção seguinte até a virada de UTC.
+        """
+        segundo = self._com_exposicao(tmp_path, modo)
+
+        assert segundo.registro.gasto_por_janela == {}
+        assert segundo.registro.exposicao_total_usdc == 0.0
+
+    def test_em_LIVE_a_exposicao_FICA(self, tmp_path):
+        """A assimetria é de propósito, e é o lado certo para errar.
+
+        Em LIVE pode haver posição real aberta. Travar o bot até uma pessoa
+        reconciliar custa janelas perdidas; esquecer a posição custa uma
+        exposição que ninguém está contando.
+        """
+        segundo = self._com_exposicao(tmp_path, Mode.LIVE)
+
+        assert segundo.registro.exposicao_total_usdc == pytest.approx(2.5)
+
+    def test_o_disjuntor_e_o_PnL_atravessam_mesmo_no_ensaio(self, tmp_path):
+        """Só a exposição em aberto é descartada.
+
+        Zerar o disjuntor no arranque daria ao reinício o poder de desarmar o
+        que só uma pessoa pode desarmar — que é a regra 2 do módulo.
+        """
+        primeiro = _portao(tmp_path, modo=Mode.SHADOW)
+        primeiro.registrar_envio(_ordem(slug="janela-que-fechou"))
+        primeiro.registro.disjuntor_armado = True
+        primeiro.registro.disjuntor_motivo = "perda do dia"
+        primeiro.registro.perdas_seguidas = 3
+        primeiro.registro.pnl_realizado_usdc = -12.5
+        primeiro._gravar()
+
+        segundo = _portao(tmp_path, modo=Mode.SHADOW)
+
+        assert segundo.registro.gasto_por_janela == {}
+        assert segundo.registro.disjuntor_armado is True
+        assert segundo.registro.disjuntor_motivo == "perda do dia"
+        assert segundo.registro.perdas_seguidas == 3
+        assert segundo.registro.pnl_realizado_usdc == pytest.approx(-12.5)

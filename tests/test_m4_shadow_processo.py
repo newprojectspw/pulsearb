@@ -342,6 +342,102 @@ class TestOsCincoAchadosDaRevisao:
         assert chamadas == [1]
 
 
+class TestOModoEDoProcessoNaoDoArquivo:
+    """Achado P2 do Codex no #52, e procede: o `config.yaml` versionado traz
+    `mode: SIM`, então o comando documentado do SHADOW criava um executor SIM,
+    gravava em `registro_do_dia.sim.json` e relatava modo SIM — desfazendo a
+    separação de registro que este mesmo PR criou."""
+
+    def _rodar_main(self, monkeypatch, tmp_path, modo):
+        vistos: list = []
+
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=modo)),
+        )
+
+        def _montar(settings, **kwargs):
+            vistos.append(settings.mode)
+            return _CicloFalso()
+
+        monkeypatch.setattr("pulsearb.live.shadow.montar_ciclo", _montar)
+
+        class _ProcessoFalso:
+            falhou = None
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            async def run(self, _duracao):
+                return {"passos": 0}
+
+        monkeypatch.setattr("pulsearb.live.shadow.ProcessoShadow", _ProcessoFalso)
+
+        from pulsearb.live.shadow import main
+
+        codigo = main(["--duration", "1s"])
+        return codigo, vistos
+
+    def test_config_em_SIM_roda_como_SHADOW(self, monkeypatch, tmp_path, capsys):
+        codigo, vistos = self._rodar_main(monkeypatch, tmp_path, Mode.SIM)
+        capsys.readouterr()
+
+        assert codigo == 0
+        assert vistos == [Mode.SHADOW]
+
+    def test_config_em_SHADOW_segue_SHADOW(self, monkeypatch, tmp_path, capsys):
+        codigo, vistos = self._rodar_main(monkeypatch, tmp_path, Mode.SHADOW)
+        capsys.readouterr()
+
+        assert codigo == 0
+        assert vistos == [Mode.SHADOW]
+
+    def test_LIVE_continua_recusado_e_nao_e_convertido(self, monkeypatch, tmp_path):
+        """Forçar não pode virar um jeito de LIVE entrar por baixo."""
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.LIVE)),
+        )
+
+        from pulsearb.live.shadow import main
+
+        assert main([]) == 2
+
+    def test_rodada_que_falhou_sai_com_codigo_diferente_de_zero(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """24 h que não gravaram nada não são sucesso — nem para o systemd,
+        nem para quem lê o log."""
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.SHADOW)),
+        )
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.montar_ciclo", lambda *a, **k: _CicloFalso()
+        )
+
+        class _ProcessoQueFalhou:
+            falhou = "diario nao gravavel: OSError: No space left on device"
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            async def run(self, _duracao):
+                return {"falhou": self.falhou}
+
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.ProcessoShadow", _ProcessoQueFalhou
+        )
+
+        from pulsearb.live.shadow import main
+
+        assert main(["--duration", "1s"]) == 1
+        capsys.readouterr()
+
+
 class TestOsTresAchadosDaSegundaRevisao:
     """Mais três, e os três procedem. Um deles era erro de unidade meu."""
 
@@ -479,14 +575,17 @@ class _LivrosFalsos:
 class _CicloFalso:
     """Conta os passos sem decidir nada."""
 
-    def __init__(self, explode: bool = False) -> None:
+    def __init__(self, explode: bool = False, erro: Exception | None = None) -> None:
         self.passos = 0
         self.explode = explode
+        self.erro = erro
         self.descobertas: list[list] = []
         self.motor = SimpleNamespace(livros=_LivrosFalsos())
 
     def passo(self, **_):
         self.passos += 1
+        if self.erro is not None:
+            raise self.erro
         if self.explode:
             raise RuntimeError("livro em formato novo")
         return 0
@@ -536,6 +635,43 @@ class TestACadencia:
         await asyncio.wait_for(processo.laco_de_decisao(fim), timeout=2.0)
 
         assert ciclo.passos > 1  # seguiu depois do primeiro erro
+
+    async def test_diario_nao_gravavel_ABORTA_a_rodada(self, tmp_path, monkeypatch):
+        """Achado P1 do Codex no #52, e é o contrário do teste acima.
+
+        A tolerância existe para um evento de mercado que o parser não
+        entende. Diário sem poder escrever é outra coisa: o processo rodaria
+        as 24 h, sairia com código 0 e entregaria ZERO intenções — e cada
+        janela seria reavaliada para sempre, porque a execução nunca completa.
+
+        Disco cheio e permissão errada chegam como `OSError`, e `passo()` não
+        faz outro I/O: o diário é o único.
+        """
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DA_DECISAO_S", 0.001)
+        ciclo = _CicloFalso(erro=OSError(28, "No space left on device"))
+        processo = _processo(tmp_path, ciclo)
+        fim = _time.monotonic() + 0.05
+
+        await asyncio.wait_for(processo.laco_de_decisao(fim), timeout=2.0)
+
+        assert ciclo.passos == 1, "parou no primeiro, nao insistiu por 24 h"
+        assert processo.falhou is not None
+        assert "No space left" in processo.falhou
+
+    async def test_a_falha_sai_no_estado_e_o_sucesso_tambem(self, tmp_path):
+        """`falhou` sai no JSON SEMPRE, inclusive `None`.
+
+        Campo que só aparece quando há erro é campo que ninguém procura
+        quando não há.
+        """
+        processo = _processo(tmp_path, _CicloFalso())
+
+        assert processo.estado()["falhou"] is None
+
+        processo.falhou = "diario nao gravavel"
+        assert processo.estado()["falhou"] == "diario nao gravavel"
 
     async def test_a_descoberta_alimenta_o_ciclo_e_assina_os_tokens(self, tmp_path):
         import time as _time
