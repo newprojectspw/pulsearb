@@ -5,6 +5,7 @@ envelhecem e morrem enquanto o bot roda — janela de 5 minutos vira outra a
 cada 5 minutos. Este pacote é quem sabe disso.
 """
 
+from pulsearb.live.ciclo import CicloAoVivo, alimentar
 from pulsearb.live.livros import LivroDoToken, LivrosAoVivo
 from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo, PrecosPorAtivo, SerieE18AoVivo
@@ -12,6 +13,7 @@ from pulsearb.live.rastreador import JanelaAoVivo, RastreadorDeJanelas
 from pulsearb.live.relogio import RelogioDoServidor
 
 __all__ = [
+    "CicloAoVivo",
     "ConfigDoMotor",
     "JanelaAoVivo",
     "LivroDoToken",
@@ -22,4 +24,5 @@ __all__ = [
     "RastreadorDeJanelas",
     "RelogioDoServidor",
     "SerieE18AoVivo",
+    "alimentar",
 ]
