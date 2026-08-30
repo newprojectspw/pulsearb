@@ -20,7 +20,11 @@ from pulsearb.analysis.anchor_sweep import (
     _folga_relativa_ppb,
     varrer,
 )
-from pulsearb.backtest.__main__ import _e18_do_payload
+
+# Mudou de casa em 2026-08-30: o SHADOW precisa da MESMA função, e ela
+# vivia privada dentro do backtest. Duas cópias fariam uma divergência de
+# arredondamento entre as pontas parecer diferença de mercado.
+from pulsearb.feeds.rtds import e18_do_evento as _e18_do_payload
 
 BASE_MS = 1_787_000_000_000
 
