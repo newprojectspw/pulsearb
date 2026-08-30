@@ -37,9 +37,11 @@ de direção: a varredura mantém o sinal fixo e troca só o book do fill, entã
 ela mexe no preço de entrada e na coorte de trades ao mesmo tempo (ver §2d-ter
 do `VEREDITO_M2.md`). Quem carrega a conclusão é o resto — PnL negativo nas
 **cinco** bandas e `hit_rate` 0,4172, abaixo de 0,5 no lado escolhido pelo
-modelo. **O +2,7125 era o simulador apostando com convicção onde não havia
-informação** — desvio-padrão 6,3× pequeno demais, `P(Up)` saturado em 0 e 1, e
-amostra pequena fazendo o resto.
+modelo. **Sobre o +2,7125:** a leitura de que ele vinha do desvio-padrão 6,3×
+pequeno demais — `P(Up)` saturado em 0 e 1, amostra pequena fazendo o resto — é
+a explicação mais econômica, e não está medida. O preditor corrigido opera
+outra coorte de trades, então esta rodada não testa aqueles 640. O que está
+medido é que a regra corrigida perde. A delimitação completa está na §2d-ter.
 
 **O 1.5 reprova por motivo independente e continua igual:** p50 de 128,05 USDC
 a 3 ticks contra os 200 exigidos. É teto de **capacidade** do book — nenhum
@@ -749,7 +751,7 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.1 / 1.4 ausência de borda** (PnL −67,27 nas cinco bandas, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
+| **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
 
