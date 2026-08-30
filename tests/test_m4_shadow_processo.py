@@ -1149,3 +1149,99 @@ class TestOAdaptadorHttpEhCompartilhado:
         adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
         with pytest.raises(RuntimeError):
             await adaptador("https://exemplo/markets/slug/x", None)
+
+
+class TestADescobertaNaoAposentaJanela:
+    """Achado P1 do Codex no #52, e era violação do contrato que a própria
+    `aposentar_fechadas` documenta: ela DEVOLVE as janelas fechadas porque
+    quem chama precisa liquidar a exposição delas — e `atualizar` chamava
+    descartando o retorno.
+
+    A sequência quebrada: a descoberta termina logo depois de uma janela
+    operada fechar, mas antes do próximo `tick`. A janela some do retrato, o
+    motor não a encontra mais, `_liquidar` nunca roda, e a exposição
+    sintética fica presa. Com cinco dessas o teto de posições recusa tudo
+    pelo resto da rodada.
+    """
+
+    def _mercado(self, condition_id, fecha):
+        return _mercado_falso(condition_id, {"Up": "up", "Down": "dn"}, fecha=fecha)
+
+    #: Quanto falta para fechar, na janela que o teste abre.
+    #:
+    #: 100 s e não 300: com 300 a abertura cairia EXATAMENTE em `agora`
+    #: (`abertura = fechamento − duração`), e o ISO com microssegundos decide
+    #: por arredondamento se `abertura <= agora`. Medido: 109 descartes em
+    #: 300 execuções. Um teste que falha em um terço das vezes por causa do
+    #: relógio não testa nada — ensina a ignorar a suíte.
+    FALTA_S = 100
+
+    def test_atualizar_NAO_tira_janela_fechada_do_retrato(self):
+        import time as _time
+
+        from pulsearb.live.rastreador import RastreadorDeJanelas
+
+        agora = _time.time()
+        rastreador = RastreadorDeJanelas()
+        rastreador.atualizar(
+            [self._mercado("0xaa", agora + self.FALTA_S)], agora_epoch=agora
+        )
+        assert "0xaa" in rastreador.janelas
+
+        # A janela fecha, e chega OUTRO ciclo de descoberta que não a traz.
+        rastreador.atualizar([], agora_epoch=agora + 400)
+
+        assert "0xaa" in rastreador.janelas, (
+            "quem aposenta e quem liquida — o motor, no tick"
+        )
+
+    def test_quem_aposenta_devolve_para_o_motor_liquidar(self):
+        """A aposentadoria continua existindo; ela é do motor."""
+        import time as _time
+
+        from pulsearb.live.rastreador import RastreadorDeJanelas
+
+        agora = _time.time()
+        rastreador = RastreadorDeJanelas()
+        rastreador.atualizar(
+            [self._mercado("0xaa", agora + self.FALTA_S)], agora_epoch=agora
+        )
+
+        saidas = rastreador.aposentar_fechadas(agora_epoch=agora + 400)
+
+        assert [j.condition_id for j in saidas] == ["0xaa"]
+        assert rastreador.janelas == {}
+
+
+class TestOCaminhoDaCurva:
+    """`--curva-de-variancia` vem de fora e não pode chegar cru ao disco.
+
+    Mesma contenção do `--json` do backtest (M2.5), agora em
+    `pulsearb.caminhos`: ler de fora da raiz não sobrescreve nada, mas põe o
+    nome do arquivo no `origem` de cada linha do diário — e o SHADOW roda sob
+    argumento montado por script e por agente, que é exatamente onde um
+    caminho hostil entra sem ninguém digitar.
+    """
+
+    def test_sem_argumento_nao_ha_curva(self):
+        assert _curvas(None) is None
+
+    @pytest.mark.parametrize(
+        "hostil",
+        ["/etc/passwd.json", "../fora.json", "~/segredo.json", "sem-sufixo"],
+    )
+    def test_caminho_fora_da_raiz_e_recusado(self, hostil, tmp_path, monkeypatch):
+        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+
+        with pytest.raises(ValueError):
+            _curvas(hostil)
+
+    def test_curva_dentro_da_raiz_e_lida(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+        (tmp_path / "relatorios").mkdir()
+        alvo = tmp_path / "relatorios" / "VARIANCIA.json"
+        alvo.write_text(json.dumps(_relatorio_de_variancia()), encoding="utf-8")
+
+        curvas = _curvas("relatorios/VARIANCIA.json")
+
+        assert len(curvas)
