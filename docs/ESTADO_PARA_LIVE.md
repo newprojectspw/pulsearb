@@ -481,7 +481,7 @@ defeitos nele:
 | # | Item | Estado |
 |---|---|---|
 | 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
-| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | 🟡 **auth pronta, assinatura da ordem não** — `execution/auth.py` (18 testes): L2 HMAC-SHA256 e o typed data do L1 (`ClobAuthDomain`), campo a campo contra o API_NOTES §3. Falta o **assinador concreto** (chave privada → EIP-712) e o construtor da struct da ordem |
+| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (25 testes: L2 HMAC-SHA256 + typed data do L1) e `execution/ordem.py` (33 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 14 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **semântica pronta, nunca falou com o CLOB** — `execution/cliente.py` (33 testes): FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). Falta o transporte real e uma resposta do servidor de verdade |

@@ -977,6 +977,60 @@ atribuída àquele mercado. O único campo de rebate que o projeto usa é
 
 ---
 
+### 12.14. A struct EIP-712 da ordem, campo a campo `[VERIFICADO na fonte]`
+
+Lido no sdist do `polymarket-client==0.6.0`:
+`_internal/actions/orders/{typed_data,orders,limit,math,context}.py`.
+Implementado em `src/pulsearb/execution/ordem.py` e travado por conferência
+diferencial em `tests/test_m4_struct_da_ordem.py` — sete casos de valores, o
+typed data completo e a assinatura, todos byte a byte contra o SDK.
+
+**Domínio** (`_PROTOCOL_NAME` / `_PROTOCOL_VERSION`):
+
+| campo | valor |
+|---|---|
+| `name` | `Polymarket CTF Exchange` |
+| `version` | **`"2"`** |
+| `chainId` | 137 |
+| `verifyingContract` | exchange padrão, ou o neg-risk se `neg_risk` |
+
+⚠️ **A versão do domínio da ORDEM é `"2"`; a do `ClobAuthDomain` (§3) é `"1"`.**
+A simetria é falsa e o erro é silencioso: versão errada muda o hash do
+domínio, logo a assinatura, logo a recusa — sem que a resposta diga a causa.
+
+**Campos assinados** (`_ORDER_FIELDS`, nesta ordem — a ordem entra no hash):
+`uint256 salt`, `address maker`, `address signer`, `uint256 tokenId`,
+`uint256 makerAmount`, `uint256 takerAmount`, `uint8 side`,
+`uint8 signatureType`, `uint256 timestamp`, `bytes32 metadata`,
+`bytes32 builder`.
+
+- `side`: **0 = BUY, 1 = SELL** (`_encode_side`).
+- `timestamp`: instante de **criação em MILISSEGUNDOS** (`_current_timestamp_ms`),
+  **não** a expiração. `expiration` é campo separado, vai no corpo do fio e
+  **não é assinado**.
+- `salt`: `secrets.randbits(53)` — 53 bits, não 256, apesar do `uint256`. É o
+  maior inteiro exato de um float de dupla precisão, ou seja, o que sobrevive
+  a um JSON lido em JavaScript.
+
+**Valores** (`_compute_limit_order_amounts`, `parse_amount`, `_ROUNDING_BY_TICK`):
+
+- Colateral com **6 casas**; conversão para unidades-base com **`ROUND_HALF_EVEN`**.
+- Em **COMPRA**, `makerAmount` é **USDC** e `takerAmount` é **shares** — o maker
+  entrega colateral e recebe shares. Em venda inverte. Trocar os dois numa
+  ordem de 5 shares a 0,50 pediria 2,5 shares por 5 USDC: ordem válida,
+  aceita, com o dobro do preço pretendido.
+- O arredondamento do valor tem **dois passos**: sobe para `casas+4`
+  (`ROUND_CEILING`) e, se ainda não couber, desce para `casas` (`ROUND_FLOOR`).
+- Casas por tick: `0.1`→(3,1,2) · `0.01`→(4,2,2) · `0.005`→(5,3,2) ·
+  `0.0025`→(6,4,2) · `0.001`→(5,3,2) · `0.0001`→(6,4,2). Tick fora desta
+  tabela é **erro**, não default.
+
+**Assinatura**: `Account.sign_typed_data(full_message=typed_data)`, com
+prefixo `0x` reposto — em `eth-account` recente `.hex()` não o inclui, e o SDK
+faz `raw if raw.startswith("0x") else "0x" + raw`.
+
+---
+
 ## 13. Cadência e regime — medições ao vivo de 2026-08-16 (M2)
 
 ### 13.1. Cadência do RTDS `[MEDIDO ao vivo]`
