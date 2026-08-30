@@ -1414,36 +1414,60 @@ Confirmado ao vivo (§12.8): `rewardsMinSize = 50`, `rewardsMaxSpread` em
 {1.5, 4.5}, `rewardsDailyRate = 1666.666667` num 4h, pago em USDC.e real da
 Polygon.
 
-### 15.2. O que NÃO está verificado — e por quê
+### 15.2. O que NÃO estava verificado — atualizado em 2026-08-30
 
-`docs.polymarket.com`, `polymarket.com` e `learn.polymarket.com` respondem
-**403 no CONNECT** do proxy de saída deste ambiente (mesma barreira da §0). O
-SDK expõe os PARÂMETROS mas não a FÓRMULA: `/order-scoring` devolve booleano,
-e não há em lugar nenhum do código do SDK o cálculo do score.
+Até 2026-08-30 `docs.polymarket.com` respondia **403** neste ambiente.
+A máquina local (Mac) acessa. A §15.3 traz o que a leitura direta confirmou.
 
-Fica registrado como **assumido**, não como fato:
-
-| Item | Estado | Como está tratado no código |
+| Item | Estado antes | Estado após §15.3 |
 |---|---|---|
-| fórmula `fator_desconto ^ ticks × tamanho` | **assumida** (vem do enunciado do projeto) | implementada em `analysis/rewards.py`, com o aviso no próprio relatório |
-| valor do fator de desconto | **assumido** = 0,5 | campo de `ParametrosDeReward`; o relatório traz varredura em 0,3/0,5/0,7/0,9 |
-| cadência de pontuação | **assumida** = 1/s | campo; erro aqui escala a receita linearmente |
-| unidade de `rewardsMaxSpread` | **inferida** = centavos | 1,5 só faz sentido como 1,5¢; como fração seriam 150% de spread, que não gateia nada |
-| exigência de cotar dos dois lados | **assumida** = não exigida | campo `exige_dois_lados`, default `False` |
-| significado de `market_competitiveness` | **desconhecido** | não usado |
-| `moas` no CLOB compacto | **desconhecido** (§12.11) | não usado |
+| fórmula `fator_desconto ^ ticks × tamanho` | assumida | **ERRADA** — ver §15.3 |
+| valor do fator de desconto | assumido = 0,5 | **não existe nessa forma** na fórmula real |
+| cadência de pontuação | assumida = 1/s | **CONFIRMADA = 1/minuto** (10.080 amostras/epoch) |
+| unidade de `rewardsMaxSpread` | inferida = centavos | **CONFIRMADA = centavos** |
+| exigência de cotar dos dois lados | assumida = não exigida | **CONFIRMADA** — dois lados recebem bônus (Q_min); single-sided divide por c=3,0; fora de [0,10, 0,90] EXIGE dois lados |
+| significado de `market_competitiveness` | desconhecido | ainda desconhecido (não aparece na doc pública) |
+| `moas` no CLOB compacto | desconhecido (§12.11) | ainda desconhecido |
 
-**Regra prática enquanto isto não for confirmado:** o número de receita do
-simulador é **ordem de grandeza**, não previsão. Na gravação sintética, variar
-só o fator de desconto entre 0,3 e 0,9 muda a receita em **2,6x** — quem ler o
-número sem ler a varredura tira conclusão errada.
+**`analysis/rewards.py` foi corrigida em 2026-08-30** (mesmo commit que este bloco de docs):
+`score_de_nivel` agora implementa `S(v,s)=((v-s)/v)^2 × tamanho`. O M2.2 maker precisa
+re-rodar com dados reais para produzir números válidos.
 
-**Como confirmar, quando houver acesso:** ler
-`docs.polymarket.com` (seção de liquidity rewards) de uma máquina sem o
-bloqueio — a VPS de Londres serve — e comparar a fórmula com
-`analysis/rewards.py`. Alternativa independente: rodar o recorder guardando
-`GET /rewards/user` do próprio endereço por alguns dias e ajustar o fator que
-reproduz o `earning_percentage` observado. A segunda é mais trabalhosa e mais
-convincente.
+### 15.3. A fórmula confirmada — `docs.polymarket.com/programs/liquidity-rewards` `[VERIFICADO 2026-08-30]`
+
+Fonte: `https://docs.polymarket.com/programs/liquidity-rewards` lida diretamente em 2026-08-30.
+
+**Scoring quadrático por ordem:**
+
+```
+S(v, s) = ((v - s) / v)² × b
+```
+
+onde `v` = max spread da config do mercado (em centavos = `rewardsMaxSpread`),
+`s` = spread atual do order book (em centavos, medido a partir do adjusted midpoint),
+`b` = in-game multiplier (valor desconhecido — não aparece na doc; provavelmente 1 por default).
+
+**Score de cada side:**
+- Q_ne = soma de `S(v, spread_bid_m) × BidSize_m + S(v, spread_ask_m') × AskSize_m'` (e o simétrico)
+- Q_no = idem com ask/bid invertidos
+
+**Score combinado (favorece dois lados):**
+- Se midpoint ∈ [0,10, 0,90]: `Q_min = max(min(Q_ne, Q_no), max(Q_ne/c, Q_no/c))` onde c = 3,0
+- Se midpoint ∉ [0,10, 0,90]: `Q_min = min(Q_ne, Q_no)` — EXIGE dois lados
+
+**Normalização e epoch:**
+- `Q_normal = Q_min / sum(Q_min em todos os makers da amostra)`
+- `Q_epoch = sum(Q_normal em 10.080 amostras)` — 1 por minuto, 1 semana por epoch
+- `Q_final = Q_epoch / sum(Q_epoch_todos) × reward_pool_do_mercado`
+
+**Programa de agosto/2026 — $1M em rewards para TWAP:**
+- Aplica-se a mercados TWAP de 5-min, 15-min e 4-hour de BTC, ETH, SOL, XRP, HYPE, BNB, DOGE
+- 5-min: BTC $300k, SOL+ETH+HYPE+XRP $200k, BNB+DOGE $50k
+- 15-min: BTC $225k, SOL+ETH+HYPE+XRP $100k, BNB+DOGE $25k
+- 4-hour: BTC $50k, SOL+ETH+HYPE+XRP $40k, BNB+DOGE $10k
+- Anunciado como "through the month of August" — temporário; o programa de rewards permanente continua
+
+**O que isto desfaz:** a fórmula assumida (`fator_desconto^ticks × tamanho`) era exponencial por distância em ticks. A real é quadrática por spread em centavos. São medidas diferentes: o tick da Polymarket vale 1¢, então `spread = ticks × tick_size = ticks × 0,01` — mas a curva de decaimento é completamente outra.
+A cadência era assumida como 1/s; é 1/min. Erro de 60× na contagem de amostras.
 
 ---

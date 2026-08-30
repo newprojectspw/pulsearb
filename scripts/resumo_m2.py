@@ -55,7 +55,6 @@ PROFUNDIDADE_MINIMA_USDC = 200.0
 MARKOUT_MINIMO_CENTAVOS = -0.5
 HORAS_MINIMAS_DE_AMOSTRA = 20.0
 DIVERGENCIA_MAXIMA = 0.01
-FATOR_DE_DESCONTO_PESSIMISTA = "0.3"
 SUFIXO_USDC = " USDC"
 NOME_DA_CONTA_FECHADA = "Conta fechada do maker"
 
@@ -258,7 +257,7 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     primeiro veredito cometeu, e é o que esta função existe para impedir.
     """
     campo = "rota_maker.conta_fechada.o_que_falta_para_fechar"
-    exigido = f"positiva com fator de desconto {FATOR_DE_DESCONTO_PESSIMISTA}"
+    exigido = "positiva (rewards + rebate - markout - capital)"
     conta = rota_maker.get("conta_fechada") or {}
     falta = conta.get("o_que_falta_para_fechar")
     if falta is None:
@@ -271,24 +270,24 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
             f"conta NAO fechada: faltam {len(falta)} termos ({termos})",
             NAO_AVALIAVEL, campo,
         )
-    por_fator = rota_maker.get("sensibilidade_ao_fator") or {}
-    valores = [
-        celulas.get(FATOR_DE_DESCONTO_PESSIMISTA)
-        for celulas in por_fator.values()
-        if isinstance(celulas, dict)
+    por_ordem = (rota_maker.get("rewards") or {}).get("por_ordem") or {}
+    receitas = [
+        recortes.get("total", {}).get("receita_usdc") or 0.0
+        for recortes in por_ordem.values()
+        if isinstance(recortes, dict)
     ]
-    medidos = [v for v in valores if isinstance(v, int | float)]
-    if not medidos:
+    medidas = [v for v in receitas if isinstance(v, int | float)]
+    if not medidas:
         return Criterio(
             "1.6", NOME_DA_CONTA_FECHADA, exigido,
-            f"sem celula no fator {FATOR_DE_DESCONTO_PESSIMISTA}",
+            "sem receita de rewards no relatorio",
             NAO_AVALIAVEL,
-            f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
+            "rota_maker.rewards.por_ordem[*].total.receita_usdc",
         )
     return Criterio(
         "1.6", NOME_DA_CONTA_FECHADA, exigido,
-        _numero(max(medidos), SUFIXO_USDC), _julgar(max(medidos) > 0),
-        f"rota_maker.sensibilidade_ao_fator[*][{FATOR_DE_DESCONTO_PESSIMISTA}]",
+        _numero(max(medidas), SUFIXO_USDC), _julgar(max(medidas) > 0),
+        "rota_maker.rewards.por_ordem[*].total.receita_usdc",
     )
 
 

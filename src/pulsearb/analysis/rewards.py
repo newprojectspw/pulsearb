@@ -27,49 +27,32 @@ O QUE ESTÁ VERIFICADO E O QUE ESTÁ ASSUMIDO — leia antes de usar o número
 - existe um `market_competitiveness` por mercado, e um `earning_percentage`
   por usuário/mercado/dia
 
-**NÃO VERIFICADO** — os docs da Polymarket (`docs.polymarket.com`) estão
-bloqueados por política do proxy neste ambiente, e o SDK expõe os parâmetros
-mas **não a fórmula**:
+**CONFIRMADO em 2026-08-30** (fonte: docs.polymarket.com/programs/liquidity-rewards,
+lido diretamente — ver `docs/API_NOTES.md` §15.3):
 
-- a fórmula do score em si
-- o valor do fator de desconto
-- a cadência de pontuação (por segundo? por minuto? amostragem aleatória?)
-- se `rewardsMaxSpread` está em CENTAVOS ou em fração de dólar
-- se cotar dos dois lados é exigência ou só bônus
-- o significado exato de `market_competitiveness`
+- **fórmula**: `S(v, s) = ((v - s) / v)² × b`, onde `v` = `rewardsMaxSpread`
+  em centavos, `s` = spread real do ponto médio ajustado em centavos, `b` = 1
+- **cadência**: 1 amostra/minuto → 10.080 amostras/epoch (1 semana)
+- **`rewardsMaxSpread` em CENTAVOS**: confirmado (1.5¢, 4.5¢)
+- **dois lados exigidos** com penalidade assimétrica (Q_min)
+- **pool agosto 2026**: $1M para TWAP 5-min/15-min/4h em BTC, ETH, SOL, XRP, HYPE, BNB, DOGE
 
-Por isso **todo parâmetro não verificado é campo de `ParametrosDeReward`, com
-o valor default marcado como hipótese** — nenhum está enterrado no meio de
-uma conta. E `simular` devolve uma varredura sobre o fator de desconto, para
-que se veja de imediato quanto a conclusão depende do palpite.
-
-Enquanto a fórmula não for confirmada contra a documentação oficial, o número
-de saída é **ordem de grandeza**, não previsão de receita. Está escrito assim
-no relatório também.
+A fórmula exponencial por tick que estava aqui antes estava ERRADA. A
+quadrática por spread (em centavos) é a correta. O M2.2 maker precisa re-rodar
+com os novos parâmetros.
 """
 
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook
 
-# ─── hipóteses, explicitamente rotuladas ──────────────────────────────────
-# Fator de desconto por tick de distância do melhor preço. O enunciado do
-# projeto o descreve como parte da fórmula pública; o valor NÃO foi
-# confirmado. `simular` varre alternativas em volta deste.
-HIPOTESE_FATOR_DESCONTO = 0.5
-# Cadência de pontuação. Entra como divisor do tempo, então erro aqui escala
-# a receita linearmente.
-HIPOTESE_CADENCIA_S = 1.0
-# `rewardsMaxSpread` observado ao vivo: 1.5 e 4.5. Valores desse tamanho só
-# fazem sentido como CENTAVOS (1,5¢ = 0,015 de probabilidade); como fração
-# seriam 150% de spread, o que não gateia nada. Inferência, não verificação.
+# `rewardsMaxSpread` observado ao vivo: 1.5 e 4.5. Confirmado em 2026-08-30
+# que a unidade é CENTAVOS (1,5¢ = 0,015 de probabilidade).
 HIPOTESE_MAX_SPREAD_EM_CENTAVOS = True
-# Varredura do fator de desconto no relatório.
-FATORES_PARA_VARRER = (0.3, 0.5, 0.7, 0.9)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +62,14 @@ class ParametrosDeReward:
 
     daily_rate: float           # VERIFICADO: rewardsDailyRate / rate_per_day
     min_size: float             # VERIFICADO: rewardsMinSize
-    max_spread: float           # VERIFICADO como número; unidade INFERIDA
+    max_spread: float           # VERIFICADO: rewardsMaxSpread / 100 (centavos → fração)
     tick_size: float            # VERIFICADO
-    fator_desconto: float = HIPOTESE_FATOR_DESCONTO      # HIPÓTESE
-    cadencia_s: float = HIPOTESE_CADENCIA_S              # HIPÓTESE
-    exige_dois_lados: bool = False                       # HIPÓTESE
+    exige_dois_lados: bool = False  # CONFIRMADO: Q_min exige dois lados
 
     @classmethod
     def do_mercado(
         cls,
         meta: dict[str, Any],
-        *,
-        fator_desconto: float = HIPOTESE_FATOR_DESCONTO,
-        cadencia_s: float = HIPOTESE_CADENCIA_S,
     ) -> ParametrosDeReward | None:
         """Lê os parâmetros do snapshot gravado. Sem eles, não simula.
 
@@ -111,8 +89,6 @@ class ParametrosDeReward:
             min_size=_numero(meta.get("rewards_min_size")) or 0.0,
             max_spread=max_spread,
             tick_size=_numero(meta.get("tick_size")) or 0.01,
-            fator_desconto=fator_desconto,
-            cadencia_s=cadencia_s,
         )
 
 
@@ -183,24 +159,27 @@ def score_de_nivel(
     preco: float,
     tamanho: float,
     *,
-    melhor_preco: float,
     meio: float | None,
     params: ParametrosDeReward,
 ) -> float:
-    """`fator_desconto ^ ticks_do_melhor_preço × tamanho`, com os dois portões.
+    """S(v, s) = ((v - s) / v)² × tamanho — fórmula confirmada em 2026-08-30.
 
-    Portões (VERIFICADOS como existentes, o comportamento exato é hipótese):
-    - abaixo de `min_size` o nível não pontua;
-    - além de `max_spread` do meio, também não.
+    `v` = params.max_spread (fração, já convertida de centavos).
+    `s` = distância do preço ao ponto médio (mesma unidade).
+
+    Portões (confirmados):
+    - abaixo de `min_size`: não pontua;
+    - além de `max_spread` do meio: não pontua (score seria zero ou negativo).
     """
     if tamanho < params.min_size:
         return 0.0
-    if meio is not None and abs(preco - meio) > params.max_spread:
+    if params.max_spread <= 0:
         return 0.0
-    if params.tick_size <= 0:
+    spread = abs(preco - meio) if meio is not None else 0.0
+    if spread >= params.max_spread:
         return 0.0
-    ticks = round(abs(preco - melhor_preco) / params.tick_size)
-    return (params.fator_desconto**ticks) * tamanho
+    ratio = spread / params.max_spread
+    return (1.0 - ratio) ** 2 * tamanho
 
 
 def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
@@ -214,13 +193,9 @@ def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
     """
     meio = book.mid
     total = 0.0
-    for niveis, melhor in ((book.bids, book.best_bid), (book.asks, book.best_ask)):
-        if melhor is None:
-            continue
+    for niveis in (book.bids, book.asks):
         for preco, tamanho in niveis:
-            total += score_de_nivel(
-                preco, tamanho, melhor_preco=melhor, meio=meio, params=params
-            )
+            total += score_de_nivel(preco, tamanho, meio=meio, params=params)
     return total
 
 
@@ -242,9 +217,7 @@ def score_da_ordem(
         preco = melhor + sentido * ordem.distancia_ticks * params.tick_size
         if not 0.0 < preco < 1.0:
             continue
-        total += score_de_nivel(
-            preco, ordem.tamanho, melhor_preco=melhor, meio=meio, params=params
-        )
+        total += score_de_nivel(preco, ordem.tamanho, meio=meio, params=params)
         if not ordem.dois_lados:
             break
     if params.exige_dois_lados and (book.best_bid is None or book.best_ask is None):
@@ -365,8 +338,6 @@ def simular(
     janelas: list[Any],
     *,
     ordens: tuple[OrdemHipotetica, ...] = (),
-    fatores: tuple[float, ...] = FATORES_PARA_VARRER,
-    cadencia_s: float = HIPOTESE_CADENCIA_S,
 ) -> dict[str, Any]:
     """A simulação completa (B.1) mais a seleção de mercado (B.5).
 
@@ -376,15 +347,13 @@ def simular(
     ordens = ordens or ORDENS_PADRAO
     saida: dict[str, Any] = {
         "hipoteses": {
-            "fator_desconto_default": HIPOTESE_FATOR_DESCONTO,
-            "cadencia_s": cadencia_s,
             "max_spread_em_centavos": HIPOTESE_MAX_SPREAD_EM_CENTAVOS,
+            "cadencia_amostras_por_min": 1,
             "aviso": (
-                "A FÓRMULA NÃO FOI VERIFICADA contra a documentação oficial "
-                "(docs.polymarket.com bloqueado neste ambiente). Os parâmetros "
-                "são lidos do dado gravado; o fator de desconto e a cadência "
-                "são palpites. Trate o número como ordem de grandeza, e leia "
-                "`sensibilidade_ao_fator` antes de qualquer conclusão."
+                "Fórmula CONFIRMADA em 2026-08-30 — ver docs/API_NOTES.md §15.3. "
+                "S(v,s)=((v-s)/v)^2 x tamanho, v=rewardsMaxSpread em centavos. "
+                "A integral aqui é contínua (intervalo real dos snapshots), não "
+                "discreta de 1/min — isso aproxima para cima em intervalos longos."
             ),
         }
     }
@@ -392,7 +361,6 @@ def simular(
     por_ordem: dict[str, dict[str, ResultadoDeReward]] = defaultdict(
         lambda: defaultdict(ResultadoDeReward)
     )
-    sensibilidade: dict[str, dict[str, float]] = defaultdict(dict)
     competicao: dict[str, list[float]] = defaultdict(list)
     janelas_com_pool = 0
     sem_pool = _SemPool()
@@ -400,7 +368,7 @@ def simular(
 
     for janela in janelas:
         meta = getattr(janela, "reward_meta", None) or {}
-        base = ParametrosDeReward.do_mercado(meta, cadencia_s=cadencia_s)
+        base = ParametrosDeReward.do_mercado(meta)
         if base is None:
             sem_pool.registrar(meta)
             continue
@@ -419,16 +387,6 @@ def simular(
                 if resultado.orcamento_por_score:
                     for recorte in recortes:
                         competicao[recorte].extend(resultado.orcamento_por_score)
-            for fator in fatores:
-                alternativo = simular_serie(
-                    amostras, replace(base, fator_desconto=fator), ordens[0]
-                )
-                chave = f"{fator:g}"
-                sensibilidade[ordens[0].nome][chave] = round(
-                    sensibilidade[ordens[0].nome].get(chave, 0.0)
-                    + alternativo.receita_usdc,
-                    6,
-                )
 
     saida["janelas_com_pool_de_reward"] = janelas_com_pool
     saida["duracoes_com_pool"] = dict(duracoes_com_pool)
@@ -457,9 +415,6 @@ def simular(
     saida["por_ordem"] = {
         nome: {recorte: r.to_dict() for recorte, r in sorted(recortes.items())}
         for nome, recortes in sorted(por_ordem.items())
-    }
-    saida["sensibilidade_ao_fator"] = {
-        nome: dict(sorted(valores.items())) for nome, valores in sensibilidade.items()
     }
     saida["selecao_de_mercado"] = {
         recorte: {
