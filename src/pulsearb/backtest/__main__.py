@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pulsearb.analysis.anchor_sweep import (
     IDADE_MAX_MS,
@@ -68,6 +68,9 @@ from pulsearb.backtest.runner import (
 # REPORTADAS — como referência histórica. `compute_anchor` saiu do
 # caminho de decisão no M2.6 e não é mais importada: a âncora do
 # backtest vem de `ancora_verificada`.
+if TYPE_CHECKING:  # o módulo só é importado quem passa --curva-de-variancia
+    from pulsearb.engine.variancia import CurvasPorAtivo
+
 from pulsearb.engine.anchor import (
     WindowOutcome,
     evaluate_hypotheses,
@@ -709,18 +712,9 @@ class RecordingIndex:
             if resolucao.ts_servidor_ms
             else chegada_ns
         )
-        if resolucao.condition_id is not None:
-            existente = self.resolucoes_por_condicao.get(resolucao.condition_id)
-            if existente is not None:
-                self.resolucoes_redundantes += 1
-                if _discordam(existente, resolucao):
-                    self.resolucoes_conflitantes.append(resolucao.condition_id)
-                # O evento do fio é mais rico (winning_asset_id) e mais
-                # direto (sem a inferência por outcomePrices da Gamma):
-                # sintético nunca sobrescreve um evento do fio já visto.
-                if resolucao.sintetico and not existente.sintetico:
-                    return
-            self.resolucoes_por_condicao[resolucao.condition_id] = resolucao
+        condicao = resolucao.condition_id
+        if condicao is not None and not self._indexar_por_condicao(condicao, resolucao):
+            return
         for token in resolucao.tokens:
             self.resolucoes_por_token[token] = resolucao
             self.resolucoes[token] = ts_ns
@@ -735,6 +729,23 @@ class RecordingIndex:
             venceu_up = resolucao.winning_outcome.strip().lower() == "up"
             for token in resolucao.tokens:
                 self.resolvido_up[token] = venceu_up
+
+    def _indexar_por_condicao(self, condicao: str, resolucao: Resolucao) -> bool:
+        """Indexa por condition id. `False` = descarte, não sobrescreva.
+
+        O evento do fio é mais rico (`winning_asset_id`) e mais direto (sem a
+        inferência por `outcomePrices` da Gamma): sintético nunca sobrescreve
+        um evento do fio já visto.
+        """
+        existente = self.resolucoes_por_condicao.get(condicao)
+        if existente is not None:
+            self.resolucoes_redundantes += 1
+            if _discordam(existente, resolucao):
+                self.resolucoes_conflitantes.append(condicao)
+            if resolucao.sintetico and not existente.sintetico:
+                return False
+        self.resolucoes_por_condicao[condicao] = resolucao
+        return True
 
     def _resolucao_da_janela(
         self, condition_id: str, token_up: str, token_down: str
@@ -1651,7 +1662,13 @@ def _hora_utc(bruto: str | None) -> datetime | None:
     return lido if lido.tzinfo else lido.replace(tzinfo=UTC)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _construir_parser() -> argparse.ArgumentParser:
+    """Os flags do backtest, separados do fluxo que os consome.
+
+    Ficam aqui por tamanho: são dezessete opções, e mantê-las dentro do
+    `main` empurrava o fluxo de decisão para o fim de uma função de
+    noventa e tantas linhas de configuração.
+    """
     parser = argparse.ArgumentParser(description="PULSEARB backtest — M2.D + M2.E")
     parser.add_argument("recordings", help="diretório (ou arquivo) da gravação")
     parser.add_argument("--threshold", type=float, default=0.02)
@@ -1832,26 +1849,167 @@ def main(argv: list[str] | None = None) -> int:
             "tamanho, em vez de inferir de um p50 de profundidade."
         ),
     )
+    return parser
+
+
+def _tamanhos_da_varredura(
+    parser: argparse.ArgumentParser, bruto: str | None
+) -> tuple[float, ...]:
+    """Lê `--varredura-de-tamanho`: 'padrao', lista de números, ou nada.
+
+    `parser.error` encerra o processo com uso e código 2 — é o contrato do
+    argparse para entrada malformada, e mantém a mensagem no mesmo formato
+    dos outros flags.
+    """
+    if not bruto:
+        return ()
+    if bruto.strip().lower() == "padrao":
+        return TAMANHOS_PADRAO
+    try:
+        tamanhos = tuple(
+            float(pedaco) for pedaco in bruto.split(",") if pedaco.strip()
+        )
+    except ValueError:
+        parser.error(
+            "--varredura-de-tamanho espera numeros separados por "
+            f"virgula, ou 'padrao'; recebi {bruto!r}"
+        )
+    if any(t <= 0 for t in tamanhos):
+        parser.error("--varredura-de-tamanho so aceita tamanhos positivos")
+    return tamanhos
+
+
+def _validacao_da_ancora(
+    resolvidas: list[WindowState], index: RecordingIndex
+) -> dict[str, Any]:
+    """Valida as hipóteses de âncora contra as resoluções REAIS.
+
+    Roda ANTES de qualquer uma delas ser usada no modelo. A varredura de τ
+    (M2.4) vem além das hipóteses nomeadas: engenharia reversa em inteiros
+    e18, no eixo de carimbo do servidor.
+    """
+    twap = [j for j in resolvidas if j.jogo == "twap"]
+    outcomes = [
+        WindowOutcome(
+            slug=j.slug,
+            open_ts_ns=j.open_ts_ns,
+            close_ts_ns=j.close_ts_ns,
+            samples=tuple(index.streams.get(j.asset, [])),
+            resolved_up=bool(j.resolveu_up),
+        )
+        for j in twap
+    ]
+    validacao = report_anchor_validation(evaluate_hypotheses(outcomes))
+    validacao["janelas_alimentadas"] = len(outcomes)
+    validacao["varredura_tau"] = varrer(
+        [
+            JanelaResolvida(
+                slug=j.slug,
+                asset=j.asset,
+                abertura_ms=j.open_ts_ns // 1_000_000,
+                fechamento_ms=j.close_ts_ns // 1_000_000,
+                resolveu_up=bool(j.resolveu_up),
+            )
+            for j in twap
+        ],
+        dict(index.streams_e18),
+    )
+    return validacao
+
+
+def _comparacao_de_entradas(
+    args: argparse.Namespace,
+    *,
+    curvas: CurvasPorAtivo | None,
+    faixa: float | None,
+    integras: list[WindowState],
+    streams: dict[str, list[tuple[int, float]]],
+) -> dict[str, Any]:
+    """Entrada única x múltipla, lado a lado, SEMPRE (M2.7 tarefa 3).
+
+    As três dentro da mesma faixa calibrada: comparar entrada múltipla no
+    regime irrestrito misturaria duas mudanças numa medição só.
+    """
+    cfg = {
+        "curvas_de_variancia": curvas,
+        "threshold_edge": args.threshold,
+        "latencia_ms": args.latencia_ms,
+        "tempo_restante_min_s": args.tempo_restante_min,
+        "tempo_restante_max_s": faixa,
+        "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+    }
+    return {
+        f"max_{n}_entradas": BacktestRunner(
+            BacktestConfig(**cfg, max_entradas_por_janela=n)
+        )
+        .run(integras, streams)
+        .to_dict()
+        for n in (1, 3, 10)
+    }
+
+
+def _comparacao_de_encolhimento(
+    args: argparse.Namespace,
+    *,
+    curvas: CurvasPorAtivo | None,
+    faixa_comparada: float | None,
+    integras: list[WindowState],
+    streams: dict[str, list[tuple[int, float]]],
+) -> dict[str, Any] | None:
+    """As duas rodadas do fator de encolhimento, lado a lado.
+
+    `None` quando não pediram fator. A ÚNICA variável entre as duas rodadas é
+    o encolhimento: mesma faixa, mesma latência, mesmo threshold, entrada
+    única.
+    """
+    if args.fator_de_encolhimento is None:
+        return None
+    cfg = {
+        "curvas_de_variancia": curvas,
+        "threshold_edge": args.threshold,
+        "latencia_ms": args.latencia_ms,
+        "tempo_restante_min_s": args.tempo_restante_min,
+        "tempo_restante_max_s": faixa_comparada,
+        "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
+        "max_entradas_por_janela": 1,
+    }
+    return {
+        "fator": args.fator_de_encolhimento,
+        "base": 0.5,
+        "faixa": {
+            "tempo_restante_min_s": args.tempo_restante_min,
+            "tempo_restante_max_s": faixa_comparada,
+        },
+        "comparacao": {
+            nome: BacktestRunner(BacktestConfig(**cfg, fator_de_encolhimento=fator))
+            .run(integras, streams)
+            .to_dict()
+            for nome, fator in (
+                ("sem_encolher", None),
+                ("encolhido", args.fator_de_encolhimento),
+            )
+        },
+        "nota": (
+            "As duas rodadas na faixa registrada em `faixa` (a calibrada, "
+            "ou a pedida na linha de comando), entrada unica, mesma "
+            "latencia e threshold — a UNICA variavel e o encolhimento. "
+            "A calibracao da variante e medida sobre a probabilidade "
+            "ENCOLHIDA, ponto a ponto: e o ECE real dela, nao a "
+            "aproximacao por faixas do resumo. VALIDADE: o fator deve "
+            "ter sido ajustado em periodo anterior ao desta gravacao; "
+            "se foi ajustado nesta, o resultado e in-sample e nao "
+            "sustenta veredito."
+        ),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _construir_parser()
     args = parser.parse_args(argv)
 
-    tamanhos_da_varredura: tuple[float, ...] = ()
-    if args.varredura_de_tamanho:
-        if args.varredura_de_tamanho.strip().lower() == "padrao":
-            tamanhos_da_varredura = TAMANHOS_PADRAO
-        else:
-            try:
-                tamanhos_da_varredura = tuple(
-                    float(pedaco)
-                    for pedaco in args.varredura_de_tamanho.split(",")
-                    if pedaco.strip()
-                )
-            except ValueError:
-                parser.error(
-                    "--varredura-de-tamanho espera numeros separados por "
-                    f"virgula, ou 'padrao'; recebi {args.varredura_de_tamanho!r}"
-                )
-            if any(t <= 0 for t in tamanhos_da_varredura):
-                parser.error("--varredura-de-tamanho so aceita tamanhos positivos")
+    tamanhos_da_varredura = _tamanhos_da_varredura(
+        parser, args.varredura_de_tamanho
+    )
 
     try:
         desde = _hora_utc(args.desde)
@@ -1922,38 +2080,7 @@ def main(argv: list[str] | None = None) -> int:
         >= minimo
     ]
 
-    # Âncora: valida as hipóteses contra as resoluções REAIS antes de usar
-    # qualquer uma delas no modelo.
-    outcomes = [
-        WindowOutcome(
-            slug=j.slug,
-            open_ts_ns=j.open_ts_ns,
-            close_ts_ns=j.close_ts_ns,
-            samples=tuple(index.streams.get(j.asset, [])),
-            resolved_up=bool(j.resolveu_up),
-        )
-        for j in resolvidas
-        if j.jogo == "twap"
-    ]
-    scores = evaluate_hypotheses(outcomes)
-    validacao = report_anchor_validation(scores)
-    validacao["janelas_alimentadas"] = len(outcomes)
-    # M2.4: as hipóteses nomeadas ficam como referência; a varredura de τ vem
-    # além delas — engenharia reversa em inteiros e18, eixo do servidor.
-    validacao["varredura_tau"] = varrer(
-        [
-            JanelaResolvida(
-                slug=j.slug,
-                asset=j.asset,
-                abertura_ms=j.open_ts_ns // 1_000_000,
-                fechamento_ms=j.close_ts_ns // 1_000_000,
-                resolveu_up=bool(j.resolveu_up),
-            )
-            for j in resolvidas
-            if j.jogo == "twap"
-        ],
-        dict(index.streams_e18),
-    )
+    validacao = _validacao_da_ancora(resolvidas, index)
 
     # ---------------------------------------------------------------- âncora
     # M2.6: a âncora deixou de ser hipótese. Até o M2.5 o simulador operava
@@ -2053,71 +2180,21 @@ def main(argv: list[str] | None = None) -> int:
     # A crua continua sendo a que alimenta os critérios pré-registrados; a
     # encolhida existe para responder se a correção de escala devolve o 1.1,
     # e a resposta só vale se o fator veio de período anterior ao avaliado.
-    comparacao_encolhimento = None
-    if args.fator_de_encolhimento is not None:
-        cfg_encolhimento = {
-            "curvas_de_variancia": curvas,
-            "threshold_edge": args.threshold,
-            "latencia_ms": args.latencia_ms,
-            "tempo_restante_min_s": args.tempo_restante_min,
-            "tempo_restante_max_s": faixa_comparada,
-            "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
-            "max_entradas_por_janela": 1,
-        }
-        comparacao_encolhimento = {
-            "fator": args.fator_de_encolhimento,
-            "base": 0.5,
-            "faixa": {
-                "tempo_restante_min_s": args.tempo_restante_min,
-                "tempo_restante_max_s": faixa_comparada,
-            },
-            "comparacao": {
-                nome: BacktestRunner(
-                    BacktestConfig(**cfg_encolhimento, fator_de_encolhimento=fator)
-                )
-                .run(integras, index.streams)
-                .to_dict()
-                for nome, fator in (
-                    ("sem_encolher", None),
-                    ("encolhido", args.fator_de_encolhimento),
-                )
-            },
-            "nota": (
-                "As duas rodadas na faixa registrada em `faixa` (a calibrada, "
-                "ou a pedida na linha de comando), entrada unica, mesma "
-                "latencia e threshold — a UNICA variavel e o encolhimento. "
-                "A calibracao da variante e medida sobre a probabilidade "
-                "ENCOLHIDA, ponto a ponto: e o ECE real dela, nao a "
-                "aproximacao por faixas do resumo. VALIDADE: o fator deve "
-                "ter sido ajustado em periodo anterior ao desta gravacao; "
-                "se foi ajustado nesta, o resultado e in-sample e nao "
-                "sustenta veredito."
-            ),
-        }
-
-    # M2.7 tarefa 3: entrada unica x multipla, lado a lado, SEMPRE — e as
-    # duas dentro da faixa calibrada, que e a configuracao que produziu o
-    # primeiro PnL positivo do projeto. Comparar entrada multipla no regime
-    # irrestrito misturaria duas mudancas numa medicao so.
-    faixa_para_entradas = (
-        args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
+    comparacao_encolhimento = _comparacao_de_encolhimento(
+        args,
+        curvas=curvas,
+        faixa_comparada=faixa_comparada,
+        integras=integras,
+        streams=index.streams,
     )
-    cfg_entradas = {
-        "curvas_de_variancia": curvas,
-        "threshold_edge": args.threshold,
-        "latencia_ms": args.latencia_ms,
-        "tempo_restante_min_s": args.tempo_restante_min,
-        "tempo_restante_max_s": faixa_para_entradas,
-        "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
-    }
-    comparacao_entradas = {
-        f"max_{n}_entradas": BacktestRunner(
-            BacktestConfig(**cfg_entradas, max_entradas_por_janela=n)
-        )
-        .run(integras, index.streams)
-        .to_dict()
-        for n in (1, 3, 10)
-    }
+
+    comparacao_entradas = _comparacao_de_entradas(
+        args,
+        curvas=curvas,
+        faixa=faixa_comparada,
+        integras=integras,
+        streams=index.streams,
+    )
 
     relatorio: dict[str, Any] = {
         "gravacao": {
@@ -2209,14 +2286,14 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "entradas_por_janela": {
-            "faixa_aplicada_s": faixa_para_entradas,
+            "faixa_aplicada_s": faixa_comparada,
             # Os DOIS limites, como no bloco `encolhimento`: `faixa_aplicada_s`
             # sozinho vem do maximo e fica `null` numa invocacao so com
             # `--tempo-restante-min`, fazendo o experimento parecer irrestrito
             # quando nao e — e sem reproduzir pelo JSON (achado em review).
             "faixa": {
                 "tempo_restante_min_s": args.tempo_restante_min,
-                "tempo_restante_max_s": faixa_para_entradas,
+                "tempo_restante_max_s": faixa_comparada,
             },
             "intervalo_minimo_s": max(0.0, args.intervalo_entradas),
             "comparacao": comparacao_entradas,

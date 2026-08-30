@@ -1,52 +1,51 @@
 # ESTADO — o que falta para operar com dinheiro real
 
-> ## ⛔ BLOCO 1 SUSPENSO EM 2026-08-29 — aguardando a rodada de remediação
+> ## ✅ BLOCO 1 DESSUSPENSO EM 2026-08-30 — a remediação rodou, e mudou o veredito
 >
-> Achado um defeito no modelo (`prob_up_twap`): a variância do TWAP de
-> fechamento ignorava o tempo que o preço caminha ANTES de a janela de 60 s
-> começar. Para `seconds_left > 60` o desvio ficava congelado no valor de
-> 60 s — 31 % do real a 240 s, 27 % a 300 s. É a causa mecânica da
-> superconfiança que reprova o 1.3, e explica o viés "MISTO e SEM ORDEM"
-> da §2d: o tamanho do erro depende do horizonte, então nenhum fator único
-> de encolhimento podia corrigi-lo.
+> O defeito de variância do `prob_up_twap` foi corrigido e, mais que isso,
+> **substituído por medição**: a §13.8 já tinha VERIFICADO que a janela resolve
+> por um ponto do stream `twap_sixty`, não por uma média que nós calculemos, e
+> o modelo derivado subestimava a variância em **39 a 48 vezes** (6,3× no
+> desvio) por três erros compostos. A `V(t)` agora é medida em dado real, num
+> dia ANTERIOR ao avaliado (curva de 23/08 → avaliação de 24/08), com guarda de
+> in-sample em código.
 >
-> Corrigido — **e não basta.** A revisão do PR #44 mostrou um defeito mais
-> fundo: o modelo estima a probabilidade de uma média de 60 amostras de preço
-> bruto, mas a §13.8 do `API_NOTES.md` já tinha VERIFICADO que a janela
-> resolve por **um ponto só** do stream `twap_sixty` no fechamento, sem média
-> nenhuma — e é esse mesmo stream já suavizado que alimenta o `sigma_1s` e o
-> "spot" do modelo. **A rodada de remediação está SUSPENSA** até o observável
-> ser o certo; rodá-la agora mediria um modelo ainda mal especificado.
->
-> **Enquanto isso, os itens 1.1 a 1.4 e o 2.3 desta página são histórico, não
-> estado corrente** — inclusive o "+2,7125 na banda", porque a banda foi
-> escolhida por uma curva calculada com o preditor defeituoso.
->
-> Continuam valendo, porque não passam pelo preditor: **1.5** (profundidade
-> de book), **1.6 a 1.10** (rota maker), a âncora, e todos os Blocos 0, 3, 4
-> e 5.
+> **O que a rodada produziu:** o **1.3 passa** — e a borda some junto. Os itens
+> 1.1 a 1.4 desta página estão atualizados com os números do modelo medido; o
+> "+2,7125 na banda" foi para o histórico. A atribuição causal dele à
+> superconfiança é inferência, não medição — a delimitação está na §2d-ter.
 
-**Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou. Sobre
-24 h de captação impecável o TAKER **irrestrito** mede −53,28 USDC. A §2d-bis
-do VEREDITO_M2 mandava procurar uma banda de horizonte com edge, e ela existe:
-**240-120 s**, 640 trades, **+2,7125 USDC**, `hit_rate` 0,7063. Restrito a essa
-banda o placar do taker é **3 PASSA / 2 REPROVA** (1.1, 1.2, 1.4 ✅ · 1.3,
-1.5 ❌). Como o critério pré-registrado exige as CINCO, **o taker segue
-reprovado**. O MAKER continua barrado pelo 1.10 e pelo 1.6 (não avaliável por
-construção) — o 1.9 passou a 0,20 % sob a emenda registrada no VEREDITO_M2.
-Nenhuma das duas rotas sustenta ir a dinheiro real hoje.
+**Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou de
+novo, e desta vez para pior. Com o preditor consertado
+(`relatorios/M2_24AGO_MEDIDO.json`, curva de 23/08 sobre o dia 24/08), o
+**1.3 passa nos cinco baldes** — `erro_de_confiabilidade` de **0,0126** a
+**0,0493**, todos com 20 faixas ocupadas e `calibracao_avaliavel: true`,
+contra 0,207 na banda com o modelo derivado. **E a borda desapareceu no mesmo
+movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
+cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
+1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
+por ausência de borda e por capacidade, não mais por calibração. O MAKER
+continua barrado pelo 1.10 e pelo 1.6 (não avaliável por construção).
 
-**O que reprova agora não é PnL nem latência — é 1.3 e 1.5.** Na banda o edge
-de direção é real e decai de forma **monótona** com a latência (+3,3119 a
-150 ms → +0,4736 a 1000 ms): a assinatura de sinal sendo corroído, não de
-ruído. Mas o preditor **acerta a direção ~71 % das vezes e erra a
-probabilidade** — ECE de **0,207** na própria banda, com ~75 mil das ~79 mil
-previsões despejadas nos extremos (0-0,05 e 0,95-1,00) e viés **MISTO e SEM
-ORDEM** (11 faixas otimistas, 9 pessimistas), o que fecha também a saída do
-encolhimento (§2d). E o 1.5 é teto de **capacidade**: p50 de 128 USDC a 3 ticks
-contra os 200 exigidos — restringir horizonte não cria liquidez. **Nenhuma das
-duas causas se resolve escolhendo horizonte ou escala, que eram as duas
-hipóteses pré-registradas.** O taker está esgotado como rota nestes mercados.
+**A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
+banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
+1000 ms), e eu citava esse decaimento como evidência de sinal direcional real.
+Com o modelo medido o PnL **melhora** com latência (−67,94 a 150 ms → −55,78 a
+1000 ms). O que isso estabelece é que **a evidência que eu invocava antes não
+sobrevive** — mesmo instrumento, sinal oposto. O que NÃO estabelece é ausência
+de direção: a varredura mantém o sinal fixo e troca só o book do fill, então
+ela mexe no preço de entrada e na coorte de trades ao mesmo tempo (ver §2d-ter
+do `VEREDITO_M2.md`). Quem carrega a conclusão é o resto — PnL negativo nas
+**cinco** bandas e `hit_rate` 0,4172, abaixo de 0,5 no lado escolhido pelo
+modelo. **Sobre o +2,7125:** a leitura de que ele vinha do desvio-padrão 6,3×
+pequeno demais — `P(Up)` saturado em 0 e 1, amostra pequena fazendo o resto — é
+a explicação mais econômica, e não está medida. O preditor corrigido opera
+outra coorte de trades, então esta rodada não testa aqueles 640. O que está
+medido é que a regra corrigida perde. A delimitação completa está na §2d-ter.
+
+**O 1.5 reprova por motivo independente e continua igual:** p50 de 128,05 USDC
+a 3 ticks contra os 200 exigidos. É teto de **capacidade** do book — nenhum
+conserto de preditor o resolve, e restringir horizonte não cria liquidez.
 
 Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
 exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
@@ -57,15 +56,19 @@ ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
 pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
 1.6 (não avaliável sem posição na fila).
 
-Atualizado: 2026-08-29 · fonte dos números: **24 horas** de gravação real de
-2026-08-24, 126,7 M registros, `pior_fracao_coberta 1,0` e 0 silêncios —
-irrestrito em `relatorios/M2_24AGO.json` (695 trades), na banda em
-`relatorios/HORIZONTE_240_120_v2.json` (640 trades). O veredito anterior, de
-20 h com 837 s de silêncio e 42% dos snapshots descartados, está preservado em
-`docs/VEREDITO_M2.md` para comparação.
+Atualizado: 2026-08-30 · fonte dos números correntes:
+**`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
+2026-08-24 (126,7 M registros, `pior_fracao_coberta 1,0`, 0 silêncios),
+avaliadas com o preditor de variância **medida** sobre a curva de 23/08
+(`relatorios/VARIANCIA_23AGO.json`), 688 trades. As rodadas do preditor
+derivado — `M2_24AGO.json` (695 trades) e `HORIZONTE_240_120_v2.json`
+(640 trades) — passaram a ser **histórico**, e é delas que vêm os números do
+**restante do Bloco 1**, da tabela de critérios até o fim daquele bloco. Os
+demais blocos são estado corrente. O veredito de 20 h, com 837 s de silêncio e
+42% dos snapshots descartados, segue em `docs/VEREDITO_M2.md`.
 
-> Como ler: **✅** passou com dado real · **✅ *na banda*** passou só quando
-> restrito à faixa 240-120 s de tempo restante · **❌** medido e reprovado ·
+> Como ler: **✅** passou com dado real · **✅ *na banda*** (só no histórico)
+> passou apenas restrito à faixa 240-120 s de tempo restante · **❌** medido e reprovado ·
 > **🟡** parcial · **⚠️** não avaliável por construção · **⏳** sem amostra
 > suficiente · **⬜** não existe / não começou.
 > Um item só vira ✅ com número de gravação real. Número de gravação
@@ -146,19 +149,30 @@ Critérios escritos **antes** dos números, em `VEREDITO_M2.md`. Não são
 negociáveis depois do resultado.
 
 Amostra: **24 horas de 2026-08-24**, `pior_fracao_coberta` 1,0 nos oito
-ativos, **0 silêncios**, 896 janelas conhecidas, 695 trades. A rodada levou
-73 min. A amostra anterior — 20 h de 23/08, com 837 s de silêncio e 42% dos
-snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
+ativos, **0 silêncios**, 896 janelas conhecidas, **688 trades** com o preditor
+de variância medida. A amostra anterior — 20 h de 23/08, com 837 s de silêncio
+e 42% dos snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 
-### TAKER — na banda 240-120 s: 3 passa, 2 reprova (o critério exige as 5)
+### TAKER — 2 passa, 3 reprova (o critério exige as 5)
 
-| # | Critério | Exigido | Medido (24 h) | |
+Sem restrição de banda: com o preditor corrigido não há banda de horizonte com
+edge para restringir a (`bandas_com_edge: []`).
+
+| # | Critério | Exigido | Medido (24 h, modelo MEDIDO) | |
 |---|---|---|---|---|
-| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | irrestrito **−53,2777**; **na banda 240-120s: +2,7125** | ✅ *na banda* |
-| 1.2 | Número de trades | ≥ 200 | **695** | ✅ |
-| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | melhor balde **0,0694** (`<30s`, 20 faixas); **na banda operada: 0,207**, viés MISTO e SEM ORDEM | ❌ **é uma das duas causas que sobram** |
-| 1.4 | Positivo também a 600 ms | sim | **+1,3488 USDC** na banda (o −54,3953 era população errada, PR #41) | ✅ *na banda* |
+| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **−67,2744** · `bandas_com_edge: []` — nenhuma das cinco bandas positiva | ❌ **causa nova** |
+| 1.2 | Número de trades | ≥ 200 | **688** | ✅ |
+| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **os cinco baldes passam**: 0,0126 (`<30s`) · 0,0285 · 0,0319 · 0,0452 · 0,0493, todos com 20 faixas ocupadas | ✅ **resolvido pela §2d-ter** |
+| 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
 | 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
+
+**⬇️ Daqui até o fim do Bloco 1 é histórico. A tabela acima é o estado
+corrente.** Os números de 1.1 a 1.4 vinham do preditor com a variância
+derivada, que subestimava o desvio-padrão em 6,3×. O que vem a seguir — o
+"+2,7125 na banda", o decaimento monótono com a latência, o ECE de 0,207 —
+descreve aquele preditor, e fica no documento porque é como se chegou aqui.
+**O escopo é este bloco só:** os Blocos 2 em diante já trazem os números
+correntes, e a tabela de pendências no fim da página também.
 
 **1.1 inverteu duas vezes, e a última leitura é a que tem lastro.** 5 h deram
 −41,57; 20 h deram +102,92; 24 h limpas dão **−53,28**. A gravação de 20 h
@@ -335,15 +349,17 @@ silêncio de conexão inteira de 3.600,67 s. Os números agora concordam entre s
 O relatório também ganhou `buracos_s` e `silencio_inicial_s` — a borda da
 frente, que só o `silencio_final_s` não via.
 
+**⬆️ Fim do histórico do Bloco 1.** Daqui para baixo, estado corrente.
+
 ---
 
 ## Bloco 2 — M3: modelo e calibração
 
 | # | Item | Estado |
 |---|---|---|
-| 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py`, coberto por 24 testes |
+| 2.1 | Modelo TWAP endgame | ✅ `engine/twap.py` — variância agora **medida** (`engine/variancia.py`), não derivada; a derivada errava por 39–48× |
 | 2.2 | Modelo horário | ✅ `engine/hourly.py` |
-| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA** — 0,0694 no melhor balde (`<30s`); **0,207 na banda operada**, viés MISTO e SEM ORDEM, ~75 mil de ~79 mil previsões nos extremos |
+| 2.3 | Curva de calibração sobre gravação real | ✅ **MEDIDA e CALIBRADA** — ECE de **0,0126 a 0,0493** nos cinco baldes, 20 faixas ocupadas em cada. *(Com o preditor derivado eram 0,0694 no melhor balde e 0,207 na banda operada, viés MISTO e SEM ORDEM — ver abaixo.)* |
 
 ### O 2.3 mudou de natureza, não só de estado
 
@@ -370,8 +386,16 @@ mais 23 do dia 23 e 5 do dia 25.
 Ou seja: o que faltava no 2.3 **não era código nem dado** — era rodar o
 backtest com o instrumento novo sobre a gravação que já existia. **Rodou.** A
 mesma rodada fechou o 2.3 do M3 e tirou o critério 1.3 do M2 do limbo do "não
-avaliado": ele está **avaliado e reprovado**, com `calibracao_avaliavel` true e
-ECE 0,207 na banda operada.
+avaliado": ele ficou **avaliado e reprovado**, com `calibracao_avaliavel` true
+e ECE 0,207 na banda operada.
+
+**E em 30/08 o 1.3 deixou de reprovar.** O ECE de 0,207 não era defeito do
+sinal: era a variância derivada subestimando o desvio-padrão em 6,3×, o que
+saturava `P(Up)` nos extremos — exatamente as ~75 mil previsões de ~79 mil
+citadas acima. Com a `V(t)` medida em dia anterior ao avaliado (§2d-ter do
+`VEREDITO_M2.md`), o ECE cai para 0,0126–0,0493 nos cinco baldes. Os números
+dos três parágrafos anteriores descrevem o instrumento antigo e ficam como
+registro de como se chegou aqui.
 
 ---
 
@@ -505,10 +529,62 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ⬜ **sem fonte de deriva no caminho ao vivo** |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ✅ **2026-08-30**: `live/relogio.py` mede, `RiskSettings.atraso_max_ms` corta em 250 ms, e em LIVE **sem fonte instalada é recusa**. Falta só o ciclo ao vivo construir o portão com a fonte — mesmo buraco do 3.13 |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
-| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — 28 no portão + 19 nas travas novas |
+| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **73**: 36 no portão, 27 nas travas novas, 10 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
+
+### A terceira trava do 3.10 existia no papel e não na máquina
+
+Feed velho e spread anômalo eram medidos desde o M4.1/M4.4. "Relógio > 250 ms"
+estava escrito no item desde a especificação e **nunca teve fonte**: nada no
+caminho ao vivo produzia esse número, então o portão não podia recusar por ele
+nem quando fosse verdade. Uma trava sem fonte é uma linha de documento.
+
+**O que passou a ser medido, e o que NÃO passou.** Cada tick do feed-verdade
+traz o carimbo do servidor. Quando ele chega, o `live/relogio.py` compara com
+o nosso relógio:
+
+    atraso = chegada_local − carimbo_do_servidor
+
+Isso **não é** a deriva do relógio: é deriva **mais** latência de rede **mais**
+fila no processo, somadas e não separáveis com uma fonte só. Por isso o campo
+publicado se chama `atraso_mediano_ms`, e não `deriva_ms` — e há um teste que
+quebra se alguém renomear, porque o nome prometeria uma decomposição que a
+medição não faz.
+
+**Serve assim mesmo, e serve bem:** o atraso é um limite SUPERIOR da deriva.
+Pequeno prova relógio bom. Grande não diz qual das três causas é — e nenhuma
+das três é aceitável para quem decide por `seconds_left`, que é a distância
+entre o NOSSO agora e o fechamento da janela. Relógio adiantado 300 ms e rede
+atrasada 300 ms produzem o mesmo erro na mesma direção: operar achando que
+sobra mais tempo do que sobra.
+
+**Três decisões que valem registro, porque as três são recusas:**
+
+- **Não saber custa o mesmo que saber que está ruim.** Fonte instalada e muda
+  — nunca chegou tick, ou o último tem mais de 10 s — recusa com
+  `relogio_nao_monitorado`. Tratar não-sei como zero seria a nota máxima do
+  critério que a trava existe para reprovar; é o defeito do
+  `cobertura_da_gravacao`, que o M2 já pagou uma vez.
+- **Em LIVE, sem fonte instalada, recusa tudo.** É a decisão menos confortável
+  do arquivo e é deliberada: uma trava que se auto-desativa quando ninguém a
+  ligou não é trava. Fora do LIVE a ausência não recusa — o SHADOW existe para
+  ensaiar, e recusar tudo ali apagaria a informação que justifica o ensaio.
+- **Carimbo no futuro recusa igual.** O servidor não manda evento do futuro:
+  se o carimbo dele está à frente do nosso relógio, quem está errado somos
+  nós. A comparação é em módulo; olhar só o lado positivo deixaria metade do
+  defeito passar.
+
+**Como isso apareceu:** ao ligar a trava, **todos** os testes de caminho LIVE
+passaram a recusar por `relogio_nao_monitorado`. Era o comportamento correto —
+e a prova de que a trava é real, e não decorativa. Os testes passaram a
+instalar a fonte, como o ciclo ao vivo terá de fazer.
+
+**O que ainda falta:** o ciclo ao vivo construir o `PortaoDeRisco` passando a
+fonte. Não existe ponto de construção hoje — é o mesmo buraco do 3.13, logo
+abaixo. Enquanto não existir, o LIVE recusaria tudo, que é o lado certo para
+errar.
 
 ### O que falta para o SHADOW rodar de verdade
 
@@ -718,18 +794,22 @@ aparecer. Fica o registro da hipótese nunca testada: supply-chain,
 
 Hoje nenhum dos três está liberado.
 
-## As três pendências que realmente travam, e o que destrava cada uma
+## As pendências que realmente travam, e o que destrava cada uma
 
 Todo o resto do quadro é ou trabalho já feito, ou trabalho que só depende de
-tempo de máquina. Estas três não:
+tempo de máquina. Estas não — a primeira linha fica na tabela riscada, porque
+saber o que deixou de travar é parte do estado:
 
 | Pendência | Natureza | O que destrava |
 |---|---|---|
-| **1.3 calibração** (ECE 0,207 na banda, viés MISTO e SEM ORDEM) | defeito do **sinal** — acerta a direção, erra a probabilidade | modelo novo, não mais dado nem mais varredura; a §2d já rejeitou o encolhimento e o "sem ordem" fecha a saída da escala |
+| ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
+| **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
 
-E uma quarta, que é metodológica e vale para qualquer resultado acima: **um dia
-não é veredito**. Repetir a banda 240-120 s em dias independentes é o único
-caminho que separa edge de sobreajuste, e nenhum número desta página passou por
-esse teste ainda.
+E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
+não é veredito**. A rodada de 30/08 é o primeiro número desta página com
+separação de dias — a curva de variância vem de 23/08 e a avaliação é de 24/08,
+com recusa em código se as datas se cruzarem. Isso cobre o preditor; não cobre
+o resto. Qualquer edge que apareça daqui em diante continua precisando de dias
+independentes para separar borda de sobreajuste.

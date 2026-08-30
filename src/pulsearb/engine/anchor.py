@@ -74,22 +74,42 @@ def compute_anchor(
         return depois[0][1] if depois else None
 
     if hypothesis is AnchorHypothesis.MAIS_PROXIMO:
-        candidatos = []
-        if antes:
-            candidatos.append(antes[-1])
-        if depois:
-            candidatos.append(depois[0])
-        if not candidatos:
-            return None
-        return min(candidatos, key=lambda s: abs(s[0] - open_ts_ns))[1]
+        return _mais_proximo(antes, depois, open_ts_ns)
 
     if hypothesis is AnchorHypothesis.TWAP_NA_ABERTURA:
         corte = open_ts_ns - int(window_seconds * 1e9)
         janela = [p for ts, p in samples if corte <= ts <= open_ts_ns]
         return sum(janela) / len(janela) if janela else None
 
-    # INTERPOLADO — sem os dois lados não há o que interpolar; cai para o
-    # único lado disponível.
+    return _interpolado(antes, depois, open_ts_ns)
+
+
+def _mais_proximo(
+    antes: list[tuple[int, float]],
+    depois: list[tuple[int, float]],
+    open_ts_ns: int,
+) -> float | None:
+    """A amostra mais perto da abertura, de qualquer um dos dois lados."""
+    candidatos = []
+    if antes:
+        candidatos.append(antes[-1])
+    if depois:
+        candidatos.append(depois[0])
+    if not candidatos:
+        return None
+    return min(candidatos, key=lambda s: abs(s[0] - open_ts_ns))[1]
+
+
+def _interpolado(
+    antes: list[tuple[int, float]],
+    depois: list[tuple[int, float]],
+    open_ts_ns: int,
+) -> float | None:
+    """Interpolação linear entre os vizinhos da abertura.
+
+    Sem os dois lados não há o que interpolar: cai para o único lado
+    disponível, que é o comportamento das hipóteses de vizinho único.
+    """
     if not antes:
         return depois[0][1] if depois else None
     if not depois:

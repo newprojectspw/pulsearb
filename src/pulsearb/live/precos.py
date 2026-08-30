@@ -22,12 +22,14 @@ recém-iniciado não opera nada por até uma janela inteira.** Não é defeito, 
 
 from __future__ import annotations
 
+import time
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.analysis.anchor_sweep import IDADE_MAX_MS, StreamE18
 from pulsearb.engine.twap import RealizedVol, TwapTracker
+from pulsearb.live.relogio import RelogioDoServidor
 from pulsearb.obs.logging import get_logger
 
 log = get_logger(__name__)
@@ -121,14 +123,38 @@ class PrecosAoVivo:
     """O preço-verdade de todos os ativos, e a âncora de cada janela."""
 
     por_ativo: dict[str, PrecosPorAtivo] = field(default_factory=dict)
+    #: A fonte de atraso do item 3.10, alimentada por todo tick que entra.
+    #: Mora aqui porque aqui é onde os ticks passam — uma fonte pendurada em
+    #: outro lugar teria de ser alimentada por alguém que lembre de fazê-lo.
+    relogio: RelogioDoServidor = field(default_factory=RelogioDoServidor)
     #: Âncoras já resolvidas, por `condition_id`. Uma vez fixada, NÃO muda:
     #: a âncora é o valor da abertura, e a abertura acontece uma vez só.
     ancoras: dict[str, float] = field(default_factory=dict)
     sem_ancora: dict[str, int] = field(default_factory=dict)
 
-    def anotar(self, asset: str, *, valor_e18: int, ts_servidor_ms: int) -> None:
+    def anotar(
+        self,
+        asset: str,
+        *,
+        valor_e18: int,
+        ts_servidor_ms: int,
+        chegada_ms: int | None = None,
+    ) -> None:
+        """Um tick do feed-verdade.
+
+        `chegada_ms` é o NOSSO relógio no momento em que o tick chegou, e
+        alimenta a trava de relógio (item 3.10). Omitir não inventa um valor:
+        a amostra simplesmente não entra, e o portão passa a dizer "não sei" —
+        que é recusa. Inventar `agora` aqui daria atraso zero para quem
+        reproduz gravação, e atraso zero é a nota máxima do critério que a
+        trava existe para reprovar.
+        """
         ativo = self.por_ativo.setdefault(asset, PrecosPorAtivo(asset=asset))
         ativo.anotar(valor_e18=valor_e18, ts_servidor_ms=ts_servidor_ms)
+        if chegada_ms is not None:
+            self.relogio.anotar(
+                ts_servidor_ms=ts_servidor_ms, chegada_ms=chegada_ms
+            )
 
     def ancora_da_janela(
         self, *, asset: str, condition_id: str, abertura_epoch: float
@@ -189,6 +215,9 @@ class PrecosAoVivo:
                 if p.serie_e18.fora_de_ordem
             },
             "ancoras_fixadas": len(self.ancoras),
+            "relogio_do_servidor": self.relogio.resumo(
+                agora_ms=int(time.time() * 1000)
+            ),
             "sem_ancora": dict(sorted(self.sem_ancora.items())),
             "nota": (
                 "`serie_nao_alcanca_a_abertura` alto logo apos subir o bot e "

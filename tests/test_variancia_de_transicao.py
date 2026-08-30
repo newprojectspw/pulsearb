@@ -339,7 +339,9 @@ def test_dia_hostil_e_recusado_antes_do_glob(tmp_path):
     assert len(script.arquivos_do_dia(valido, "20260823")) == 1
 
 
-def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(tmp_path, capsys):
+def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(
+    tmp_path, capsys, monkeypatch
+):
     """O comando documentado tem de produzir relatório utilizável.
 
     Achado em review: o docstring do módulo mostrava o comando SEM `--dia`, e
@@ -356,6 +358,12 @@ def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(tmp_path, capsys):
     diretorio.mkdir()
     gerar_gravacao(diretorio / "rec.jsonl.gz", n_janelas=8)
 
+    # A saída é contida sob `tmp_path`, como TODO teste que chama o `main`
+    # faz. Sem isto, `caminho_de_escrita` cai no diretório de trabalho — que
+    # aqui é a raiz do repositório — e o teste grava um relatório dentro do
+    # projeto. Foi o que aconteceu: `relatorios/exploratorio.json` chegou a
+    # ser commitado, varrido por um `git add -A`.
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     saida = tmp_path / "relatorios"
     saida.mkdir()
     codigo = script.main(
@@ -363,3 +371,5 @@ def test_sem_dia_o_relatorio_sai_marcado_como_exploratorio(tmp_path, capsys):
     )
     assert codigo == 0
     assert "EXPLORATORIO" in capsys.readouterr().err
+    # E o relatório saiu ONDE se mandou, não no diretório de trabalho.
+    assert (saida / "exploratorio.json").is_file()

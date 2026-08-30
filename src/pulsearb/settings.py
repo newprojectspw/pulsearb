@@ -156,6 +156,14 @@ class RiskSettings(BaseModel):
     #: spread de 0,04 o custo de atravessar iguala o edge exigido, e o trade
     #: nao pode ganhar por construcao.
     spread_maximo: float = 0.04
+    #: Teto do atraso entre o carimbo do servidor e a nossa chegada
+    #: (item 3.10). NAO e so deriva de relogio: e deriva mais latencia de rede
+    #: mais fila no processo, somadas — ver `live/relogio.py`. Serve como
+    #: limite superior da deriva, e e o numero certo para o portao porque a
+    #: decisao inteira se apoia em `seconds_left`, a distancia entre o NOSSO
+    #: agora e o fechamento da janela. 250 ms e o valor que o ESTADO_PARA_LIVE
+    #: carrega no item 3.10 desde que a trava foi especificada.
+    atraso_max_ms: float = 250.0
     #: Onde o registro do dia mora. Precisa sobreviver a reinicio.
     caminho_do_registro: str = "data/risco/registro_do_dia.json"
     #: A chave de emergencia. Enquanto este arquivo existir, nenhuma ordem

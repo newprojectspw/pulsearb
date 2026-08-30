@@ -9,6 +9,7 @@ from pulsearb.live.livros import LivroDoToken, LivrosAoVivo
 from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo, PrecosPorAtivo, SerieE18AoVivo
 from pulsearb.live.rastreador import JanelaAoVivo, RastreadorDeJanelas
+from pulsearb.live.relogio import RelogioDoServidor
 
 __all__ = [
     "ConfigDoMotor",
@@ -19,5 +20,6 @@ __all__ = [
     "PrecosAoVivo",
     "PrecosPorAtivo",
     "RastreadorDeJanelas",
+    "RelogioDoServidor",
     "SerieE18AoVivo",
 ]

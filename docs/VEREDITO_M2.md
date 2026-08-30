@@ -1,31 +1,43 @@
 # VEREDITO M2 — existe edge líquido?
 
-> ## ⛔ NÚMEROS DE 1.1 A 1.4 E DE 2.3 SUSPENSOS EM 2026-08-29
+> ## ✅ A REMEDIAÇÃO RODOU EM 2026-08-30 — e os números de 1.1 a 1.4 e de 2.3 são OUTROS
 >
-> Foi encontrado um defeito no `prob_up_twap` que subestimava o desvio-padrão
-> do TWAP de fechamento em 2 a 3,6 vezes para todo `seconds_left > 60` — o
-> balde `>240s` inteiro e a banda operada 240-120 s inteira. Ele é a causa
-> mecânica da superconfiança que o 1.3 mede, e explica por que o encolhimento
-> da §2d saiu "MISTO e SEM ORDEM".
+> O `prob_up_twap` tinha um defeito de variância que, somado a outros dois
+> erros, subestimava a variância do TWAP de fechamento em **39 a 48 vezes**
+> (6,3× no desvio-padrão). A saída não foi corrigir a derivação: foi
+> **substituí-la por medição**, do mesmo jeito que a §13.8 fez com a âncora. A
+> `V(t)` agora vem de dado real, medida em dia ANTERIOR ao avaliado (curva de
+> 23/08 → avaliação de 24/08), com recusa em código se as datas se cruzarem.
 >
-> Corrigido — mas o conserto **não é suficiente**, e a rodada de remediação
-> está **SUSPENSA**: a revisão do PR #44 mostrou que o modelo também erra o
-> OBSERVÁVEL, contra a §13.8 deste mesmo repositório. Ver §2d-ter, subseção
-> "o defeito maior". Até isso ser resolvido, todo número de 1.1 a 1.4 e do 2.3
-> nesta página é **histórico**, não corrente — **inclusive o +2,7125 da
-> banda**, porque a banda foi escolhida por uma curva calculada com o
-> preditor defeituoso.
+> **Resultado (§2d-ter, subseção "O RESULTADO"):** o **1.3 passa** nos cinco
+> baldes (ECE 0,0126–0,0493, contra 0,207 na banda) — **e a borda some junto**:
+> 688 trades, PnL −67,27, `bandas_com_edge: []` e `hit_rate` 0,4172. O taker
+> reprova agora por 1.1, 1.4 e 1.5.
 >
-> Seguem valendo: o **1.5** (estrutura de book, não passa pelo preditor — o
-> teto de 128 USDC contra 200 continua de pé), o 1.7, 1.8 e 1.9 (rota maker),
-> a âncora τ=0 e o `hourly.py`.
+> **O que é histórico, exatamente:** os números de 1.1 a 1.4 e do 2.3 nas
+> seções de veredito abaixo — o **SEGUNDO VEREDITO** (24 h de 24/08) e tudo o
+> que vem depois dele até a §2d-ter. Vêm do preditor com variância derivada, e
+> ficam no documento porque são o registro de como se chegou aqui. **Inclusive
+> o +2,7125 da banda** (ver a delimitação da conclusão causal na §2d-ter).
+>
+> **Duas partes deste arquivo NÃO são histórico**, apesar de virem depois: a
+> subseção "O RESULTADO" da §2d-ter, e o placar corrente em "Placar dos 10
+> critérios pré-registrados" — os dois estão rotulados no lugar. Fora daqui, o
+> estado corrente está no `ESTADO_PARA_LIVE.md`.
+>
+> Nunca passaram pelo preditor, e seguem valendo como estão: o **1.5**
+> (estrutura de book — o teto de 128 USDC contra 200 continua de pé), o 1.7,
+> 1.8 e 1.9 (rota maker), a âncora τ=0 e o `hourly.py`.
 
-**Status: SEGUNDO VEREDITO em 2026-08-26, sobre 24 h limpas — e ele DERRUBA
-o primeiro. Ver a seção logo abaixo.**
+**Status: TERCEIRO VEREDITO em 2026-08-30**, sobre as mesmas 24 h limpas mas
+com o preditor de variância medida — **1.3 passa, e a borda some**. Está na
+§2d-ter, subseção "O RESULTADO". As duas seções logo abaixo são o segundo
+veredito (2026-08-26) e o primeiro (2026-08-23), preservados na ordem em que
+foram escritos.
 
 Data: 2026-08-16 · atualizado 2026-08-21 (M2.5) · veredito 2026-08-23 ·
-**reveredito 2026-08-26 sobre 2026-08-24** · **defeito de variância achado e
-corrigido 2026-08-29 (§2d-ter)**
+reveredito 2026-08-26 sobre 2026-08-24 · defeito de variância achado e
+corrigido 2026-08-29 · **remediação medida e rodada 2026-08-30 (§2d-ter)**
 
 ---
 
@@ -1101,6 +1113,70 @@ avalia em 24/08.** A curva de 24/08 fica como controle — se as duas
 discordarem muito, a própria estabilidade de V(t) entre dias vira pergunta
 aberta, e isso é resultado, não obstáculo.
 
+#### E ela FOI medida — a curva de 23/08, e uma previsão antes da rodada
+
+> **Ordem de leitura, porque este documento é o registro do experimento:**
+> tudo acima desta linha foi escrito ANTES de a curva de 23/08 existir. O
+> que vem a seguir é o resultado dela, mais uma previsão feita antes de a
+> rodada de remediação existir. A cronologia é o que dá valor ao
+> pré-registro; misturá-la apagaria a prova de que a regra veio primeiro.
+
+*(A previsão abaixo está no commit `f59dc79` deste repositório, e o resultado
+só entrou em `4760669`, dois commits depois — há revisão do repositório que
+contém a previsão sem o desfecho. A ordem das linhas é conveniência de leitura;
+a prova é o histórico.)*
+
+`relatorios/VARIANCIA_23AGO.json`, 653.680 ticks, `dia_medido: 20260823`, oito
+ativos avaliáveis e unânimes, nenhum tick sem relógio de origem, fator de
+suavização entre **33,5 e 38,5** (contra 34,1 a 45,6 no dia 24). Dois arquivos
+do dia 23 vieram com o gzip quebrado e foram abandonados; sobraram ~81,7 mil
+amostras por ativo, contra ~81,4 mil no dia 24.
+
+**Comparando as duas curvas do btc, horizonte a horizonte:**
+
+| t (s) | V(23)/V(24) |
+|---|---|
+| 1 | 0,463 |
+| 2 | 0,499 |
+| 5 | 0,498 |
+| 10 | 0,505 |
+| 30 | 0,517 |
+| 60 | 0,521 |
+| 120 | 0,518 |
+| 180 | 0,524 |
+| 240 | **0,541** |
+| 300 | 0,534 |
+| 600 | 0,456 |
+
+Média **0,507**, e a razão varia apenas **1,19×** ao longo de 600× de faixa de
+horizonte. Isso é um achado por si:
+
+> **A FORMA de V(t) é estável entre dias; o NÍVEL não.** O dia 23 foi cerca de
+> metade do dia 24 em variância, na mesma proporção em todo horizonte.
+
+**A previsão, registrada AGORA, antes de a rodada existir.** Usando a curva de
+23/08 para avaliar 24/08, o modelo vai subestimar a variância em ~1/0,51 ≈
+**1,97×** — ou seja, ~**1,40×** no desvio-padrão. Isso é uma melhora enorme
+sobre os 6,3× do modelo derivado, mas não é zero, e ela empurra na direção da
+superconfiança.
+
+**O que essa previsão torna falsificável:**
+
+- Se o 1.3 passar, o nível residual não bastou para reprovar, e o conserto
+  está completo para o que o critério cobra.
+- Se o 1.3 reprovar com ECE compatível com ~1,4× de excesso de confiança, o
+  diagnóstico é **de NÍVEL, não de forma** — e o passo seguinte é um estimador
+  de nível (a curva dá a forma, a volatilidade recente dá a escala), não um
+  modelo novo.
+- Se o 1.3 reprovar com viés MISTO e SEM ORDEM de novo, a forma também está
+  errada, e aí sim a conclusão da §2d-bis volta inteira.
+
+**Não vou ajustar o nível antes de rodar.** A curva de 24/08 existe e daria um
+fator melhor — e usá-la seria exatamente o ajuste in-sample que esta seção
+inteira existe para impedir. O estimador de nível, se for preciso, é o próximo
+experimento, com protocolo próprio.
+
+
 
 
 As três são julgadas em CÓDIGO (`veredito_da_curva`), não a olho na tabela, e
@@ -1124,6 +1200,104 @@ E a medição usa o relógio do SERVIDOR (`src_timestamp_ms`), não o da chegada
 local — a conta é toda sobre distância entre observações, e `ts_wall_ns`
 carrega latência de rede, pausa do processo e ajuste do relógio da máquina.
 Tick sem timestamp de origem é descartado e CONTADO no relatório.
+
+#### O RESULTADO — 1.3 passa, e a borda some junto (2026-08-30)
+
+> Escrito DEPOIS da rodada. Tudo acima desta linha é anterior a ela.
+
+`relatorios/M2_24AGO_MEDIDO.json`: curva de 23/08 sobre o dia 24/08, a regra
+da seção cumprida em código (`modelo_de_variancia.medida: true`,
+`dia_medido: "20260823"`, oito ativos, guarda de in-sample satisfeita porque o
+dia da curva é estritamente anterior ao primeiro dia avaliado). As portas
+fail-closed não engoliram nada em silêncio: `janelas_sem_curva_de_variancia` e
+`janelas_de_jogo_sem_curva` vazios, e `instantes_alem_da_curva` contando o que
+ficou fora do alcance de 600 s (btc 89.517, eth 62.303) em vez de extrapolar.
+
+**O 1.3 passa, e passa nos cinco buckets:**
+
+| bucket | `erro_de_confiabilidade` | faixas ocupadas |
+|---|---|---|
+| <30s | **0,0126** | 20 |
+| 60–30s | 0,0285 | 20 |
+| 240–120s | 0,0319 | 20 |
+| 120–60s | 0,0452 | 20 |
+| >240s | 0,0493 | 20 |
+
+Todos com `calibracao_avaliavel: true`. Contra **0,207** na banda operada com o
+modelo derivado — uma redução de 4 a 16 vezes. O critério pede um bucket
+avaliável abaixo de 0,05; saíram cinco. **A causa mecânica do 1.3 era o
+defeito de variância, e a medição o fecha.** É a primeira das três previsões
+registradas acima: o nível residual de ~1,40× no desvio não bastou para
+reprovar.
+
+**E a borda desapareceu no mesmo movimento.** 688 trades, PnL **−67,27**, hit
+0,4172, e `curva_de_horizonte` com `bandas_com_edge: []`:
+
+| banda | PnL |
+|---|---|
+| >240s | −67,27 |
+| 240–120s | −87,56 |
+| 120–60s | −113,64 |
+| 60–30s | −31,90 |
+| <30s | −22,54 |
+
+Nenhuma positiva. O +2,7125 que a §2d-bis registrou na banda de horizonte não
+sobrevive à correção do preditor.
+
+**A sensibilidade à latência inverteu.** Com o modelo derivado, o PnL decaía
+monotonicamente com a latência, e eu citei esse decaimento como evidência de
+borda direcional real. Com o modelo medido, o PnL **melhora** com latência
+(−67,94 a 150 ms, −55,78 a 1000 ms). O que isso estabelece com segurança é que
+**a evidência que eu invocava antes não sobrevive**: era o mesmo instrumento,
+lido nos dois sentidos, e ele agora aponta para o lado oposto.
+
+**O que isso NÃO estabelece, e a revisão do PR #47 pegou.** A varredura de
+latência não é um teste de direção. Em `_tentar_entrada` o sinal é calculado
+em `t` e fica FIXO; o que a latência muda é o book usado no fill,
+`timeline.at(t + latência)`. Isso mexe em duas coisas de uma vez: o preço de
+entrada, e se a ordem preenche. Se o ask melhora no intervalo, o PnL sobe com
+latência mesmo com sinal direcional; e fill que falha empurra a entrada para
+outro instante, mudando a COORTE de trades entre os cenários. Uma inclinação
+positiva, sozinha, não separa "não há direção" de "a execução ficou mais
+barata" nem de "as coortes são outras".
+
+**Então o que carrega a conclusão de ausência de borda é o resto**, não a
+inclinação: PnL negativo nas **cinco** bandas de horizonte, e `hit_rate` de
+0,4172 — abaixo de 0,5 no lado que o modelo escolheu. **O teste direto continua
+por fazer**, e fica registrado como próximo passo: acurácia direcional ou
+markout sobre coorte pareada entre latências (o relatório já publica `trades` e
+`hit_rate` por cenário em `sensibilidade_latencia`; falta a comparação por
+coorte). Até ele existir, a inclinação da latência é indício, não prova.
+
+**O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
+1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
+borda, havia superconfiança". Foi essa a ramificação que ocorreu.
+
+**Mas o alcance da conclusão é menor do que a frase sugere, e vale delimitar.**
+O que está medido é: **a regra corrigida perde neste dia**, em todas as cinco
+bandas, com `hit_rate` 0,4172. Não está medido que os 640 trades antigos não
+carregavam informação. As duas rodadas não operam a mesma população: o `P(Up)`
+corrigido muda quais instantes cruzam o threshold e pode mudar de que lado se
+compra, então os 688 trades novos não são os 640 antigos com preço melhor — são
+outro conjunto. Atribuir o +2,7125 *causalmente* à superconfiança é a
+explicação mais econômica que temos (a banda foi escolhida pela curva de
+horizonte do preditor defeituoso, e o desvio era 6,3× pequeno demais), mas
+segue sendo inferência, não medição.
+
+**O que fecharia isso é o mesmo teste que falta acima:** coorte pareada — os
+mesmos instantes, os dois preditores, comparando direção e markout em vez de
+PnL agregado. Enquanto ele não existir, o registro é "a regra corrigida perde",
+não "não havia informação nenhuma ali".
+
+**O 1.5 continua reprovando, e por motivo independente.** Profundidade a 3
+ticks, p50 = 128,05 USDC em 300 s, contra os 200 exigidos. Capacidade não é
+questão de modelo; nenhum conserto de preditor a resolve.
+
+**Placar da rota taker depois desta rodada:** o 1.3 sai da lista de reprovações
+e entram/permanecem 1.1 (sem PnL positivo em nenhuma banda), 1.4 e 1.5. A rota
+taker reprova por *ausência de borda medida* e por *capacidade*, não mais por
+calibração. É uma reprovação melhor fundamentada do que a anterior, e é pior
+para a estratégia.
 
 
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
@@ -1478,15 +1652,28 @@ que resta pendente não é medição, é **fato externo** ou **decisão**.
 
 ### Placar dos 10 critérios pré-registrados
 
-| | Taker (na banda 240-120s) | Maker |
+**Corrente — preditor de variância MEDIDA (2026-08-30, `M2_24AGO_MEDIDO.json`):**
+
+| | Taker | Maker |
 |---|---|---|
-| ✅ **PASSA** | **3** — 1.1 (+2,7125), 1.2 (640), 1.4 (+1,3488) | **3** — 1.7 (−0,1974), 1.8 (65,9 h), 1.9 (0,20%) |
-| ❌ **REPROVA** | **2** — 1.3 (calibração), 1.5 (profundidade) | **1** — 1.10 (fórmula não confirmada) |
+| ✅ **PASSA** | **2** — 1.2 (688 trades), 1.3 (ECE 0,0126–0,0493) | **3** — 1.7 (−0,1974), 1.8 (65,9 h), 1.9 (0,20%) |
+| ❌ **REPROVA** | **3** — 1.1 (−67,27, nenhuma banda), 1.4 (negativo em toda a grade), 1.5 (profundidade) | **1** — 1.10 (fórmula não confirmada) |
 | ⏳ **NÃO AVALIÁVEL** | 0 | **1** — 1.6 (conta não fecha) |
 
-**Total: 6 de 10 verdes, 3 reprovados, 1 não avaliável.** Como cada rota exige as
+**Total: 5 de 10 verdes, 4 reprovados, 1 não avaliável.** Como cada rota exige as
 CINCO do seu bloco, **nenhuma das duas está viável** — mas as reprovas têm
 naturezas diferentes, e é isso que decide o que vem depois.
+
+*Histórico — preditor de variância DERIVADA, o mesmo placar antes da §2d-ter:*
+
+| | Taker (na banda 240-120s) | Maker |
+|---|---|---|
+| ✅ PASSA | 3 — 1.1 (+2,7125), 1.2 (640), 1.4 (+1,3488) | 3 — 1.7, 1.8, 1.9 |
+| ❌ REPROVA | 2 — 1.3 (calibração), 1.5 (profundidade) | 1 — 1.10 |
+| ⏳ NÃO AVALIÁVEL | 0 | 1 — 1.6 |
+
+*Dava 6 de 10 verdes. A diferença inteira entre os dois placares é o conserto do
+preditor: o 1.3 saiu da coluna de reprovas e 1.1 e 1.4 entraram nela.*
 
 ### O que ainda está pendente — e por quê
 
@@ -1503,10 +1690,13 @@ backtest de novo:
    depende de **posição na fila**. O WS entrega níveis agregados, não ordens: a
    fila não é observável na gravação. Fechar exige outra fonte de dado ou um
    modelo de fila assumido (e declarado).
-3. **Repetição em dia independente (validade).** Tudo acima é **um dia**. O edge
-   de +2,71 na banda, o fator de encolhimento e o threshold 0,03 foram todos
-   vistos NESTA amostra. Nada disso vira decisão de dinheiro sem repetir em
-   gravação independente — a ressalva de sempre da §2d-bis.
+3. **Repetição em dia independente (validade).** A avaliação ainda é de **um
+   dia**. O que mudou em 30/08 é que o *preditor* deixou de ser ajustado nele:
+   a curva de variância vem de 23/08 e a avaliação é de 24/08, com recusa em
+   código se as datas se cruzarem (§2d-ter). Isso cobre a variância; não cobre
+   o threshold nem qualquer banda que venha a ser escolhida. Nada disso vira
+   decisão de dinheiro sem repetir em gravação independente — a ressalva de
+   sempre da §2d-bis.
 
 ### Regras de decisão, definidas ANTES de ver os números
 
