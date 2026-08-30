@@ -168,12 +168,12 @@ class TestOsLimiares:
         assert "2.82%" in criterio.medido
         assert "sem decomposicao" in criterio.medido
 
-    def test_formula_de_reward_reprova_enquanto_for_hipotese(self):
-        # Não é medição: é fato sobre a documentação. Fica REPROVA de
-        # propósito — número bem formatado saído de fórmula não confirmada é
-        # exatamente o erro que o critério 1.10 existe para impedir.
+    def test_formula_de_reward_passa_confirmada(self):
+        # Confirmada em 2026-08-30 na docs.polymarket.com: S(v,s)=((v-s)/v)^2 x b.
+        # Nao e medicao — e fato sobre a documentacao externa ao relatorio.
         criterio = _por_numero(resumo_m2.criterios_do_maker(_relatorio()))["1.10"]
-        assert criterio.veredito == REPROVA
+        assert criterio.veredito == PASSA
+        assert "CONFIRMADA" in criterio.medido
 
 
 class TestOMarkoutRepresentativo:
