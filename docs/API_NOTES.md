@@ -1429,8 +1429,9 @@ A máquina local (Mac) acessa. A §15.3 traz o que a leitura direta confirmou.
 | significado de `market_competitiveness` | desconhecido | ainda desconhecido (não aparece na doc pública) |
 | `moas` no CLOB compacto | desconhecido (§12.11) | ainda desconhecido |
 
-**Consequência imediata:** `analysis/rewards.py::score_de_nivel` usa a fórmula errada.
-O número de receita do M2.2 é inválido. A refatoração para a fórmula correta está pendente.
+**`analysis/rewards.py` foi corrigida em 2026-08-30** (mesmo commit que este bloco de docs):
+`score_de_nivel` agora implementa `S(v,s)=((v-s)/v)^2 × tamanho`. O M2.2 maker precisa
+re-rodar com dados reais para produzir números válidos.
 
 ### 15.3. A fórmula confirmada — `docs.polymarket.com/programs/liquidity-rewards` `[VERIFICADO 2026-08-30]`
 
