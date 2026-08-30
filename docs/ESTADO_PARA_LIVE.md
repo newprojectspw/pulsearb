@@ -1,52 +1,45 @@
 # ESTADO — o que falta para operar com dinheiro real
 
-> ## ⛔ BLOCO 1 SUSPENSO EM 2026-08-29 — aguardando a rodada de remediação
+> ## ✅ BLOCO 1 DESSUSPENSO EM 2026-08-30 — a remediação rodou, e mudou o veredito
 >
-> Achado um defeito no modelo (`prob_up_twap`): a variância do TWAP de
-> fechamento ignorava o tempo que o preço caminha ANTES de a janela de 60 s
-> começar. Para `seconds_left > 60` o desvio ficava congelado no valor de
-> 60 s — 31 % do real a 240 s, 27 % a 300 s. É a causa mecânica da
-> superconfiança que reprova o 1.3, e explica o viés "MISTO e SEM ORDEM"
-> da §2d: o tamanho do erro depende do horizonte, então nenhum fator único
-> de encolhimento podia corrigi-lo.
+> O defeito de variância do `prob_up_twap` foi corrigido e, mais que isso,
+> **substituído por medição**: a §13.8 já tinha VERIFICADO que a janela resolve
+> por um ponto do stream `twap_sixty`, não por uma média que nós calculemos, e
+> o modelo derivado subestimava a variância em **39 a 48 vezes** (6,3× no
+> desvio) por três erros compostos. A `V(t)` agora é medida em dado real, num
+> dia ANTERIOR ao avaliado (curva de 23/08 → avaliação de 24/08), com guarda de
+> in-sample em código.
 >
-> Corrigido — **e não basta.** A revisão do PR #44 mostrou um defeito mais
-> fundo: o modelo estima a probabilidade de uma média de 60 amostras de preço
-> bruto, mas a §13.8 do `API_NOTES.md` já tinha VERIFICADO que a janela
-> resolve por **um ponto só** do stream `twap_sixty` no fechamento, sem média
-> nenhuma — e é esse mesmo stream já suavizado que alimenta o `sigma_1s` e o
-> "spot" do modelo. **A rodada de remediação está SUSPENSA** até o observável
-> ser o certo; rodá-la agora mediria um modelo ainda mal especificado.
->
-> **Enquanto isso, os itens 1.1 a 1.4 e o 2.3 desta página são histórico, não
-> estado corrente** — inclusive o "+2,7125 na banda", porque a banda foi
-> escolhida por uma curva calculada com o preditor defeituoso.
->
-> Continuam valendo, porque não passam pelo preditor: **1.5** (profundidade
-> de book), **1.6 a 1.10** (rota maker), a âncora, e todos os Blocos 0, 3, 4
-> e 5.
+> **O que a rodada produziu:** o **1.3 passa** — e a borda some junto. Os itens
+> 1.1 a 1.4 desta página estão atualizados com os números do modelo medido; o
+> "+2,7125 na banda" foi para o histórico, porque era artefato de
+> superconfiança.
 
-**Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou. Sobre
-24 h de captação impecável o TAKER **irrestrito** mede −53,28 USDC. A §2d-bis
-do VEREDITO_M2 mandava procurar uma banda de horizonte com edge, e ela existe:
-**240-120 s**, 640 trades, **+2,7125 USDC**, `hit_rate` 0,7063. Restrito a essa
-banda o placar do taker é **3 PASSA / 2 REPROVA** (1.1, 1.2, 1.4 ✅ · 1.3,
-1.5 ❌). Como o critério pré-registrado exige as CINCO, **o taker segue
-reprovado**. O MAKER continua barrado pelo 1.10 e pelo 1.6 (não avaliável por
-construção) — o 1.9 passou a 0,20 % sob a emenda registrada no VEREDITO_M2.
-Nenhuma das duas rotas sustenta ir a dinheiro real hoje.
+**Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou de
+novo, e desta vez para pior. Com o preditor consertado
+(`relatorios/M2_24AGO_MEDIDO.json`, curva de 23/08 sobre o dia 24/08), o
+**1.3 passa nos cinco baldes** — `erro_de_confiabilidade` de **0,0126** a
+**0,0493**, todos com 20 faixas ocupadas e `calibracao_avaliavel: true`,
+contra 0,207 na banda com o modelo derivado. **E a borda desapareceu no mesmo
+movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
+cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
+1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
+por ausência de borda e por capacidade, não mais por calibração. O MAKER
+continua barrado pelo 1.10 e pelo 1.6 (não avaliável por construção).
 
-**O que reprova agora não é PnL nem latência — é 1.3 e 1.5.** Na banda o edge
-de direção é real e decai de forma **monótona** com a latência (+3,3119 a
-150 ms → +0,4736 a 1000 ms): a assinatura de sinal sendo corroído, não de
-ruído. Mas o preditor **acerta a direção ~71 % das vezes e erra a
-probabilidade** — ECE de **0,207** na própria banda, com ~75 mil das ~79 mil
-previsões despejadas nos extremos (0-0,05 e 0,95-1,00) e viés **MISTO e SEM
-ORDEM** (11 faixas otimistas, 9 pessimistas), o que fecha também a saída do
-encolhimento (§2d). E o 1.5 é teto de **capacidade**: p50 de 128 USDC a 3 ticks
-contra os 200 exigidos — restringir horizonte não cria liquidez. **Nenhuma das
-duas causas se resolve escolhendo horizonte ou escala, que eram as duas
-hipóteses pré-registradas.** O taker está esgotado como rota nestes mercados.
+**O teste mais duro da rodada foi a latência, e ele inverteu.** Com o modelo
+defeituoso o PnL da banda decaía monotonicamente com a latência (+3,3119 a
+150 ms → +0,4736 a 1000 ms), e essa era a assinatura que eu citava como
+evidência de sinal direcional real. Com o modelo medido o PnL **melhora** com
+latência (−67,94 a 150 ms → −55,78 a 1000 ms). Sinal que fica menos ruim quanto
+mais atrasado chega não tem direção: chegar tarde apenas negocia menos ruído.
+**O +2,7125 era o simulador apostando com convicção onde não havia
+informação** — desvio-padrão 6,3× pequeno demais, `P(Up)` saturado em 0 e 1, e
+amostra pequena fazendo o resto.
+
+**O 1.5 reprova por motivo independente e continua igual:** p50 de 128,05 USDC
+a 3 ticks contra os 200 exigidos. É teto de **capacidade** do book — nenhum
+conserto de preditor o resolve, e restringir horizonte não cria liquidez.
 
 Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
 exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
@@ -57,7 +50,7 @@ ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
 pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
 1.6 (não avaliável sem posição na fila).
 
-Atualizado: 2026-08-29 · fonte dos números: **24 horas** de gravação real de
+Atualizado: 2026-08-30 · fonte dos números: **24 horas** de gravação real de
 2026-08-24, 126,7 M registros, `pior_fracao_coberta 1,0` e 0 silêncios —
 irrestrito em `relatorios/M2_24AGO.json` (695 trades), na banda em
 `relatorios/HORIZONTE_240_120_v2.json` (640 trades). O veredito anterior, de
@@ -152,13 +145,19 @@ snapshots descartados — segue em `VEREDITO_M2.md` para comparação.
 
 ### TAKER — na banda 240-120 s: 3 passa, 2 reprova (o critério exige as 5)
 
-| # | Critério | Exigido | Medido (24 h) | |
+| # | Critério | Exigido | Medido (24 h, modelo MEDIDO) | |
 |---|---|---|---|---|
-| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | irrestrito **−53,2777**; **na banda 240-120s: +2,7125** | ✅ *na banda* |
-| 1.2 | Número de trades | ≥ 200 | **695** | ✅ |
-| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | melhor balde **0,0694** (`<30s`, 20 faixas); **na banda operada: 0,207**, viés MISTO e SEM ORDEM | ❌ **é uma das duas causas que sobram** |
-| 1.4 | Positivo também a 600 ms | sim | **+1,3488 USDC** na banda (o −54,3953 era população errada, PR #41) | ✅ *na banda* |
+| 1.1 | PnL líquido a 300 ms, threshold ≥ 0,02 | positivo | **−67,2744** · `bandas_com_edge: []` — nenhuma das cinco bandas positiva | ❌ **causa nova** |
+| 1.2 | Número de trades | ≥ 200 | **688** | ✅ |
+| 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **os cinco baldes passam**: 0,0126 (`<30s`) · 0,0285 · 0,0319 · 0,0452 · 0,0493, todos com 20 faixas ocupadas | ✅ **resolvido pela §2d-ter** |
+| 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
 | 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
+
+**Leia esta tabela como o estado corrente; a de baixo é o histórico.** Os
+números de 1.1 a 1.4 vinham do preditor com a variância derivada, que
+subestimava o desvio-padrão em 6,3×. O que está abaixo desta linha — o
+"+2,7125 na banda", o decaimento monótono com a latência, o ECE de 0,207 —
+descreve aquele preditor, e fica no documento porque é como se chegou aqui.
 
 **1.1 inverteu duas vezes, e a última leitura é a que tem lastro.** 5 h deram
 −41,57; 20 h deram +102,92; 24 h limpas dão **−53,28**. A gravação de 20 h
@@ -718,18 +717,22 @@ aparecer. Fica o registro da hipótese nunca testada: supply-chain,
 
 Hoje nenhum dos três está liberado.
 
-## As três pendências que realmente travam, e o que destrava cada uma
+## As pendências que realmente travam, e o que destrava cada uma
 
 Todo o resto do quadro é ou trabalho já feito, ou trabalho que só depende de
-tempo de máquina. Estas três não:
+tempo de máquina. Estas não — a primeira linha fica na tabela riscada, porque
+saber o que deixou de travar é parte do estado:
 
 | Pendência | Natureza | O que destrava |
 |---|---|---|
-| **1.3 calibração** (ECE 0,207 na banda, viés MISTO e SEM ORDEM) | defeito do **sinal** — acerta a direção, erra a probabilidade | modelo novo, não mais dado nem mais varredura; a §2d já rejeitou o encolhimento e o "sem ordem" fecha a saída da escala |
+| ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
+| **1.1 / 1.4 ausência de borda** (PnL −67,27, nenhuma banda positiva) | resultado de **medição**, não defeito | nada conhecido. Com o preditor calibrado o sinal não tem direção — e a sensibilidade à latência INVERTEU (melhora com atraso), que é a assinatura de ruído, não de borda corroída |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | **1.10 fórmula de reward** | **fato externo** | a doc de liquidity rewards da Polymarket (`docs.polymarket.com`), inalcançável deste ambiente. Ver API_NOTES §15.2 para a lista exata do que hoje é suposição: expoente do desconto por tick, fator 0,5, cadência de 1 s, unidade do `rewardsMaxSpread`, exigência de cotar dos dois lados, e o que é `market_competitiveness` |
 
-E uma quarta, que é metodológica e vale para qualquer resultado acima: **um dia
-não é veredito**. Repetir a banda 240-120 s em dias independentes é o único
-caminho que separa edge de sobreajuste, e nenhum número desta página passou por
-esse teste ainda.
+E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
+não é veredito**. A rodada de 30/08 é o primeiro número desta página com
+separação de dias — a curva de variância vem de 23/08 e a avaliação é de 24/08,
+com recusa em código se as datas se cruzarem. Isso cobre o preditor; não cobre
+o resto. Qualquer edge que apareça daqui em diante continua precisando de dias
+independentes para separar borda de sobreajuste.

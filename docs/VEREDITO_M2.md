@@ -1184,6 +1184,73 @@ local — a conta é toda sobre distância entre observações, e `ts_wall_ns`
 carrega latência de rede, pausa do processo e ajuste do relógio da máquina.
 Tick sem timestamp de origem é descartado e CONTADO no relatório.
 
+#### O RESULTADO — 1.3 passa, e a borda some junto (2026-08-30)
+
+> Escrito DEPOIS da rodada. Tudo acima desta linha é anterior a ela.
+
+`relatorios/M2_24AGO_MEDIDO.json`: curva de 23/08 sobre o dia 24/08, a regra
+da seção cumprida em código (`modelo_de_variancia.medida: true`,
+`dia_medido: "20260823"`, oito ativos, guarda de in-sample satisfeita porque o
+dia da curva é estritamente anterior ao primeiro dia avaliado). As portas
+fail-closed não engoliram nada em silêncio: `janelas_sem_curva_de_variancia` e
+`janelas_de_jogo_sem_curva` vazios, e `instantes_alem_da_curva` contando o que
+ficou fora do alcance de 600 s (btc 89.517, eth 62.303) em vez de extrapolar.
+
+**O 1.3 passa, e passa nos cinco buckets:**
+
+| bucket | `erro_de_confiabilidade` | faixas ocupadas |
+|---|---|---|
+| <30s | **0,0126** | 20 |
+| 60–30s | 0,0285 | 20 |
+| 240–120s | 0,0319 | 20 |
+| 120–60s | 0,0452 | 20 |
+| >240s | 0,0493 | 20 |
+
+Todos com `calibracao_avaliavel: true`. Contra **0,207** na banda operada com o
+modelo derivado — uma redução de 4 a 16 vezes. O critério pede um bucket
+avaliável abaixo de 0,05; saíram cinco. **A causa mecânica do 1.3 era o
+defeito de variância, e a medição o fecha.** É a primeira das três previsões
+registradas acima: o nível residual de ~1,40× no desvio não bastou para
+reprovar.
+
+**E a borda desapareceu no mesmo movimento.** 688 trades, PnL **−67,27**, hit
+0,4172, e `curva_de_horizonte` com `bandas_com_edge: []`:
+
+| banda | PnL |
+|---|---|
+| >240s | −67,27 |
+| 240–120s | −87,56 |
+| 120–60s | −113,64 |
+| 60–30s | −31,90 |
+| <30s | −22,54 |
+
+Nenhuma positiva. O +2,7125 que a §2d-bis registrou na banda de horizonte não
+sobrevive à correção do preditor.
+
+**A sensibilidade à latência inverteu, e isso é o teste mais duro que a
+rodada oferece.** Com o modelo derivado, o PnL decaía monotonicamente com a
+latência — assinatura de borda direcional real, e eu citei isso como
+evidência. Com o modelo medido, o PnL **melhora** com latência (−67,94 a 150 ms,
+−55,78 a 1000 ms). Sinal que fica menos ruim quanto mais atrasado é sinal que
+não tem direção: é ruído sendo negociado, e chegar tarde apenas negocia menos.
+
+**O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
+1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
+borda, havia superconfiança". É o que aconteceu. O PnL positivo das seções
+anteriores era artefato de um `P(Up)` saturado por um desvio-padrão 6,3×
+pequeno demais — o simulador apostava com convicção onde não havia informação,
+e a amostra pequena fez o resto.
+
+**O 1.5 continua reprovando, e por motivo independente.** Profundidade a 3
+ticks, p50 = 128,05 USDC em 300 s, contra os 200 exigidos. Capacidade não é
+questão de modelo; nenhum conserto de preditor a resolve.
+
+**Placar da rota taker depois desta rodada:** o 1.3 sai da lista de reprovações
+e entram/permanecem 1.1 (sem PnL positivo em nenhuma banda), 1.4 e 1.5. A rota
+taker reprova por *ausência de borda medida* e por *capacidade*, não mais por
+calibração. É uma reprovação melhor fundamentada do que a anterior, e é pior
+para a estratégia.
+
 
 ### 2c. Critérios de invalidação de livro — escritos ANTES dos números (M2.5)
 
