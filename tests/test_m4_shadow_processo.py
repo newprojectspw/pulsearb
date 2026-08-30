@@ -438,6 +438,60 @@ class TestOModoEDoProcessoNaoDoArquivo:
         capsys.readouterr()
 
 
+class TestARodadaQueFalhaTerminaLogo:
+    """Achado P2 do Codex no #52, segunda rodada sobre o mesmo defeito.
+
+    O tratamento de falha do diário fazia `laco_de_decisao` RETORNAR, mas
+    `asyncio.wait` no default (`ALL_COMPLETED`) deixava descoberta e relato
+    seguindo até o prazo original. Uma rodada de 24 h abortada no minuto 5
+    manteria sockets e HTTP ativos pelas 23 h restantes antes de devolver o
+    código != 0.
+    """
+
+    async def test_o_primeiro_laco_a_sair_encerra_a_rodada(self):
+        """`FIRST_COMPLETED`, e não `ALL_COMPLETED`."""
+        import asyncio as _asyncio
+        import time as _time
+
+        cancelada = _asyncio.Event()
+
+        async def curta():
+            return "acabei"
+
+        async def longa():
+            try:
+                await _asyncio.sleep(30)
+            except _asyncio.CancelledError:
+                cancelada.set()
+                raise
+
+        tarefas = [_asyncio.create_task(curta()), _asyncio.create_task(longa())]
+        inicio = _time.monotonic()
+        await _asyncio.wait(
+            tarefas, timeout=30, return_when=_asyncio.FIRST_COMPLETED
+        )
+        for t in tarefas:
+            t.cancel()
+        await _asyncio.gather(*tarefas, return_exceptions=True)
+
+        assert _time.monotonic() - inicio < 1.0
+        assert cancelada.is_set()
+
+    def test_o_run_usa_FIRST_COMPLETED(self):
+        """O teste acima prova a semântica do asyncio; este trava o uso.
+
+        Sem ele, alguém tira o `return_when` achando que é redundante e o
+        default volta a segurar a rodada até o prazo.
+        """
+        import inspect
+
+        from pulsearb.live import shadow
+
+        fonte = inspect.getsource(shadow.ProcessoShadow.run)
+
+        assert "FIRST_COMPLETED" in fonte
+
+
 class TestUmDiarioPorRodada:
     """Achado P2 do Codex no #52, e procede.
 

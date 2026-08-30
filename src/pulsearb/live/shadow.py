@@ -366,8 +366,20 @@ class ProcessoShadow:
                 # `gather` esperaria a tarefa mais lenta terminar sozinha —
                 # estourando `--duration` por minutos se a Gamma estiver lenta.
                 # O prazo aqui é duro: passou, cancela.
+                # `FIRST_COMPLETED`, e não o default `ALL_COMPLETED`.
+                # Achado P2 do Codex no #52: o tratamento de falha do diário
+                # faz `laco_de_decisao` RETORNAR, mas com o default os laços
+                # de descoberta e de relato seguiam até o prazo original — uma
+                # rodada de 24 h abortada no minuto 5 manteria sockets e HTTP
+                # ativos pelas 23 h restantes antes de devolver o código != 0.
+                #
+                # No caminho normal os três terminam juntos (todos são
+                # `while monotonic() < deadline`), então cancelar os outros
+                # quando o primeiro sai não perde nada: o prazo já passou.
                 await asyncio.wait(
-                    tarefas, timeout=max(0.0, deadline - time.monotonic())
+                    tarefas,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
                 for tarefa in tarefas:

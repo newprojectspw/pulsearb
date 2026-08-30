@@ -183,3 +183,108 @@ class TestMesmaMedidaDoBacktest:
 
         assert isinstance(livro, OrderBook)
         assert livro.depth_usdc(side="ask", ticks=3, tick_size=0.01) > 0
+
+
+def _delta_forma_b(*tokens, preco: str = "0.52", size: str = "300", lado="SELL"):
+    """A forma do SDK: SEM `asset_id` no topo, lista em `price_changes`, e
+    cada entrada com o seu token. `[VERIFICADO]` API_NOTES §6.1b."""
+    return {
+        "event_type": "price_change",
+        "market": "0xabc",
+        "price_changes": [
+            {"asset_id": t, "price": preco, "size": size, "side": lado}
+            for t in tokens
+        ],
+    }
+
+
+class TestOPriceChangeDaFormaDoSDK:
+    """Achado P1 do Codex no #52, e era o defeito mais caro do PR.
+
+    O `price_change` do SDK **não tem `asset_id` no topo**. `aplicar` lia o
+    topo, não achava token, recusava o evento como sem token — e os livros
+    ficavam parados no snapshot inicial. Depois de 10 s nenhum era confiável,
+    e o SHADOW rodaria as 24 h **sem avaliar nada**, entregando um relatório
+    que diria "nenhuma oportunidade".
+
+    Por que os testes não pegaram: eles usavam a forma A (`_delta`), que é a
+    fixture SINTÉTICA que o §6.1b avisa nunca ter sido confirmada contra o
+    fio. O teste encodava a suposição em vez de checá-la.
+
+    E o backtest **não** tinha o defeito, porque já roteava por
+    `iter_mudancas`. A divergência apareceria como "o mercado estava
+    diferente" — exatamente o que a regra do mesmo caminho existe para
+    impedir.
+    """
+
+    def test_a_forma_do_SDK_move_o_livro(self):
+        livros = LivrosAoVivo()
+        livros.aplicar(_snapshot("tok"), ts_ns=SEGUNDO)
+
+        livros.aplicar(_delta_forma_b("tok"), ts_ns=2 * SEGUNDO)
+
+        assert livros.eventos_ignorados == 0
+        assert livros.por_token["tok"].ultimo_evento_ns == 2 * SEGUNDO
+
+    def test_o_livro_segue_confiavel_depois_do_silencio_do_snapshot(self):
+        """O sintoma que o usuário veria: livro parado, tudo velho, zero
+        avaliações — sem nenhum erro no log."""
+        livros = LivrosAoVivo()
+        livros.aplicar(_snapshot("tok"), ts_ns=SEGUNDO)
+        assert not livros.confiavel("tok", agora_ns=30 * SEGUNDO)
+
+        livros.aplicar(_delta_forma_b("tok"), ts_ns=29 * SEGUNDO)
+
+        assert livros.confiavel("tok", agora_ns=30 * SEGUNDO)
+
+    def test_UMA_mensagem_pode_cobrir_VARIOS_tokens(self):
+        """`price_changes` é uma lista e as entradas podem ser de tokens
+        diferentes — Up e Down do mesmo mercado, tipicamente."""
+        livros = LivrosAoVivo()
+        livros.aplicar(_snapshot("up"), ts_ns=SEGUNDO)
+        livros.aplicar(_snapshot("dn"), ts_ns=SEGUNDO)
+
+        livros.aplicar(_delta_forma_b("up", "dn"), ts_ns=3 * SEGUNDO)
+
+        assert livros.por_token["up"].ultimo_evento_ns == 3 * SEGUNDO
+        assert livros.por_token["dn"].ultimo_evento_ns == 3 * SEGUNDO
+
+    def test_token_sem_snapshot_continua_contado_como_orfao(self):
+        """A trava de delta órfão não pode ser perdida no conserto: aplicar
+        delta a livro vazio inventaria profundidade."""
+        livros = LivrosAoVivo()
+
+        livros.aplicar(_delta_forma_b("desconhecido"), ts_ns=SEGUNDO)
+
+        assert livros.deltas_orfaos == 1
+
+    def test_um_token_conhecido_entre_dois_ainda_e_aplicado(self):
+        """Mensagem mista não pode ser descartada inteira por causa do token
+        que não acompanhamos — perderíamos o delta do que acompanhamos."""
+        livros = LivrosAoVivo()
+        livros.aplicar(_snapshot("up"), ts_ns=SEGUNDO)
+
+        livros.aplicar(_delta_forma_b("up", "de-outro-mercado"), ts_ns=4 * SEGUNDO)
+
+        assert livros.por_token["up"].ultimo_evento_ns == 4 * SEGUNDO
+        assert livros.deltas_orfaos == 1
+
+    def test_a_forma_A_continua_funcionando(self):
+        """As duas formas são aceitas até a gravação dizer qual o servidor
+        fala (§6.1b). Consertar B não pode quebrar A."""
+        livros = LivrosAoVivo()
+        livros.aplicar(_snapshot("tok"), ts_ns=SEGUNDO)
+
+        livros.aplicar(_delta("tok"), ts_ns=2 * SEGUNDO)
+
+        assert livros.por_token["tok"].ultimo_evento_ns == 2 * SEGUNDO
+        assert livros.eventos_ignorados == 0
+
+    def test_price_change_sem_entrada_nenhuma_e_contado(self):
+        """Zero silencioso é indistinguível de bug."""
+        livros = LivrosAoVivo()
+        livros.aplicar(
+            {"event_type": "price_change", "market": "0xabc"}, ts_ns=SEGUNDO
+        )
+
+        assert livros.eventos_ignorados == 1
