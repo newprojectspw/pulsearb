@@ -40,6 +40,7 @@ import asyncio
 import json
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,29 @@ def montar_ciclo(
         # O feed não filtra o `on_event` — ver `CicloAoVivo.ativos_operados`.
         ativos_operados=frozenset(a.lower() for a in settings.assets),
     )
+
+
+#: Onde os diários de rodada moram quando `--diario` não é passado.
+PASTA_DOS_DIARIOS = "data/shadow"
+
+
+def caminho_do_diario_da_rodada(agora: datetime | None = None) -> str:
+    """Um arquivo por rodada, carimbado com o instante de início.
+
+    Achado P2 do Codex no #52, e procede. O default era fixo, e
+    `ExecutorSombra._anotar` abre em modo **append**: uma rodada curta de
+    teste seguida do ensaio de 24 h escreviam as duas no mesmo arquivo, sem
+    identificador de rodada nem fronteira no JSONL. As contagens saíam
+    somadas e a comparação SHADOW × backtest passava a ler duas populações
+    como se fossem uma — o mesmo formato do defeito do critério 1.4.
+
+    Carimbar em vez de truncar é deliberado: truncar apagaria o diário da
+    rodada anterior, que é justamente o artefato que o ensaio existe para
+    produzir. Caminho explícito continua anexando, que é como se retoma uma
+    rodada de propósito.
+    """
+    instante = agora or datetime.now(UTC)
+    return f"{PASTA_DOS_DIARIOS}/diario-{instante.strftime('%Y%m%d-%H%M%S')}.jsonl"
 
 
 class ProcessoShadow:
@@ -398,8 +422,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--diario",
-        default="data/shadow/diario.jsonl",
-        help="onde o diário de intenções é gravado",
+        default=None,
+        help=(
+            "onde o diário de intenções é gravado. Sem esta opção, cada "
+            "rodada ganha um arquivo próprio, carimbado com o instante de "
+            "início. Passar um caminho explícito ANEXA a ele — é assim que se "
+            "retoma uma rodada de propósito"
+        ),
     )
     parser.add_argument(
         "--curva-de-variancia",
@@ -445,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ciclo = montar_ciclo(
         settings,
-        caminho_do_diario=Path(args.diario),
+        caminho_do_diario=Path(args.diario or caminho_do_diario_da_rodada()),
         curvas_de_variancia=_curvas(args.curva_de_variancia),
     )
     processo = ProcessoShadow(settings, ciclo)

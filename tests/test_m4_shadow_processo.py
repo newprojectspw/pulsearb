@@ -438,6 +438,110 @@ class TestOModoEDoProcessoNaoDoArquivo:
         capsys.readouterr()
 
 
+class TestUmDiarioPorRodada:
+    """Achado P2 do Codex no #52, e procede.
+
+    O default era fixo e `ExecutorSombra._anotar` abre em modo APPEND: uma
+    rodada curta de teste seguida do ensaio de 24 h escreviam as duas no mesmo
+    arquivo, sem identificador de rodada nem fronteira no JSONL. As contagens
+    saíam somadas e a comparação SHADOW × backtest lia duas populações como se
+    fossem uma — o mesmo formato do defeito do critério 1.4.
+    """
+
+    def test_duas_rodadas_seguidas_nao_dividem_arquivo(self):
+        from datetime import UTC, datetime
+
+        from pulsearb.live.shadow import caminho_do_diario_da_rodada
+
+        primeira = caminho_do_diario_da_rodada(datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC))
+        segunda = caminho_do_diario_da_rodada(datetime(2026, 8, 30, 10, 0, 1, tzinfo=UTC))
+
+        assert primeira != segunda
+
+    def test_o_carimbo_e_do_instante_de_inicio(self):
+        from datetime import UTC, datetime
+
+        from pulsearb.live.shadow import caminho_do_diario_da_rodada
+
+        caminho = caminho_do_diario_da_rodada(
+            datetime(2026, 8, 30, 16, 20, 5, tzinfo=UTC)
+        )
+
+        assert caminho == "data/shadow/diario-20260830-162005.jsonl"
+
+    def test_caminho_explicito_e_respeitado(self, monkeypatch, tmp_path, capsys):
+        """Anexar a um caminho dado é como se retoma uma rodada de propósito —
+        a correção não pode tirar isso."""
+        vistos = []
+
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.SHADOW)),
+        )
+
+        def _montar(settings, *, caminho_do_diario, **kwargs):
+            vistos.append(caminho_do_diario)
+            return _CicloFalso()
+
+        monkeypatch.setattr("pulsearb.live.shadow.montar_ciclo", _montar)
+
+        class _ProcessoFalso:
+            falhou = None
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            async def run(self, _duracao):
+                return {}
+
+        monkeypatch.setattr("pulsearb.live.shadow.ProcessoShadow", _ProcessoFalso)
+
+        from pulsearb.live.shadow import main
+
+        escolhido = str(tmp_path / "meu-diario.jsonl")
+        main(["--duration", "1s", "--diario", escolhido])
+        capsys.readouterr()
+
+        assert vistos == [Path(escolhido)]
+
+    def test_sem_a_opcao_cada_rodada_ganha_o_seu(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        vistos = []
+
+        monkeypatch.setattr("pulsearb.live.shadow.setup_logging", lambda: None)
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.SHADOW)),
+        )
+
+        def _montar(settings, *, caminho_do_diario, **kwargs):
+            vistos.append(caminho_do_diario)
+            return _CicloFalso()
+
+        monkeypatch.setattr("pulsearb.live.shadow.montar_ciclo", _montar)
+
+        class _ProcessoFalso:
+            falhou = None
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            async def run(self, _duracao):
+                return {}
+
+        monkeypatch.setattr("pulsearb.live.shadow.ProcessoShadow", _ProcessoFalso)
+
+        from pulsearb.live.shadow import main
+
+        main(["--duration", "1s"])
+        capsys.readouterr()
+
+        assert vistos[0] != Path("data/shadow/diario.jsonl")
+        assert "diario-" in vistos[0].name
+
+
 class TestOsTresAchadosDaSegundaRevisao:
     """Mais três, e os três procedem. Um deles era erro de unidade meu."""
 
