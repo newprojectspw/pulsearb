@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -59,7 +60,8 @@ from pulsearb.analysis.variancia_de_transicao import (
     curva_de_variancia,
     veredito_da_curva,
 )
-from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
+from pulsearb.backtest.__main__ import caminho_de_leitura
+from pulsearb.caminhos import caminho_de_escrita, raiz_de_saida
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.replay.reader import RecordingReader
 
@@ -311,6 +313,20 @@ def main(argv: list[str] | None = None) -> int:
     texto = json.dumps(relatorio, indent=2, ensure_ascii=False)
     if args.saida:
         destino = caminho_de_escrita(args.saida)
+        # Cinto e suspensório, e não desconfiança do `caminho_de_escrita`: a
+        # análise de fluxo do SonarCloud não entra no corpo do ajudante, então
+        # o que ela enxerga aqui é o argumento da linha de comando chegando ao
+        # disco (S8707), e ela está certa em enxergar assim — o ajudante mora
+        # em outro arquivo e nada neste ponto prova que ele conteve o caminho.
+        # A contenção repetida à vista do `write_text` é a MESMA conta do
+        # `caminho_de_escrita` (raiz resolvida + separador + `startswith`); se
+        # um dia as duas divergirem, o que aparece é este `raise`, e não um
+        # relatório escrito fora da raiz — que some sem ninguém notar.
+        raiz_permitida = str(raiz_de_saida())
+        if not raiz_permitida.endswith(os.sep):
+            raiz_permitida += os.sep
+        if not str(destino).startswith(raiz_permitida):
+            raise ValueError(f"saída fora da raiz permitida: {destino}")
         destino.write_text(texto + "\n", encoding="utf-8")
         print(f"relatorio em {destino}", file=sys.stderr)
     else:

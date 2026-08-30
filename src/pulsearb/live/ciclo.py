@@ -33,12 +33,13 @@ soubesse falar com a rede não poderia ser confrontado com nada.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.feeds.base import FeedEvent
-from pulsearb.feeds.poly_ws import eventos_do_payload
+from pulsearb.feeds.poly_ws import eventos_do_payload, resolucao_do_evento
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, e18_do_evento, parse_rtds_event
 from pulsearb.live.motor import MotorAoVivo
 from pulsearb.markets.discovery import DiscoveredMarket
@@ -58,6 +59,21 @@ SILENCIO_DO_PRECO_S = 10.0
 FONTE_RTDS = "rtds"
 FONTE_POLY = "poly_ws"
 
+#: Quantos carimbos recentes lembrar por ativo, para deduplicar.
+#:
+#: O RTDS é assinado em N conexões redundantes (`rtds_conexoes`, default 2)
+#: porque conexão individual já produziu lacunas de 30 a 306 s. O preço disso é
+#: o MESMO tick chegando N vezes, e contá-lo N vezes estragaria a volatilidade
+#: realizada e o sensor de anomalia de tempo — dois "atrasos" por tick.
+#:
+#: A dedupe mora aqui, e não no processo, para valer qualquer que seja a
+#: origem: N sockets, reprodução de gravação, ou um teste que empurre a mesma
+#: lista duas vezes.
+#:
+#: 256 a ~1 tick/s por ativo são ~4 min de memória: folgado para cobrir a
+#: diferença de chegada entre conexões, curto para não pesar.
+CARIMBOS_LEMBRADOS = 256
+
 
 @dataclass
 class CicloAoVivo:
@@ -70,9 +86,19 @@ class CicloAoVivo:
 
     motor: MotorAoVivo
     silencio_do_preco_s: float = SILENCIO_DO_PRECO_S
+    #: Ativos que este ciclo opera. `None` = aceita todos.
+    #:
+    #: NÃO é redundante com o `assets` do `RtdsFeed`: aquele filtra o
+    #: `on_tick`, e o `on_event` — que é por onde o ciclo recebe — é chamado
+    #: INCONDICIONALMENTE depois (`feeds/base.py`). Sem este filtro aqui, um
+    #: ativo que o bot nem opera entra no `feeds_saudaveis`, que fecha pelo
+    #: pior, e emudecer bloquearia intenções de BTC/ETH saudáveis.
+    ativos_operados: frozenset[str] | None = None
 
     #: Última chegada de tick de `twap_sixty`, por ativo (ns de parede).
     ultimo_preco_ns: dict[str, int] = field(default_factory=dict)
+    #: Carimbos de servidor já vistos, por ativo. Ver `CARIMBOS_LEMBRADOS`.
+    _vistos: dict[str, deque[int]] = field(default_factory=dict)
     #: O que entrou, por tipo. Zero silencioso é indistinguível de bug.
     contagem: dict[str, int] = field(default_factory=dict)
 
@@ -91,6 +117,10 @@ class CicloAoVivo:
         if tick is None:
             self._contar("rtds_nao_e_preco")
             return
+        if self.ativos_operados is not None and tick.asset not in self.ativos_operados:
+            # O RTDS transmite todos os símbolos; só os operados importam.
+            self._contar("preco_de_outro_ativo")
+            return
         if tick.topic != TOPIC_TWAP_60:
             # `crypto_prices` (spot Binance) chega pelo mesmo fio. Não entra:
             # a âncora verificada é definida sobre `twap_sixty`.
@@ -105,6 +135,12 @@ class CicloAoVivo:
         if tick.src_timestamp_ms <= 0:
             self._contar("preco_sem_carimbo_do_servidor")
             return
+        if self._repetido(tick.asset, tick.src_timestamp_ms):
+            # Segunda conexão entregando o mesmo tick. Contado e não engolido:
+            # `preco_repetido` perto de zero com `rtds_conexoes > 1` significa
+            # que a redundância não está funcionando.
+            self._contar("preco_repetido")
+            return
 
         self.motor.precos.anotar(
             tick.asset,
@@ -117,9 +153,41 @@ class CicloAoVivo:
         self.ultimo_preco_ns[tick.asset] = event.ts_wall_ns
         self._contar("preco")
 
+    def _repetido(self, asset: str, carimbo: int) -> bool:
+        """Este (ativo, carimbo) já passou? Marca como visto se não.
+
+        Só o carimbo EXATO conta como repetido. Tick fora de ordem NÃO é
+        descartado: o backtest também os guarda (`streams_e18` acumula e a
+        âncora resolve por bisect), e jogá-los fora aqui faria as duas pontas
+        verem séries diferentes.
+        """
+        janela = self._vistos.get(asset)
+        if janela is None:
+            janela = deque(maxlen=CARIMBOS_LEMBRADOS)
+            self._vistos[asset] = janela
+        if carimbo in janela:
+            return True
+        janela.append(carimbo)
+        return False
+
     def _on_poly(self, event: FeedEvent) -> None:
         vistos = 0
         for evento in eventos_do_payload(event.parsed):
+            # Achado P1 do Codex no #52. A resolução tem de chegar ao PORTÃO,
+            # não só ao livro: `_liquidar` fecha toda janela com `pnl=0.0`
+            # (correto — no fechamento o resultado ainda não se conhece), e
+            # se ninguém trouxer o PnL depois, `perdas_seguidas` e
+            # `pnl_realizado_usdc` ficam em zero para sempre. A pausa por
+            # sequência e o disjuntor de perda do dia NUNCA armariam no
+            # SHADOW, e o ensaio aprovaria o que o LIVE já teria recusado.
+            resolucao = resolucao_do_evento(evento)
+            if resolucao is not None:
+                if self.motor.resolver(resolucao):
+                    self._contar("resolucao")
+                else:
+                    self._contar("resolucao_sem_posicao")
+                vistos += 1
+                continue
             self.motor.livros.aplicar(evento, ts_ns=event.ts_wall_ns)
             vistos += 1
         if vistos:

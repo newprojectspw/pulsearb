@@ -34,7 +34,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from pulsearb.obs.logging import get_logger
 from pulsearb.settings import Mode, RiskSettings
+
+log = get_logger(__name__)
 
 # ─────────────────────────────────────────────────────────── motivos de recusa
 #
@@ -201,6 +204,38 @@ def _hoje_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def caminho_do_registro_do_modo(caminho: Path | None, modo: Mode) -> Path | None:
+    """O registro de risco de um ENSAIO nunca é o do dinheiro real.
+
+    Achado do Codex no #52, e procede em duas frentes. `ExecutorSombra` chama
+    `registrar_envio` de propósito — sem isso os tetos por janela e de
+    exposição nunca seriam exercitados e o ensaio não ensaiaria a parte que
+    mais importa. Só que `registrar_envio` GRAVA, e o caminho vinha do mesmo
+    `settings.risk.caminho_do_registro` que o LIVE usará:
+
+    - SHADOW morto no meio de uma janela deixa exposição sintética no arquivo.
+      `_liquidar` só roda com o processo vivo; depois de reiniciar, aquele
+      slug já passou e nunca mais será liquidado. A exposição fica presa para
+      sempre, e o teto passa a recusar intenção legítima.
+    - Pior: PnL, sequência de perdas e disjuntor de um ensaio entrariam no
+      registro durável do dinheiro real — e o real, no do ensaio.
+
+    Por que aqui e não na fábrica do SHADOW: `montar_ciclo` é hoje o ÚNICO
+    lugar que constrói o portão, mas a entrada do LIVE ainda vai ser escrita.
+    Deixar a separação na fábrica seria confiar em disciplina de quem
+    constrói — que é exatamente a classe de erro que este achado é. O portão
+    já recebe o modo; então é ele quem decide, e nenhuma entrada futura
+    consegue esquecer.
+
+    O KILL **não** entra nesta separação, e a assimetria é de propósito: a
+    chave de emergência existe para parar TUDO. Um KILL por modo faria
+    `touch KILL` numa sessão ssh parar metade do que está rodando.
+    """
+    if caminho is None or modo is Mode.LIVE:
+        return caminho
+    return caminho.with_name(f"{caminho.stem}.{modo.value.lower()}{caminho.suffix}")
+
+
 class PortaoDeRisco:
     """Consulte antes de CADA ordem. Não há caminho legítimo que o contorne."""
 
@@ -217,7 +252,8 @@ class PortaoDeRisco:
     ) -> None:
         self.settings = settings
         self.modo = modo
-        self.caminho = caminho_do_registro
+        # Ensaio e dinheiro real não dividem registro. Ver a função.
+        self.caminho = caminho_do_registro_do_modo(caminho_do_registro, modo)
         self.caminho_do_kill = caminho_do_kill
         self._hoje = hoje or _hoje_utc()
         self._relogio = relogio
@@ -245,6 +281,32 @@ class PortaoDeRisco:
             registro.disjuntor_armado = True
             registro.disjuntor_motivo = f"registro do dia ilegivel: {erro}"
             return registro
+
+        if registro.gasto_por_janela and self.modo is not Mode.LIVE:
+            # Achado P1 do Codex no #52, segunda rodada: separar o arquivo não
+            # bastou, porque o arquivo separado continua sendo RECARREGADO.
+            #
+            # A sequência: SHADOW aprova intenções, o processo morre antes de
+            # `_liquidar` rodar, reinicia no mesmo dia. Aquelas janelas já
+            # fecharam, então os slugs nunca mais aparecem e nada as liquida.
+            # Com cinco delas o teto de posições recusa TODA intenção seguinte
+            # até a virada de UTC — e o ensaio de 24 h vira um ensaio de nada.
+            #
+            # Em ensaio a exposição é sintética: nenhuma ordem existiu, então
+            # não há o que reconciliar e descartá-la não perde informação.
+            # Em LIVE ela FICA, e é de propósito: ali pode haver posição real
+            # aberta, e travar o bot até uma pessoa reconciliar é o lado certo
+            # para errar.
+            #
+            # O que atravessa nos dois casos: disjuntor, sequência de perdas,
+            # pausa e PnL. Só a exposição em aberto é descartada.
+            log.warning(
+                "exposicao de ensaio descartada no arranque",
+                modo=str(self.modo),
+                janelas=len(registro.gasto_por_janela),
+                usdc=round(registro.exposicao_total_usdc, 4),
+            )
+            registro.gasto_por_janela = {}
 
         if registro.dia != self._hoje:
             # Dia virou: gasto e PnL zeram, mas o DISJUNTOR não. Se ele

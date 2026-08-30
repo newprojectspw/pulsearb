@@ -244,3 +244,140 @@ class TestResumo:
         assert "livros" in resumo
         assert "precos" in resumo
         assert "de cima para baixo antes de suspeitar do modelo" in resumo["nota"]
+
+
+def _resolucao(vencedor: str = "tok-up", condition_id: str = "0xaa"):
+    """A forma REAL do servidor (`assets_ids` no plural, sem `asset_id`)."""
+    return {
+        "event_type": "market_resolved",
+        "market": condition_id,
+        "assets_ids": ["tok-up", "tok-down"],
+        "winning_asset_id": vencedor,
+        "winning_outcome": "Up" if vencedor == "tok-up" else "Down",
+        "timestamp": "1787166722776",
+    }
+
+
+class TestAResolucaoAlimentaODisjuntor:
+    """Achado P1 do Codex no #52, e era um buraco no ensaio inteiro.
+
+    `_liquidar` fecha toda janela com `pnl=0.0` — correto, porque no
+    fechamento o resultado ainda não se conhece. Só que **nada** chamava
+    `registrar_resolucao` com o PnL de verdade depois. `perdas_seguidas` e
+    `pnl_realizado_usdc` ficavam em zero para sempre, então a pausa por
+    sequência e o disjuntor de perda do dia **nunca armavam no SHADOW** — e o
+    ensaio aprovaria intenções que o LIVE equivalente já teria recusado.
+    """
+
+    def _operar(self, tmp_path, **risco):
+        from pulsearb.feeds.poly_ws import resolucao_do_evento
+
+        cenario = Cenario(tmp_path, **risco)
+        cenario.alimentar_precos()
+        cenario.alimentar_livros(ts_ns=int((FECHA_EPOCH - 100) * 1e9))
+        cenario.tick(faltam=100.0)
+        return cenario, resolucao_do_evento
+
+    def test_a_posicao_e_indexada_pela_grafia_NORMALIZADA(self, tmp_path):
+        """Erro meu, e o código já documentava a armadilha.
+
+        A Gamma entrega `0xAA…` e o WS entrega `aa…`. Eu indexei pela grafia
+        crua, então TODA resolução caía em `resolucoes_sem_posicao` — em
+        silêncio, e com o disjuntor parado em zero exatamente como antes do
+        conserto. É o modo de falha que `normalizar_condition_id` foi escrita
+        para eliminar.
+        """
+        cenario, _ = self._operar(tmp_path)
+
+        assert "aa" in cenario.motor.posicoes
+        assert "0xaa" not in cenario.motor.posicoes
+        posicao = cenario.motor.posicoes["aa"]
+        assert posicao.slug == "btc-updown-5m-1787000300"
+        assert posicao.preco_pago == pytest.approx(0.30)
+
+    def test_perder_incrementa_a_SEQUENCIA_de_perdas(self, tmp_path):
+        """O número que arma a pausa. Sem isto ele fica em zero para sempre."""
+        cenario, parse = self._operar(tmp_path)
+        posicao = cenario.motor.posicoes["aa"]
+        perdedor = "tok-down" if posicao.lado_up else "tok-up"
+
+        assert cenario.motor.resolver(parse(_resolucao(perdedor))) is True
+
+        assert cenario.portao.registro.perdas_seguidas == 1
+        assert cenario.portao.registro.pnl_realizado_usdc < 0
+
+    def test_ganhar_zera_a_sequencia_e_soma_PnL(self, tmp_path):
+        cenario, parse = self._operar(tmp_path)
+        posicao = cenario.motor.posicoes["aa"]
+        vencedor = "tok-up" if posicao.lado_up else "tok-down"
+        cenario.portao.registro.perdas_seguidas = 2
+
+        cenario.motor.resolver(parse(_resolucao(vencedor)))
+
+        assert cenario.portao.registro.perdas_seguidas == 0
+        assert cenario.portao.registro.pnl_realizado_usdc > 0
+
+    def test_a_conta_e_a_MESMA_do_backtest(self, tmp_path):
+        """`payout − custo − fee`, share vencedora paga 1,00.
+
+        Duas contas diferentes fariam o SHADOW e o backtest discordarem sobre
+        o próprio resultado — e a comparação entre os dois é o que justifica o
+        SHADOW existir.
+        """
+        cenario, parse = self._operar(tmp_path)
+        posicao = cenario.motor.posicoes["aa"]
+        vencedor = "tok-up" if posicao.lado_up else "tok-down"
+
+        cenario.motor.resolver(parse(_resolucao(vencedor)))
+
+        esperado = posicao.shares - posicao.shares * posicao.preco_pago
+        assert cenario.portao.registro.pnl_realizado_usdc == pytest.approx(
+            esperado - posicao.fee_usdc
+        )
+
+    def test_resolver_duas_vezes_NAO_conta_duas_vezes(self, tmp_path):
+        """A resolução pode chegar por mais de um caminho (evento e consulta
+        à Gamma). Somar duas vezes inflaria o disjuntor."""
+        cenario, parse = self._operar(tmp_path)
+        posicao = cenario.motor.posicoes["aa"]
+        perdedor = "tok-down" if posicao.lado_up else "tok-up"
+
+        cenario.motor.resolver(parse(_resolucao(perdedor)))
+        primeiro = cenario.portao.registro.pnl_realizado_usdc
+
+        assert cenario.motor.resolver(parse(_resolucao(perdedor))) is False
+        assert cenario.portao.registro.pnl_realizado_usdc == primeiro
+        assert cenario.portao.registro.perdas_seguidas == 1
+
+    def test_resolucao_de_janela_que_nao_operamos_e_contada_e_nao_erro(
+        self, tmp_path
+    ):
+        """Assinamos o livro de janela recusada de propósito, então este é o
+        caso NORMAL."""
+        cenario, parse = self._operar(tmp_path)
+
+        assert (
+            cenario.motor.resolver(parse(_resolucao("tok-up", "0xoutro"))) is False
+        )
+        assert cenario.motor.resolucoes_sem_posicao == 1
+
+    def test_a_posicao_SOBREVIVE_ao_fechamento_da_janela(self, tmp_path):
+        """A resolução chega DEPOIS do fechamento. Se `_liquidar` apagasse a
+        posição, o PnL se perderia — que era o defeito."""
+        cenario, parse = self._operar(tmp_path)
+
+        cenario.tick(faltam=-10.0)  # a janela fechou: `_liquidar` roda
+
+        assert "aa" in cenario.motor.posicoes
+        assert cenario.motor.resolver(parse(_resolucao("tok-down"))) is True
+
+    def test_evento_que_nao_decide_o_lado_devolve_a_posicao(self, tmp_path):
+        """Perder o PnL seria pior que esperar: a posição volta para a fila e
+        a próxima resolução ainda pode liquidá-la."""
+        cenario, parse = self._operar(tmp_path)
+        indeciso = _resolucao("tok-up")
+        indeciso["winning_asset_id"] = "token-de-outro-mercado"
+        indeciso["winning_outcome"] = None
+
+        assert cenario.motor.resolver(parse(indeciso)) is False
+        assert "aa" in cenario.motor.posicoes

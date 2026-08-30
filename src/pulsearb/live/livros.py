@@ -33,6 +33,7 @@ from pulsearb.backtest.book import OrderBook
 from pulsearb.feeds.poly_ws import (
     EVENT_BOOK,
     EVENT_PRICE_CHANGE,
+    iter_mudancas,
 )
 from pulsearb.obs.logging import get_logger
 
@@ -81,6 +82,26 @@ class LivrosAoVivo:
 
     def aplicar(self, evento: dict[str, Any], *, ts_ns: int) -> None:
         tipo = evento.get("event_type")
+
+        if tipo == EVENT_PRICE_CHANGE:
+            # Achado P1 do Codex no #52, e procede — era o defeito mais caro
+            # do PR, porque não deixa rastro: o SHADOW rodaria as 24 h sem
+            # avaliar nada e o relatório sairia como "nenhuma oportunidade".
+            #
+            # `[VERIFICADO]` API_NOTES §6.1b: o `price_change` do SDK **não
+            # tem `asset_id` no topo**. Ele traz `price_changes[]`, e cada
+            # entrada carrega o seu próprio token — uma mensagem pode cobrir
+            # VÁRIOS tokens. Lendo `asset_id` do topo, o evento era recusado
+            # como sem token, os livros ficavam parados no snapshot inicial e
+            # depois de 10 s nenhum era confiável.
+            #
+            # E o pior: o backtest NÃO tinha esse defeito, porque já roteava
+            # por `iter_mudancas`. A divergência apareceria como "o mercado
+            # estava diferente", que é justamente o que a regra do mesmo
+            # caminho existe para impedir.
+            self._aplicar_mudancas(evento, ts_ns=ts_ns)
+            return
+
         token_id = evento.get("asset_id")
         if not isinstance(token_id, str) or not token_id:
             self.eventos_ignorados += 1
@@ -99,25 +120,56 @@ class LivrosAoVivo:
             )
             return
 
-        if tipo != EVENT_PRICE_CHANGE:
-            # `last_trade_price`, `tick_size_change` e afins não movem o
-            # livro. Ignorar é correto; contar é o que permite dizer depois
-            # que o silêncio de um token era silêncio de verdade.
+        # `last_trade_price`, `tick_size_change` e afins não movem o livro.
+        # Ignorar é correto; contar é o que permite dizer depois que o
+        # silêncio de um token era silêncio de verdade.
+        self.eventos_ignorados += 1
+
+    def _aplicar_mudancas(self, evento: dict[str, Any], *, ts_ns: int) -> None:
+        """Roteia cada entrada do `price_change` para o livro do SEU token.
+
+        `iter_mudancas` é a MESMA função que o backtest usa, e é de propósito:
+        ela aceita as duas formas de payload (§6.1b) e a escolha entre elas
+        não pode divergir entre as duas pontas.
+        """
+        tocados: set[str] = set()
+        for mudanca in iter_mudancas(evento):
+            atual = self.por_token.get(mudanca.asset_id)
+            if atual is None or not atual.tem_snapshot:
+                # Aplicar isto a um livro vazio inventaria profundidade.
+                self.deltas_orfaos += 1
+                if atual is not None:
+                    atual.deltas_sem_snapshot += 1
+                continue
+            tocados.add(mudanca.asset_id)
+
+        if not tocados:
             self.eventos_ignorados += 1
             return
 
-        atual = self.por_token.get(token_id)
-        if atual is None or not atual.tem_snapshot:
-            # Aplicar isto a um livro vazio inventaria profundidade.
-            self.deltas_orfaos += 1
-            if atual is not None:
-                atual.deltas_sem_snapshot += 1
-            return
-
-        atual.livro.apply_price_change(evento)
-        atual.ultimo_evento_ns = ts_ns
+        # O payload inteiro vai para cada livro tocado, e não a entrada
+        # isolada: `apply_price_change` já sabe filtrar o que é dele, e
+        # `best_bid`/`best_ask` descrevem o livro DEPOIS da mensagem toda —
+        # aplicar entrada por entrada compararia contra estados intermediários
+        # que nunca existiram no servidor (§6.1b, o erro que custou caro no
+        # M2.5).
+        for token_id in tocados:
+            atual = self.por_token[token_id]
+            atual.livro.apply_price_change(evento)
+            atual.ultimo_evento_ns = ts_ns
 
     # ────────────────────────────────────────────────────────────── consulta
+    def esquecer(self, token_id: str) -> bool:
+        """Solta o livro de um token que não interessa mais.
+
+        `por_token` não expira sozinho. Numa rodada de 24 h cada mercado que
+        rotaciona deixaria o `OrderBook` inteiro para trás — milhares de
+        livros mortos ocupando memória e sendo percorridos por todo `resumo`.
+
+        Quem chama é quem sabe que a janela acabou: o processo, ao desassinar.
+        """
+        return self.por_token.pop(token_id, None) is not None
+
     def confiavel(self, token_id: str, *, agora_ns: int) -> bool:
         registro = self.por_token.get(token_id)
         return registro is not None and registro.confiavel(

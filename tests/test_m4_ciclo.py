@@ -167,10 +167,115 @@ class TestRoteamento:
         assert ciclo.contagem["preco_sem_carimbo_do_servidor"] == 1
 
     def test_alimentar_empurra_uma_sequencia(self, ciclo):
-        alimentar(ciclo, [_evento_rtds(), _evento_poly(), _evento_rtds()])
+        # Carimbos distintos: dois ticks com o MESMO carimbo são o tick
+        # repetido da redundância, e a dedupe os conta uma vez só.
+        alimentar(
+            ciclo,
+            [
+                _evento_rtds(ts_servidor_ms=ABRE_MS),
+                _evento_poly(),
+                _evento_rtds(ts_servidor_ms=ABRE_MS + 1000),
+            ],
+        )
 
         assert ciclo.contagem["preco"] == 2
         assert ciclo.contagem["livro"] == 1
+
+
+class TestFiltroDeAtivoOperado:
+    """O `assets` do feed NÃO filtra o `on_event`.
+
+    Em `feeds/base.py`, `_handle_message` filtra por ativo — e o `on_event`,
+    que é por onde o ciclo recebe, é chamado INCONDICIONALMENTE depois. Passar
+    `settings.assets` ao feed portanto não basta: sem o filtro aqui, um ativo
+    que o bot nem opera entra no `feeds_saudaveis`, que fecha pelo pior, e
+    emudecer bloquearia intenções de BTC/ETH saudáveis.
+    """
+
+    def test_ativo_fora_da_lista_e_ignorado_e_contado(self, ciclo):
+        ciclo.ativos_operados = frozenset({"btc", "eth"})
+
+        ciclo.on_feed_event(_evento_rtds("sol"))
+
+        assert ciclo.contagem["preco_de_outro_ativo"] == 1
+        assert "sol" not in ciclo.motor.precos.por_ativo
+        assert "sol" not in ciclo.ultimo_preco_ns
+
+    def test_ativo_ignorado_NAO_derruba_a_saude_do_feed(self, ciclo):
+        """O ponto inteiro do filtro."""
+        ciclo.ativos_operados = frozenset({"btc"})
+        agora = ABRE_NS + int(30 * 1e9)
+
+        ciclo.on_feed_event(_evento_rtds("sol", chegada_ns=ABRE_NS))
+        ciclo.on_feed_event(
+            _evento_rtds("btc", chegada_ns=agora - 1_000_000_000)
+        )
+
+        assert ciclo.feeds_saudaveis(agora_ns=agora) is True
+
+    def test_sem_lista_aceita_todos(self, ciclo):
+        """`None` = sem restrição, para reprodução de gravação e testes."""
+        assert ciclo.ativos_operados is None
+
+        ciclo.on_feed_event(_evento_rtds("sol"))
+
+        assert ciclo.contagem["preco"] == 1
+
+
+class TestDeduplicacaoDoTickRepetido:
+    """O RTDS é assinado em N conexões redundantes (default 2).
+
+    O preço da redundância é o MESMO tick chegando N vezes. Contá-lo N vezes
+    estragaria a volatilidade realizada e o sensor de anomalia de tempo — dois
+    "atrasos" por tick.
+    """
+
+    def test_o_mesmo_carimbo_duas_vezes_conta_uma(self, ciclo):
+        evento = _evento_rtds(ts_servidor_ms=ABRE_MS)
+        ciclo.on_feed_event(evento)
+        ciclo.on_feed_event(_evento_rtds(ts_servidor_ms=ABRE_MS))
+
+        assert ciclo.contagem["preco"] == 1
+        assert ciclo.contagem["preco_repetido"] == 1
+        assert len(ciclo.motor.precos.por_ativo["btc"].serie_e18) == 1
+
+    def test_o_repetido_nao_alimenta_o_sensor_de_tempo(self, ciclo):
+        """Dois "atrasos" pelo mesmo tick enviesariam a mediana."""
+        for _ in range(4):
+            ciclo.on_feed_event(_evento_rtds(ts_servidor_ms=ABRE_MS))
+
+        assert ciclo.motor.precos.relogio.resumo(
+            agora_ms=ABRE_MS + 100
+        )["ticks_vistos"] == 1
+
+    def test_ativos_diferentes_com_o_mesmo_carimbo_NAO_sao_repetidos(self, ciclo):
+        """O RTDS entrega os oito ativos com carimbos que podem coincidir."""
+        ciclo.on_feed_event(_evento_rtds("btc", ts_servidor_ms=ABRE_MS))
+        ciclo.on_feed_event(_evento_rtds("eth", ts_servidor_ms=ABRE_MS))
+
+        assert ciclo.contagem["preco"] == 2
+        assert "preco_repetido" not in ciclo.contagem
+
+    def test_tick_FORA_DE_ORDEM_nao_e_descartado(self, ciclo):
+        """Só o carimbo EXATO conta como repetido.
+
+        O backtest guarda os fora de ordem (`streams_e18` acumula e a âncora
+        resolve por bisect); jogá-los fora aqui faria as duas pontas verem
+        séries diferentes.
+        """
+        ciclo.on_feed_event(_evento_rtds(ts_servidor_ms=ABRE_MS + 2000))
+        ciclo.on_feed_event(_evento_rtds(ts_servidor_ms=ABRE_MS + 1000))
+
+        assert ciclo.contagem["preco"] == 2
+
+    def test_a_memoria_e_limitada(self, ciclo):
+        """Uma rodada de 24 h não pode acumular 700 mil carimbos por ativo."""
+        from pulsearb.live.ciclo import CARIMBOS_LEMBRADOS
+
+        for i in range(CARIMBOS_LEMBRADOS + 50):
+            ciclo.on_feed_event(_evento_rtds(ts_servidor_ms=ABRE_MS + i * 1000))
+
+        assert len(ciclo._vistos["btc"]) == CARIMBOS_LEMBRADOS
 
 
 class TestOSensorDeTempoRecebeAChegada:

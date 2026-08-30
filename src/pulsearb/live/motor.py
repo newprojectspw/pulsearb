@@ -28,7 +28,9 @@ from typing import Any
 
 from pulsearb.backtest.runner import edge_liquido
 from pulsearb.engine.decisao import JOGO_TWAP, estimar_prob_up
+from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.execution.executor import Executor
+from pulsearb.feeds.poly_ws import Resolucao, normalizar_condition_id
 from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.precos import PrecosAoVivo
 from pulsearb.live.rastreador import JanelaAoVivo, RastreadorDeJanelas
@@ -63,6 +65,23 @@ PULOU_SEM_CURVA = "sem_curva_de_variancia"
 #: recorta no mesmo ponto, e recortar em lugares diferentes faria os dois
 #: divergirem por construção.
 PULOU_ALEM_DA_CURVA = "alem_do_horizonte_medido"
+#: A janela é de um jogo que este processo não está equipado para operar.
+#:
+#: O jogo HORÁRIO resolve pelo candle 1h da Binance, e a âncora dele é o campo
+#: `o` do `kline_1h` (`engine/hourly.py`) — não o stream `twap_sixty`. Um
+#: processo que só assina RTDS não tem essa série, e `estimar_prob_up` cairia
+#: em `prob_up_hourly` com a âncora do observável errado: toda probabilidade
+#: horária sairia de uma série que não é a que resolve a janela.
+#:
+#: Falha fechada em vez de operar errado. Sai desta lista quando o feed da
+#: Binance estiver ligado e roteado — e não antes.
+PULOU_JOGO_NAO_OPERADO = "jogo_sem_feed_proprio"
+#: `shares_por_trade` abaixo do mínimo que o mercado aceita.
+#:
+#: O backtest já recusa isto (`sinais_abaixo_do_minimo`). Sem a mesma recusa
+#: aqui, o SHADOW registraria `pode=true` para uma ordem que a corretora
+#: rejeitaria, e a população dele divergiria da do backtest.
+PULOU_ABAIXO_DO_MINIMO = "abaixo_do_minimo_do_mercado"
 
 
 @dataclass
@@ -78,6 +97,14 @@ class ConfigDoMotor:
     #: modelo não sabe.
     tempo_restante_max_s: float | None = 240.0
     tempo_restante_min_s: float | None = None
+    #: Que jogos este processo opera. Default: só o TWAP.
+    #:
+    #: É o único cuja âncora foi VERIFICADA (§13.8, τ=0 em 152 janelas) e o
+    #: único cujo feed este processo assina. Ampliar exige ligar o feed do
+    #: jogo novo primeiro.
+    jogos_operados: frozenset[str] = field(
+        default_factory=lambda: frozenset({JOGO_TWAP})
+    )
     #: As curvas V(t) medidas, por ativo. `None` = o modelo derivado.
     #:
     #: TEM de casar com o que o backtest usou. Rodar o SHADOW no derivado
@@ -97,6 +124,43 @@ class ConfigDoMotor:
         )
 
 
+def _chave(condition_id: str) -> str:
+    """A grafia comparável do condition id.
+
+    A Gamma, o CLOB e o WS não prometem a mesma: `0xABE6…` e `abe6…` são o
+    mesmo mercado. Comparar sem normalizar falha em SILÊNCIO — que é o modo
+    de falha que `normalizar_condition_id` foi escrita para eliminar.
+    """
+    return normalizar_condition_id(condition_id) or condition_id
+
+
+@dataclass(frozen=True)
+class PosicaoAberta:
+    """O que se comprou numa janela, guardado até a resolução chegar.
+
+    Existe porque o PnL só se conhece depois do fechamento, e sem memória do
+    lado e do preço não há como convertê-lo — o disjuntor ficaria cego.
+    """
+
+    slug: str
+    token_up: str
+    token_down: str
+    lado_up: bool
+    shares: float
+    preco_pago: float
+    fee_usdc: float
+
+    def pnl_usdc(self, *, venceu_up: bool) -> float:
+        """A MESMA conta do backtest (`report.py: Trade.pnl_usdc`).
+
+        Share vencedora paga 1,00; perdedora paga 0. Duas contas diferentes
+        fariam o SHADOW e o backtest discordarem sobre o próprio resultado.
+        """
+        acertou = self.lado_up == venceu_up
+        payout = self.shares if acertou else 0.0
+        return payout - self.shares * self.preco_pago - self.fee_usdc
+
+
 @dataclass
 class MotorAoVivo:
     """Um `tick()` por vez. Sem rede, sem asyncio: só decisão.
@@ -114,6 +178,18 @@ class MotorAoVivo:
 
     #: Janelas em que já se entrou, por `condition_id`.
     ja_operadas: set[str] = field(default_factory=set)
+    #: A posição de cada janela operada, até a resolução chegar. Ver
+    #: `resolver`: sem isto o disjuntor do SHADOW nunca arma.
+    #:
+    #: **A chave é o condition id NORMALIZADO**, e a distinção é a mesma que
+    #: `normalizar_condition_id` existe para impedir: a Gamma entrega `0xAA…`
+    #: e o WS entrega `aa…`. Indexar pela grafia crua fazia toda resolução
+    #: cair em `resolucoes_sem_posicao` — em silêncio, e com o disjuntor
+    #: parado em zero exatamente como antes do conserto.
+    posicoes: dict[str, PosicaoAberta] = field(default_factory=dict)
+    #: Resoluções que chegaram para janela que não operamos. Contador, não
+    #: erro: assinamos o livro de janela recusada de propósito.
+    resolucoes_sem_posicao: int = 0
     pulos: dict[str, int] = field(default_factory=dict)
     tentativas: int = 0
 
@@ -150,6 +226,87 @@ class MotorAoVivo:
         self.executor.portao.registrar_resolucao(janela.slug, 0.0)
         self.precos.esquecer(janela.condition_id)
         self.ja_operadas.discard(janela.condition_id)
+        # `posicoes` NÃO é limpo aqui: a resolução chega DEPOIS do fechamento,
+        # e é ela que traz o PnL. Apagar aqui seria apagar a única memória de
+        # que houve posição — ver `resolver`.
+
+    def resolver(self, resolucao: Resolucao) -> bool:
+        """A resolução chegou: converte a posição em PnL e alimenta o portão.
+
+        Achado P1 do Codex no #52, e era um buraco no ensaio inteiro.
+        `_liquidar` fecha toda janela com `pnl=0.0` — correto, porque no
+        fechamento o resultado ainda não se conhece. Só que **nada** chamava
+        `registrar_resolucao` com o PnL de verdade depois: `perdas_seguidas` e
+        `pnl_realizado_usdc` ficavam parados em zero para sempre.
+
+        Consequência: a pausa por sequência de perdas e o disjuntor de perda
+        do dia **nunca armavam no SHADOW**. Depois das primeiras entradas
+        perdedoras, o ensaio aprovaria intenções que o estado de risco
+        equivalente em LIVE já teria recusado — e o ensaio existe justamente
+        para dizer o que o LIVE faria.
+
+        A conta é a MESMA do backtest (`report.py: Trade.pnl_usdc`):
+        `payout − custo − fee`, com a share vencedora pagando 1,00. Duas
+        contas diferentes fariam o SHADOW e o backtest discordarem sobre o
+        próprio resultado.
+
+        Chamar duas vezes para a mesma janela é seguro: a posição sai de
+        `posicoes` na primeira.
+        """
+        condition_id = resolucao.condition_id
+        if condition_id is None:
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        posicao = self.posicoes.pop(condition_id, None)
+        if posicao is None:
+            # Assinamos o livro de janela recusada de propósito, então
+            # resolução sem posição é o caso NORMAL, não um erro.
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        venceu_up = resolucao.venceu_up(posicao.token_up, posicao.token_down)
+        if venceu_up is None:
+            # Evento que não permite decidir o lado. Devolver a posição para
+            # `posicoes` deixa a próxima resolução (ou a consulta à Gamma)
+            # ainda poder liquidá-la — perder o PnL seria pior.
+            self.posicoes[condition_id] = posicao
+            self.resolucoes_sem_posicao += 1
+            return False
+
+        self.executor.portao.registrar_resolucao(
+            posicao.slug, posicao.pnl_usdc(venceu_up=venceu_up)
+        )
+        return True
+
+    def _elegivel(self, janela: JanelaAoVivo, *, agora_epoch: float) -> bool:
+        """Esta janela merece ser avaliada? Cada não já sai contado.
+
+        São as perguntas que não dependem de preço nem de livro — respondê-las
+        antes evita gastar modelo com janela que nunca viraria ordem, e mantém
+        `pulos` respondendo à pergunta operacional de sempre: o bot está vivo e
+        não opera, por quê?
+        """
+        if janela.condition_id in self.ja_operadas:
+            self._pular(PULOU_JA_OPEROU)
+            return False
+
+        if janela.jogo not in self.config.jogos_operados:
+            self._pular(PULOU_JOGO_NAO_OPERADO)
+            return False
+
+        if self.config.shares_por_trade < janela.min_order_size:
+            # Mesma recusa do backtest (`sinais_abaixo_do_minimo`). Registrar
+            # intenção que a corretora rejeitaria encheria o diário de linhas
+            # que nunca virariam ordem.
+            self._pular(PULOU_ABAIXO_DO_MINIMO)
+            return False
+
+        if not self.config.na_faixa(janela.seconds_left(agora_epoch)):
+            self._pular(PULOU_FORA_DA_FAIXA)
+            return False
+
+        return True
 
     def _avaliar(
         self,
@@ -159,14 +316,10 @@ class MotorAoVivo:
         agora_ns: int,
         feeds_saudaveis: bool,
     ) -> bool:
-        if janela.condition_id in self.ja_operadas:
-            self._pular(PULOU_JA_OPEROU)
+        if not self._elegivel(janela, agora_epoch=agora_epoch):
             return False
 
         seconds_left = janela.seconds_left(agora_epoch)
-        if not self.config.na_faixa(seconds_left):
-            self._pular(PULOU_FORA_DA_FAIXA)
-            return False
 
         ancora = self.precos.ancora_da_janela(
             asset=janela.asset,
@@ -278,6 +431,20 @@ class MotorAoVivo:
                 # sobem PnL e drawdown na mesma proporção — alavancagem, não
                 # borda.
                 self.ja_operadas.add(janela.condition_id)
+                self.posicoes[_chave(janela.condition_id)] = PosicaoAberta(
+                    slug=janela.slug,
+                    token_up=janela.token_up,
+                    token_down=janela.token_down,
+                    lado_up=lado_up,
+                    shares=ordem.shares,
+                    preco_pago=livro.best_ask,
+                    fee_usdc=ordem.shares
+                    * fee_pp_por_share(
+                        livro.best_ask,
+                        rate=janela.fee_rate,
+                        exponent=janela.fee_exponent,
+                    ),
+                )
             return True
 
         self._pular(PULOU_SEM_LIVRO if sem_livro else PULOU_SEM_EDGE)

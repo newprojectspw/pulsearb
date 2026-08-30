@@ -382,3 +382,144 @@ class TestPortaoDoRelogio:
         decisao = _avaliar(portao, _ordem(), feeds_saudaveis=False)
 
         assert decisao.motivo == MOTIVOS.FEED_PARADO
+
+
+class TestOEnsaioNaoContaminaORegistroReal:
+    """Achado P1 do Codex no #52.
+
+    `ExecutorSombra` chama `registrar_envio` de propósito — sem isso os tetos
+    por janela e de exposição nunca seriam exercitados, e o ensaio não
+    ensaiaria a parte que mais importa. Só que `registrar_envio` GRAVA, e o
+    caminho vinha do mesmo `caminho_do_registro` que o LIVE usará.
+    """
+
+    def test_LIVE_escreve_no_caminho_configurado(self, tmp_path):
+        """O dinheiro real fica onde a configuração mandou. Sem sufixo."""
+        portao = _portao(tmp_path, modo=Mode.LIVE)
+
+        assert portao.caminho == tmp_path / "registro.json"
+
+    @pytest.mark.parametrize("modo", [Mode.SHADOW, Mode.SIM])
+    def test_ensaio_ganha_arquivo_proprio(self, tmp_path, modo):
+        portao = _portao(tmp_path, modo=modo)
+
+        assert portao.caminho == tmp_path / f"registro.{modo.value.lower()}.json"
+
+    def test_o_ensaio_NAO_toca_no_arquivo_do_LIVE(self, tmp_path):
+        """O teste que importa: contaminação, não nomenclatura.
+
+        A sequência concreta: SHADOW aprova intenção, `registrar_envio` grava,
+        o processo morre antes de a janela fechar. `_liquidar` só roda com o
+        processo vivo — depois de reiniciar, aquele slug já passou e nunca
+        mais será liquidado. Com um arquivo só, a exposição sintética ficaria
+        presa no registro do dinheiro real, para sempre, e o teto passaria a
+        recusar intenção legítima.
+        """
+        real = tmp_path / "registro.json"
+        ensaio = _portao(tmp_path, modo=Mode.SHADOW)
+
+        ensaio.registrar_envio(_ordem(shares=5.0, preco=0.50))
+
+        assert not real.exists()
+        assert ensaio.caminho is not None and ensaio.caminho.exists()
+        assert ensaio.registro.exposicao_total_usdc == pytest.approx(2.5)
+
+    def test_o_LIVE_nao_herda_a_exposicao_do_ensaio(self, tmp_path):
+        """E o outro lado da mesma moeda, que é o pior dos dois.
+
+        PnL, sequência de perdas e disjuntor de um ensaio entrando no registro
+        durável do dinheiro real corromperiam o histórico de segurança.
+        """
+        ensaio = _portao(tmp_path, modo=Mode.SHADOW)
+        ensaio.registrar_envio(_ordem(shares=5.0, preco=0.50))
+
+        real = _portao(tmp_path, modo=Mode.LIVE)
+
+        assert real.registro.exposicao_total_usdc == 0.0
+        assert real.registro.gasto_por_janela == {}
+
+    def test_o_KILL_continua_compartilhado(self, tmp_path):
+        """A assimetria é de propósito.
+
+        A chave de emergência existe para parar TUDO. Um KILL por modo faria
+        `touch KILL` numa sessão ssh parar metade do que está rodando —
+        exatamente o contrário do que a chave promete.
+        """
+        kill = tmp_path / "KILL"
+        portoes = [
+            PortaoDeRisco(
+                RiskSettings(),
+                modo,
+                caminho_do_registro=tmp_path / "registro.json",
+                caminho_do_kill=kill,
+                hoje="2026-08-25",
+                relogio_do_servidor=_RelogioFalso(),
+            )
+            for modo in (Mode.LIVE, Mode.SHADOW, Mode.SIM)
+        ]
+
+        assert {p.caminho_do_kill for p in portoes} == {kill}
+
+    def test_sem_caminho_configurado_segue_sem_caminho(self, tmp_path):
+        """`None` é memória, e memória não contamina ninguém."""
+        portao = PortaoDeRisco(RiskSettings(), Mode.SHADOW, hoje="2026-08-25")
+
+        assert portao.caminho is None
+
+
+class TestExposicaoDeEnsaioNaoSobreviveAoReinicio:
+    """Achado P1 do Codex no #52, segunda rodada.
+
+    Separar o arquivo não bastou: o arquivo separado continua sendo
+    RECARREGADO, e a exposição sintética presa nele trava o ensaio seguinte.
+    """
+
+    def _com_exposicao(self, tmp_path, modo):
+        primeiro = _portao(tmp_path, modo=modo)
+        primeiro.registrar_envio(_ordem(slug="janela-que-fechou"))
+        return _portao(tmp_path, modo=modo)
+
+    @pytest.mark.parametrize("modo", [Mode.SHADOW, Mode.SIM])
+    def test_o_ensaio_arranca_sem_exposicao_presa(self, tmp_path, modo):
+        """A sequência: SHADOW aprova, o processo morre antes de `_liquidar`,
+        reinicia no mesmo dia. Aquela janela já fechou, o slug nunca mais
+        aparece, e nada a liquida. Com cinco delas o teto de posições recusa
+        toda intenção seguinte até a virada de UTC.
+        """
+        segundo = self._com_exposicao(tmp_path, modo)
+
+        assert segundo.registro.gasto_por_janela == {}
+        assert segundo.registro.exposicao_total_usdc == 0.0
+
+    def test_em_LIVE_a_exposicao_FICA(self, tmp_path):
+        """A assimetria é de propósito, e é o lado certo para errar.
+
+        Em LIVE pode haver posição real aberta. Travar o bot até uma pessoa
+        reconciliar custa janelas perdidas; esquecer a posição custa uma
+        exposição que ninguém está contando.
+        """
+        segundo = self._com_exposicao(tmp_path, Mode.LIVE)
+
+        assert segundo.registro.exposicao_total_usdc == pytest.approx(2.5)
+
+    def test_o_disjuntor_e_o_PnL_atravessam_mesmo_no_ensaio(self, tmp_path):
+        """Só a exposição em aberto é descartada.
+
+        Zerar o disjuntor no arranque daria ao reinício o poder de desarmar o
+        que só uma pessoa pode desarmar — que é a regra 2 do módulo.
+        """
+        primeiro = _portao(tmp_path, modo=Mode.SHADOW)
+        primeiro.registrar_envio(_ordem(slug="janela-que-fechou"))
+        primeiro.registro.disjuntor_armado = True
+        primeiro.registro.disjuntor_motivo = "perda do dia"
+        primeiro.registro.perdas_seguidas = 3
+        primeiro.registro.pnl_realizado_usdc = -12.5
+        primeiro._gravar()
+
+        segundo = _portao(tmp_path, modo=Mode.SHADOW)
+
+        assert segundo.registro.gasto_por_janela == {}
+        assert segundo.registro.disjuntor_armado is True
+        assert segundo.registro.disjuntor_motivo == "perda do dia"
+        assert segundo.registro.perdas_seguidas == 3
+        assert segundo.registro.pnl_realizado_usdc == pytest.approx(-12.5)

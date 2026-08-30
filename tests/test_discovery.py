@@ -547,3 +547,124 @@ async def test_keyset_manda_filtro_de_data(gamma_fee):
 def test_reconhecimento_de_slug(slug, esperado):
     discovery, _ = _discovery({}, assets=["btc"])
     assert discovery._is_updown_slug(slug) is esperado
+
+
+class TestConditionIdNaUrl:
+    """O `conditionId` vem do FIO e ia cru para dentro de um caminho de URL.
+
+    `f"{clob_url}/clob-markets/{condition_id}"` sem passar por nada. Um valor
+    com `../`, `?`, `#` ou `//` mudaria o caminho, a query ou o host da
+    requisição. Não é hipótese sobre má-fé da Polymarket: uma resposta
+    malformada, um proxy no meio ou um campo renomeado bastam.
+    """
+
+    @pytest.mark.parametrize(
+        "valor",
+        [
+            "0xabc123def456",
+            "ABC123DEF456",
+            "abc123",
+            "0XABC",
+        ],
+    )
+    def test_hash_hexadecimal_passa(self, valor):
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert seguro_na_url(valor)
+
+    @pytest.mark.parametrize(
+        "valor",
+        [
+            "../admin",
+            "abc/def",
+            "abc?token=x",
+            "abc#frag",
+            "//evil.example.com/x",
+            "abc def",
+            "abc%2f..",
+            "",
+            "0x",
+            "naohex",
+        ],
+    )
+    def test_qualquer_coisa_fora_do_hex_e_recusada(self, valor):
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert not seguro_na_url(valor)
+
+    def test_a_checagem_e_do_CONJUNTO_e_nao_do_comprimento(self):
+        """Exigir 64 dígitos exatos faria o dia em que o servidor mudar o
+        formato virar "nenhuma janela existe" — pior que o problema."""
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert seguro_na_url("ab")
+        assert seguro_na_url("a" * 200)
+
+    def test_normalizar_condition_id_NAO_serve_para_isto(self):
+        """Ela normaliza a grafia para comparação e deixa passar qualquer
+        caractere. Usá-la como validação seria o engano fácil."""
+        from pulsearb.feeds.poly_ws import normalizar_condition_id
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert normalizar_condition_id("../admin") == "../admin"
+        assert not seguro_na_url("../admin")
+
+
+class TestIdRecusadoNaoViraMercadoOperavel:
+    """Achado P2 do Codex no #52, e procede: eu chamei o comportamento de
+    "falha fechada" e ele não era.
+
+    Pular a consulta ao CLOB não bastava. A Gamma sozinha traz `feeSchedule`,
+    os token ids, o tick, o mínimo e `acceptingOrders` — o suficiente para
+    `extract_market` marcar o mercado como OPERÁVEL. O id malformado entrava
+    no rastreador como negociável.
+    """
+
+    async def _descobrir(self, condition_id):
+        from pulsearb.markets.discovery import MarketDiscovery
+
+        gamma = {
+            "conditionId": condition_id,
+            "slug": "btc-updown-5m-1",
+            "clobTokenIds": '["up1", "dn1"]',
+            "outcomes": '["Up", "Down"]',
+            "endDate": "2099-01-01T00:00:00Z",
+            "acceptingOrders": True,
+            "orderPriceMinTickSize": 0.01,
+            "orderMinSize": 5,
+            "active": True,
+            "closed": False,
+        }
+
+        chamadas = []
+
+        async def http_get_json(url, params):
+            chamadas.append(url)
+            return None
+
+        descoberta = MarketDiscovery(
+            http_get_json=http_get_json,
+            gamma_url="https://gamma-api.polymarket.com",
+            clob_url="https://clob.polymarket.com",
+            assets=["btc"],
+            probe_durations_seconds=[300],
+        )
+        mercado = await descoberta._assemble(gamma)
+        return descoberta, mercado, chamadas
+
+    async def test_id_malformado_sai_NAO_operavel_e_com_motivo(self):
+        from pulsearb.markets.discovery import MOTIVO_ID_RECUSADO
+
+        descoberta, mercado, chamadas = await self._descobrir("../admin")
+
+        assert mercado.operable is False
+        assert mercado.gate_failures == [MOTIVO_ID_RECUSADO]
+        assert descoberta.ids_recusados == 1
+        assert chamadas == [], "nao pode consultar o CLOB com o id recusado"
+
+    async def test_id_bom_segue_o_caminho_normal(self):
+        """A recusa não pode virar rigor que barra mercado legítimo."""
+        _, mercado, chamadas = await self._descobrir("0x" + "ab" * 32)
+
+        assert mercado.gate_failures != ["condition_id_recusado"]
+        assert len(chamadas) == 1

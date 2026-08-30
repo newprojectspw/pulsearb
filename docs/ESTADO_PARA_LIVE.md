@@ -481,10 +481,10 @@ defeitos nele:
 | # | Item | Estado |
 |---|---|---|
 | 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 28 testes |
-| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ⬜ |
+| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (25 testes: L2 HMAC-SHA256 + typed data do L1) e `execution/ordem.py` (33 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 14 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
-| 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | ⬜ |
+| 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **código completo, nunca falou com o CLOB de verdade** — `execution/cliente.py` (47 testes), com o transporte `httpx` já escrito e testado contra `MockTransport`: FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). Falta **uma resposta do servidor de verdade** — o que exige rede e credencial, não código. O `content=` (e não `json=`) é o que preserva os bytes assinados; falha de rede vira `INCERTA` e nunca recusa, porque recusa autorizaria reenviar uma ordem que talvez esteja no livro |
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
 
 ### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
@@ -530,9 +530,9 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
-| 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
+| 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o ciclo existe** desde 2026-08-30 (`live/ciclo.py`, 15 testes); falta o processo que abre os sockets e o roda por 24 h |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 53 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -704,10 +704,85 @@ estão velhos — "feed parado" sem dizer qual não é alarme acionável.
 Sem nenhum preço ainda, a saúde é `false`: bot recém-subido não sabe nada, e
 não saber não autoriza.
 
-**O que ainda falta para o 3.13:** o processo que abre os sockets, roda a
-descoberta e chama `passo()` numa cadência — e o roda por 24 h sem cair. O
-recorder já tem toda essa fiação (957 linhas); o ciclo foi desenhado para ser o
-consumidor dela.
+#### E o processo que lhe dá rede — `live/shadow.py`
+
+O ciclo não abre socket por design. `ProcessoShadow` é quem abre, e reusa a
+fiação do recorder — `RtdsFeed`, `PolyMarketWsFeed`, `MarketDiscovery`, as
+mesmas classes que gravaram as 24 h do M2. Se o SHADOW abrisse os sockets por
+outro caminho, uma diferença de assinatura ou de reconexão faria a população
+que ele vê divergir da que o backtest leu, e a comparação entre os dois
+perderia o sentido.
+
+```
+python -m pulsearb.live.shadow --duration 24h \
+    --curva-de-variancia relatorios/VARIANCIA_23AGO.json
+```
+
+**A ligação que a fábrica faz, e que é a mais fácil de esquecer:** o
+`PortaoDeRisco` recebe `relogio_do_servidor=precos.relogio` — a MESMA
+instância que o ciclo alimenta tick a tick. Sem ela a trava de relógio diria
+"não sei" a cada ordem, o diário sairia com `relogio_nao_monitorado` em toda
+linha, e nenhum dos portões que interessam seria exercitado. Há teste travando
+a identidade da instância, porque uma cópia não recebe os ticks.
+
+**Redundância no RTDS, como no recorder.** `rtds_conexoes` (default 2)
+conexões ao mesmo endpoint. Conexão individual já produziu lacunas de 30 a
+306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder ticks de
+âncora que o backtest enxerga — furando exatamente a comparação que justifica o
+SHADOW. O tick repetido que a redundância produz é descartado **no ciclo**, não
+no processo, para valer também na reprodução de gravação; e é **contado**
+(`preco_repetido`), porque perto de zero com duas conexões significa que a
+redundância não está funcionando.
+
+**Só o jogo TWAP é operado.** A janela horária resolve pelo candle 1h da
+Binance, e a âncora dela é o campo `o` do `kline_1h` (`engine/hourly.py`) — não
+o `twap_sixty`. Um processo que só assina RTDS não tem essa série, e
+`estimar_prob_up` cairia em `prob_up_hourly` com a âncora do observável errado:
+toda probabilidade horária sairia de uma série que não resolve aquela janela.
+`jogos_operados` recusa, conta (`jogo_sem_feed_proprio`) e só se amplia quando
+o feed da Binance estiver ligado e roteado.
+
+**Só os ativos OPERADOS entram no feed.** `all_price_assets` inclui os
+`extra_price_assets`, que existem para gravação e backtest futuro. Como
+`feeds_saudaveis` fecha pelo pior ativo, um SOL mudo bloquearia intenções de
+BTC/ETH saudáveis — o gate de saúde passaria a depender de ativos que o bot nem
+opera.
+
+**O tamanho da ordem não sai do teto em USDC.** São unidades diferentes:
+`stake_max_por_trade_usdc` é USDC e quem o aplica é o portão, sobre
+`shares × preço`; `shares_por_trade` é em SHARES, e o default (5) é o mínimo
+que o mercado aceita (§12.5). E o motor passou a recusar ordem abaixo desse
+mínimo, como o backtest já fazia — sem isso o SHADOW registraria `pode=true`
+para ordem que a corretora rejeitaria.
+
+**Assinaturas rodam, não acumulam.** Token de janela encerrada é desassinado
+depois da carência de resolução — a MESMA de `pulsearb.tempo` que o recorder
+usa. Sem isso, 24 h de descoberta acumulariam milhares de assinaturas, e cada
+reconexão reenviaria o conjunto histórico inteiro no frame inicial.
+
+**Três cadências, e cada uma tem um número por trás:**
+
+| Laço | Cadência | Por quê |
+|---|---|---|
+| decisão | 1 s | o feed entrega 1,061 tick/s por ativo; decidir mais rápido que o dado chega não muda nada |
+| descoberta | 30 s | janela de 5 min descoberta com 30 s de atraso ainda sobra 4,5 min, e a faixa operada são os últimos 240 s |
+| relato | 60 s | estado no log sem poluir |
+
+O custo da primeira é até ~1 s de atraso a mais que o backtest — dentro da
+grade de latência que o M2 já mediu (150 a 1000 ms).
+
+**Um passo que levanta NÃO derruba o processo.** O SHADOW existe para rodar
+24 h e mostrar o que aconteceu; cair no primeiro evento estranho entregaria
+zero informação sobre as outras 23 horas. O erro sai nomeado no log e o laço
+segue — e há um teste que trava isso, para que ninguém "limpe" o `try/except`
+achando que ele esconde bug.
+
+**Janela não-operável também é assinada.** O motor decide se opera e o diário
+quer o motivo; não ver o livro de uma janela recusada trocaria "recusei por X"
+por "não sei nada sobre ela", que é justamente o que o M2 quer medir.
+
+**O que ainda falta para o 3.13:** rodar. As 24 h contínuas exigem máquina e
+tempo, não código.
 
 ### As peças que o ciclo casa
 

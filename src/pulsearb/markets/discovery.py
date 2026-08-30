@@ -22,6 +22,7 @@ Fatos que dirigem este módulo (docs/API_NOTES.md seção 12):
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -175,6 +176,11 @@ def parse_end_date_epoch(gamma: dict[str, Any]) -> float | None:
     except ValueError:
         return None
 
+
+#: O motivo de recusa de um mercado cujo `conditionId` não passa na conferência
+#: de segurança da URL. Nome próprio, como todo motivo do projeto: recusa
+#: anônima não vira métrica nem alarme.
+MOTIVO_ID_RECUSADO = "condition_id_recusado"
 
 #: Duração nominal de cada família de slug, em segundos. Não é tabela de
 #: conveniência: o `endDate` sozinho diz quando a janela FECHA, e a abertura
@@ -417,6 +423,36 @@ def extract_market(
     )
 
 
+#: Um `conditionId` é um hash hexadecimal, com ou sem `0x`. A checagem é do
+#: CONJUNTO DE CARACTERES, não do comprimento: exigir 64 dígitos exatos faria
+#: o dia em que o servidor mudar o formato virar "nenhuma janela existe", que
+#: é pior que o problema que isto resolve.
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def seguro_na_url(condition_id: str) -> bool:
+    """Este `conditionId` pode ser interpolado num caminho de URL?
+
+    Ele vem do FIO — `gamma.get("conditionId")` — e ia direto para dentro de
+    `f"{clob_url}/clob-markets/{condition_id}"` sem passar por nada. Um valor
+    com `../`, `?`, `#` ou `//` mudaria o caminho, a query ou o host da
+    requisição que fazemos.
+
+    Não é hipótese sobre má-fé da Polymarket: é que uma resposta malformada, um
+    proxy no meio ou um campo renomeado bastam para a nossa requisição sair
+    diferente do que se pretendia. O conserto é barato e a falha é fechada — id
+    recusado significa apenas que este mercado segue sem os dados do CLOB, e
+    `extract_market` já o barra por `fee_schedule_ilegivel`.
+
+    `normalizar_condition_id` (feeds/poly_ws) NÃO serve para isto: ela
+    normaliza a grafia para comparação e deixa passar qualquer caractere.
+    """
+    limpo = condition_id.strip()
+    if limpo.lower().startswith("0x"):
+        limpo = limpo[2:]
+    return bool(limpo) and all(caractere in _HEX for caractere in limpo)
+
+
 def _as_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -455,6 +491,8 @@ class MarketDiscovery:
         self.clock = clock
         self.log = get_logger("pulsearb.discovery")
         self.cache: dict[str, DiscoveredMarket] = {}  # por conditionId
+        #: `conditionId` que não passou em `seguro_na_url`. Ver a função.
+        self.ids_recusados = 0
 
     async def discover(
         self, *, ahead: int = 2, keyset_fallback: bool = True
@@ -549,12 +587,32 @@ class MarketDiscovery:
     async def _assemble(self, gamma: dict[str, Any]) -> DiscoveredMarket:
         condition_id = str(gamma.get("conditionId") or "")
         clob_compact: dict[str, Any] | None = None
-        if condition_id:
+        if condition_id and seguro_na_url(condition_id):
             data = await self.http_get_json(
                 f"{self.clob_url}/clob-markets/{condition_id}", None
             )
             if isinstance(data, dict):
                 clob_compact = data
+        elif condition_id:
+            # Não é silencioso: um id recusado é ou servidor mudando de
+            # formato, ou alguém tentando redirecionar a nossa requisição, e
+            # os dois precisam aparecer.
+            self.ids_recusados += 1
+            self.log.warning(
+                "conditionId recusado para uso em URL",
+                slug=gamma.get("slug"),
+                condition_id=condition_id[:80],
+            )
+            # Achado P2 do Codex no #52, e procede: pular a consulta ao CLOB
+            # não bastava. A Gamma sozinha traz `feeSchedule`, tokens, tick,
+            # mínimo e `acceptingOrders` — o suficiente para `extract_market`
+            # marcar o mercado como OPERÁVEL. O id malformado entrava no
+            # rastreador como negociável, que é o contrário de falhar fechado.
+            return dataclasses.replace(
+                extract_market(gamma, None, now_epoch=self.clock()),
+                operable=False,
+                gate_failures=[MOTIVO_ID_RECUSADO],
+            )
         return extract_market(gamma, clob_compact, now_epoch=self.clock())
 
     def _is_updown_slug(self, slug: str) -> bool:

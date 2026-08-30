@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import re
 import time
 from collections import Counter
 from typing import Any
@@ -69,6 +68,7 @@ from pulsearb.recorder.writer import (
     RecordEnvelope,
 )
 from pulsearb.settings import Settings
+from pulsearb.tempo import RESOLUTION_GRACE_SECONDS, parse_duration
 
 log = get_logger("pulsearb.recorder.main")
 
@@ -83,22 +83,11 @@ GAP_POLL_SECONDS = 1.0
 # publicado DEPOIS (o M0 estimava ~2min; no jogo horário, com UMA no caminho,
 # pode ser bem mais). Desassinar no endDate desligava a escuta antes do
 # resultado existir: 104 janelas conhecidas, ZERO resoluções capturadas.
-RESOLUTION_GRACE_SECONDS = 600.0
 # Fallback: consultar a Gamma para janelas encerradas cuja resolução não
 # chegou pelo WS. Independente do caminho do WS de propósito — se um falhar,
 # o outro cobre.
 RESOLUTION_POLL_SECONDS = 120.0
 
-_DURATION_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.IGNORECASE)
-_DURATION_UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, "": 3600.0}
-
-
-def parse_duration(text: str) -> float:
-    """'72h' → 259200.0. Sem sufixo = horas (o uso mais comum aqui)."""
-    match = _DURATION_PATTERN.match(text)
-    if match is None:
-        raise ValueError(f"duração inválida: {text!r} (use 90s, 30m, 72h, 7d)")
-    return float(match.group(1)) * _DURATION_UNITS[match.group(2).lower()]
 
 
 #: Onde a Gamma pode pôr a lista de rewards. `clobRewards` é o que se viu ao

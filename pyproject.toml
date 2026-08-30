@@ -17,6 +17,12 @@ dependencies = [
     "uvicorn==0.52.3",
     "aiosqlite==0.22.1",
     "pyyaml==6.0.3",
+    # M4 — assinatura EIP-712 das ordens (execution/ordem.py). E a mesma
+    # biblioteca que o SDK oficial usa por baixo, e a unica coisa dele que
+    # valia importar: a criptografia. O SDK inteiro NAO entra porque exige
+    # websockets<16 e rebaixaria o pacote do caminho quente — ver o adendo do
+    # API_NOTES secao 1.4 e o cabecalho de execution/auth.py.
+    "eth-account==0.13.7",
 ]
 # NOTA: polymarket-client (SDK oficial) NÃO é dependência de runtime no M1.
 # Só entra no M4, exclusivamente para assinatura de ordens (EIP-712/HMAC).
