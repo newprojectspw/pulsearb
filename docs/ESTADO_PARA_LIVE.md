@@ -529,62 +529,82 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ✅ **2026-08-30**: `live/relogio.py` mede, `RiskSettings.atraso_max_ms` corta em 250 ms, e em LIVE **sem fonte instalada é recusa**. Falta só o ciclo ao vivo construir o portão com a fonte — mesmo buraco do 3.13 |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
-| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **73**: 36 no portão, 27 nas travas novas, 10 no relógio |
+| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
 
-### A terceira trava do 3.10 existia no papel e não na máquina
+### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
 Feed velho e spread anômalo eram medidos desde o M4.1/M4.4. "Relógio > 250 ms"
-estava escrito no item desde a especificação e **nunca teve fonte**: nada no
-caminho ao vivo produzia esse número, então o portão não podia recusar por ele
-nem quando fosse verdade. Uma trava sem fonte é uma linha de documento.
+estava no item desde a especificação e **nunca teve fonte**. Agora tem uma — e
+a parte mais importante deste registro é o limite dela, porque a primeira
+versão prometeu mais do que entrega e a revisão do PR #47 pegou.
 
-**O que passou a ser medido, e o que NÃO passou.** Cada tick do feed-verdade
-traz o carimbo do servidor. Quando ele chega, o `live/relogio.py` compara com
-o nosso relógio:
+**A medição.** Cada tick do feed-verdade traz o carimbo do servidor; na
+chegada, olhamos o nosso relógio. Chamando `offset` a diferença entre o nosso
+relógio e o verdadeiro (negativo = estamos atrasados):
 
-    atraso = chegada_local − carimbo_do_servidor
+    atraso = chegada_local − carimbo_servidor = latencia + offset
 
-Isso **não é** a deriva do relógio: é deriva **mais** latência de rede **mais**
-fila no processo, somadas e não separáveis com uma fonte só. Por isso o campo
-publicado se chama `atraso_mediano_ms`, e não `deriva_ms` — e há um teste que
-quebra se alguém renomear, porque o nome prometeria uma decomposição que a
-medição não faz.
+**Duas incógnitas numa equação só**, medidas de UMA via.
 
-**Serve assim mesmo, e serve bem:** o atraso é um limite SUPERIOR da deriva.
-Pequeno prova relógio bom. Grande não diz qual das três causas é — e nenhuma
-das três é aceitável para quem decide por `seconds_left`, que é a distância
-entre o NOSSO agora e o fechamento da janela. Relógio adiantado 300 ms e rede
-atrasada 300 ms produzem o mesmo erro na mesma direção: operar achando que
-sobra mais tempo do que sobra.
+**O erro que eu cometi.** Escrevi que isso é um *limite superior* da deriva —
+"pequeno prova relógio bom". É falso, e falso na direção perigosa, porque as
+parcelas se cancelam:
 
-**Três decisões que valem registro, porque as três são recusas:**
+| offset | latência | medido | portão 250 ms | erro real no `seconds_left` |
+|---|---|---|---|---|
+| **−400 ms** | **400 ms** | **0 ms** | **passa** | **400 ms** |
+| −100 ms | 120 ms | +20 ms | passa | 100 ms |
+| +300 ms | 80 ms | +380 ms | recusa | 300 ms |
 
-- **Não saber custa o mesmo que saber que está ruim.** Fonte instalada e muda
-  — nunca chegou tick, ou o último tem mais de 10 s — recusa com
-  `relogio_nao_monitorado`. Tratar não-sei como zero seria a nota máxima do
-  critério que a trava existe para reprovar; é o defeito do
-  `cobertura_da_gravacao`, que o M2 já pagou uma vez.
-- **Em LIVE, sem fonte instalada, recusa tudo.** É a decisão menos confortável
-  do arquivo e é deliberada: uma trava que se auto-desativa quando ninguém a
-  ligou não é trava. Fora do LIVE a ausência não recusa — o SHADOW existe para
-  ensaiar, e recusar tudo ali apagaria a informação que justifica o ensaio.
-- **Carimbo no futuro recusa igual.** O servidor não manda evento do futuro:
-  se o carimbo dele está à frente do nosso relógio, quem está errado somos
-  nós. A comparação é em módulo; olhar só o lado positivo deixaria metade do
-  defeito passar.
+Relógio local atrasado é justamente o caso que infla o `seconds_left` — o bot
+opera achando que sobra mais tempo do que sobra — e é justamente o caso que a
+latência positiva mascara. Um `abs()` depois não recupera nada: o valor já saiu
+zerado da subtração.
 
-**Como isso apareceu:** ao ligar a trava, **todos** os testes de caminho LIVE
-passaram a recusar por `relogio_nao_monitorado`. Era o comportamento correto —
-e a prova de que a trava é real, e não decorativa. Os testes passaram a
+**O que a trava vale, então.** É **detector de anomalia**, não certificado de
+relógio. `|atraso|` grande prova que algo está grande; `|atraso|` pequeno é
+ausência de alarme deste sensor, e nada mais.
+
+**As duas metades que fecham o buraco:**
+
+1. **NTP/chrony verificado é PRÉ-CONDIÇÃO de deploy**, não algo que software
+   nosso possa provar com um feed de uma via. Entra na lista do Bloco 5, ao
+   lado da carteira dedicada e da imagem Docker.
+2. **O salto do relógio esse dá para pegar**, e é o modo de falhar mais comum:
+   o NTP corrige de vez no meio da operação. `_Saltos` compara o avanço do
+   relógio de parede com o do monótono — lendo os dois por conta própria, não
+   o `chegada_ms` do chamador, que carrega o espaçamento entre ticks e faria
+   um feed reproduzido parecer relógio pulando. Salto detectado recusa por
+   30 s: as medianas anteriores foram calculadas com o relógio antigo.
+
+**Uma janela por ativo, e o portão lê a pior** — também da revisão. Com janela
+única, um ativo continuamente atrasado entre oito saudáveis fica abaixo da
+mediana global; os ticks dele chegam sem parar, então a checagem de feed velho
+também não acusa, e uma ordem naquele ativo sairia com preço velho e o portão
+dizendo que está tudo bem.
+
+**Três recusas, todas deliberadas:**
+
+- **fonte muda** (sem tick, amostra velha, ou salto recente) → recusa. Não
+  saber custa o mesmo que saber que está ruim; tratar não-sei como zero é o
+  defeito do `cobertura_da_gravacao`, que o M2 já pagou uma vez.
+- **em LIVE sem fonte instalada** → recusa tudo. Uma trava que se auto-desativa
+  quando ninguém a ligou não é trava. Fora do LIVE a ausência não recusa —
+  o SHADOW existe para ensaiar.
+- **carimbo no futuro** → recusa igual, em módulo. É o que resta de sinal de
+  relógio local atrasado depois que a cancelação come o resto.
+
+**Como a trava se provou real:** ao ligá-la, **todos** os testes de caminho
+LIVE passaram a recusar por `relogio_nao_monitorado`. Os testes passaram a
 instalar a fonte, como o ciclo ao vivo terá de fazer.
 
-**O que ainda falta:** o ciclo ao vivo construir o `PortaoDeRisco` passando a
-fonte. Não existe ponto de construção hoje — é o mesmo buraco do 3.13, logo
-abaixo. Enquanto não existir, o LIVE recusaria tudo, que é o lado certo para
-errar.
+**O que ainda falta:** (a) o NTP verificado do item 1 acima; (b) o ciclo ao
+vivo construir o `PortaoDeRisco` passando a fonte — não há ponto de construção
+hoje, é o mesmo buraco do 3.13. Enquanto não existir, o LIVE recusaria tudo,
+que é o lado certo para errar.
 
 ### O que falta para o SHADOW rodar de verdade
 
@@ -760,6 +780,7 @@ do primeiro dólar real.
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
 | 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
+| 5.4 | **NTP/chrony verificado na máquina que opera** | ⬜ **pré-condição do 3.10** — o sensor de anomalia de tempo NÃO certifica sincronia (latência e offset se cancelam; ver 3.10). Sem NTP verificado, um relógio 400 ms atrasado passa no portão. Verificar na subida e recusar LIVE se não sincronizado |
 
 Sobre 5.3: até o PR #40 o único check que aparecia era o SonarCloud, que vem
 do GitHub App e faz análise estática — **não executa a suíte**. Os testes só

@@ -62,6 +62,9 @@ class MOTIVOS:
     #: Sem topo de livro nao da para saber o que a ordem custaria.
     LIVRO_DESCONHECIDO = "livro_desconhecido"
     #: O nosso agora discorda do agora do servidor por mais que o teto.
+    #: ATENCAO ao que isto NAO significa: o sensor mede latencia MAIS offset
+    #: de relogio, e as duas se cancelam. Este motivo prova que algo esta
+    #: grande; a AUSENCIA dele nao prova relogio bom — ver `live/relogio.py`.
     RELOGIO_DERIVADO = "relogio_derivado"
     #: Modo LIVE sem fonte de deriva instalada, ou com a fonte muda. Nao e o
     #: mesmo que RELOGIO_DERIVADO: la sabemos que derivou, aqui nao sabemos
@@ -331,8 +334,15 @@ class PortaoDeRisco:
 
         A decisão inteira se apoia em `seconds_left`, que é a distância entre
         o NOSSO relógio e o fechamento da janela. Se os dois relógios
-        divergem, o modelo opera com um horizonte que não existe — e erra
-        sempre na mesma direção, achando que sobra mais tempo do que sobra.
+        divergem, o modelo opera com um horizonte que não existe.
+
+        **O que este portão NÃO garante.** A fonte mede latência MAIS offset
+        de relógio numa subtração só, e as duas parcelas se cancelam: relógio
+        400 ms atrasado com 400 ms de latência mede ZERO e passa aqui, com o
+        `seconds_left` errado em 400 ms. Passar neste portão é ausência de
+        alarme deste sensor, não certificado de relógio — a garantia de
+        sincronia é pré-condição de deploy (NTP/chrony verificado), e está
+        registrada como tal em `live/relogio.py` e no ESTADO_PARA_LIVE.
 
         **Sem fonte instalada, em LIVE, é recusa.** É a decisão menos
         confortável deste arquivo, e é deliberada: uma trava que se
