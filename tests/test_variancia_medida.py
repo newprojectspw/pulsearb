@@ -394,7 +394,7 @@ def test_curva_fora_da_raiz_e_recusada(tmp_path, monkeypatch):
     Ler `/etc/qualquer/coisa.json` não sobrescreve nada, mas o nome do
     arquivo sai no relatório em `modelo_de_variancia.origem`.
     """
-    from pulsearb.backtest.__main__ import (
+    from pulsearb.caminhos import (
         ENV_RAIZ_DE_SAIDA,
         caminho_de_relatorio_lido,
     )
@@ -406,7 +406,7 @@ def test_curva_fora_da_raiz_e_recusada(tmp_path, monkeypatch):
 
 
 def test_curva_dentro_da_raiz_e_aceita(tmp_path, monkeypatch):
-    from pulsearb.backtest.__main__ import (
+    from pulsearb.caminhos import (
         ENV_RAIZ_DE_SAIDA,
         caminho_de_relatorio_lido,
     )
@@ -421,7 +421,7 @@ def test_curva_dentro_da_raiz_e_aceita(tmp_path, monkeypatch):
 
 def test_curva_inexistente_diz_o_que_esta_errado(tmp_path, monkeypatch):
     """Erro que nomeia o problema, em vez de FileNotFoundError lá na frente."""
-    from pulsearb.backtest.__main__ import (
+    from pulsearb.caminhos import (
         ENV_RAIZ_DE_SAIDA,
         caminho_de_relatorio_lido,
     )
@@ -439,7 +439,8 @@ def test_relatorio_sem_curva_avaliavel_falha_alto(tmp_path, monkeypatch):
     """
     import json as _json
 
-    from pulsearb.backtest.__main__ import ENV_RAIZ_DE_SAIDA, _curvas_de_variancia
+    from pulsearb.backtest.__main__ import _curvas_de_variancia
+    from pulsearb.caminhos import ENV_RAIZ_DE_SAIDA
 
     monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
     (tmp_path / "relatorios").mkdir()
@@ -605,7 +606,8 @@ def test_relatorio_sem_dia_medido_e_recusado(tmp_path, monkeypatch):
     """Curva que não declara o dia não pode provar que é anterior."""
     import json as _json
 
-    from pulsearb.backtest.__main__ import ENV_RAIZ_DE_SAIDA, _curvas_de_variancia
+    from pulsearb.backtest.__main__ import _curvas_de_variancia
+    from pulsearb.caminhos import ENV_RAIZ_DE_SAIDA
 
     monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
     (tmp_path / "relatorios").mkdir()

@@ -411,7 +411,8 @@ def test_cli_recusa_gravacao_inexistente(tmp_path):
 
 def test_validacao_de_caminhos(tmp_path, gravacao, monkeypatch):
     """Caminhos vindos da CLI são resolvidos e validados antes de qualquer I/O."""
-    from pulsearb.backtest.__main__ import caminho_de_escrita, caminho_de_leitura
+    from pulsearb.backtest.__main__ import caminho_de_leitura
+    from pulsearb.caminhos import caminho_de_escrita
 
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     assert caminho_de_leitura(str(gravacao)).is_absolute()
@@ -461,7 +462,7 @@ def test_saida_hostil_nunca_chega_ao_disco(tmp_path, monkeypatch, hostil):
     já montado com a string de fora. Assim o valor externo não chega ao
     sistema de arquivos em forma nenhuma.
     """
-    from pulsearb.backtest.__main__ import caminho_de_escrita
+    from pulsearb.caminhos import caminho_de_escrita
 
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     with pytest.raises(ValueError):
@@ -481,7 +482,7 @@ def test_raiz_barra_nao_rejeita_tudo(monkeypatch):
     resposta que ela nunca deu — o teste passava no Linux da CI e falhava na
     maquina de analise, que e um Mac. E a mesma armadilha do `ru_maxrss`.
     """
-    from pulsearb.backtest.__main__ import caminho_de_escrita
+    from pulsearb.caminhos import caminho_de_escrita
 
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", "/")
     # /tmp existe em qualquer maquina que roda a suite; nada e escrito.
@@ -500,7 +501,7 @@ def test_symlink_no_caminho_resolve_para_o_destino_real(tmp_path, monkeypatch):
     A contencao continua valendo depois de resolver: o destino real tem de
     estar sob a raiz.
     """
-    from pulsearb.backtest.__main__ import caminho_de_escrita
+    from pulsearb.caminhos import caminho_de_escrita
 
     real = tmp_path / "real"
     real.mkdir()
@@ -511,7 +512,7 @@ def test_symlink_no_caminho_resolve_para_o_destino_real(tmp_path, monkeypatch):
 
 
 def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
-    from pulsearb.backtest.__main__ import caminho_de_escrita
+    from pulsearb.caminhos import caminho_de_escrita
 
     monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
     (tmp_path / "relatorios").mkdir()
@@ -523,7 +524,7 @@ def test_saida_valida_fica_dentro_da_raiz(tmp_path, monkeypatch):
 
 def test_raiz_de_saida_padrao_e_o_diretorio_de_trabalho(monkeypatch):
     """Sem env, a raiz é o cwd — que é o que o runbook usa."""
-    from pulsearb.backtest.__main__ import raiz_de_saida
+    from pulsearb.caminhos import raiz_de_saida
 
     monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
     assert raiz_de_saida() == Path.cwd().resolve()
