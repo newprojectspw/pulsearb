@@ -24,12 +24,31 @@ def _ordem(slug: str = "btc-updown-5m-1", shares: float = 5.0, preco: float = 0.
     )
 
 
-def _portao(tmp_path, modo=Mode.LIVE, **ajustes):
+class _RelogioFalso:
+    """Dublê da fonte de atraso do item 3.10. O teste manda o número."""
+
+    def __init__(self, atraso_ms: float | None = 12.0) -> None:
+        self.valor = atraso_ms
+        self.perguntas = 0
+
+    def atraso_ms(self, *, agora_ms: int) -> float | None:
+        self.perguntas += 1
+        return self.valor
+
+
+def _portao(tmp_path, modo=Mode.LIVE, *, relogio_do_servidor=..., **ajustes):
+    # Fonte de relógio SADIA por padrão, pelo mesmo motivo do `LIVRO_SADIO`:
+    # cada teste exercita o portão que nomeia, não o do relógio. Quem quer
+    # testar o relógio passa o dele — inclusive `None`, para o caso de a
+    # trava não estar instalada.
     return PortaoDeRisco(
         RiskSettings(**ajustes),
         modo,
         caminho_do_registro=tmp_path / "registro.json",
         hoje="2026-08-25",
+        relogio_do_servidor=(
+            _RelogioFalso() if relogio_do_servidor is ... else relogio_do_servidor
+        ),
     )
 
 
@@ -261,3 +280,105 @@ class TestMotivoNomeado:
     def test_decisao_positiva_nao_carrega_motivo(self):
         with pytest.raises(ValueError, match="não carrega motivo"):
             Decisao(True, MOTIVOS.FEED_PARADO)
+
+
+class TestPortaoDoRelogio:
+    """3.10 — a terceira trava, que até 2026-08-30 não tinha fonte.
+
+    Feed velho e spread anômalo já eram medidos. "O relógio derivou" não era
+    medido em lugar nenhum, então o portão não podia recusar por isso nem
+    quando fosse verdade. Cada teste aqui trava uma parte do contrato novo.
+    """
+
+    def test_atraso_dentro_do_teto_deixa_passar(self, tmp_path):
+        portao = _portao(tmp_path, relogio_do_servidor=_RelogioFalso(120.0))
+        assert _avaliar(portao, _ordem()).pode
+
+    def test_atraso_acima_do_teto_recusa(self, tmp_path):
+        portao = _portao(tmp_path, relogio_do_servidor=_RelogioFalso(300.0))
+        decisao = _avaliar(portao, _ordem())
+
+        assert not decisao.pode
+        assert decisao.motivo == MOTIVOS.RELOGIO_DERIVADO
+        assert decisao.detalhe["atraso_ms"] == 300.0
+        assert decisao.detalhe["teto_ms"] == 250.0
+
+    def test_carimbo_no_futuro_recusa_igual(self, tmp_path):
+        """Atraso NEGATIVO é relógio local atrasado, e custa o mesmo.
+
+        O servidor não manda evento do futuro. Se o carimbo dele está à
+        frente do nosso relógio, quem está errado somos nós — e o
+        `seconds_left` sai errado na direção oposta, mas igualmente cara.
+        Comparar só o lado positivo deixaria essa metade passar.
+        """
+        decisao = _avaliar(
+            _portao(tmp_path, relogio_do_servidor=_RelogioFalso(-400.0)), _ordem()
+        )
+
+        assert decisao.motivo == MOTIVOS.RELOGIO_DERIVADO
+        assert decisao.detalhe["atraso_ms"] == -400.0
+
+    def test_fonte_muda_recusa_por_nao_saber(self, tmp_path):
+        """Fonte instalada devolvendo `None` é "não sei", e não sei é recusa.
+
+        Acontece quando nunca chegou tick, ou quando o último é velho demais.
+        Tratar não-sei como zero seria dar nota máxima ao caso em que a
+        medição parou de existir — o defeito do `cobertura_da_gravacao` que o
+        M2 já pagou uma vez.
+        """
+        decisao = _avaliar(
+            _portao(tmp_path, relogio_do_servidor=_RelogioFalso(None)), _ordem()
+        )
+
+        assert decisao.motivo == MOTIVOS.RELOGIO_NAO_MONITORADO
+        assert decisao.detalhe["atraso_ms"] is None
+
+    def test_em_LIVE_sem_fonte_instalada_recusa_tudo(self, tmp_path):
+        """A decisão menos confortável do arquivo, e a mais importante.
+
+        Uma trava que se auto-desativa quando ninguém a ligou não é trava. Se
+        este teste for "consertado" afrouxando o portão, o bot volta a poder
+        operar em LIVE com o relógio sem vigilância nenhuma.
+        """
+        decisao = _avaliar(_portao(tmp_path, relogio_do_servidor=None), _ordem())
+
+        assert decisao.motivo == MOTIVOS.RELOGIO_NAO_MONITORADO
+        assert decisao.detalhe["fonte"] is None
+
+    def test_fora_do_LIVE_a_ausencia_da_fonte_nao_recusa(self, tmp_path):
+        """O SHADOW existe para ensaiar, e recusar tudo ali apaga o ensaio.
+
+        Mesma razão pela qual `avaliar_risco` não roda o portão de modo: o
+        diário do shadow precisa dizer qual portão SEGURARIA se fosse LIVE,
+        e um `relogio_nao_monitorado` em toda linha esconderia isso.
+        """
+        portao = _portao(tmp_path, modo=Mode.SHADOW, relogio_do_servidor=None)
+        decisao = portao.avaliar_risco(
+            _ordem(), feeds_saudaveis=True, **LIVRO_SADIO
+        )
+
+        assert decisao.pode
+
+    def test_o_relogio_e_conferido_no_shadow_quando_ha_fonte(self, tmp_path):
+        """Com fonte instalada, o SHADOW confere igual — senão não ensaia."""
+        portao = _portao(
+            tmp_path, modo=Mode.SHADOW, relogio_do_servidor=_RelogioFalso(900.0)
+        )
+        decisao = portao.avaliar_risco(
+            _ordem(), feeds_saudaveis=True, **LIVRO_SADIO
+        )
+
+        assert decisao.motivo == MOTIVOS.RELOGIO_DERIVADO
+
+    def test_feed_parado_vence_relogio_derivado(self, tmp_path):
+        """Ordem entre os dois: o feed é a causa mais geral.
+
+        Feed parado explica por que o relógio parece derivado (a última
+        amostra é velha); o contrário não vale. Registrar o relógio ali
+        mandaria quem lê o diário investigar o relógio quando o problema é o
+        feed.
+        """
+        portao = _portao(tmp_path, relogio_do_servidor=_RelogioFalso(900.0))
+        decisao = _avaliar(portao, _ordem(), feeds_saudaveis=False)
+
+        assert decisao.motivo == MOTIVOS.FEED_PARADO

@@ -36,7 +36,17 @@ class _Relogio:
         self.agora += segundos
 
 
-def _portao(tmp_path, *, relogio=None, kill=None, **ajustes):
+class _RelogioFalso:
+    """Dublê da fonte de atraso do item 3.10. O teste manda o número."""
+
+    def __init__(self, atraso_ms: float | None = 12.0) -> None:
+        self.valor = atraso_ms
+
+    def atraso_ms(self, *, agora_ms: int) -> float | None:
+        return self.valor
+
+
+def _portao(tmp_path, *, relogio=None, kill=None, relogio_do_servidor=..., **ajustes):
     return PortaoDeRisco(
         RiskSettings(**ajustes),
         Mode.LIVE,
@@ -44,6 +54,9 @@ def _portao(tmp_path, *, relogio=None, kill=None, **ajustes):
         caminho_do_kill=kill,
         hoje="2026-08-25",
         relogio=relogio or _Relogio(),
+        relogio_do_servidor=(
+            _RelogioFalso() if relogio_do_servidor is ... else relogio_do_servidor
+        ),
     )
 
 

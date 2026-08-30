@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pulsearb.settings import Mode, RiskSettings
 
@@ -61,6 +61,12 @@ class MOTIVOS:
     SPREAD_ANOMALO = "spread_anomalo"
     #: Sem topo de livro nao da para saber o que a ordem custaria.
     LIVRO_DESCONHECIDO = "livro_desconhecido"
+    #: O nosso agora discorda do agora do servidor por mais que o teto.
+    RELOGIO_DERIVADO = "relogio_derivado"
+    #: Modo LIVE sem fonte de deriva instalada, ou com a fonte muda. Nao e o
+    #: mesmo que RELOGIO_DERIVADO: la sabemos que derivou, aqui nao sabemos
+    #: nada — e nao saber tem de custar o mesmo que saber que esta ruim.
+    RELOGIO_NAO_MONITORADO = "relogio_nao_monitorado"
 
     TODOS = frozenset(
         {
@@ -77,6 +83,8 @@ class MOTIVOS:
             FEED_PARADO,
             PRECO_FORA_DA_FAIXA,
             ORDEM_MAL_FORMADA,
+            RELOGIO_DERIVADO,
+            RELOGIO_NAO_MONITORADO,
         }
     )
 
@@ -174,6 +182,18 @@ class RegistroDoDia:
         )
 
 
+class FonteDeAtraso(Protocol):
+    """O contrato mínimo que o portão do relógio precisa (item 3.10).
+
+    Protocolo, e não import direto de `live.relogio`: o pacote de risco não
+    depende do de captação, e o teste passa um dublê de três linhas.
+    """
+
+    def atraso_ms(self, *, agora_ms: int) -> float | None:
+        """Mediana do atraso servidor→chegada, ou `None` para "não sei"."""
+        ...
+
+
 def _hoje_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
@@ -190,6 +210,7 @@ class PortaoDeRisco:
         caminho_do_kill: Path | None = None,
         hoje: str | None = None,
         relogio: Callable[[], float] = time.time,
+        relogio_do_servidor: FonteDeAtraso | None = None,
     ) -> None:
         self.settings = settings
         self.modo = modo
@@ -197,6 +218,9 @@ class PortaoDeRisco:
         self.caminho_do_kill = caminho_do_kill
         self._hoje = hoje or _hoje_utc()
         self._relogio = relogio
+        #: A fonte de atraso do item 3.10. `None` = trava NÃO instalada, e em
+        #: LIVE isso é recusa: ver `_portao_do_relogio`.
+        self.relogio_do_servidor = relogio_do_servidor
         self.registro = self._carregar()
 
     # ───────────────────────────────────────────────────────────── persistência
@@ -299,6 +323,44 @@ class PortaoDeRisco:
                 False,
                 MOTIVOS.SPREAD_ANOMALO,
                 {"spread": spread, "teto": self.settings.spread_maximo},
+            )
+        return None
+
+    def _portao_do_relogio(self) -> Decisao | None:
+        """O nosso agora ainda concorda com o do servidor? (item 3.10)
+
+        A decisão inteira se apoia em `seconds_left`, que é a distância entre
+        o NOSSO relógio e o fechamento da janela. Se os dois relógios
+        divergem, o modelo opera com um horizonte que não existe — e erra
+        sempre na mesma direção, achando que sobra mais tempo do que sobra.
+
+        **Sem fonte instalada, em LIVE, é recusa.** É a decisão menos
+        confortável deste arquivo, e é deliberada: uma trava que se
+        auto-desativa quando ninguém a ligou não é trava, é decoração. Fora do
+        LIVE a ausência não recusa — o SHADOW existe para ensaiar, e recusar
+        tudo ali apagaria a informação que justifica o ensaio (a mesma razão
+        pela qual o portão de modo não roda em `avaliar_risco`).
+        """
+        fonte = self.relogio_do_servidor
+        if fonte is None:
+            if self.modo is Mode.LIVE:
+                return Decisao(False, MOTIVOS.RELOGIO_NAO_MONITORADO, {"fonte": None})
+            return None
+        atraso = fonte.atraso_ms(agora_ms=int(self._relogio() * 1000))
+        if atraso is None:
+            # Fonte instalada e muda: ou nunca chegou tick, ou o último é
+            # velho demais. Não saber custa o mesmo que saber que está ruim.
+            return Decisao(
+                False, MOTIVOS.RELOGIO_NAO_MONITORADO, {"atraso_ms": None}
+            )
+        if abs(atraso) > self.settings.atraso_max_ms:
+            # ABS, e não só o positivo: carimbo do servidor no futuro do nosso
+            # relógio significa relógio LOCAL atrasado, que estraga o
+            # `seconds_left` na direção oposta e igualmente cara.
+            return Decisao(
+                False,
+                MOTIVOS.RELOGIO_DERIVADO,
+                {"atraso_ms": round(atraso, 1), "teto_ms": self.settings.atraso_max_ms},
             )
         return None
 
@@ -419,6 +481,10 @@ class PortaoDeRisco:
 
         if not feeds_saudaveis:
             return Decisao(False, MOTIVOS.FEED_PARADO, {})
+
+        recusa = self._portao_do_relogio()
+        if recusa is not None:
+            return recusa
 
         return self._portao_do_spread(melhor_bid, melhor_ask)
 

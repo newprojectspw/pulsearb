@@ -529,10 +529,62 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.7 | Trava: perda diária máxima → disjuntor | ✅ **M4.1** — código usa **US$ 25**, este doc dizia 20; decisão sua |
 | 3.8 | Trava: 4 perdas consecutivas → pausa de 1 h | ✅ **M4.4** — persiste, atravessa a meia-noite, 9 testes |
 | 3.9 | Trava: exposição simultânea máxima | ✅ **M4.1** — código usa **5 janelas / US$ 50**, este doc dizia 2; decisão sua |
-| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ⬜ **sem fonte de deriva no caminho ao vivo** |
+| 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04 derivado do edge), relógio ✅ **2026-08-30**: `live/relogio.py` mede, `RiskSettings.atraso_max_ms` corta em 250 ms, e em LIVE **sem fonte instalada é recusa**. Falta só o ciclo ao vivo construir o portão com a fonte — mesmo buraco do 3.13 |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
-| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — 28 no portão + 19 nas travas novas |
+| 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **73**: 36 no portão, 27 nas travas novas, 10 no relógio |
 | 3.13 | SHADOW rodando 24 h sem crash | ⬜ |
+
+### A terceira trava do 3.10 existia no papel e não na máquina
+
+Feed velho e spread anômalo eram medidos desde o M4.1/M4.4. "Relógio > 250 ms"
+estava escrito no item desde a especificação e **nunca teve fonte**: nada no
+caminho ao vivo produzia esse número, então o portão não podia recusar por ele
+nem quando fosse verdade. Uma trava sem fonte é uma linha de documento.
+
+**O que passou a ser medido, e o que NÃO passou.** Cada tick do feed-verdade
+traz o carimbo do servidor. Quando ele chega, o `live/relogio.py` compara com
+o nosso relógio:
+
+    atraso = chegada_local − carimbo_do_servidor
+
+Isso **não é** a deriva do relógio: é deriva **mais** latência de rede **mais**
+fila no processo, somadas e não separáveis com uma fonte só. Por isso o campo
+publicado se chama `atraso_mediano_ms`, e não `deriva_ms` — e há um teste que
+quebra se alguém renomear, porque o nome prometeria uma decomposição que a
+medição não faz.
+
+**Serve assim mesmo, e serve bem:** o atraso é um limite SUPERIOR da deriva.
+Pequeno prova relógio bom. Grande não diz qual das três causas é — e nenhuma
+das três é aceitável para quem decide por `seconds_left`, que é a distância
+entre o NOSSO agora e o fechamento da janela. Relógio adiantado 300 ms e rede
+atrasada 300 ms produzem o mesmo erro na mesma direção: operar achando que
+sobra mais tempo do que sobra.
+
+**Três decisões que valem registro, porque as três são recusas:**
+
+- **Não saber custa o mesmo que saber que está ruim.** Fonte instalada e muda
+  — nunca chegou tick, ou o último tem mais de 10 s — recusa com
+  `relogio_nao_monitorado`. Tratar não-sei como zero seria a nota máxima do
+  critério que a trava existe para reprovar; é o defeito do
+  `cobertura_da_gravacao`, que o M2 já pagou uma vez.
+- **Em LIVE, sem fonte instalada, recusa tudo.** É a decisão menos confortável
+  do arquivo e é deliberada: uma trava que se auto-desativa quando ninguém a
+  ligou não é trava. Fora do LIVE a ausência não recusa — o SHADOW existe para
+  ensaiar, e recusar tudo ali apagaria a informação que justifica o ensaio.
+- **Carimbo no futuro recusa igual.** O servidor não manda evento do futuro:
+  se o carimbo dele está à frente do nosso relógio, quem está errado somos
+  nós. A comparação é em módulo; olhar só o lado positivo deixaria metade do
+  defeito passar.
+
+**Como isso apareceu:** ao ligar a trava, **todos** os testes de caminho LIVE
+passaram a recusar por `relogio_nao_monitorado`. Era o comportamento correto —
+e a prova de que a trava é real, e não decorativa. Os testes passaram a
+instalar a fonte, como o ciclo ao vivo terá de fazer.
+
+**O que ainda falta:** o ciclo ao vivo construir o `PortaoDeRisco` passando a
+fonte. Não existe ponto de construção hoje — é o mesmo buraco do 3.13, logo
+abaixo. Enquanto não existir, o LIVE recusaria tudo, que é o lado certo para
+errar.
 
 ### O que falta para o SHADOW rodar de verdade
 
