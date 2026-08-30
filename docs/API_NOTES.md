@@ -95,6 +95,28 @@ base do M1. Não há conflito de stack.
 > We've released a new unified SDK that combines all our REST APIs and
 > WebSockets into one package. We recommend Polymarket/py-sdk for new projects.
 
+**ADENDO 2026-08-30 — o SDK oficial NÃO entra: ele rebaixa o `websockets`.**
+Medido ao instalar `polymarket-client==0.6.0` no venv do projeto:
+
+    polymarket-client 0.6.0  exige  websockets<16,>=13
+    pulsearb                 fixa   websockets==17.0.1
+
+A instalação rebaixou o pacote para 15.0.1 — o **mesmo `websockets` do caminho
+quente**, que gravou as 24 h do M2. Trocar a biblioteca de socket embaixo do
+recorder para ganhar uma função de assinatura é pagar no lugar errado: a
+população que o backtest lê passaria a vir de outra pilha de rede, e a
+comparação SHADOW × backtest é justamente o que o M2 existe para fazer.
+
+O que de fato não se deve reimplementar é a **criptografia**, e ela não mora no
+SDK: mora no `eth-account`, que o próprio SDK usa por baixo e que **não depende
+de `websockets`** (verificado nos metadados do pacote). O que sobra de nosso
+lado é serialização — HMAC de biblioteca padrão e um dicionário de typed data
+cujos campos já estão verificados nesta seção 3 e na 12.13. Implementado em
+`src/pulsearb/execution/auth.py`.
+
+A decisão de §1.4 sobre *o que* não reimplementar continua valendo; muda o
+*pacote* que a cumpre.
+
 `py-clob-client-v2` continua vivo e é o fallback se o `py-sdk` travar. **Motivo
 registrado para a escolha do py-sdk:** é o recomendado oficialmente, é o único
 que já traz CLOB + Gamma + Data + RTDS + WebSockets num pacote só, e o v2 cobre

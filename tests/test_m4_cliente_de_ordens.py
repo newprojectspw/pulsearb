@@ -1,0 +1,303 @@
+"""3.5 — o cliente de ordens: FOK, idempotência, rejeição e timeout.
+
+O teste que dá nome ao arquivo é o do timeout. Todo o resto existe em volta
+dele: um timeout mal classificado vira posição dupla, e posição dupla é o
+único erro deste caminho que custa dinheiro sem aparecer em lugar nenhum até
+a resolução.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from pulsearb.execution.auth import CredenciaisL2, corpo_canonico
+from pulsearb.execution.cliente import (
+    ENVIOS_LEMBRADOS,
+    MOTIVOS_DE_RECUSA,
+    TIPO_DE_ORDEM,
+    ClienteDeOrdens,
+    ErroDeTransporte,
+    EstadoDoEnvio,
+    conferir_ordem,
+    id_do_cliente,
+)
+from pulsearb.risk import OrdemPretendida
+
+CREDENCIAIS = CredenciaisL2(
+    api_key="chave", segredo="c2VncmVkbw==", passphrase="frase", endereco="0xabc"
+)
+
+
+def _ordem(slug="btc-updown-5m-1", shares=5.0, preco=0.50, token="tok-up", up=True):
+    return OrdemPretendida(
+        slug=slug, token_id=token, lado_up=up, shares=shares, preco_limite=preco
+    )
+
+
+class _Construtor:
+    """Dublê do assinador da ordem. A chave privada não passa pelo cliente."""
+
+    def __init__(self):
+        self.pedidos: list[str] = []
+
+    def corpo_da_ordem(self, ordem, *, id_do_cliente):
+        self.pedidos.append(id_do_cliente)
+        return {"tokenId": ordem.token_id, "clientId": id_do_cliente}
+
+
+class _Transporte:
+    """Dublê da rede. `respostas` é uma fila; exceção na fila é levantada."""
+
+    def __init__(self, *respostas):
+        self.respostas = list(respostas)
+        self.chamadas: list[tuple[str, dict, bytes]] = []
+
+    async def __call__(self, caminho, cabecalhos, corpo):
+        self.chamadas.append((caminho, cabecalhos, corpo))
+        resposta = self.respostas.pop(0) if self.respostas else (200, {"success": True})
+        if isinstance(resposta, Exception):
+            raise resposta
+        return resposta
+
+
+def _cliente(*respostas, **ajustes):
+    return ClienteDeOrdens(
+        CREDENCIAIS, _Construtor(), _Transporte(*respostas), **ajustes
+    )
+
+
+class TestTimeoutNaoERecusa:
+    """A distinção mais cara do módulo."""
+
+    async def test_transporte_que_falha_vira_INCERTA_e_nao_recusada(self):
+        """Se isto virasse `RECUSADA`, quem chama reenviaria — e a ordem
+        original pode estar preenchida do outro lado."""
+        cliente = _cliente(ErroDeTransporte("timeout depois de 5 s"))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+        assert resultado.precisa_reconciliar is True
+        assert resultado.order_id is None
+
+    async def test_incerta_carrega_o_id_para_a_reconciliacao_encontrar(self):
+        """`order_id` não existe (a resposta não chegou), mas o NOSSO id sim —
+        e é por ele que se procura a ordem que talvez tenha entrado."""
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.id_do_cliente == id_do_cliente(_ordem(), janela="j1")
+
+    async def test_5xx_tambem_e_INCERTA(self):
+        """Um 502 pode chegar depois de a ordem passar para o casamento.
+
+        Só a faixa 4xx prova que ela não entrou: ali o servidor examinou o
+        pedido e disse não.
+        """
+        cliente = _cliente((502, None))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+
+    async def test_4xx_e_recusa_de_verdade(self):
+        cliente = _cliente((400, {"error": "tick invalido"}))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.RECUSADA
+        assert resultado.motivo == MOTIVOS_DE_RECUSA.SERVIDOR_RECUSOU
+        assert resultado.precisa_reconciliar is False
+
+
+class TestIdempotencia:
+    async def test_a_mesma_ordem_na_mesma_janela_tem_o_mesmo_id(self):
+        """É isso que torna a reconciliação possível: procura-se por um id
+        conhecido, não se adivinha pelo horário."""
+        assert id_do_cliente(_ordem(), janela="j1") == id_do_cliente(
+            _ordem(), janela="j1"
+        )
+
+    async def test_a_mesma_ordem_em_OUTRA_janela_tem_id_diferente(self):
+        """Sem a janela na conta, a segunda ordem — real e distinta — seria
+        recusada como duplicata."""
+        assert id_do_cliente(_ordem(), janela="j1") != id_do_cliente(
+            _ordem(), janela="j2"
+        )
+
+    @pytest.mark.parametrize(
+        "mudanca",
+        [
+            {"shares": 6.0},
+            {"preco": 0.51},
+            {"token": "tok-down"},
+            {"up": False},
+            {"slug": "btc-updown-5m-2"},
+        ],
+    )
+    async def test_qualquer_campo_que_muda_a_ordem_muda_o_id(self, mudanca):
+        assert id_do_cliente(_ordem(**mudanca), janela="j1") != id_do_cliente(
+            _ordem(), janela="j1"
+        )
+
+    async def test_reenviar_a_mesma_ordem_e_recusado_sem_tocar_na_rede(self):
+        cliente = _cliente((200, {"success": True, "orderID": "o1"}))
+
+        primeira = await cliente.enviar(_ordem(), janela="j1")
+        segunda = await cliente.enviar(_ordem(), janela="j1")
+
+        assert primeira.estado is EstadoDoEnvio.ACEITA
+        assert segunda.estado is EstadoDoEnvio.RECUSADA
+        assert segunda.motivo == MOTIVOS_DE_RECUSA.JA_ENVIADA
+        assert len(cliente.transporte.chamadas) == 1
+
+    async def test_reenviar_depois_de_INCERTA_e_recusado_SOBRETUDO(self):
+        """O caso que mais importa dos dois.
+
+        Depois de um timeout a ordem pode estar no livro. Um cliente que
+        deixasse a segunda tentativa passar produziria a posição dupla que o
+        módulo inteiro existe para impedir — e o `estado_anterior` no detalhe
+        diz a quem chamou por que a recusa aconteceu.
+        """
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        incerta = await cliente.enviar(_ordem(), janela="j1")
+        segunda = await cliente.enviar(_ordem(), janela="j1")
+
+        assert incerta.estado is EstadoDoEnvio.INCERTA
+        assert segunda.motivo == MOTIVOS_DE_RECUSA.JA_ENVIADA
+        assert segunda.detalhe["estado_anterior"] == str(EstadoDoEnvio.INCERTA)
+        assert len(cliente.transporte.chamadas) == 1
+
+    async def test_ordem_mal_formada_NAO_trava_o_id(self):
+        """Nada saiu para a rede, então travar o id impediria a mesma ordem de
+        ser enviada depois de corrigida a configuração."""
+        cliente = _cliente((200, {"success": True}))
+
+        recusada = await cliente.enviar(_ordem(shares=1.0), janela="j1")
+        assert recusada.motivo == MOTIVOS_DE_RECUSA.ORDEM_MAL_FORMADA
+
+        depois = await cliente.enviar(_ordem(shares=5.0), janela="j1")
+        assert depois.estado is EstadoDoEnvio.ACEITA
+
+    async def test_a_memoria_de_envios_tem_teto(self):
+        """Sessão de 24 h não pode crescer memória sem limite."""
+        cliente = _cliente(*[(200, {"success": True})] * 5, envios_lembrados=3)
+
+        for i in range(5):
+            await cliente.enviar(_ordem(), janela=f"j{i}")
+
+        assert len(cliente._enviados) == 3
+
+    def test_o_teto_default_cobre_uma_sessao_inteira(self):
+        """5 min por janela × 512 ≈ 42 h, com folga sobre as 24 h do 3.13."""
+        assert ENVIOS_LEMBRADOS * 5 / 60 > 24
+
+
+class TestAConferenciaLocal:
+    @pytest.mark.parametrize(
+        ("ajuste", "trecho"),
+        [
+            ({"shares": 0.0}, "positivo"),
+            ({"shares": -1.0}, "positivo"),
+            ({"shares": 3.0}, "minimo"),
+            ({"preco": 0.0}, "fora de"),
+            ({"preco": 1.0}, "fora de"),
+            ({"preco": 1.5}, "fora de"),
+            ({"token": ""}, "token_id"),
+        ],
+    )
+    def test_o_que_o_servidor_recusaria_e_pego_antes_da_rede(self, ajuste, trecho):
+        """Troca um timeout de rede por uma mensagem que diz o que está errado."""
+        problema = conferir_ordem(_ordem(**ajuste), minimo_de_shares=5.0)
+
+        assert problema is not None and trecho in problema
+
+    def test_ordem_boa_passa(self):
+        assert conferir_ordem(_ordem(), minimo_de_shares=5.0) is None
+
+    async def test_a_conferencia_roda_antes_de_gastar_a_rede(self):
+        cliente = _cliente((200, {"success": True}))
+
+        await cliente.enviar(_ordem(shares=1.0), janela="j1")
+
+        assert cliente.transporte.chamadas == []
+
+
+class TestOEnvio:
+    async def test_o_tipo_de_ordem_e_sempre_FOK(self):
+        """`[VERIFICADO]` API_NOTES §4.1. Parcial numa janela de 5 min é
+        exposição com tamanho diferente do autorizado e sem tempo de corrigir."""
+        cliente = _cliente((200, {"success": True}))
+
+        await cliente.enviar(_ordem(), janela="j1")
+
+        _, _, corpo = cliente.transporte.chamadas[0]
+        assert b'"orderType":"FOK"' in corpo
+        assert TIPO_DE_ORDEM == "FOK"
+
+    async def test_o_corpo_no_fio_e_o_corpo_assinado(self):
+        """A regra do `auth.py`, exercitada de ponta a ponta: o que o
+        transporte recebe é byte a byte o que entrou no HMAC."""
+        cliente = _cliente((200, {"success": True}))
+
+        await cliente.enviar(_ordem(), janela="j1")
+
+        _, cabecalhos, corpo = cliente.transporte.chamadas[0]
+        esperado = corpo_canonico(
+            {
+                "tokenId": "tok-up",
+                "clientId": id_do_cliente(_ordem(), janela="j1"),
+                "orderType": "FOK",
+            }
+        )
+        assert corpo == esperado
+        assert "POLY_SIGNATURE" in cabecalhos
+
+    async def test_o_construtor_recebe_o_id_determinístico(self):
+        """O id vai no corpo assinado, senão a idempotência do lado deles não
+        existe — só a nossa, que não sobrevive a reinício."""
+        cliente = _cliente((200, {"success": True}))
+
+        await cliente.enviar(_ordem(), janela="j1")
+
+        assert cliente.construtor.pedidos == [id_do_cliente(_ordem(), janela="j1")]
+
+    async def test_aceita_traz_o_order_id_do_servidor(self):
+        cliente = _cliente((200, {"success": True, "orderID": "0xdeadbeef"}))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.ACEITA
+        assert resultado.order_id == "0xdeadbeef"
+
+    async def test_200_com_success_false_e_recusa(self):
+        """200 não é aceite: o CLOB responde 200 com `success: false` em erro
+        de negócio, e ler só o status daria posição imaginária."""
+        cliente = _cliente((200, {"success": False, "errorMsg": "sem allowance"}))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.estado is EstadoDoEnvio.RECUSADA
+        assert resultado.motivo == MOTIVOS_DE_RECUSA.SERVIDOR_RECUSOU
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_auth_recusada_tem_motivo_proprio(self, status):
+        """Nome separado porque o conserto é outro: credencial errada não se
+        resolve tentando de novo, e um alarme de auth não é um alarme de
+        mercado."""
+        cliente = _cliente((status, {"error": "unauthorized"}))
+
+        resultado = await cliente.enviar(_ordem(), janela="j1")
+
+        assert resultado.motivo == MOTIVOS_DE_RECUSA.AUTH_RECUSADA
+
+    async def test_o_cliente_nao_reenvia_por_conta_propria(self):
+        """Sem `retry` embutido: reenviar é a decisão mais perigosa deste
+        caminho e não pode morar numa política default."""
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        await cliente.enviar(_ordem(), janela="j1")
+
+        assert len(cliente.transporte.chamadas) == 1
