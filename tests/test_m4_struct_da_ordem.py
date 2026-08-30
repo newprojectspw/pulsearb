@@ -388,3 +388,39 @@ class TestOAssinador:
 
         with pytest.raises(ErroDeOrdem):
             AssinadorLocal.do_ambiente({})
+
+
+class TestOTimestampNaoTemDefault:
+    """Achado P2 do Codex no #52.
+
+    Um default de `0` assinaria `timestamp: 0` — uma ordem com aparência
+    válida que o servidor recusa, e nada no nosso lado apontaria o campo.
+    """
+
+    def test_esquecer_o_timestamp_e_TypeError_na_construcao(self):
+        """Onde o erro custa menos: na construção, não numa recusa remota."""
+        with pytest.raises(TypeError) as erro:
+            OrdemNaoAssinada(
+                salt=1,
+                maker="0xA",
+                signer="0xB",
+                token_id="42",
+                maker_amount=1,
+                taker_amount=1,
+                compra=True,
+            )
+
+        assert "timestamp_ms" in str(erro.value)
+
+    def test_agora_em_ms_e_em_MILISSEGUNDOS(self):
+        """`int(time.time())` mandaria um número mil vezes menor. A função
+        existe para que a conversão apareça uma vez só."""
+        import time
+
+        from pulsearb.execution.ordem import agora_em_ms
+
+        segundos = time.time()
+        medido = agora_em_ms()
+
+        assert abs(medido - segundos * 1000) < 5000
+        assert medido > 1_000_000_000_000

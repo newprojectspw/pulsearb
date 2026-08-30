@@ -90,12 +90,28 @@ class RastreadorDeJanelas:
     def atualizar(
         self, mercados: list[DiscoveredMarket], *, agora_epoch: float
     ) -> None:
-        """Absorve um ciclo de descoberta e aposenta o que já fechou."""
+        """Absorve um ciclo de descoberta. **Não aposenta nada.**
+
+        Achado P1 do Codex no #52, e era violação do contrato que a própria
+        `aposentar_fechadas` documenta: ela DEVOLVE as janelas fechadas
+        porque quem chama precisa liquidar a exposição delas. Este método
+        chamava e **descartava o retorno**.
+
+        A sequência que isso quebrava: a descoberta termina logo depois de uma
+        janela operada fechar, mas antes do próximo `tick`. A janela some do
+        retrato aqui, o `MotorAoVivo.tick` não a encontra mais, `_liquidar`
+        nunca roda, e a exposição sintética fica presa em `gasto_por_janela`.
+        Com cinco dessas, o teto de posições recusa toda intenção seguinte
+        pelo resto da rodada.
+
+        Quem aposenta é quem liquida — o motor, no `tick`. Uma janela fechada
+        pode ficar no retrato por até uma cadência de decisão (1 s), e isso
+        não custa nada: `_elegivel` já a recusa por tempo.
+        """
         for mercado in mercados:
             janela = self._converter(mercado, agora_epoch=agora_epoch)
             if janela is not None:
                 self.janelas[mercado.condition_id] = janela
-        self.aposentar_fechadas(agora_epoch=agora_epoch)
 
     def _converter(
         self, mercado: DiscoveredMarket, *, agora_epoch: float

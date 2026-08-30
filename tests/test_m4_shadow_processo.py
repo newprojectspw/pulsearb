@@ -1113,3 +1113,56 @@ class TestOAdaptadorHttpEhCompartilhado:
         adaptador = fazer_http_get_json(_Http(), bases=("https://exemplo/",))
         with pytest.raises(RuntimeError):
             await adaptador("https://exemplo/markets/slug/x", None)
+
+
+class TestADescobertaNaoAposentaJanela:
+    """Achado P1 do Codex no #52, e era violação do contrato que a própria
+    `aposentar_fechadas` documenta: ela DEVOLVE as janelas fechadas porque
+    quem chama precisa liquidar a exposição delas — e `atualizar` chamava
+    descartando o retorno.
+
+    A sequência quebrada: a descoberta termina logo depois de uma janela
+    operada fechar, mas antes do próximo `tick`. A janela some do retrato, o
+    motor não a encontra mais, `_liquidar` nunca roda, e a exposição
+    sintética fica presa. Com cinco dessas o teto de posições recusa tudo
+    pelo resto da rodada.
+    """
+
+    def _mercado(self, condition_id, fecha):
+        return _mercado_falso(condition_id, {"Up": "up", "Down": "dn"}, fecha=fecha)
+
+    def test_atualizar_NAO_tira_janela_fechada_do_retrato(self):
+        import time as _time
+
+        from pulsearb.live.rastreador import RastreadorDeJanelas
+
+        agora = _time.time()
+        rastreador = RastreadorDeJanelas()
+        rastreador.atualizar(
+            [self._mercado("0xaa", agora + 300)], agora_epoch=agora
+        )
+        assert "0xaa" in rastreador.janelas
+
+        # A janela fecha, e chega OUTRO ciclo de descoberta que não a traz.
+        rastreador.atualizar([], agora_epoch=agora + 400)
+
+        assert "0xaa" in rastreador.janelas, (
+            "quem aposenta e quem liquida — o motor, no tick"
+        )
+
+    def test_quem_aposenta_devolve_para_o_motor_liquidar(self):
+        """A aposentadoria continua existindo; ela é do motor."""
+        import time as _time
+
+        from pulsearb.live.rastreador import RastreadorDeJanelas
+
+        agora = _time.time()
+        rastreador = RastreadorDeJanelas()
+        rastreador.atualizar(
+            [self._mercado("0xaa", agora + 300)], agora_epoch=agora
+        )
+
+        saidas = rastreador.aposentar_fechadas(agora_epoch=agora + 400)
+
+        assert [j.condition_id for j in saidas] == ["0xaa"]
+        assert rastreador.janelas == {}
