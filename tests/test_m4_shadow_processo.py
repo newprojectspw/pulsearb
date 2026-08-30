@@ -1131,6 +1131,15 @@ class TestADescobertaNaoAposentaJanela:
     def _mercado(self, condition_id, fecha):
         return _mercado_falso(condition_id, {"Up": "up", "Down": "dn"}, fecha=fecha)
 
+    #: Quanto falta para fechar, na janela que o teste abre.
+    #:
+    #: 100 s e não 300: com 300 a abertura cairia EXATAMENTE em `agora`
+    #: (`abertura = fechamento − duração`), e o ISO com microssegundos decide
+    #: por arredondamento se `abertura <= agora`. Medido: 109 descartes em
+    #: 300 execuções. Um teste que falha em um terço das vezes por causa do
+    #: relógio não testa nada — ensina a ignorar a suíte.
+    FALTA_S = 100
+
     def test_atualizar_NAO_tira_janela_fechada_do_retrato(self):
         import time as _time
 
@@ -1139,7 +1148,7 @@ class TestADescobertaNaoAposentaJanela:
         agora = _time.time()
         rastreador = RastreadorDeJanelas()
         rastreador.atualizar(
-            [self._mercado("0xaa", agora + 300)], agora_epoch=agora
+            [self._mercado("0xaa", agora + self.FALTA_S)], agora_epoch=agora
         )
         assert "0xaa" in rastreador.janelas
 
@@ -1159,7 +1168,7 @@ class TestADescobertaNaoAposentaJanela:
         agora = _time.time()
         rastreador = RastreadorDeJanelas()
         rastreador.atualizar(
-            [self._mercado("0xaa", agora + 300)], agora_epoch=agora
+            [self._mercado("0xaa", agora + self.FALTA_S)], agora_epoch=agora
         )
 
         saidas = rastreador.aposentar_fechadas(agora_epoch=agora + 400)
