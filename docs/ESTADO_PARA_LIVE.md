@@ -56,8 +56,9 @@ Atualizado: 2026-08-30 · fonte dos números correntes:
 avaliadas com o preditor de variância **medida** sobre a curva de 23/08
 (`relatorios/VARIANCIA_23AGO.json`), 688 trades. As rodadas do preditor
 derivado — `M2_24AGO.json` (695 trades) e `HORIZONTE_240_120_v2.json`
-(640 trades) — passaram a ser **histórico**, e é delas que vêm os números de
-tudo o que vier depois da tabela de critérios do Bloco 1. O veredito de 20 h, com 837 s de silêncio e
+(640 trades) — passaram a ser **histórico**, e é delas que vêm os números do
+**restante do Bloco 1**, da tabela de critérios até o fim daquele bloco. Os
+demais blocos são estado corrente. O veredito de 20 h, com 837 s de silêncio e
 42% dos snapshots descartados, segue em `docs/VEREDITO_M2.md`.
 
 > Como ler: **✅** passou com dado real · **✅ *na banda*** (só no histórico)
@@ -159,11 +160,13 @@ edge para restringir a (`bandas_com_edge: []`).
 | 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
 | 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
 
-**⬇️ Daqui para baixo é histórico. A tabela acima é o estado corrente.** Os
-números de 1.1 a 1.4 vinham do preditor com a variância derivada, que
-subestimava o desvio-padrão em 6,3×. O que está abaixo desta linha — o
+**⬇️ Daqui até o fim do Bloco 1 é histórico. A tabela acima é o estado
+corrente.** Os números de 1.1 a 1.4 vinham do preditor com a variância
+derivada, que subestimava o desvio-padrão em 6,3×. O que vem a seguir — o
 "+2,7125 na banda", o decaimento monótono com a latência, o ECE de 0,207 —
 descreve aquele preditor, e fica no documento porque é como se chegou aqui.
+**O escopo é este bloco só:** os Blocos 2 em diante já trazem os números
+correntes, e a tabela de pendências no fim da página também.
 
 **1.1 inverteu duas vezes, e a última leitura é a que tem lastro.** 5 h deram
 −41,57; 20 h deram +102,92; 24 h limpas dão **−53,28**. A gravação de 20 h
@@ -339,6 +342,8 @@ rodada a conta nova dá **0,9526** onde a antiga dava 1,0000, e o novo
 silêncio de conexão inteira de 3.600,67 s. Os números agora concordam entre si.
 O relatório também ganhou `buracos_s` e `silencio_inicial_s` — a borda da
 frente, que só o `silencio_final_s` não via.
+
+**⬆️ Fim do histórico do Bloco 1.** Daqui para baixo, estado corrente.
 
 ---
 
