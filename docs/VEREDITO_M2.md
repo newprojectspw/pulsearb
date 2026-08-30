@@ -18,7 +18,7 @@
 > seções de veredito abaixo — o **SEGUNDO VEREDITO** (24 h de 24/08) e tudo o
 > que vem depois dele até a §2d-ter. Vêm do preditor com variância derivada, e
 > ficam no documento porque são o registro de como se chegou aqui. **Inclusive
-> o +2,7125 da banda**, que era artefato da superconfiança.
+> o +2,7125 da banda** (ver a delimitação da conclusão causal na §2d-ter).
 >
 > **Duas partes deste arquivo NÃO são histórico**, apesar de virem depois: a
 > subseção "O RESULTADO" da §2d-ter, e o placar corrente em "Placar dos 10
@@ -1121,6 +1121,11 @@ aberta, e isso é resultado, não obstáculo.
 > rodada de remediação existir. A cronologia é o que dá valor ao
 > pré-registro; misturá-la apagaria a prova de que a regra veio primeiro.
 
+*(A previsão abaixo está no commit `f59dc79` deste repositório, e o resultado
+só entrou em `4760669`, dois commits depois — há revisão do repositório que
+contém a previsão sem o desfecho. A ordem das linhas é conveniência de leitura;
+a prova é o histórico.)*
+
 `relatorios/VARIANCIA_23AGO.json`, 653.680 ticks, `dia_medido: 20260823`, oito
 ativos avaliáveis e unânimes, nenhum tick sem relógio de origem, fator de
 suavização entre **33,5 e 38,5** (contra 34,1 a 45,6 no dia 24). Dois arquivos
@@ -1266,10 +1271,23 @@ coorte). Até ele existir, a inclinação da latência é indício, não prova.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
-borda, havia superconfiança". É o que aconteceu. O PnL positivo das seções
-anteriores era artefato de um `P(Up)` saturado por um desvio-padrão 6,3×
-pequeno demais — o simulador apostava com convicção onde não havia informação,
-e a amostra pequena fez o resto.
+borda, havia superconfiança". Foi essa a ramificação que ocorreu.
+
+**Mas o alcance da conclusão é menor do que a frase sugere, e vale delimitar.**
+O que está medido é: **a regra corrigida perde neste dia**, em todas as cinco
+bandas, com `hit_rate` 0,4172. Não está medido que os 640 trades antigos não
+carregavam informação. As duas rodadas não operam a mesma população: o `P(Up)`
+corrigido muda quais instantes cruzam o threshold e pode mudar de que lado se
+compra, então os 688 trades novos não são os 640 antigos com preço melhor — são
+outro conjunto. Atribuir o +2,7125 *causalmente* à superconfiança é a
+explicação mais econômica que temos (a banda foi escolhida pela curva de
+horizonte do preditor defeituoso, e o desvio era 6,3× pequeno demais), mas
+segue sendo inferência, não medição.
+
+**O que fecharia isso é o mesmo teste que falta acima:** coorte pareada — os
+mesmos instantes, os dois preditores, comparando direção e markout em vez de
+PnL agregado. Enquanto ele não existir, o registro é "a regra corrigida perde",
+não "não havia informação nenhuma ali".
 
 **O 1.5 continua reprovando, e por motivo independente.** Profundidade a 3
 ticks, p50 = 128,05 USDC em 300 s, contra os 200 exigidos. Capacidade não é

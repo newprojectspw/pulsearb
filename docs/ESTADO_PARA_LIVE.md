@@ -12,8 +12,8 @@
 >
 > **O que a rodada produziu:** o **1.3 passa** — e a borda some junto. Os itens
 > 1.1 a 1.4 desta página estão atualizados com os números do modelo medido; o
-> "+2,7125 na banda" foi para o histórico, porque era artefato de
-> superconfiança.
+> "+2,7125 na banda" foi para o histórico. A atribuição causal dele à
+> superconfiança é inferência, não medição — a delimitação está na §2d-ter.
 
 **Semáforo de hoje: 🔴 VERMELHO** — o veredito não mudou, a causa mudou de
 novo, e desta vez para pior. Com o preditor consertado
