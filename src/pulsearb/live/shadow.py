@@ -54,11 +54,12 @@ from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo
 from pulsearb.live.rastreador import RastreadorDeJanelas
-from pulsearb.markets.discovery import MarketDiscovery
+from pulsearb.markets.discovery import MarketDiscovery, parse_end_date_epoch
 from pulsearb.markets.http import fazer_http_get_json
-from pulsearb.obs.logging import get_logger
+from pulsearb.obs import get_logger, setup_logging
 from pulsearb.risk import PortaoDeRisco
 from pulsearb.settings import Mode, Settings
+from pulsearb.tempo import RESOLUTION_GRACE_SECONDS, parse_duration
 
 log = get_logger(__name__)
 
@@ -121,22 +122,42 @@ class ProcessoShadow:
         self.settings = settings
         self.ciclo = ciclo
         self.tokens_assinados: set[str] = set()
+        #: Até quando cada token interessa (epoch). Sem isto, 24 h de
+        #: descoberta acumulam milhares de assinaturas e livros retidos, e
+        #: cada reconexão reenvia o conjunto histórico inteiro.
+        self.desassinar_apos: dict[str, float] = {}
         self.passos = 0
         self.descobertas = 0
-        self.rtds = RtdsFeed(
-            url=settings.endpoints.rtds_ws,
-            user_agent=settings.user_agent,
-            assets=settings.all_price_assets,
-            on_event=self._on_event,
-            stale_after_seconds=settings.feeds.stale_after_seconds_twap,
-            reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
-            reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
-            sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
-            topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
-            reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
-            reassinaturas_ate_derrubar=settings.feeds.rtds_reassinaturas_ate_derrubar,
-            rotulo="rtds[shadow]",
-        )
+        # REDUNDÂNCIA, como no recorder: N conexões ao MESMO endpoint. Não é
+        # paranoia — conexão individual do RTDS já produziu lacunas de 30 a
+        # 306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder
+        # ticks de âncora que o backtest enxerga. A comparação entre os dois é
+        # a razão de o SHADOW existir; furá-la por economizar um socket seria
+        # trocar o fim pelo meio.
+        #
+        # O tick repetido que a redundância produz é descartado pelo ciclo
+        # (`CicloAoVivo._repetido`), não aqui: assim vale para qualquer origem.
+        self.rtds_feeds: list[RtdsFeed] = [
+            RtdsFeed(
+                url=settings.endpoints.rtds_ws,
+                user_agent=settings.user_agent,
+                assets=settings.all_price_assets,
+                on_event=self._on_event,
+                stale_after_seconds=settings.feeds.stale_after_seconds_twap,
+                reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
+                reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+                sem_dados_timeout_s=settings.feeds.rtds_sem_dados_timeout_s,
+                topico_mudo_s=settings.feeds.rtds_topico_mudo_s,
+                reassinatura_intervalo_s=settings.feeds.rtds_reassinatura_intervalo_s,
+                reassinaturas_ate_derrubar=(
+                    settings.feeds.rtds_reassinaturas_ate_derrubar
+                ),
+                # O rótulo torna o log atribuível a UMA conexão; sem ele as
+                # duas logam idêntico e não dá para saber qual reclamava.
+                rotulo=f"rtds[shadow:{indice}]",
+            )
+            for indice in range(max(1, settings.feeds.rtds_conexoes))
+        ]
         self.poly = PolyMarketWsFeed(
             url=settings.endpoints.clob_market_ws,
             user_agent=settings.user_agent,
@@ -157,7 +178,7 @@ class ProcessoShadow:
     async def laco_de_decisao(self, deadline: float) -> None:
         """Um `passo()` por cadência, até o prazo."""
         while time.monotonic() < deadline:
-            await asyncio.sleep(CADENCIA_DA_DECISAO_S)
+            await _dormir_ate(CADENCIA_DA_DECISAO_S, deadline)
             try:
                 self.passos += 1
                 self.ciclo.passo(
@@ -183,7 +204,7 @@ class ProcessoShadow:
                 log.warning(
                     "descoberta falhou", erro=f"{type(erro).__name__}: {erro}"
                 )
-            await asyncio.sleep(CADENCIA_DA_DESCOBERTA_S)
+            await _dormir_ate(CADENCIA_DA_DESCOBERTA_S, deadline)
 
     async def _um_ciclo_de_descoberta(self, discovery: MarketDiscovery) -> None:
         mercados = await discovery.discover()
@@ -192,18 +213,41 @@ class ProcessoShadow:
         # Assina o que apareceu. Janela não-operável também entra: o motor
         # decide se opera, e o diário quer o motivo — não ver o livro dela
         # trocaria "recusei por X" por "não sei nada sobre ela".
-        novos = {
-            token
-            for mercado in mercados
-            for token in mercado.token_id_by_outcome.values()
-        } - self.tokens_assinados
+        agora = time.time()
+        vivos: set[str] = set()
+        for mercado in mercados:
+            fim = parse_end_date_epoch({"endDate": mercado.end_date_iso})
+            limite = (fim if fim is not None else agora) + RESOLUTION_GRACE_SECONDS
+            for token in mercado.token_id_by_outcome.values():
+                self.desassinar_apos[token] = limite
+                vivos.add(token)
+
+        novos = vivos - self.tokens_assinados
         if novos:
             await self.poly.subscribe(sorted(novos))
             self.tokens_assinados |= novos
 
+        # A carência existe porque a resolução não chega no instante do
+        # fechamento: desassinar cedo perderia o evento que diz quem ganhou.
+        # É a MESMA de `pulsearb.tempo` que o recorder usa — se as duas
+        # divergissem, um pararia de ver o token antes do outro.
+        encerrados = {
+            token
+            for token in self.tokens_assinados
+            if agora >= self.desassinar_apos.get(token, 0.0)
+        }
+        if encerrados:
+            await self.poly.unsubscribe(sorted(encerrados))
+            self.tokens_assinados -= encerrados
+            for token in encerrados:
+                self.desassinar_apos.pop(token, None)
+
     async def laco_de_relato(self, deadline: float) -> None:
         while time.monotonic() < deadline:
-            await asyncio.sleep(CADENCIA_DO_RELATO_S)
+            await _dormir_ate(CADENCIA_DO_RELATO_S, deadline)
+            if time.monotonic() >= deadline:
+                # Não relata depois do prazo: o resumo final já sai no `run`.
+                return
             log.info("shadow", **self.estado())
 
     def estado(self) -> dict[str, Any]:
@@ -233,7 +277,8 @@ class ProcessoShadow:
                 assets=self.settings.assets,
                 probe_durations_seconds=self.settings.probe_durations_seconds,
             )
-            await self.rtds.start()
+            for feed in self.rtds_feeds:
+                await feed.start()
             await self.poly.start()
             tarefas = [
                 asyncio.create_task(self.laco_de_descoberta(discovery, deadline)),
@@ -245,9 +290,21 @@ class ProcessoShadow:
             finally:
                 for tarefa in tarefas:
                     tarefa.cancel()
-                await self.rtds.stop()
+                for feed in self.rtds_feeds:
+                    await feed.stop()
                 await self.poly.stop()
         return self.estado()
+
+
+async def _dormir_ate(cadencia: float, deadline: float) -> None:
+    """Dorme a cadência, ou o que falta do prazo — o que for menor.
+
+    Sem isto, `--duration 10` bloqueava ~60 s no laço de relato e a rodada
+    estourava o prazo pedido em quase um minuto: o `gather` espera as três
+    tarefas, e a mais lenta manda. Uma rodada de fumaça de 10 s tem de durar
+    10 s, senão ninguém a usa.
+    """
+    await asyncio.sleep(max(0.0, min(cadencia, deadline - time.monotonic())))
 
 
 def _curvas(caminho: str | None) -> Any:
@@ -271,7 +328,12 @@ def _curvas(caminho: str | None) -> Any:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="PULSEARB SHADOW — decide, não envia")
-    parser.add_argument("--duration", type=float, default=3600.0, help="segundos")
+    parser.add_argument(
+        "--duration",
+        type=parse_duration,
+        default="1h",
+        help="90s, 30m, 24h, 7d — sem sufixo, horas",
+    )
     parser.add_argument(
         "--diario",
         default="data/shadow/diario.jsonl",
@@ -286,6 +348,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    # ANTES de qualquer coisa: sem isto o root logger fica em WARNING e os
+    # relatos de 60 s, os avisos de conexão e os motivos de janela ignorada
+    # somem — 24 h de rodada entregando só o resumo final.
+    setup_logging()
 
     settings = Settings.load()
     if settings.mode is Mode.LIVE:

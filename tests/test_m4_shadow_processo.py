@@ -125,6 +125,169 @@ class TestAFabrica:
         assert portao.caminho_do_kill == Path(str(kill))
 
 
+class TestOsCincoAchadosDaRevisao:
+    """Cinco defeitos que a revisão do #52 pegou. Um teste por defeito.
+
+    Nenhum era hipotético: os cinco foram conferidos contra o código antes de
+    corrigir, e cada um tinha uma consequência concreta numa rodada de 24 h.
+    """
+
+    def test_P1_abre_TODAS_as_conexoes_rtds_configuradas(self, tmp_path):
+        """`rtds_conexoes` default é 2, e o processo abria UMA.
+
+        Conexão individual do RTDS já produziu lacunas de 30 a 306 s. Uma
+        lacuna aqui que a gravação não tem faria o SHADOW perder ticks de
+        âncora que o backtest enxerga — furando a comparação, que é a razão de
+        o SHADOW existir.
+        """
+        settings = _settings(tmp_path)
+        ciclo = montar_ciclo(settings, caminho_do_diario=tmp_path / "d.jsonl")
+        processo = ProcessoShadow(settings, ciclo)
+
+        assert settings.feeds.rtds_conexoes == 2
+        assert len(processo.rtds_feeds) == settings.feeds.rtds_conexoes
+        # Rótulos distintos: sem eles as duas logam idêntico e não dá para
+        # saber qual conexão reclamava.
+        assert len({f.rotulo for f in processo.rtds_feeds}) == 2
+
+    async def test_P2_token_de_janela_encerrada_e_DESASSINADO(self, tmp_path):
+        """24 h de descoberta acumulariam milhares de assinaturas.
+
+        Cada reconexão reenvia o conjunto inteiro no frame inicial, e os
+        livros ficam retidos. A carência é a MESMA do recorder — se as duas
+        divergissem, um pararia de ver o token antes do outro.
+        """
+        import time as _time
+
+        from pulsearb.tempo import RESOLUTION_GRACE_SECONDS
+
+        class _Poly:
+            def __init__(self):
+                self.assinados: list[str] = []
+                self.desassinados: list[str] = []
+
+            async def subscribe(self, tokens):
+                self.assinados.extend(tokens)
+
+            async def unsubscribe(self, tokens):
+                self.desassinados.extend(tokens)
+
+        class _Descoberta:
+            def __init__(self, fim):
+                self.fim = fim
+
+            async def discover(self):
+                return [_mercado_falso("0xaa", {"Up": "t-up"}, fecha=self.fim)]
+
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.poly = _Poly()
+
+        # Janela aberta: assina.
+        await processo._um_ciclo_de_descoberta(
+            _Descoberta(_time.time() + 300)
+        )
+        assert processo.tokens_assinados == {"t-up"}
+
+        # Janela fechada há mais que a carência: desassina.
+        await processo._um_ciclo_de_descoberta(
+            _Descoberta(_time.time() - RESOLUTION_GRACE_SECONDS - 60)
+        )
+        assert processo.poly.desassinados == ["t-up"]
+        assert processo.tokens_assinados == set()
+
+    async def test_P2_dentro_da_carencia_NAO_desassina(self, tmp_path):
+        """A resolução não chega no instante do fechamento.
+
+        Desassinar cedo perderia justamente o evento que diz quem ganhou.
+        """
+        import time as _time
+
+        class _Poly:
+            def __init__(self):
+                self.desassinados: list[str] = []
+
+            async def subscribe(self, tokens):
+                pass
+
+            async def unsubscribe(self, tokens):
+                self.desassinados.extend(tokens)
+
+        class _Descoberta:
+            async def discover(self):
+                return [
+                    _mercado_falso(
+                        "0xaa", {"Up": "t-up"}, fecha=_time.time() - 60
+                    )
+                ]
+
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.poly = _Poly()
+
+        await processo._um_ciclo_de_descoberta(_Descoberta())
+
+        assert processo.poly.desassinados == []
+        assert processo.tokens_assinados == {"t-up"}
+
+    def test_P2_a_duracao_documentada_e_aceita(self):
+        """`--duration 24h` era rejeitado por `type=float`.
+
+        A doc anunciava um comando que não inicia. Agora o parser é o mesmo
+        do recorder.
+        """
+        from pulsearb.tempo import parse_duration
+
+        assert parse_duration("24h") == 86400.0
+        assert parse_duration("90s") == 90.0
+        assert parse_duration("72") == 259200.0  # sem sufixo = horas
+
+    async def test_P2_o_sono_respeita_o_prazo(self):
+        """Uma rodada de 10 s bloqueava ~60 s no laço de relato.
+
+        O `gather` espera as três tarefas, e a mais lenta manda: `--duration`
+        estourava em quase um minuto. Rodada de fumaça que dura seis vezes o
+        pedido não é usada por ninguém.
+        """
+        import time as _time
+
+        from pulsearb.live.shadow import _dormir_ate
+
+        inicio = _time.monotonic()
+        await _dormir_ate(60.0, _time.monotonic() + 0.05)
+
+        assert _time.monotonic() - inicio < 1.0
+
+    async def test_P2_prazo_ja_vencido_nao_dorme(self):
+        import time as _time
+
+        from pulsearb.live.shadow import _dormir_ate
+
+        inicio = _time.monotonic()
+        await _dormir_ate(60.0, _time.monotonic() - 10)
+
+        assert _time.monotonic() - inicio < 0.5
+
+    def test_P2_o_logging_e_configurado_antes_de_rodar(self, monkeypatch, tmp_path):
+        """Sem `setup_logging()` o root fica em WARNING.
+
+        Os relatos de 60 s, os avisos de conexão e os motivos de janela
+        ignorada sumiriam — 24 h de rodada entregando só o resumo final.
+        """
+        chamadas: list[int] = []
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.setup_logging", lambda: chamadas.append(1)
+        )
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.Settings.load",
+            classmethod(lambda cls: _settings(tmp_path, modo=Mode.LIVE)),
+        )
+
+        # Em LIVE o `main` sai em 2 — mas só DEPOIS de configurar o log.
+        from pulsearb.live.shadow import main
+
+        assert main([]) == 2
+        assert chamadas == [1]
+
+
 class _CicloFalso:
     """Conta os passos sem decidir nada."""
 
@@ -186,13 +349,21 @@ class TestACadencia:
         assert ciclo.passos > 1  # seguiu depois do primeiro erro
 
     async def test_a_descoberta_alimenta_o_ciclo_e_assina_os_tokens(self, tmp_path):
+        import time as _time
+
         class _Descoberta:
             def __init__(self):
                 self.chamadas = 0
 
             async def discover(self):
                 self.chamadas += 1
-                return [_mercado_falso("0xaa", {"Up": "t-up", "Down": "t-down"})]
+                return [
+                    _mercado_falso(
+                        "0xaa",
+                        {"Up": "t-up", "Down": "t-down"},
+                        fecha=_time.time() + 300,
+                    )
+                ]
 
         class _Poly:
             def __init__(self):
@@ -200,6 +371,9 @@ class TestACadencia:
 
             async def subscribe(self, tokens):
                 self.assinados.append(list(tokens))
+
+            async def unsubscribe(self, tokens):
+                raise AssertionError("janela aberta não deveria desassinar")
 
         ciclo = _CicloFalso()
         processo = _processo(tmp_path, ciclo)
@@ -216,9 +390,17 @@ class TestACadencia:
         """Reassinar o mesmo token a cada 30 s gastaria banda e poluiria o
         log de assinatura sem mudar nada."""
 
+        import time as _time
+
         class _Descoberta:
             async def discover(self):
-                return [_mercado_falso("0xaa", {"Up": "t-up", "Down": "t-down"})]
+                return [
+                    _mercado_falso(
+                        "0xaa",
+                        {"Up": "t-up", "Down": "t-down"},
+                        fecha=_time.time() + 300,
+                    )
+                ]
 
         class _Poly:
             def __init__(self):
@@ -226,6 +408,9 @@ class TestACadencia:
 
             async def subscribe(self, tokens):
                 self.chamadas += 1
+
+            async def unsubscribe(self, tokens):
+                raise AssertionError("janela aberta não deveria desassinar")
 
         processo = _processo(tmp_path, _CicloFalso())
         processo.poly = _Poly()
@@ -244,11 +429,16 @@ class TestACadencia:
         "não sei nada sobre ela" — e é exatamente o que o M2 quer medir.
         """
 
+        import time as _time
+
         class _Descoberta:
             async def discover(self):
                 return [
                     _mercado_falso(
-                        "0xbb", {"Up": "n-up", "Down": "n-down"}, operable=False
+                        "0xbb",
+                        {"Up": "n-up", "Down": "n-down"},
+                        operable=False,
+                        fecha=_time.time() + 300,
                     )
                 ]
 
@@ -259,6 +449,9 @@ class TestACadencia:
             async def subscribe(self, tokens):
                 self.assinados.extend(tokens)
 
+            async def unsubscribe(self, tokens):
+                raise AssertionError("janela aberta não deveria desassinar")
+
         processo = _processo(tmp_path, _CicloFalso())
         processo.poly = _Poly()
 
@@ -267,12 +460,12 @@ class TestACadencia:
         assert set(processo.poly.assinados) == {"n-up", "n-down"}
 
 
-def _mercado_falso(condition_id, tokens, *, operable=True):
+def _mercado_falso(condition_id, tokens, *, operable=True, fecha=1_787_000_300):
     from datetime import UTC, datetime
 
     from pulsearb.markets.discovery import DiscoveredMarket
 
-    iso = datetime.fromtimestamp(1_787_000_300, UTC).isoformat().replace("+00:00", "Z")
+    iso = datetime.fromtimestamp(fecha, UTC).isoformat().replace("+00:00", "Z")
     return DiscoveredMarket(
         slug="btc-updown-5m-1787000300",
         condition_id=condition_id,

@@ -532,7 +532,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | 🟡 arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ⬜ **não há dashboard** |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 43 testes. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -724,6 +724,20 @@ instância que o ciclo alimenta tick a tick. Sem ela a trava de relógio diria
 "não sei" a cada ordem, o diário sairia com `relogio_nao_monitorado` em toda
 linha, e nenhum dos portões que interessam seria exercitado. Há teste travando
 a identidade da instância, porque uma cópia não recebe os ticks.
+
+**Redundância no RTDS, como no recorder.** `rtds_conexoes` (default 2)
+conexões ao mesmo endpoint. Conexão individual já produziu lacunas de 30 a
+306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder ticks de
+âncora que o backtest enxerga — furando exatamente a comparação que justifica o
+SHADOW. O tick repetido que a redundância produz é descartado **no ciclo**, não
+no processo, para valer também na reprodução de gravação; e é **contado**
+(`preco_repetido`), porque perto de zero com duas conexões significa que a
+redundância não está funcionando.
+
+**Assinaturas rodam, não acumulam.** Token de janela encerrada é desassinado
+depois da carência de resolução — a MESMA de `pulsearb.tempo` que o recorder
+usa. Sem isso, 24 h de descoberta acumulariam milhares de assinaturas, e cada
+reconexão reenviaria o conjunto histórico inteiro no frame inicial.
 
 **Três cadências, e cada uma tem um número por trás:**
 

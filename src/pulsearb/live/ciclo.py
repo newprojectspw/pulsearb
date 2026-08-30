@@ -33,6 +33,7 @@ soubesse falar com a rede não poderia ser confrontado com nada.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,6 +59,21 @@ SILENCIO_DO_PRECO_S = 10.0
 FONTE_RTDS = "rtds"
 FONTE_POLY = "poly_ws"
 
+#: Quantos carimbos recentes lembrar por ativo, para deduplicar.
+#:
+#: O RTDS é assinado em N conexões redundantes (`rtds_conexoes`, default 2)
+#: porque conexão individual já produziu lacunas de 30 a 306 s. O preço disso é
+#: o MESMO tick chegando N vezes, e contá-lo N vezes estragaria a volatilidade
+#: realizada e o sensor de anomalia de tempo — dois "atrasos" por tick.
+#:
+#: A dedupe mora aqui, e não no processo, para valer qualquer que seja a
+#: origem: N sockets, reprodução de gravação, ou um teste que empurre a mesma
+#: lista duas vezes.
+#:
+#: 256 a ~1 tick/s por ativo são ~4 min de memória: folgado para cobrir a
+#: diferença de chegada entre conexões, curto para não pesar.
+CARIMBOS_LEMBRADOS = 256
+
 
 @dataclass
 class CicloAoVivo:
@@ -73,6 +89,8 @@ class CicloAoVivo:
 
     #: Última chegada de tick de `twap_sixty`, por ativo (ns de parede).
     ultimo_preco_ns: dict[str, int] = field(default_factory=dict)
+    #: Carimbos de servidor já vistos, por ativo. Ver `CARIMBOS_LEMBRADOS`.
+    _vistos: dict[str, deque[int]] = field(default_factory=dict)
     #: O que entrou, por tipo. Zero silencioso é indistinguível de bug.
     contagem: dict[str, int] = field(default_factory=dict)
 
@@ -105,6 +123,12 @@ class CicloAoVivo:
         if tick.src_timestamp_ms <= 0:
             self._contar("preco_sem_carimbo_do_servidor")
             return
+        if self._repetido(tick.asset, tick.src_timestamp_ms):
+            # Segunda conexão entregando o mesmo tick. Contado e não engolido:
+            # `preco_repetido` perto de zero com `rtds_conexoes > 1` significa
+            # que a redundância não está funcionando.
+            self._contar("preco_repetido")
+            return
 
         self.motor.precos.anotar(
             tick.asset,
@@ -116,6 +140,23 @@ class CicloAoVivo:
         )
         self.ultimo_preco_ns[tick.asset] = event.ts_wall_ns
         self._contar("preco")
+
+    def _repetido(self, asset: str, carimbo: int) -> bool:
+        """Este (ativo, carimbo) já passou? Marca como visto se não.
+
+        Só o carimbo EXATO conta como repetido. Tick fora de ordem NÃO é
+        descartado: o backtest também os guarda (`streams_e18` acumula e a
+        âncora resolve por bisect), e jogá-los fora aqui faria as duas pontas
+        verem séries diferentes.
+        """
+        janela = self._vistos.get(asset)
+        if janela is None:
+            janela = deque(maxlen=CARIMBOS_LEMBRADOS)
+            self._vistos[asset] = janela
+        if carimbo in janela:
+            return True
+        janela.append(carimbo)
+        return False
 
     def _on_poly(self, event: FeedEvent) -> None:
         vistos = 0
