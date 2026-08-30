@@ -61,7 +61,9 @@ def _relatorio(**ajustes):
                 "por_ordem_e_recorte": {"celula": {"horas_de_amostra": 65.9}},
                 "o_que_falta_para_fechar": [],
             },
-            "sensibilidade_ao_fator": {"ordem": {"0.3": 1.5}},
+            "rewards": {
+                "por_ordem": {"50 shares @ 1 tick(s), 2 lados": {"total": {"receita_usdc": 1.5}}},
+            },
         },
     }
     return base | ajustes
