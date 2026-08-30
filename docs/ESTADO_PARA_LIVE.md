@@ -957,7 +957,7 @@ do primeiro dólar real.
 | # | Item | Estado |
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
-| 5.2 | Imagem Docker efetivamente construída | ⬜ nunca foi — `VEREDITO_M2.md` marca como não verificado |
+| 5.2 | Imagem Docker efetivamente construída | 🟡 `deploy/Dockerfile` existe e `.dockerignore` foi adicionado (2026-08-30) — sem ele o contexto incluía `.venv/` e `data/`, podendo passar de vários GB. Falta: build nunca rodou; job `docker` em `ci.yml` escrito mas pendente de scope `workflow` no token OAuth; deploy na VPS |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
 | 5.4 | **NTP/chrony verificado na máquina que opera** | ✅ **2026-08-30** — `risk/sincronia.py` pergunta ao daemon (systemd, chrony, macOS), 14 testes. **Não determinado conta como não sincronizado**, e o LIVE recusa por isso. Falta só habilitar NTP na VPS |
 
