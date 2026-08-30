@@ -116,6 +116,19 @@ def montar_ciclo(
     )
     return CicloAoVivo(
         motor=motor,
+        # O limiar do M1, não o default do módulo. Deixá-lo no default punha o
+        # ciclo MAIS permissivo que a configuração: com `stale_after_seconds_twap`
+        # em 5 s, `feeds_saudaveis` seguia verdadeiro por mais 5 s e registrava
+        # intenção com preço que a própria configuração já declara velho.
+        #
+        # Por que o limiar e não o `stale` de cada feed: o RTDS é assinado em N
+        # conexões redundantes (`rtds_conexoes`), e cada `RtdsFeed` fica `stale`
+        # sozinho. Fechar por feed pararia o bot quando UMA das N caísse, que é
+        # justamente o caso que a redundância existe para cobrir. "Nenhum tick
+        # chegou por X s" é a agregação certa: só é verdade quando TODAS
+        # emudecem — e é o que o backtest também enxerga, pela regra do mesmo
+        # caminho.
+        silencio_do_preco_s=settings.feeds.stale_after_seconds_twap,
         # O feed não filtra o `on_event` — ver `CicloAoVivo.ativos_operados`.
         ativos_operados=frozenset(a.lower() for a in settings.assets),
     )

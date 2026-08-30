@@ -21,12 +21,13 @@ from pulsearb.live.shadow import (
     ProcessoShadow,
     montar_ciclo,
 )
-from pulsearb.settings import Mode, RiskSettings, Settings
+from pulsearb.settings import FeedSettings, Mode, RiskSettings, Settings
 
 
-def _settings(tmp_path, modo=Mode.SHADOW, **risco):
+def _settings(tmp_path, modo=Mode.SHADOW, feeds=None, **risco):
     return Settings(
         mode=modo,
+        feeds=feeds or FeedSettings(),
         risk=RiskSettings(
             caminho_do_registro=str(tmp_path / "registro.json"),
             caminho_do_kill=str(tmp_path / "KILL"),
@@ -92,6 +93,50 @@ class TestAFabrica:
 
         assert ciclo.motor.config.shares_por_trade == 5.0
         assert ciclo.motor.executor.portao.settings.stake_max_por_trade_usdc == 3.0
+
+    def test_o_limiar_de_silencio_sai_da_configuracao(self, tmp_path):
+        """Achado do Codex no #52, e procede.
+
+        A fábrica deixava `silencio_do_preco_s` no default do módulo (10 s)
+        enquanto o M1 configura 5 s. O ciclo ficava MAIS permissivo que a
+        configuração: por 5 s extras `feeds_saudaveis` seguia verdadeiro e o
+        SHADOW registrava intenção com preço que a própria configuração já
+        declara velho.
+        """
+        ciclo = montar_ciclo(
+            _settings(tmp_path),
+            caminho_do_diario=tmp_path / "diario.jsonl",
+        )
+
+        assert ciclo.silencio_do_preco_s == 5.0
+
+    def test_um_limiar_ajustado_chega_ao_ciclo(self, tmp_path):
+        """Não é o 5.0 que importa: é sair da configuração, qualquer que seja.
+
+        Um teste que só checasse o default passaria se a fábrica tivesse o
+        número escrito à mão.
+        """
+        ciclo = montar_ciclo(
+            _settings(tmp_path, feeds=FeedSettings(stale_after_seconds_twap=1.5)),
+            caminho_do_diario=tmp_path / "diario.jsonl",
+        )
+
+        assert ciclo.silencio_do_preco_s == 1.5
+
+    def test_o_silencio_fecha_no_limiar_configurado(self, tmp_path):
+        """O efeito, não só a fiação: 6 s de silêncio com limiar de 5 s fecha.
+
+        Antes do conserto isto passava — 6 < 10 —, que é exatamente a janela
+        em que o Codex mostrou o SHADOW decidindo com preço velho.
+        """
+        ciclo = montar_ciclo(
+            _settings(tmp_path),
+            caminho_do_diario=tmp_path / "diario.jsonl",
+        )
+        ciclo.ultimo_preco_ns["btc"] = 0
+
+        assert ciclo.feeds_saudaveis(agora_ns=4_000_000_000) is True
+        assert ciclo.feeds_saudaveis(agora_ns=6_000_000_000) is False
 
     def test_a_curva_de_variancia_chega_ao_motor(self, tmp_path):
         """Rodar o SHADOW no derivado depois de validar no medido recria ao
