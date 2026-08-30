@@ -1088,7 +1088,26 @@ e o conserto da variância da §2d-ter, sozinho, cobria só uma fatia dela.
 3. O `sigma_1s` é medido sobre a série já suavizada, e vale ~1/36 da
    volatilidade do subjacente.
 
-#### A curva de 23/08 medida — e uma PREVISÃO registrada antes da rodada
+#### A restrição que sobra, e ela é de método
+
+A curva foi medida em **24/08**, que é o mesmo dia que o veredito avalia. Usar
+os dois no mesmo dia é ajuste in-sample — exatamente o que a §2d proibiu para
+o fator de encolhimento ("o fator vem de calibração medida em período ANTERIOR
+ao avaliado").
+
+Então a `V(t)` que entra no modelo tem de ser medida em **outro dia**. Há 23 h
+de 23/08 gravadas. A regra registrada agora, antes de rodar: **mede em 23/08,
+avalia em 24/08.** A curva de 24/08 fica como controle — se as duas
+discordarem muito, a própria estabilidade de V(t) entre dias vira pergunta
+aberta, e isso é resultado, não obstáculo.
+
+#### E ela FOI medida — a curva de 23/08, e uma previsão antes da rodada
+
+> **Ordem de leitura, porque este documento é o registro do experimento:**
+> tudo acima desta linha foi escrito ANTES de a curva de 23/08 existir. O
+> que vem a seguir é o resultado dela, mais uma previsão feita antes de a
+> rodada de remediação existir. A cronologia é o que dá valor ao
+> pré-registro; misturá-la apagaria a prova de que a regra veio primeiro.
 
 `relatorios/VARIANCIA_23AGO.json`, 653.680 ticks, `dia_medido: 20260823`, oito
 ativos avaliáveis e unânimes, nenhum tick sem relógio de origem, fator de
@@ -1140,18 +1159,6 @@ fator melhor — e usá-la seria exatamente o ajuste in-sample que esta seção
 inteira existe para impedir. O estimador de nível, se for preciso, é o próximo
 experimento, com protocolo próprio.
 
-#### A restrição que sobra, e ela é de método
-
-A curva foi medida em **24/08**, que é o mesmo dia que o veredito avalia. Usar
-os dois no mesmo dia é ajuste in-sample — exatamente o que a §2d proibiu para
-o fator de encolhimento ("o fator vem de calibração medida em período ANTERIOR
-ao avaliado").
-
-Então a `V(t)` que entra no modelo tem de ser medida em **outro dia**. Há 23 h
-de 23/08 gravadas. A regra registrada agora, antes de rodar: **mede em 23/08,
-avalia em 24/08.** A curva de 24/08 fica como controle — se as duas
-discordarem muito, a própria estabilidade de V(t) entre dias vira pergunta
-aberta, e isso é resultado, não obstáculo.
 
 
 
