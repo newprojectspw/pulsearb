@@ -33,7 +33,7 @@ dependencies = [
 # a VPS que grava não converte nada, e carregar ~40 MB de biblioteca colunar
 # lá não compraria nada. Ver src/pulsearb/replay/columnar.py.
 analise = [
-    "pyarrow==22.0.0",
+    "pyarrow==23.0.1",
 ]
 dev = [
     "pytest==9.1.1",

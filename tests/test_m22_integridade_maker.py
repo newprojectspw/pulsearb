@@ -346,26 +346,26 @@ PARAMS = ParametrosDeReward(
     min_size=50.0,
     max_spread=0.03,
     tick_size=0.01,
-    fator_desconto=0.5,
 )
 
 
-def test_score_cai_com_a_distancia_do_topo():
-    no_topo = score_de_nivel(0.50, 100, melhor_preco=0.50, meio=0.50, params=PARAMS)
-    um_tick = score_de_nivel(0.49, 100, melhor_preco=0.50, meio=0.50, params=PARAMS)
-    dois = score_de_nivel(0.48, 100, melhor_preco=0.50, meio=0.50, params=PARAMS)
-    assert no_topo == 100
-    assert um_tick == 50
-    assert dois == 25
+def test_score_cai_quadraticamente_com_a_distancia_do_meio():
+    # S(v,s) = ((v-s)/v)² × tamanho, v=max_spread=0.03
+    no_meio = score_de_nivel(0.50, 100, meio=0.50, params=PARAMS)
+    um_tick = score_de_nivel(0.49, 100, meio=0.50, params=PARAMS)
+    dois = score_de_nivel(0.48, 100, meio=0.50, params=PARAMS)
+    assert no_meio == pytest.approx(100.0)                # s=0: (1-0)²×100 = 100
+    assert um_tick == pytest.approx((2 / 3) ** 2 * 100)  # s/v=1/3: (2/3)²×100 ≈ 44.4
+    assert dois == pytest.approx((1 / 3) ** 2 * 100)     # s/v=2/3: (1/3)²×100 ≈ 11.1
 
 
 def test_abaixo_do_min_size_nao_pontua():
-    assert score_de_nivel(0.50, 49, melhor_preco=0.50, meio=0.50, params=PARAMS) == 0.0
+    assert score_de_nivel(0.50, 49, meio=0.50, params=PARAMS) == 0.0
 
 
 def test_fora_do_max_spread_nao_pontua():
     """0.46 está a 0.04 do meio, além do max_spread de 0.03."""
-    assert score_de_nivel(0.46, 100, melhor_preco=0.50, meio=0.50, params=PARAMS) == 0.0
+    assert score_de_nivel(0.46, 100, meio=0.50, params=PARAMS) == 0.0
 
 
 def test_parametros_sem_pool_nao_viram_default_inventado():
@@ -404,8 +404,9 @@ def test_ordem_hipotetica_pontua_dos_dois_lados():
 
 
 def test_score_do_livro_soma_os_dois_lados():
+    # mid=0.50, bids/asks a 0.01 do meio; v=0.03 → s/v=1/3 → (2/3)²×100 × 2 lados
     livro = OrderBook(asset_id="tok", bids=[(0.49, 100.0)], asks=[(0.51, 100.0)])
-    assert score_do_livro(livro, PARAMS) == 200.0
+    assert score_do_livro(livro, PARAMS) == pytest.approx(2 * (2 / 3) ** 2 * 100)
 
 
 def _janela_com_livro(slug: str = "j1") -> WindowState:
@@ -444,23 +445,17 @@ def _janela_com_livro(slug: str = "j1") -> WindowState:
     return janela
 
 
-def test_simulacao_produz_receita_e_varre_o_fator():
+def test_simulacao_produz_receita_com_formula_correta():
     saida = simular([_janela_com_livro()])
     assert saida["janelas_com_pool_de_reward"] == 1
     total = saida["por_ordem"]["50 shares @ 1 tick(s), 2 lados"]["total"]
     assert total["receita_usdc"] > 0
     assert 0 < total["fatia_media"] < 1
 
-    # A varredura do fator é obrigatória: é ela que mostra o quanto a
-    # conclusão depende de um parâmetro que NÃO foi verificado.
-    sensibilidade = saida["sensibilidade_ao_fator"]["50 shares @ 1 tick(s), 2 lados"]
-    assert set(sensibilidade) == {"0.3", "0.5", "0.7", "0.9"}
-    assert sensibilidade["0.9"] > sensibilidade["0.3"]
 
-
-def test_simulacao_avisa_que_a_formula_nao_foi_verificada():
+def test_simulacao_reporta_formula_confirmada():
     saida = simular([_janela_com_livro()])
-    assert "NÃO FOI VERIFICADA" in saida["hipoteses"]["aviso"]
+    assert "CONFIRMADA" in saida["hipoteses"]["aviso"]
 
 
 def test_selecao_de_mercado_reporta_orcamento_por_score():

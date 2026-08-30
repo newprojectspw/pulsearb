@@ -1,0 +1,43 @@
+# Exclui do contexto do build o que não vai para a imagem.
+# Sem este arquivo o `docker build .` envia o .venv e o data/ inteiros,
+# o que pode passar de vários GB e travar o build no envio do contexto.
+
+# Segredos — nunca devem entrar na imagem
+.env
+.env.*
+CONFIRM_LIVE
+KILL
+
+# Python — gerados na máquina do desenvolvedor, não na imagem
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Dados do recorder — grandes, não pertencem à imagem
+data/
+recordings/
+relatorios/
+*.parquet
+*.jsonl
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Desenvolvimento e CI — não necessários em produção
+tests/
+scripts/
+.github/
+docs/
+deploy/
+
+# Git — nunca entra na imagem
+.git/
+.gitignore
