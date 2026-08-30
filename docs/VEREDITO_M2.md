@@ -1088,6 +1088,58 @@ e o conserto da variância da §2d-ter, sozinho, cobria só uma fatia dela.
 3. O `sigma_1s` é medido sobre a série já suavizada, e vale ~1/36 da
    volatilidade do subjacente.
 
+#### A curva de 23/08 medida — e uma PREVISÃO registrada antes da rodada
+
+`relatorios/VARIANCIA_23AGO.json`, 653.680 ticks, `dia_medido: 20260823`, oito
+ativos avaliáveis e unânimes, nenhum tick sem relógio de origem, fator de
+suavização entre **33,5 e 38,5** (contra 34,1 a 45,6 no dia 24). Dois arquivos
+do dia 23 vieram com o gzip quebrado e foram abandonados; sobraram ~81,7 mil
+amostras por ativo, contra ~81,4 mil no dia 24.
+
+**Comparando as duas curvas do btc, horizonte a horizonte:**
+
+| t (s) | V(23)/V(24) |
+|---|---|
+| 1 | 0,463 |
+| 2 | 0,499 |
+| 5 | 0,498 |
+| 10 | 0,505 |
+| 30 | 0,517 |
+| 60 | 0,521 |
+| 120 | 0,518 |
+| 180 | 0,524 |
+| 240 | **0,541** |
+| 300 | 0,534 |
+| 600 | 0,456 |
+
+Média **0,507**, e a razão varia apenas **1,19×** ao longo de 600× de faixa de
+horizonte. Isso é um achado por si:
+
+> **A FORMA de V(t) é estável entre dias; o NÍVEL não.** O dia 23 foi cerca de
+> metade do dia 24 em variância, na mesma proporção em todo horizonte.
+
+**A previsão, registrada AGORA, antes de a rodada existir.** Usando a curva de
+23/08 para avaliar 24/08, o modelo vai subestimar a variância em ~1/0,51 ≈
+**1,97×** — ou seja, ~**1,40×** no desvio-padrão. Isso é uma melhora enorme
+sobre os 6,3× do modelo derivado, mas não é zero, e ela empurra na direção da
+superconfiança.
+
+**O que essa previsão torna falsificável:**
+
+- Se o 1.3 passar, o nível residual não bastou para reprovar, e o conserto
+  está completo para o que o critério cobra.
+- Se o 1.3 reprovar com ECE compatível com ~1,4× de excesso de confiança, o
+  diagnóstico é **de NÍVEL, não de forma** — e o passo seguinte é um estimador
+  de nível (a curva dá a forma, a volatilidade recente dá a escala), não um
+  modelo novo.
+- Se o 1.3 reprovar com viés MISTO e SEM ORDEM de novo, a forma também está
+  errada, e aí sim a conclusão da §2d-bis volta inteira.
+
+**Não vou ajustar o nível antes de rodar.** A curva de 24/08 existe e daria um
+fator melhor — e usá-la seria exatamente o ajuste in-sample que esta seção
+inteira existe para impedir. O estimador de nível, se for preciso, é o próximo
+experimento, com protocolo próprio.
+
 #### A restrição que sobra, e ela é de método
 
 A curva foi medida em **24/08**, que é o mesmo dia que o veredito avalia. Usar
