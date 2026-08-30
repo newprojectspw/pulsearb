@@ -2238,9 +2238,9 @@ def main(argv: list[str] | None = None) -> int:
             fee_exponent=_medio_do_dado(integras, "fee_exponent") or 1.0,
         ),
         "aviso": (
-            "NADA aqui envia ordem. É simulação sobre gravação. A fórmula de "
-            "score NÃO foi verificada contra a documentação oficial — ver "
-            "`rota_maker.rewards.hipoteses` e docs/API_NOTES.md 15."
+            "NADA aqui envia ordem. É simulação sobre gravação. "
+            "Fórmula CONFIRMADA em 2026-08-30: S(v,s)=((v-s)/v)^2 x tamanho — "
+            "ver `rota_maker.rewards.hipoteses` e docs/API_NOTES.md §15.3."
         ),
     }
 
