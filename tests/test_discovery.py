@@ -547,3 +547,64 @@ async def test_keyset_manda_filtro_de_data(gamma_fee):
 def test_reconhecimento_de_slug(slug, esperado):
     discovery, _ = _discovery({}, assets=["btc"])
     assert discovery._is_updown_slug(slug) is esperado
+
+
+class TestConditionIdNaUrl:
+    """O `conditionId` vem do FIO e ia cru para dentro de um caminho de URL.
+
+    `f"{clob_url}/clob-markets/{condition_id}"` sem passar por nada. Um valor
+    com `../`, `?`, `#` ou `//` mudaria o caminho, a query ou o host da
+    requisição. Não é hipótese sobre má-fé da Polymarket: uma resposta
+    malformada, um proxy no meio ou um campo renomeado bastam.
+    """
+
+    @pytest.mark.parametrize(
+        "valor",
+        [
+            "0xabc123def456",
+            "ABC123DEF456",
+            "abc123",
+            "0XABC",
+        ],
+    )
+    def test_hash_hexadecimal_passa(self, valor):
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert seguro_na_url(valor)
+
+    @pytest.mark.parametrize(
+        "valor",
+        [
+            "../admin",
+            "abc/def",
+            "abc?token=x",
+            "abc#frag",
+            "//evil.example.com/x",
+            "abc def",
+            "abc%2f..",
+            "",
+            "0x",
+            "naohex",
+        ],
+    )
+    def test_qualquer_coisa_fora_do_hex_e_recusada(self, valor):
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert not seguro_na_url(valor)
+
+    def test_a_checagem_e_do_CONJUNTO_e_nao_do_comprimento(self):
+        """Exigir 64 dígitos exatos faria o dia em que o servidor mudar o
+        formato virar "nenhuma janela existe" — pior que o problema."""
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert seguro_na_url("ab")
+        assert seguro_na_url("a" * 200)
+
+    def test_normalizar_condition_id_NAO_serve_para_isto(self):
+        """Ela normaliza a grafia para comparação e deixa passar qualquer
+        caractere. Usá-la como validação seria o engano fácil."""
+        from pulsearb.feeds.poly_ws import normalizar_condition_id
+        from pulsearb.markets.discovery import seguro_na_url
+
+        assert normalizar_condition_id("../admin") == "../admin"
+        assert not seguro_na_url("../admin")

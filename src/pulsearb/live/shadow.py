@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo
 from pulsearb.live.rastreador import RastreadorDeJanelas
 from pulsearb.markets.discovery import MarketDiscovery
+from pulsearb.markets.http import fazer_http_get_json
 from pulsearb.obs.logging import get_logger
 from pulsearb.risk import PortaoDeRisco
 from pulsearb.settings import Mode, Settings
@@ -218,16 +220,8 @@ class ProcessoShadow:
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent}, timeout=15.0
         ) as http:
-
-            async def http_get_json(url: str, params: dict[str, Any] | None) -> Any:
-                resposta = await http.get(url, params=params)
-                if resposta.status_code == 404:
-                    return None
-                resposta.raise_for_status()
-                return resposta.json()
-
             discovery = MarketDiscovery(
-                http_get_json=http_get_json,
+                http_get_json=fazer_http_get_json(http),
                 gamma_url=self.settings.endpoints.gamma,
                 clob_url=self.settings.endpoints.clob,
                 assets=self.settings.assets,
@@ -294,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "este processo é o SHADOW e nunca envia ordem. Para LIVE, "
             "ver risk/autorizacao.py — e o cliente de ordens ainda não existe.",
-            file=__import__("sys").stderr,
+            file=sys.stderr,
         )
         return 2
 

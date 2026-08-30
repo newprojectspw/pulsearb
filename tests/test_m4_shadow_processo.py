@@ -305,3 +305,44 @@ class TestOEstado:
         assert estado["descobertas"] == 0
         assert "feeds_saudaveis" in estado
         assert isinstance(ciclo, CicloAoVivo)
+
+
+class TestOAdaptadorHttpEhCompartilhado:
+    """O tratamento de 404 é semântica, não encanação.
+
+    A Gamma responde 404 para slug sem mercado, e isso é resposta NORMAL: a
+    grade testa candidatos que podem não existir. Se o recorder tratasse 404
+    como `None` e o SHADOW como erro, um veria a janela e o outro não — e a
+    divergência apareceria como diferença de mercado.
+    """
+
+    async def test_404_vira_none(self):
+        from pulsearb.markets.http import fazer_http_get_json
+
+        class _Resposta:
+            status_code = 404
+
+            def raise_for_status(self):
+                raise AssertionError("404 não deveria levantar")
+
+        class _Http:
+            async def get(self, url, params=None):
+                return _Resposta()
+
+        assert await fazer_http_get_json(_Http())("qualquer", None) is None
+
+    async def test_erro_de_verdade_levanta(self):
+        from pulsearb.markets.http import fazer_http_get_json
+
+        class _Resposta:
+            status_code = 500
+
+            def raise_for_status(self):
+                raise RuntimeError("500")
+
+        class _Http:
+            async def get(self, url, params=None):
+                return _Resposta()
+
+        with pytest.raises(RuntimeError):
+            await fazer_http_get_json(_Http())("qualquer", None)
