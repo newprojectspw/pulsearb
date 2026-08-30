@@ -581,9 +581,10 @@ class TestUmDiarioPorRodada:
 
         instante = datetime(2026, 8, 30, 10, 0, 0, tzinfo=UTC)
 
-        assert caminho_do_diario_da_rodada(instante) != caminho_do_diario_da_rodada(
-            instante
-        )
+        primeiro = caminho_do_diario_da_rodada(instante)
+        segundo = caminho_do_diario_da_rodada(instante)
+
+        assert primeiro != segundo
 
     def test_o_arquivo_nasce_criado_e_vazio(self):
         """Ele é a prova de que a rodada começou, mesmo que ela morra antes

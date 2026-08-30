@@ -119,9 +119,10 @@ class TestIdempotencia:
     async def test_a_mesma_ordem_na_mesma_janela_tem_o_mesmo_id(self):
         """É isso que torna a reconciliação possível: procura-se por um id
         conhecido, não se adivinha pelo horário."""
-        assert id_do_cliente(_ordem(), janela="j1") == id_do_cliente(
-            _ordem(), janela="j1"
-        )
+        primeiro = id_do_cliente(_ordem(), janela="j1")
+        segundo = id_do_cliente(_ordem(), janela="j1")
+
+        assert primeiro == segundo
 
     async def test_a_mesma_ordem_em_OUTRA_janela_tem_id_diferente(self):
         """Sem a janela na conta, a segunda ordem — real e distinta — seria
