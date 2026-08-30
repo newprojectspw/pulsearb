@@ -532,7 +532,7 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | 🟡 **2 de 3 + sensor parcial** *(a metade que faltava — sincronia verificada — virou o 5.4, e ele está ✅)* — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio 🟡 `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto** de relógio, e recusa em LIVE sem fonte. **Não certifica sincronia**: latência e offset se cancelam. Falta NTP verificado como pré-condição — ver abaixo |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **83**: 36 no portão, 27 nas travas novas, 20 no relógio |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 53 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 28 testes). `python -m pulsearb.live.shadow --duration 24h`, 53 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. **`replay/ao_vivo.py` fecha o "mesmo caminho"** (PR #55, 2026-08-30): `ReplayCiclo` alimenta o `CicloAoVivo` com qualquer gravação usando o relógio DA gravação — `agora_ns = record.ts_wall_ns`, não `time.time_ns()`. O teste de "mesmo caminho" prova por amostra real (2026-08-24 20:00) que as séries E18 do replay e do caminho direto são byte-a-byte idênticas. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -783,6 +783,20 @@ por "não sei nada sobre ela", que é justamente o que o M2 quer medir.
 
 **O que ainda falta para o 3.13:** rodar. As 24 h contínuas exigem máquina e
 tempo, não código.
+
+#### O elo que faltava para o "mesmo caminho" — `replay/ao_vivo.py`
+
+O ciclo não abre socket por design. `live/shadow.py` lhe dá rede; `replay/ao_vivo.py` lhe dá gravações.
+
+`ReplayCiclo` itera um arquivo de gravação e alimenta o `CicloAoVivo`, mas com um detalhe que não é cosmético: `agora_ns` e `agora_epoch` passados a `ciclo.passo()` e `ciclo.feeds_saudaveis()` vêm de `record.ts_wall_ns`, não de `time.time_ns()`. Sem isso, preços gravados ontem pareceriam ter chegado 24 h atrás — `feeds_saudaveis()` retornaria `False` para todo tick no replay acelerado, e o ciclo nunca decidiria.
+
+**O teste de "mesmo caminho" prova a paridade.** `test_replay_ao_vivo.py` roda os primeiros 5 minutos de `pulsearb-20260824-2000.jsonl.gz` pelos dois caminhos e exige três invariantes:
+
+1. **Séries E18 idênticas** — os parsers do ciclo e do backtest direto produzem `(ts_wall_ns, valor_e18)` iguais para cada ativo. Uma divergência aqui apareceria como diferença de mercado na comparação SHADOW × backtest quando na verdade seria diferença de código.
+2. **Relógio da gravação** — `ts_inicio_ns` cai em 2026-08-24, não no dia de hoje. Prova que o ciclo não está usando `time.time_ns()`.
+3. **Discovery alimenta o rastreador** — `on_descoberta()` recebe e conta os mercados do snapshot gravado.
+
+O teste roda em ~2 min localmente e é ignorado em CI (sem gravação real). PR #55.
 
 ### As peças que o ciclo casa
 
