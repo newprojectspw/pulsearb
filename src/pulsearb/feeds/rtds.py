@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import orjson
@@ -61,6 +62,42 @@ def e18_to_float(value: str) -> float:
     whole, fraction = divmod(abs(scaled), _E18)
     result = float(whole) + fraction / _E18
     return -result if scaled < 0 else result
+
+
+def e18_do_evento(parsed: Any) -> int | None:
+    """O valor do tick em INTEIRO na escala 1e18, sem passar por float.
+
+    Preferência: `full_accuracy_value` (string inteira já escalada — o campo
+    que o SDK também prefere). Fallback: `value` decimal, convertido de forma
+    EXATA via Decimal — `int(float(x) * 1e18)` erraria os últimos dígitos, que
+    são exatamente os que a varredura de τ existe para enxergar.
+
+    **Mora aqui, e não no backtest, porque as duas pontas precisam dela.** A
+    âncora verificada (§13.8) é definida sobre estes inteiros no eixo do
+    servidor; se o SHADOW os obtivesse por outro caminho, uma divergência de
+    arredondamento entre ele e o backtest apareceria como diferença de
+    mercado. É a mesma razão que tirou `duracao_do_slug` do backtest.
+    """
+    if not isinstance(parsed, dict):
+        return None
+    payload = parsed.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    fav = payload.get("full_accuracy_value")
+    if isinstance(fav, str):
+        try:
+            return int(fav)
+        except ValueError:
+            pass
+    valor = payload.get("value")
+    if isinstance(valor, (int, str)) and not isinstance(valor, bool):
+        try:
+            return int(Decimal(str(valor)).scaleb(18))
+        except (InvalidOperation, ValueError):
+            return None
+    # Float já perdeu os dígitos finais na origem; converter é criar precisão
+    # falsa. Melhor ponto nenhum que ponto mentiroso.
+    return None
 
 
 def parse_rtds_event(parsed: Any, ts_mono_ns: int, ts_wall_ns: int) -> PriceTick | None:

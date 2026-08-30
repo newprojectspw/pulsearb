@@ -19,7 +19,6 @@ import sys
 import time
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -84,7 +83,7 @@ from pulsearb.feeds.poly_ws import (
     normalizar_condition_id,
     resolucao_do_evento,
 )
-from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
+from pulsearb.feeds.rtds import TOPIC_TWAP_60, e18_do_evento, parse_rtds_event
 from pulsearb.markets.discovery import duracao_do_slug, parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
@@ -667,7 +666,7 @@ class RecordingIndex:
             # "janelas com abertura em lacuna" numa gravacao com ZERO
             # silencio do RTDS. `streams` (float) fica denso e
             # `streams_e18` fica ralo — e a ancora usa o segundo.
-            valor = _e18_do_payload(record.payload)
+            valor = e18_do_evento(record.payload)
             if valor is None:
                 self._e18_descartados["sem_valor_exato"] += 1
             elif tick.src_timestamp_ms <= 0:
@@ -1353,38 +1352,6 @@ def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
 def _percentil_simples(ordenados: list[float], pct: float) -> float:
     rank = max(1, min(len(ordenados), int(-(-pct * len(ordenados) // 100))))
     return ordenados[rank - 1]
-
-
-def _e18_do_payload(bruto: Any) -> int | None:
-    """O valor do tick em INTEIRO na escala 1e18, sem passar por float.
-
-    Preferência: `full_accuracy_value` (string inteira já escalada — o campo
-    que o SDK também prefere). Fallback: `value` decimal, convertido de forma
-    EXATA via Decimal — `int(float(x) * 1e18)` erraria os últimos dígitos,
-    que são exatamente os que a varredura de τ existe para enxergar.
-    """
-    if not isinstance(bruto, dict):
-        return None
-    payload = bruto.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    fav = payload.get("full_accuracy_value")
-    if isinstance(fav, str):
-        try:
-            return int(fav)
-        except ValueError:
-            pass
-    valor = payload.get("value")
-    if isinstance(valor, (int, str)) and not isinstance(valor, bool):
-        try:
-            return int(Decimal(str(valor)).scaleb(18))
-        except (InvalidOperation, ValueError):
-            return None
-    if isinstance(valor, float):
-        # Float já perdeu os dígitos finais na origem; converter é criar
-        # precisão falsa. Melhor ponto nenhum que ponto mentiroso.
-        return None
-    return None
 
 
 def _numero_bruto(valor: Any) -> float | None:
