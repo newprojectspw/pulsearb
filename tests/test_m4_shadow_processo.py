@@ -74,19 +74,23 @@ class TestAFabrica:
 
         assert "LIVE NAO autorizado" in str(erro.value)
 
-    def test_o_stake_sai_do_teto_de_risco(self, tmp_path):
-        """Duas fontes para o tamanho da ordem virariam duas verdades.
+    def test_o_tamanho_da_ordem_NAO_sai_do_teto_em_USDC(self, tmp_path):
+        """São unidades diferentes, e eu as tinha confundido.
 
-        O portão recusa acima de `stake_max_por_trade_usdc`; o motor pediria
-        outro número e toda ordem sairia recusada por `stake_acima_do_teto`
-        sem que nada estivesse errado.
+        `stake_max_por_trade_usdc` é USDC e quem o aplica é o PORTÃO, sobre
+        `shares × preço`. `shares_por_trade` é em SHARES, e o default do
+        backtest (5) é o mínimo que o mercado aceita (API_NOTES §12.5).
+
+        Derivar um do outro punha 3 shares num mercado que exige 5 — ordem que
+        a corretora rejeita, e que o SHADOW registraria como `pode=true`.
         """
         ciclo = montar_ciclo(
             _settings(tmp_path, stake_max_por_trade_usdc=3.0),
             caminho_do_diario=tmp_path / "diario.jsonl",
         )
 
-        assert ciclo.motor.config.shares_por_trade == 3.0
+        assert ciclo.motor.config.shares_por_trade == 5.0
+        assert ciclo.motor.executor.portao.settings.stake_max_por_trade_usdc == 3.0
 
     def test_a_curva_de_variancia_chega_ao_motor(self, tmp_path):
         """Rodar o SHADOW no derivado depois de validar no medido recria ao
@@ -286,6 +290,128 @@ class TestOsCincoAchadosDaRevisao:
 
         assert main([]) == 2
         assert chamadas == [1]
+
+
+class TestOsTresAchadosDaSegundaRevisao:
+    """Mais três, e os três procedem. Um deles era erro de unidade meu."""
+
+    def test_P1_janela_HORARIA_nao_e_operada(self, tmp_path):
+        """O jogo horário resolve pelo candle 1h da Binance.
+
+        A âncora dele é o campo `o` do `kline_1h` (`engine/hourly.py`), não o
+        stream `twap_sixty`. Um processo que só assina RTDS não tem essa
+        série, e `estimar_prob_up` cairia em `prob_up_hourly` com a âncora do
+        observável errado — toda probabilidade horária saindo de uma série que
+        não é a que resolve a janela.
+
+        Falha fechada. Sai desta lista quando o feed da Binance estiver ligado
+        e roteado, e não antes.
+        """
+        from pulsearb.engine.decisao import JOGO_TWAP
+
+        ciclo = montar_ciclo(
+            _settings(tmp_path), caminho_do_diario=tmp_path / "d.jsonl"
+        )
+
+        assert ciclo.motor.config.jogos_operados == frozenset({JOGO_TWAP})
+
+    def test_P1_o_motor_pula_o_jogo_que_nao_opera(self, tmp_path):
+        from pulsearb.engine.decisao import JOGO_HORARIO
+        from pulsearb.live.motor import PULOU_JOGO_NAO_OPERADO
+        from pulsearb.live.rastreador import JanelaAoVivo
+
+        ciclo = montar_ciclo(
+            _settings(tmp_path), caminho_do_diario=tmp_path / "d.jsonl"
+        )
+        janela = JanelaAoVivo(
+            slug="btc-updown-1h-1",
+            condition_id="0xhh",
+            asset="btc",
+            jogo=JOGO_HORARIO,
+            token_up="h-up",
+            token_down="h-down",
+            abertura_epoch=1_787_000_000.0,
+            fechamento_epoch=1_787_003_600.0,
+            duracao_s=3600,
+            min_order_size=5.0,
+            tick_size=0.01,
+            fee_rate=0.0,
+            fee_exponent=1.0,
+        )
+        ciclo.motor.rastreador.janelas["0xhh"] = janela
+
+        ciclo.motor.tick(
+            agora_epoch=1_787_003_500.0,
+            agora_ns=1_787_003_500_000_000_000,
+            feeds_saudaveis=True,
+        )
+
+        assert ciclo.motor.pulos.get(PULOU_JOGO_NAO_OPERADO) == 1
+
+    def test_P2_so_os_ativos_OPERADOS_entram_no_feed(self, tmp_path):
+        """`all_price_assets` traz os `extra_price_assets`, que existem para
+        gravação e backtest futuro.
+
+        Como `feeds_saudaveis` fecha pelo PIOR ativo, um SOL mudo bloquearia
+        intenções de BTC/ETH saudáveis — o gate de saúde passaria a depender
+        de ativos que o bot nem opera.
+        """
+        settings = Settings(
+            assets=["btc", "eth"],
+            extra_price_assets=["sol", "hype"],
+            risk=RiskSettings(
+                caminho_do_registro=str(tmp_path / "r.json"),
+                caminho_do_kill=str(tmp_path / "KILL"),
+            ),
+        )
+        ciclo = montar_ciclo(settings, caminho_do_diario=tmp_path / "d.jsonl")
+        processo = ProcessoShadow(settings, ciclo)
+
+        assinados = set(processo.rtds_feeds[0].assets)
+        assert assinados == {"btc", "eth"}
+        assert "sol" not in assinados
+        # E os extras seguem existindo na config, para o recorder.
+        assert set(settings.all_price_assets) >= {"sol", "hype"}
+
+    def test_P2_ordem_abaixo_do_minimo_do_mercado_nao_vira_intencao(self, tmp_path):
+        """O backtest já recusa isto (`sinais_abaixo_do_minimo`).
+
+        Sem a mesma recusa aqui, o SHADOW registraria `pode=true` para uma
+        ordem que a corretora rejeitaria, e a população dele divergiria da do
+        backtest.
+        """
+        from pulsearb.engine.decisao import JOGO_TWAP
+        from pulsearb.live.motor import PULOU_ABAIXO_DO_MINIMO
+        from pulsearb.live.rastreador import JanelaAoVivo
+
+        ciclo = montar_ciclo(
+            _settings(tmp_path),
+            caminho_do_diario=tmp_path / "d.jsonl",
+            config=ConfigDoMotor(shares_por_trade=3.0),
+        )
+        ciclo.motor.rastreador.janelas["0xaa"] = JanelaAoVivo(
+            slug="btc-updown-5m-1",
+            condition_id="0xaa",
+            asset="btc",
+            jogo=JOGO_TWAP,
+            token_up="t-up",
+            token_down="t-down",
+            abertura_epoch=1_787_000_000.0,
+            fechamento_epoch=1_787_000_300.0,
+            duracao_s=300,
+            min_order_size=5.0,
+            tick_size=0.01,
+            fee_rate=0.0,
+            fee_exponent=1.0,
+        )
+
+        ciclo.motor.tick(
+            agora_epoch=1_787_000_200.0,
+            agora_ns=1_787_000_200_000_000_000,
+            feeds_saudaveis=True,
+        )
+
+        assert ciclo.motor.pulos.get(PULOU_ABAIXO_DO_MINIMO) == 1
 
 
 class _CicloFalso:

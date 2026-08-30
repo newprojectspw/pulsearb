@@ -106,11 +106,13 @@ def montar_ciclo(
         executor=escolher_executor(
             settings.mode, portao, caminho_do_diario=caminho_do_diario
         ),
-        config=config
-        or ConfigDoMotor(
-            shares_por_trade=settings.risk.stake_max_por_trade_usdc,
-            curvas_de_variancia=curvas_de_variancia,
-        ),
+        # `shares_por_trade` NÃO sai do teto de risco: são unidades
+        # diferentes. O teto é em USDC e quem o aplica é o portão
+        # (`stake_acima_do_teto`, sobre `shares × preço`); `shares_por_trade`
+        # é em SHARES, e o default do backtest (5) é o mínimo que o mercado
+        # aceita (API_NOTES §12.5). Derivar um do outro punha 3 shares num
+        # mercado que exige 5 — ordem que a corretora rejeita.
+        config=config or ConfigDoMotor(curvas_de_variancia=curvas_de_variancia),
     )
     return CicloAoVivo(motor=motor)
 
@@ -141,7 +143,11 @@ class ProcessoShadow:
             RtdsFeed(
                 url=settings.endpoints.rtds_ws,
                 user_agent=settings.user_agent,
-                assets=settings.all_price_assets,
+                # Só os ativos OPERADOS. `all_price_assets` traz também os
+                # `extra_price_assets`, que existem para gravação e backtest
+                # futuro — e como `feeds_saudaveis` fecha pelo pior ativo, um
+                # SOL mudo bloquearia intenções de BTC/ETH saudáveis.
+                assets=settings.assets,
                 on_event=self._on_event,
                 stale_after_seconds=settings.feeds.stale_after_seconds_twap,
                 reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,

@@ -63,6 +63,23 @@ PULOU_SEM_CURVA = "sem_curva_de_variancia"
 #: recorta no mesmo ponto, e recortar em lugares diferentes faria os dois
 #: divergirem por construção.
 PULOU_ALEM_DA_CURVA = "alem_do_horizonte_medido"
+#: A janela é de um jogo que este processo não está equipado para operar.
+#:
+#: O jogo HORÁRIO resolve pelo candle 1h da Binance, e a âncora dele é o campo
+#: `o` do `kline_1h` (`engine/hourly.py`) — não o stream `twap_sixty`. Um
+#: processo que só assina RTDS não tem essa série, e `estimar_prob_up` cairia
+#: em `prob_up_hourly` com a âncora do observável errado: toda probabilidade
+#: horária sairia de uma série que não é a que resolve a janela.
+#:
+#: Falha fechada em vez de operar errado. Sai desta lista quando o feed da
+#: Binance estiver ligado e roteado — e não antes.
+PULOU_JOGO_NAO_OPERADO = "jogo_sem_feed_proprio"
+#: `shares_por_trade` abaixo do mínimo que o mercado aceita.
+#:
+#: O backtest já recusa isto (`sinais_abaixo_do_minimo`). Sem a mesma recusa
+#: aqui, o SHADOW registraria `pode=true` para uma ordem que a corretora
+#: rejeitaria, e a população dele divergiria da do backtest.
+PULOU_ABAIXO_DO_MINIMO = "abaixo_do_minimo_do_mercado"
 
 
 @dataclass
@@ -78,6 +95,14 @@ class ConfigDoMotor:
     #: modelo não sabe.
     tempo_restante_max_s: float | None = 240.0
     tempo_restante_min_s: float | None = None
+    #: Que jogos este processo opera. Default: só o TWAP.
+    #:
+    #: É o único cuja âncora foi VERIFICADA (§13.8, τ=0 em 152 janelas) e o
+    #: único cujo feed este processo assina. Ampliar exige ligar o feed do
+    #: jogo novo primeiro.
+    jogos_operados: frozenset[str] = field(
+        default_factory=lambda: frozenset({JOGO_TWAP})
+    )
     #: As curvas V(t) medidas, por ativo. `None` = o modelo derivado.
     #:
     #: TEM de casar com o que o backtest usou. Rodar o SHADOW no derivado
@@ -151,6 +176,35 @@ class MotorAoVivo:
         self.precos.esquecer(janela.condition_id)
         self.ja_operadas.discard(janela.condition_id)
 
+    def _elegivel(self, janela: JanelaAoVivo, *, agora_epoch: float) -> bool:
+        """Esta janela merece ser avaliada? Cada não já sai contado.
+
+        São as perguntas que não dependem de preço nem de livro — respondê-las
+        antes evita gastar modelo com janela que nunca viraria ordem, e mantém
+        `pulos` respondendo à pergunta operacional de sempre: o bot está vivo e
+        não opera, por quê?
+        """
+        if janela.condition_id in self.ja_operadas:
+            self._pular(PULOU_JA_OPEROU)
+            return False
+
+        if janela.jogo not in self.config.jogos_operados:
+            self._pular(PULOU_JOGO_NAO_OPERADO)
+            return False
+
+        if self.config.shares_por_trade < janela.min_order_size:
+            # Mesma recusa do backtest (`sinais_abaixo_do_minimo`). Registrar
+            # intenção que a corretora rejeitaria encheria o diário de linhas
+            # que nunca virariam ordem.
+            self._pular(PULOU_ABAIXO_DO_MINIMO)
+            return False
+
+        if not self.config.na_faixa(janela.seconds_left(agora_epoch)):
+            self._pular(PULOU_FORA_DA_FAIXA)
+            return False
+
+        return True
+
     def _avaliar(
         self,
         janela: JanelaAoVivo,
@@ -159,14 +213,10 @@ class MotorAoVivo:
         agora_ns: int,
         feeds_saudaveis: bool,
     ) -> bool:
-        if janela.condition_id in self.ja_operadas:
-            self._pular(PULOU_JA_OPEROU)
+        if not self._elegivel(janela, agora_epoch=agora_epoch):
             return False
 
         seconds_left = janela.seconds_left(agora_epoch)
-        if not self.config.na_faixa(seconds_left):
-            self._pular(PULOU_FORA_DA_FAIXA)
-            return False
 
         ancora = self.precos.ancora_da_janela(
             asset=janela.asset,

@@ -734,6 +734,27 @@ no processo, para valer também na reprodução de gravação; e é **contado**
 (`preco_repetido`), porque perto de zero com duas conexões significa que a
 redundância não está funcionando.
 
+**Só o jogo TWAP é operado.** A janela horária resolve pelo candle 1h da
+Binance, e a âncora dela é o campo `o` do `kline_1h` (`engine/hourly.py`) — não
+o `twap_sixty`. Um processo que só assina RTDS não tem essa série, e
+`estimar_prob_up` cairia em `prob_up_hourly` com a âncora do observável errado:
+toda probabilidade horária sairia de uma série que não resolve aquela janela.
+`jogos_operados` recusa, conta (`jogo_sem_feed_proprio`) e só se amplia quando
+o feed da Binance estiver ligado e roteado.
+
+**Só os ativos OPERADOS entram no feed.** `all_price_assets` inclui os
+`extra_price_assets`, que existem para gravação e backtest futuro. Como
+`feeds_saudaveis` fecha pelo pior ativo, um SOL mudo bloquearia intenções de
+BTC/ETH saudáveis — o gate de saúde passaria a depender de ativos que o bot nem
+opera.
+
+**O tamanho da ordem não sai do teto em USDC.** São unidades diferentes:
+`stake_max_por_trade_usdc` é USDC e quem o aplica é o portão, sobre
+`shares × preço`; `shares_por_trade` é em SHARES, e o default (5) é o mínimo
+que o mercado aceita (§12.5). E o motor passou a recusar ordem abaixo desse
+mínimo, como o backtest já fazia — sem isso o SHADOW registraria `pode=true`
+para ordem que a corretora rejeitaria.
+
 **Assinaturas rodam, não acumulam.** Token de janela encerrada é desassinado
 depois da carência de resolução — a MESMA de `pulsearb.tempo` que o recorder
 usa. Sem isso, 24 h de descoberta acumulariam milhares de assinaturas, e cada
