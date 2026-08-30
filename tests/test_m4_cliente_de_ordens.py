@@ -8,12 +8,15 @@ a resolução.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from pulsearb.execution.auth import CredenciaisL2, corpo_canonico
 from pulsearb.execution.cliente import (
     ENVIOS_LEMBRADOS,
     MOTIVOS_DE_RECUSA,
+    TIMEOUT_DO_ENVIO_S,
     TIPO_DE_ORDEM,
     ClienteDeOrdens,
     ErroDeTransporte,
@@ -301,3 +304,107 @@ class TestOEnvio:
         await cliente.enviar(_ordem(), janela="j1")
 
         assert len(cliente.transporte.chamadas) == 1
+
+
+class TestAJanelaAntesDoAwait:
+    """Achado P1 do Codex no #52. A trava só valia se ninguém corresse."""
+
+    async def test_duas_corrotinas_com_a_MESMA_ordem_enviam_uma_vez_so(self):
+        """`_lembrar` só depois da resposta deixava uma janela entre a consulta
+        e o registro: as duas viam o dicionário vazio, as duas passavam pelo
+        `await`, e a ordem saía DUAS VEZES.
+
+        O dublê segura a primeira chamada até a segunda entrar — sem isso o
+        teste passaria por acidente de escalonamento, e não por causa da trava.
+        """
+        entrou = asyncio.Event()
+        soltar = asyncio.Event()
+        chamadas = []
+
+        async def transporte(caminho, cabecalhos, corpo):
+            chamadas.append(caminho)
+            entrou.set()
+            await soltar.wait()
+            return 200, {"success": True, "orderID": "o1"}
+
+        cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+
+        primeira = asyncio.create_task(cliente.enviar(_ordem(), janela="j1"))
+        await entrou.wait()
+        segunda = await cliente.enviar(_ordem(), janela="j1")
+        soltar.set()
+        r1 = await primeira
+
+        assert len(chamadas) == 1, "a ordem saiu duas vezes"
+        assert r1.estado is EstadoDoEnvio.ACEITA
+        assert segunda.motivo == MOTIVOS_DE_RECUSA.JA_ENVIADA
+
+    async def test_a_reserva_e_INCERTA_e_nao_um_estado_inventado(self):
+        """Se o processo morrer entre o envio e a resposta, INCERTA é
+        exatamente o que aconteceu: a ordem pode estar no livro."""
+        entrou = asyncio.Event()
+        soltar = asyncio.Event()
+
+        async def transporte(caminho, cabecalhos, corpo):
+            entrou.set()
+            await soltar.wait()
+            return 200, {"success": True}
+
+        cliente = ClienteDeOrdens(CREDENCIAIS, _Construtor(), transporte)
+        tarefa = asyncio.create_task(cliente.enviar(_ordem(), janela="j1"))
+        await entrou.wait()
+
+        assert cliente.ja_enviada(id_do_cliente(_ordem(), janela="j1")) is (
+            EstadoDoEnvio.INCERTA
+        )
+
+        soltar.set()
+        await tarefa
+
+
+class TestOTimeoutDeclaradoEAplicado:
+    """Achado P2 do Codex no #52: eu declarei `TIMEOUT_DO_ENVIO_S` e nunca o
+    liguei — uma constante que parece segurança e não é."""
+
+    async def test_transporte_que_engasga_vira_INCERTA_e_nao_pendura(self):
+        """CLOB lento ou proxy de rate-limit enfileirando o POST não levantam
+        `ErroDeTransporte`: eles simplesmente não voltam. Sem o timeout,
+        `enviar` ficava pendurado para sempre e o `INCERTA` obrigatório nunca
+        saía."""
+
+        async def transporte(caminho, cabecalhos, corpo):
+            await asyncio.sleep(30)
+            return 200, {"success": True}
+
+        cliente = ClienteDeOrdens(
+            CREDENCIAIS, _Construtor(), transporte, timeout_s=0.02
+        )
+
+        resultado = await asyncio.wait_for(
+            cliente.enviar(_ordem(), janela="j1"), timeout=2.0
+        )
+
+        assert resultado.estado is EstadoDoEnvio.INCERTA
+        assert resultado.precisa_reconciliar is True
+
+    async def test_o_default_e_o_declarado(self):
+        cliente = _cliente()
+
+        assert cliente.timeout_s == TIMEOUT_DO_ENVIO_S
+
+    async def test_depois_do_timeout_o_reenvio_continua_barrado(self):
+        """O caso que junta os dois achados: engasgou, virou INCERTA, e a
+        ordem pode estar no livro."""
+
+        async def transporte(caminho, cabecalhos, corpo):
+            await asyncio.sleep(30)
+
+        cliente = ClienteDeOrdens(
+            CREDENCIAIS, _Construtor(), transporte, timeout_s=0.02
+        )
+
+        await cliente.enviar(_ordem(), janela="j1")
+        segunda = await cliente.enviar(_ordem(), janela="j1")
+
+        assert segunda.motivo == MOTIVOS_DE_RECUSA.JA_ENVIADA
+        assert segunda.detalhe["estado_anterior"] == str(EstadoDoEnvio.INCERTA)

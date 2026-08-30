@@ -246,3 +246,43 @@ class TestOTypedDataDoL1:
 def test_eoa_e_o_tipo_de_assinatura_do_pulsearb():
     """O item 5.1 manda carteira DEDICADA; carteira proxy exigiria `funder`."""
     assert ASSINATURA_EOA == 0
+
+
+class TestOSegredoMalformadoNaoViraChaveVazia:
+    """Achado P2 do Codex no #52, e o meu próprio teste tinha o defeito.
+
+    Eu documentei que `b64decode` descarta o que não reconhece — e continuei
+    decodificando de forma permissiva. `"!!!!"` tem comprimento múltiplo de 4,
+    então nem padding falta: decodificava para b"" **sem levantar nada**, e
+    todo pedido passava a ser assinado com chave HMAC vazia. O sintoma seria
+    uma fila de 401, sem nenhuma pista da causa.
+    """
+
+    @pytest.mark.parametrize(
+        "malformado", ["!!!!", "====", "aaaa!!!!", "isto nao e base64!!!"]
+    )
+    def test_caractere_fora_do_alfabeto_levanta(self, malformado):
+        with pytest.raises(ErroDeAuth):
+            _credenciais(segredo=malformado).segredo_em_bytes()
+
+    def test_segredo_que_decodifica_para_vazio_levanta(self):
+        """Cobre o que a validação de alfabeto não pega: `"===="` e afins não
+        têm caractere ilegal e ainda assim dão chave vazia."""
+        with pytest.raises(ErroDeAuth) as erro:
+            _credenciais(segredo="====").segredo_em_bytes()
+
+        assert "vazio" in str(erro.value) or "base64" in str(erro.value)
+
+    def test_segredo_sem_padding_continua_valido(self):
+        """A validação não pode virar rigor inútil: segredo sem `=` no fim é
+        comum e não é erro."""
+        sem_padding = SEGREDO.rstrip("=")
+
+        assert _credenciais(segredo=sem_padding).segredo_em_bytes() == (
+            base64.urlsafe_b64decode(SEGREDO)
+        )
+
+    def test_a_traducao_de_alfabeto_nao_muda_o_resultado(self):
+        """`validate` só existe em `b64decode`, então traduzimos `-_` para
+        `+/` antes. O byte de saída tem de continuar sendo o do urlsafe."""
+        assert _credenciais().segredo_em_bytes() == base64.urlsafe_b64decode(SEGREDO)

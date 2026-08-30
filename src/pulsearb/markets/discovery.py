@@ -22,6 +22,7 @@ Fatos que dirigem este módulo (docs/API_NOTES.md seção 12):
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -175,6 +176,11 @@ def parse_end_date_epoch(gamma: dict[str, Any]) -> float | None:
     except ValueError:
         return None
 
+
+#: O motivo de recusa de um mercado cujo `conditionId` não passa na conferência
+#: de segurança da URL. Nome próprio, como todo motivo do projeto: recusa
+#: anônima não vira métrica nem alarme.
+MOTIVO_ID_RECUSADO = "condition_id_recusado"
 
 #: Duração nominal de cada família de slug, em segundos. Não é tabela de
 #: conveniência: o `endDate` sozinho diz quando a janela FECHA, e a abertura
@@ -596,6 +602,16 @@ class MarketDiscovery:
                 "conditionId recusado para uso em URL",
                 slug=gamma.get("slug"),
                 condition_id=condition_id[:80],
+            )
+            # Achado P2 do Codex no #52, e procede: pular a consulta ao CLOB
+            # não bastava. A Gamma sozinha traz `feeSchedule`, tokens, tick,
+            # mínimo e `acceptingOrders` — o suficiente para `extract_market`
+            # marcar o mercado como OPERÁVEL. O id malformado entrava no
+            # rastreador como negociável, que é o contrário de falhar fechado.
+            return dataclasses.replace(
+                extract_market(gamma, None, now_epoch=self.clock()),
+                operable=False,
+                gate_failures=[MOTIVO_ID_RECUSADO],
             )
         return extract_market(gamma, clob_compact, now_epoch=self.clock())
 

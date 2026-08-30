@@ -70,6 +70,24 @@ MENSAGEM_DE_AUTH = "This message attests that I control the given wallet"
 ASSINATURA_EOA = 0
 
 
+#: A tradução do alfabeto urlsafe para o padrão. Existe porque
+#: `urlsafe_b64decode` **não aceita `validate`** — só `b64decode` aceita — e é
+#: a validação que impede o segredo malformado de virar chave HMAC vazia.
+_PARA_ALFABETO_PADRAO = str.maketrans("-_", "+/")
+
+
+def _normalizado(texto: str) -> bytes:
+    """O segredo no alfabeto padrão e com padding, pronto para validação.
+
+    O padding que falta é reposto: segredo sem `=` no fim é comum e não é erro,
+    mas `validate=True` exige comprimento múltiplo de 4. O que NÃO se repõe é
+    caractere fora do alfabeto — esse é o que precisa levantar.
+    """
+    dado = texto.translate(_PARA_ALFABETO_PADRAO).encode("ascii", errors="strict")
+    falta = (-len(dado)) % 4
+    return dado + b"=" * falta
+
+
 class ErroDeAuth(RuntimeError):
     """Falha de autenticação. Nunca é motivo para tentar de novo às cegas."""
 
@@ -103,12 +121,31 @@ class CredenciaisL2:
             )
 
     def segredo_em_bytes(self) -> bytes:
+        """Decodifica com validação ESTRITA. Achado P2 do Codex no #52.
+
+        `urlsafe_b64decode` é permissivo: descarta em silêncio tudo que não
+        está no alfabeto. `"!!!!"` tem comprimento múltiplo de 4, então nem
+        padding falta — decodifica para b"" **sem levantar nada**, e todo
+        pedido passa a ser assinado com chave HMAC vazia. O sintoma seria uma
+        fila de 401 do servidor, sem nenhuma pista de que o segredo é que
+        estava malformado.
+
+        `validate=True` recusa o caractere estranho, e o teste do resultado
+        vazio cobre o resto (`""` e `"===="` decodificam para b"" sem
+        caractere ilegal nenhum).
+        """
         try:
-            return base64.urlsafe_b64decode(self.segredo)
+            bruto = base64.b64decode(_normalizado(self.segredo), validate=True)
         except (ValueError, TypeError) as erro:
             raise ErroDeAuth(
                 f"segredo da API nao e base64 urlsafe valido: {erro}"
             ) from erro
+        if not bruto:
+            raise ErroDeAuth(
+                "segredo da API decodifica para vazio — assinar com chave HMAC "
+                "vazia produz 401 em toda ordem, sem dizer que a causa e o segredo"
+            )
+        return bruto
 
     def __repr__(self) -> str:
         """Segredo e passphrase NUNCA aparecem em log ou traceback.

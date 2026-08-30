@@ -608,3 +608,63 @@ class TestConditionIdNaUrl:
 
         assert normalizar_condition_id("../admin") == "../admin"
         assert not seguro_na_url("../admin")
+
+
+class TestIdRecusadoNaoViraMercadoOperavel:
+    """Achado P2 do Codex no #52, e procede: eu chamei o comportamento de
+    "falha fechada" e ele não era.
+
+    Pular a consulta ao CLOB não bastava. A Gamma sozinha traz `feeSchedule`,
+    os token ids, o tick, o mínimo e `acceptingOrders` — o suficiente para
+    `extract_market` marcar o mercado como OPERÁVEL. O id malformado entrava
+    no rastreador como negociável.
+    """
+
+    async def _descobrir(self, condition_id):
+        from pulsearb.markets.discovery import MarketDiscovery
+
+        gamma = {
+            "conditionId": condition_id,
+            "slug": "btc-updown-5m-1",
+            "clobTokenIds": '["up1", "dn1"]',
+            "outcomes": '["Up", "Down"]',
+            "endDate": "2099-01-01T00:00:00Z",
+            "acceptingOrders": True,
+            "orderPriceMinTickSize": 0.01,
+            "orderMinSize": 5,
+            "active": True,
+            "closed": False,
+        }
+
+        chamadas = []
+
+        async def http_get_json(url, params):
+            chamadas.append(url)
+            return None
+
+        descoberta = MarketDiscovery(
+            http_get_json=http_get_json,
+            gamma_url="https://gamma-api.polymarket.com",
+            clob_url="https://clob.polymarket.com",
+            assets=["btc"],
+            probe_durations_seconds=[300],
+        )
+        mercado = await descoberta._assemble(gamma)
+        return descoberta, mercado, chamadas
+
+    async def test_id_malformado_sai_NAO_operavel_e_com_motivo(self):
+        from pulsearb.markets.discovery import MOTIVO_ID_RECUSADO
+
+        descoberta, mercado, chamadas = await self._descobrir("../admin")
+
+        assert mercado.operable is False
+        assert mercado.gate_failures == [MOTIVO_ID_RECUSADO]
+        assert descoberta.ids_recusados == 1
+        assert chamadas == [], "nao pode consultar o CLOB com o id recusado"
+
+    async def test_id_bom_segue_o_caminho_normal(self):
+        """A recusa não pode virar rigor que barra mercado legítimo."""
+        _, mercado, chamadas = await self._descobrir("0x" + "ab" * 32)
+
+        assert mercado.gate_failures != ["condition_id_recusado"]
+        assert len(chamadas) == 1

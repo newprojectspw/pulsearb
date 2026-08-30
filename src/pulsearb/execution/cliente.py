@@ -32,6 +32,7 @@ chegou ao livro?* — e a resposta distingue os três estados acima.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -201,12 +202,14 @@ class ClienteDeOrdens:
         *,
         minimo_de_shares: float = 5.0,
         envios_lembrados: int = ENVIOS_LEMBRADOS,
+        timeout_s: float = TIMEOUT_DO_ENVIO_S,
     ) -> None:
         self.credenciais = credenciais
         self.construtor = construtor
         self.transporte = transporte
         self.minimo_de_shares = minimo_de_shares
         self.envios_lembrados = envios_lembrados
+        self.timeout_s = timeout_s
         #: Ids já enviados nesta sessão, em ordem de envio. É a trava de
         #: idempotência do NOSSO lado; a do lado deles é o próprio id.
         self._enviados: dict[str, EstadoDoEnvio] = {}
@@ -261,13 +264,35 @@ class ClienteDeOrdens:
             corpo=corpo,
         )
 
-        # A partir daqui a ordem PODE existir do outro lado. Toda saída deste
-        # bloco lembra o id antes de devolver.
+        # RESERVA ANTES DO `await`. Achado P1 do Codex no #52, e procede.
+        #
+        # `_lembrar` só depois da resposta deixava uma janela entre a consulta
+        # a `ja_enviada` e o registro: duas corrotinas com a mesma ordem viam
+        # as duas o dicionário vazio, passavam as duas pelo `await`, e a
+        # ordem saía DUAS VEZES — exatamente o que a trava existe para
+        # impedir. Reservar antes fecha a janela porque não há `await` entre
+        # a leitura e a escrita, e o laço de eventos só troca de tarefa num
+        # ponto de suspensão.
+        #
+        # Reserva-se como INCERTA, e não como um estado "em voo" qualquer: se
+        # o processo morrer entre o envio e a resposta, INCERTA é exatamente o
+        # que aconteceu — a ordem pode estar no livro e ninguém sabe.
+        self._lembrar(identificador, EstadoDoEnvio.INCERTA)
+
         try:
-            status, resposta = await self.transporte(
-                CAMINHO_DA_ORDEM, cabecalhos, bytes_do_corpo
+            status, resposta = await asyncio.wait_for(
+                self.transporte(CAMINHO_DA_ORDEM, cabecalhos, bytes_do_corpo),
+                timeout=self.timeout_s,
             )
-        except ErroDeTransporte as erro:
+        except (ErroDeTransporte, TimeoutError) as erro:
+            # O timeout do transporte é a razão de `TIMEOUT_DO_ENVIO_S`
+            # existir, e ele não estava ligado (achado P2 do Codex). Um
+            # transporte que ENGASGA em vez de levantar — CLOB lento, proxy de
+            # rate-limit enfileirando o POST — deixava `enviar` pendurado para
+            # sempre e o `INCERTA` obrigatório nunca saía.
+            #
+            # `asyncio.TimeoutError` é `TimeoutError` desde o 3.11, então a
+            # captura cobre as duas grafias.
             self._lembrar(identificador, EstadoDoEnvio.INCERTA)
             log.error(
                 "envio incerto: reconciliar antes de qualquer novo envio",
