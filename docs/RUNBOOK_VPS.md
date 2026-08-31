@@ -609,6 +609,97 @@ O recorder fecha o arquivo corrente e grava o relatório final de cobertura
 antes de sair. Matar com `kill -9` perde, no máximo, a última linha — o replay
 tolera isso e conta quantas foram.
 
+## 8.1 A carteira dedicada — item 5.1
+
+**Nada aqui é executado por software deste repositório.** É procedimento de
+pessoa, e está escrito para que a decisão do item 5.1 não precise ser tomada
+com a credencial já na mão.
+
+**Por que dedicada, e não a carteira de uso pessoal.** O bot assina com uma
+chave que fica numa máquina que roda 24 h sem ninguém olhando. O prejuízo
+máximo de uma chave comprometida é o saldo daquela carteira — e é isso, e
+só isso, que a separação compra. Carteira compartilhada transforma um
+defeito de bot em perda de patrimônio.
+
+**O caminho é EOA (`signature_type=0`)** `[VERIFICADO]` API_NOTES §3. Carteira
+proxy (`signature_type=2`) exigiria também o `funder`, o endereço que segura o
+dinheiro — e o ponto de uma carteira dedicada é que quem assina e quem segura
+sejam o mesmo endereço.
+
+**A armadilha do EOA, e ela não avisa:** `[VERIFICADO]` API_NOTES §3 — é
+preciso **setar as allowances de token manualmente antes da primeira ordem**.
+Sem elas a ordem é aceita pelo CLOB e falha na liquidação. Não é erro de
+assinatura, e a mensagem não fala em allowance.
+
+Ordem dos passos:
+
+1. **Criar a carteira nova.** Chave privada gerada offline, na máquina que vai
+   operar. Não importar chave que já existiu em outro lugar.
+2. **Anotar o endereço** (público — pode ir para o `.env` e para este runbook).
+3. **Fundear com o capital de operação em USDC na Polygon**, e nada além
+   disso. O teto de exposição do portão é 50 USDC (item 3.9); financiar muito
+   acima disso é guardar na carteira quente um dinheiro que as travas nunca
+   deixariam usar.
+4. **Deixar MATIC para gás.** Pouco, mas não zero: sem gás não se assina
+   allowance nem se retira nada.
+5. **Setar as allowances** dos contratos do CLOB (passo 8.1.1 abaixo).
+6. **Derivar as credenciais de API** pelo L1 — é o único uso da chave privada
+   fora de assinar ordem (API_NOTES §3).
+7. **Colocar no ambiente do serviço**, nunca no `config.yaml`, que é
+   versionado:
+
+```bash
+PULSEARB_CHAVE_PRIVADA=0x…      # a chave. Nunca sai da máquina.
+PULSEARB_API_KEY=…              # as três de baixo saem do passo 6
+PULSEARB_API_SEGREDO=…          # base64 URLSAFE — o `-` e o `_` importam
+PULSEARB_API_PASSPHRASE=…
+PULSEARB_ENDERECO=0x…           # o do passo 2
+```
+
+`AssinadorLocal.do_ambiente()` lê a primeira; `CredenciaisL2.do_ambiente()` lê
+as quatro restantes e **nomeia todas as que faltarem de uma vez** — reportar
+uma por vez faria o operador descobrir a próxima a cada volta, com credencial
+de dinheiro real na mão.
+
+O arquivo de ambiente é `0600` e pertence ao usuário do serviço. Em systemd,
+`EnvironmentFile=` e **não** `Environment=`: o segundo aparece em
+`systemctl show`, que qualquer usuário local lê.
+
+**O que confirma que deu certo, e o que não confirma.** Nenhum dos passos
+acima autoriza o LIVE. A trava tripla do item 3.4 continua exigindo
+`MODE=LIVE` **mais** `PULSEARB_CONFIRM_LIVE` **mais** a frase exata, e
+`escolher_executor` recusa sem as três. Ter com que assinar não é ter
+autorização para enviar — e é de propósito que as duas coisas sejam separadas.
+
+### 8.1.1 As allowances
+
+Duas aprovações, uma vez por carteira, antes da primeira ordem:
+
+- **USDC** → contrato de troca do CLOB (é o que permite gastar o colateral)
+- **CTF (ERC-1155)** → `setApprovalForAll` para o mesmo contrato (é o que
+  permite entregar as shares quando a posição fecha)
+
+Os endereços dos contratos vêm da doc da Polymarket, e **vão para o
+`API_NOTES.md` com o carimbo `[VERIFICADO]` e a fonte** antes de qualquer
+transação — endereço de contrato copiado de memória ou de um resultado de
+busca é como se perde uma carteira inteira numa transação só. Este runbook
+não os lista justamente por isso.
+
+Aprovar o valor exato do capital, e não `uint256` infinito: allowance
+infinita é a diferença entre perder o saldo do dia e perder tudo que a
+carteira vier a receber depois.
+
+**Checklist antes da primeira ordem real:**
+
+- [ ] carteira nova, chave nunca usada em outro lugar
+- [ ] só o capital de operação em USDC, e MATIC para gás
+- [ ] allowance de USDC setada, no valor do capital e não infinita
+- [ ] `setApprovalForAll` do CTF setada
+- [ ] endereços dos contratos conferidos na doc e anotados no API_NOTES
+- [ ] as 5 variáveis no `EnvironmentFile`, arquivo `0600`
+- [ ] `chronyc tracking` verde (item 5.4 recusa LIVE sem NTP)
+- [ ] o endereço público anotado onde a equipe vê; a chave privada em lugar nenhum
+
 ## 9. Checklist da primeira hora
 
 - [ ] `smoke_discovery` achou janelas dos **dois** jogos (TWAP e horário)

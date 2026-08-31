@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -192,6 +193,79 @@ class TestAsCredenciais:
         assert SEGREDO not in texto
         assert "frase" not in texto
         assert "<oculto>" in texto
+
+
+class TestAsCredenciaisVindasDoAmbiente:
+    """A simetria com `AssinadorLocal.do_ambiente` — item 5.1.
+
+    Sem este caminho, a única forma de a credencial chegar ao cliente seria
+    alguém escrevê-la no código ou no `config.yaml`, que é versionado.
+    """
+
+    AMBIENTE: ClassVar[dict[str, str]] = {
+        "PULSEARB_API_KEY": "chave-123",
+        "PULSEARB_API_SEGREDO": SEGREDO,
+        "PULSEARB_API_PASSPHRASE": "frase",
+        "PULSEARB_ENDERECO": "0xabc",
+    }
+
+    def test_monta_a_partir_das_quatro_variaveis(self):
+        credenciais = CredenciaisL2.do_ambiente(self.AMBIENTE)
+
+        assert credenciais.api_key == "chave-123"
+        assert credenciais.endereco == "0xabc"
+        assert credenciais.segredo_em_bytes()
+
+    @pytest.mark.parametrize("faltando", sorted(AMBIENTE))
+    def test_variavel_ausente_nomeia_a_variavel(self, faltando):
+        ambiente = {k: v for k, v in self.AMBIENTE.items() if k != faltando}
+
+        with pytest.raises(ErroDeAuth) as erro:
+            CredenciaisL2.do_ambiente(ambiente)
+
+        assert faltando in str(erro.value)
+
+    def test_todas_as_ausentes_de_uma_vez(self):
+        """Reportar uma por vez faria o operador descobrir a próxima a cada
+        volta — com credencial de dinheiro real na mão. Mesma escolha do
+        `risk/autorizacao.py`."""
+        with pytest.raises(ErroDeAuth) as erro:
+            CredenciaisL2.do_ambiente({})
+
+        for nome in self.AMBIENTE:
+            assert nome in str(erro.value)
+
+    def test_espaco_nas_pontas_nao_conta_como_credencial(self):
+        """Artefato de `export VAR=" abc "` ou de copiar do painel.
+
+        Sem o `strip`, um segredo com espaço vira chave HMAC diferente e todo
+        pedido volta 401 sem dizer que a causa é um espaço invisível.
+        """
+        ambiente = self.AMBIENTE | {"PULSEARB_API_KEY": "  chave-123  "}
+
+        assert CredenciaisL2.do_ambiente(ambiente).api_key == "chave-123"
+
+    def test_variavel_so_com_espacos_e_ausencia(self):
+        ambiente = self.AMBIENTE | {"PULSEARB_API_PASSPHRASE": "   "}
+
+        with pytest.raises(ErroDeAuth) as erro:
+            CredenciaisL2.do_ambiente(ambiente)
+
+        assert "PULSEARB_API_PASSPHRASE" in str(erro.value)
+
+    def test_o_erro_nao_publica_o_valor_de_credencial_nenhuma(self):
+        """A mensagem cita o NOME da variável, nunca o valor.
+
+        Credencial parcial em traceback é credencial vazada — e o traceback
+        de subida costuma ir para o log.
+        """
+        ambiente = self.AMBIENTE | {"PULSEARB_ENDERECO": ""}
+
+        with pytest.raises(ErroDeAuth) as erro:
+            CredenciaisL2.do_ambiente(ambiente)
+
+        assert SEGREDO not in str(erro.value)
+        assert "frase" not in str(erro.value)
 
 
 class TestOTypedDataDoL1:
