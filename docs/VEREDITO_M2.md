@@ -1356,6 +1356,169 @@ defeito está em QUANDO se entra, não em QUANTO se prevê.
 1. **Que inverter a regra dá lucro.** Não foi testado. Inverter é comprar o que
    o modelo acha caro, e isso não tem razão a priori de funcionar — a
    simetria de uma regra ruim não é uma regra boa.
+2. ~~**Que a causa é seleção adversa.**~~ **MEDIDO em 2026-08-31 — ver
+   §2d-quinquies.** A falsificação que faltava foi feita, e a hipótese
+   sobreviveu.
+3. **Que um dia decide.** Continua valendo a regra desta página: 2026-08-24 é
+   um dia. Qualquer conclusão daqui precisa repetir em dia independente.
+
+### §2d-quinquies. A seleção adversa saiu de hipótese para medida
+
+`relatorios/M2_FAIXAS_20260824.json` quebra as 688 apostas pela **confiança do
+lado apostado** — `P(Up)` se comprou Up, `1 − P(Up)` se comprou Down. O que
+aparece responde a §2d-quater:
+
+| confiança | n | o modelo promete | realiza | déficit |
+|---|---|---|---|---|
+| 0,45–0,50 | 215 | 0,4945 | 0,3628 | **−0,1317** |
+| 0,50–0,55 | 328 | 0,5037 | 0,4451 | **−0,0586** |
+| **ponderado** | **543 (79 %)** | | | **−0,0875** |
+
+*(Os "promete" são a **confiança média das apostas** da faixa, não o meio dela
+— `confianca_media` foi acrescentada ao relatório justamente porque o déficit
+é a diferença entre dois números grandes e próximos, e meia largura de faixa
+seria erro da ordem do efeito. A estimativa anterior pelo meio dava −0,093;
+com o valor exato, −0,0875. Mesma conclusão, número diferente.)*
+
+**A regra opera onde o modelo não sabe.** 543 das 688 apostas — 79 % — saem
+com confiança entre 0,45 e 0,55, ou seja, a um passo de cara-ou-coroa. As
+faixas confiantes existem, mas com 5 a 15 apostas cada: irrelevantes no total.
+
+**E lá o modelo perde 9,3 pontos do que promete.** Este é o teste que faltava:
+no agregado de 247 mil previsões ele é calibrado (ECE 0,0126–0,0493), mas
+**dentro da mesma faixa**, os instantes que a regra escolhe realizam pior que
+a faixa inteira. A comparação é pareada por construção — mesmo modelo, mesma
+faixa de confiança, mesma janela — e a diferença é a seleção.
+
+**O mecanismo, agora explícito.** `_candidatos_com_edge` avalia os dois lados
+e dispara em qualquer um com `edge = prob − ask > threshold`. Com o modelo em
+0,48 e o ask em 0,44, a margem existe **se o modelo estiver certo** — e a
+regra compra Up mesmo achando Down mais provável. O que ela otimiza é a
+discordância com o preço, não a convicção. Quando a convicção é nula, o que
+resta é justamente o caso em que discordar do mercado é caro.
+
+**O que isso fecha, e o que não fecha.** Fecha a pergunta "é o sinal ou é a
+regra?": é a regra. Não fecha o que fazer — e continua valendo que inverter
+não foi testado, e que 2026-08-24 é um dia.
+
+### Um defeito achado ao escrever o teste acima
+
+`faixa_de_probabilidade` **não tinha teste nenhum**, e classificava errado
+alguns valores de borda: `0.60 / 0.05` vale 11,999999999999998 em binário, o
+`int()` truncava para 11, e 0,60 caía no rótulo `0.55-0.60`. O mesmo com 0,70
+e 0,95 — **mas não** com 0,55, 0,65, 0,75, 0,80, 0,85 e 0,90.
+
+Errar em algumas bordas é pior do que errar em todas: o padrão não aparece
+numa conferência de olho, e a função alimenta a curva de confiabilidade que
+decide o critério **1.3**. Corrigido com epsilon de 1e-9 (o erro real é da
+ordem de 1e-15) e travado com as 20 bordas parametrizadas.
+
+**Impacto nos ECEs já publicados: MEDIDO, e é zero.**
+`relatorios/M2_FAIXA_CORRIGIDA_20260824.json` re-rodou as mesmas 24 h com a
+função consertada:
+
+| balde | ECE antes | ECE depois | Δ | faixas |
+|---|---|---|---|---|
+| `<30s` | 0,0126 | 0,0126 | 0,000000 | 20 → 20 |
+| `60-30s` | 0,0285 | 0,0285 | 0,000000 | 20 → 20 |
+| `240-120s` | 0,0319 | 0,0319 | 0,000000 | 20 → 20 |
+| `120-60s` | 0,0452 | 0,0452 | 0,000000 | 20 → 20 |
+| `>240s` | 0,0493 | 0,0493 | 0,000000 | 20 → 20 |
+
+Nenhum número do 1.3 se move: previsões que caem **exatamente** em 0,60, 0,70
+ou 0,95 são raras demais numa série contínua para deslocar a média. A hipótese
+estava certa — mas ela só vale escrita aqui porque foi conferida, e não porque
+parecia óbvia. O conserto continua valendo para quem vier depois com dado
+discreto ou probabilidade arredondada, onde as bordas deixam de ser raras.
+
+**De quebra, a direção reproduziu.** **Quatro** rodadas independentes do mesmo
+dia (`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`, `M2_VIES`) dão
+`por_janela` = **0,4157 com p = 1,16e−05**, ao dígito. O número não é artefato
+de uma execução.
+
+### §2d-septies. Inverter a regra é PIOR — e a razão encerra a rota taker
+
+A última correção que restava na mesa: se a direção acerta 0,4157, o lado
+oposto acerta 0,5843. Medido sobre as mesmas 688 janelas, com o preço de cada
+lado guardado no instante do sinal (`M2_INVERSAO_20260824.json`):
+
+| | acurácia | preço pago | PnL/share |
+|---|---|---|---|
+| como está | 0,4157 | 0,4219 | **−0,00618** |
+| **invertido** | 0,5843 | 0,5991 | **−0,01477** |
+
+**Inverter perde 2,4× mais**, e a razão é o preço, não a direção. A soma dos
+dois asks é **1,0210** — o mercado cobra 2,1 % de spread para estar nos dois
+lados. Acertar 58 % pagando 0,5991 perde mais do que acertar 42 % pagando
+0,4219, porque o prêmio do favorito cresce mais rápido que a vantagem
+direcional que ele carrega.
+
+**As duas pontas perdem.** Não existe lado desta aposta que pague, neste dia,
+com este spread. É o resultado que a intuição errava: "a regra erra, então
+inverta" trata direção como se fosse a única variável, e a variável que decide
+é quanto se paga por ela.
+
+**O que isto encerra:** a rota taker não tem correção conhecida. A regra
+seleciona pior que o acaso (§2d-quater), exigir convicção não salva
+(§2d-sexies), e inverter é pior (aqui). O que resta é a rota maker — que
+ganha do spread em vez de pagá-lo, e é exatamente por isso.
+
+**O que isto NÃO estabelece:** que nenhuma regra de entrada funcione. Foram
+testadas três — a original, a filtrada e a invertida —, todas sobre o mesmo
+sinal e o mesmo dia. Um sinal diferente, ou um dia diferente, é outro
+experimento.
+
+### §2d-sexies. Exigir convicção mínima NÃO salva a regra
+
+A primeira correção que ocorre a quem lê o déficit é óbvia: se a regra erra
+onde o modelo não sabe, que ela só opere onde ele sabe. Medido antes de
+alguém implementar e gastar uma campanha descobrindo:
+
+| limiar de confiança | apostas | acurácia | p |
+|---|---|---|---|
+| ≥ 0,50 | 395 | 0,4506 | 0,056 |
+| ≥ 0,55 | 67 | 0,4776 | 0,807 |
+| ≥ 0,60 | 56 | 0,4464 | 0,504 |
+| ≥ 0,65 | 48 | 0,4583 | 0,665 |
+| ≥ 0,70 | 41 | 0,4634 | 0,755 |
+| ≥ 0,75 | 32 | 0,5312 | 0,860 |
+| ≥ 0,80 | 24 | 0,5833 | 0,540 |
+
+**Nenhum limiar entrega as duas coisas ao mesmo tempo** — acurácia acima de
+0,5 *e* amostra que sustente. O melhor número da coluna (0,5833) vem de 24
+apostas com p = 0,54: ruído. Escolher esse limiar por ele ser o mais alto
+seria sobreajuste com uma casa decimal.
+
+**Por que a curva se comporta assim.** Subir o limiar corta a amostra antes de
+corrigir a direção: de 395 apostas para 24. As duas condições que a regra
+precisa — modelo convicto **e** preço discordando — quase não coincidem. Faz
+sentido: quando o modelo tem convicção e o preço concorda, não há margem;
+quando tem convicção e o preço discorda, ou é oportunidade rara, ou o modelo
+está errado. Os dados dizem que é predominantemente o segundo caso.
+
+**O que isto fecha:** a linha de investigação "filtrar por convicção". O
+problema não é o limiar. Está publicado em
+`direcao_sem_fill.se_exigisse_confianca_minima`, e o `resumo_m2.py` imprime o
+veredito a partir do dado, não como texto fixo.
+
+### O viés do próprio instrumento: suspeitado, medido, e é zero
+
+`_candidatos_com_edge` monta a lista sempre na ordem `(Up, Down)`, e o registro
+lê `candidatos[0]`. **Quando os dois lados passam do threshold, o lado
+registrado é Up por ordem da lista, não por decisão** — e isso enviesaria a
+acurácia que sustenta todo o diagnóstico acima.
+
+A condição para os dois passarem é `ask_up + ask_down < 1 − 2×threshold`, ou
+seja 0,96 com o threshold de 0,02: book tão fino que comprar os dois lados
+custaria menos que o payoff. Eu supunha que fosse raro. Medido:
+
+    0 instantes em 149.448 sinais  —  0,0000 %
+
+O mercado sempre cobrou spread suficiente. **O viés não existe nesta amostra**,
+e o 0,4157 está limpo dele. Continua publicado (`vies_de_ambos_os_lados`) e
+impresso no resumo, porque num dia de book mais fino a fração pode deixar de
+ser zero — e quem ler o número precisa poder conferir, não confiar.
+
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
 borda, havia superconfiança". Foi essa a ramificação que ocorreu.
