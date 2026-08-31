@@ -678,6 +678,24 @@ sustentam veredito nenhum, nem no sinal negativo. (c) `pausa_por_sequencia` em
 99 % das linhas **não é 99 % do tempo**: o bot continua tentando durante a
 pausa, e cada tentativa vira uma linha.
 
+> **⚠️ O PnL DESTE ensaio é otimista por construção, e o defeito era de código.**
+> Até 2026-08-31 o motor gravava `preco_pago = livro.best_ask` — o topo, como
+> se a ordem inteira coubesse no primeiro nível e não custasse slippage. O
+> backtest sempre atravessou o livro com `simulate_taker_buy`. **Duas contas
+> para a mesma coisa**, que é exatamente a violação que a regra do *mesmo
+> caminho* existe para impedir: a diferença apareceria como "o mercado ao vivo
+> é melhor", quando é aritmética.
+>
+> Achado ao investigar por que o shadow marcou **+126,77 às 10,6 h** enquanto o
+> backtest do mesmo motor dá negativo. Corrigido no motor, com teste de topo
+> raso travando `preco_pago > best_ask`.
+>
+> **O ensaio em curso NÃO foi reiniciado** — o que ele mede sobre estabilidade
+> e portões continua valendo, e reiniciar custaria as 10,6 h já corridas. Mas
+> o **PnL dele sai enviesado para cima**, e por isso não entra em conta
+> nenhuma. O item **4.2** (SHADOW ≥ 2 semanas com edge líquido medido) exige
+> um ensaio com o motor corrigido.
+
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
 aparecendo no diário, não um. `preco_fora_da_faixa` e `livro_desconhecido`
@@ -1113,7 +1131,7 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 | # | Condição | Estado |
 |---|---|---|
 | 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ |
-| 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ |
+| 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
 **Piso de tempo:** mesmo que a captação seja consertada hoje e o veredito venha
