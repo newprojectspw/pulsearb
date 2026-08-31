@@ -434,6 +434,34 @@ apagado — apagar esconderia que a rota chegou a parecer aprovada.
 1.8, 1.9 e 1.10; o 1.6 fica não avaliável até existir medição de fila ou uma
 definição pré-registrada do que o fator 0,3 desconta.
 
+### O terceiro termo do 1.6 é decidível — e ele reprova o tamanho avaliado
+
+`o_que_falta_para_fechar` lista três termos. Os dois primeiros dependem da
+fila. **O terceiro, `capital_imobilizado`, não** — ele sai dos tetos que já
+estão no `RiskSettings`, e ninguém tinha feito a conta:
+
+| cotação | rewards 8 h | capital preso | retorno/capital | cabe no teto de 50 USDC? |
+|---|---|---|---|---|
+| 200 shares, 2 lados | 39,37 | **200 USDC** | 19,7 % | **ESTOURA 4×** |
+| 50 shares, 2 lados | 22,75 | 50 USDC | **45,5 %** | sim |
+| 50 shares, 1 lado | 15,65 | 25 USDC | **62,6 %** | sim |
+
+**O 1.6 foi avaliado com 200 shares nos dois lados — que prende 200 USDC
+contra o teto de exposição de 50** (item 3.9). A cotação que fundamentou o
+"+35,6 USDC/8h" não passaria pelo próprio portão de risco do projeto.
+
+**E o tamanho menor rende MAIS por USDC imobilizado**, não menos: 45,5 %
+contra 19,7 % em 8 h. O motivo está na fórmula — o score é linear no tamanho,
+mas a nossa entrada também engorda o denominador, então dobrar a cotação menos
+que dobra a fatia. Com o fator 0,3, 50 shares em dois lados dão **6,83 USDC em
+8 h sobre 50 de capital (13,7 %)**.
+
+**O que isso fecha e o que não fecha.** Fecha o terceiro termo: o capital é
+decidível, e a decisão é ≤ 50 shares por lado. Não fecha o 1.6 — os dois
+primeiros termos continuam dependendo da fila. O que muda é que o número que
+circulava (+35,6) vem de um dimensionamento que o portão recusa, e o número do
+dimensionamento admissível é **cinco vezes menor**.
+
 **1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
 
 ### O M2.2 rodou (2026-08-31), e os números de 1.7 e 1.8 NÃO mudaram
@@ -1261,7 +1289,7 @@ saber o que deixou de travar é parte do estado:
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
 | **1.1 / 1.4 — a REGRA DE ENTRADA seleciona pior que o acaso** (bandas de −22,54 a −113,64; irrestrito −67,27) | **medido em 2026-08-31**, e a causa mudou de nome | **RODOU: `M2_DIRECAO_20260824.json`, 24 h, 688 janelas independentes.** `direcao_sem_fill` deu **acurácia 0,4157 com p = 1,16e−05** — a direção escolhida erra sistematicamente, sobre coorte que **não muda com o fill**. E o preditor **não é o culpado**: em 247.306 previsões ele sai calibrado (ECE 0,0126–0,0493, 20 faixas em todos os cinco baldes) e a taxa-base é 0,5043. Ou seja: prever, ele prevê; quem escolhe mal é a regra `edge = prob − preço > threshold`, que seleciona 688 momentos e acerta menos que sortear. **O conserto muda de lugar** — não adianta trocar o preditor, é a regra de entrada. **As DUAS correções óbvias foram testadas, e nenhuma serve.** (§2d-sexies) exigir convicção mínima não salva: nenhum limiar de 0,50 a 0,80 dá acurácia acima de 0,5 *com* amostra que sustente — o melhor (0,5833) sai de 24 apostas com p=0,54, e subir o limiar corta de 395 para 24 antes de corrigir a direção. (§2d-septies) **inverter é 2,4× PIOR**: −0,01477 contra −0,00618 por share. A razão é o preço, não a direção — a soma dos asks é 1,0210, e acertar 58 % pagando 0,5991 perde mais que acertar 42 % pagando 0,4219. **As duas pontas perdem: o spread de 2,1 % é maior que qualquer vantagem direcional.** **O que NÃO está estabelecido:** que nenhuma regra funcione — foram testadas três, sobre o mesmo sinal e o mesmo dia |
-| **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
+| **1.5 profundidade** (p50 115 USDC a 3 ticks em 300 s, dia 24; 28 USDC em 4 h) | teto de **capacidade** do book, e **critério da rota TAKER** | nada sob nosso controle — é liquidez do mercado, e 115 contra 200 não sugere contestar o limiar. **MAS a leitura muda com a rota (medido 2026-08-31):** o mesmo book raso que impede o taker de mover 200 USDC é o que dá ao maker uma **fatia alta do pool**. Nossa cotação de 200 shares a ~0,50 vale ~100 USDC por lado; num livro cujo p50 a 3 ticks é 115 USDC, isso é ~46 % do total — que é **exatamente** a `fatia_media` de 0,457 que o relatório publica. O 1.5 reprova o taker e **não é critério do maker** (os do maker são 1.6 a 1.10). Book raso não é obstáculo para quem cota; é obstáculo para quem atravessa |
 | ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 
 E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
