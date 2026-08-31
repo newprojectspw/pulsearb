@@ -380,6 +380,20 @@ class BacktestRunner:
         if not candidatos:
             return
         report.add_oportunidade(est.bucket_tempo, janela.slug)
+        # `candidatos[0]` é o lado que a execução TENTA primeiro, e é por isso
+        # que é ele o registrado — a medição tem de descrever a decisão que
+        # seria tomada, não uma média das opções.
+        #
+        # MAS a lista sai sempre na ordem (Up, Down), então quando OS DOIS
+        # lados passam do threshold o registrado é Up por construção, e não
+        # por decisão. Isso enviesaria a acurácia. A condição é
+        # `ask_up + ask_down < 1 − 2×threshold`, ou seja, book tão fino que
+        # comprar os dois lados custaria menos que o payoff — raro, mas não
+        # impossível. Contado para que "raro" seja um número e não uma
+        # suposição minha: se `ambos_os_lados` for material perto de
+        # `sinais_direcionais`, o viés é real e a leitura precisa mudar.
+        if len(candidatos) > 1:
+            report.sinais_com_ambos_os_lados += 1
         lado_up, _token, prob = candidatos[0]
         report.add_sinal_direcional(
             SinalDirecional(

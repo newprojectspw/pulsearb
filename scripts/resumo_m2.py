@@ -769,6 +769,19 @@ def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
         "  Lucro depende de execucao e capacidade, que sao o 1.1 e o 1.5."
     )
     print()
+    # O viés conhecido sai ANTES das faixas, e sempre: se ele for material,
+    # toda a leitura abaixo muda, e saber disso depois seria tarde.
+    vies = bloco.get("vies_de_ambos_os_lados") or {}
+    fracao = vies.get("fracao_dos_sinais")
+    if fracao is not None:
+        marca = "desprezivel" if fracao < 0.01 else ">> MATERIAL, desconte na leitura"
+        print(
+            f"  vies conhecido: {vies.get('instantes', 0)} instantes com OS DOIS"
+            f" lados acima do\n  threshold ({100 * fracao:.2f}% dos sinais)."
+            f" Ali o lado registrado e Up por ordem\n  da lista, nao por decisao"
+            f"  —  {marca}"
+        )
+        print()
     _imprimir_faixas_de_confianca(bloco.get("por_faixa_de_confianca") or {})
 
 

@@ -300,6 +300,12 @@ class BacktestReport:
     primeiro_sinal_da_janela: dict[str, SinalDirecional] = field(
         default_factory=dict
     )
+    #: Instantes em que OS DOIS lados passaram do threshold. Nesses, o lado
+    #: registrado é Up por ordem da lista, não por decisão — então é aqui que
+    #: mora o único viés conhecido de `direcao_sem_fill`. Publicado ao lado do
+    #: resultado para que a leitura possa descontá-lo em vez de confiar que é
+    #: desprezível.
+    sinais_com_ambos_os_lados: int = 0
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -448,10 +454,26 @@ class BacktestReport:
             return saida
 
         por_janela = list(self.primeiro_sinal_da_janela.values())
+        total = len(self.sinais_direcionais)
         return {
             "por_sinal": _bloco(self.sinais_direcionais),
             "por_janela": _bloco(por_janela),
             "por_faixa_de_confianca": _por_faixa(por_janela),
+            # O único viés conhecido desta medição, publicado como número.
+            "vies_de_ambos_os_lados": {
+                "instantes": self.sinais_com_ambos_os_lados,
+                "fracao_dos_sinais": (
+                    self.sinais_com_ambos_os_lados / total if total else None
+                ),
+                "nota": (
+                    "instantes em que OS DOIS lados passaram do threshold. "
+                    "Ali o lado registrado e Up por ordem da lista, nao por "
+                    "decisao. Fracao alta invalida a leitura de direcao; "
+                    "fracao perto de zero deixa o vies desprezivel — e o "
+                    "numero esta aqui para que isso seja conferido, e nao "
+                    "assumido."
+                ),
+            },
             "leitura": (
                 "por_janela e a leitura conservadora e e a que decide: dentro "
                 "de uma janela os instantes dividem ancora, preco e resultado, "

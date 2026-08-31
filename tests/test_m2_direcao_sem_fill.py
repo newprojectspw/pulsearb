@@ -296,11 +296,35 @@ class TestAPublicacao:
             "por_sinal",
             "por_janela",
             "por_faixa_de_confianca",
+            "vies_de_ambos_os_lados",
             "leitura",
         }
         # A leitura diz qual das duas contagens decide. Sem ela, quem lê o
         # JSON cita a de `n` maior, que é a inflada.
         assert "por_janela" in bloco["leitura"]
+
+    def test_o_vies_conhecido_sai_como_NUMERO_e_nao_como_ressalva(self):
+        """O único viés desta medição é publicado, não descrito.
+
+        Quando os dois lados passam do threshold, o registrado é Up por ordem
+        da lista — não por decisão. Uma ressalva em prosa seria pulada; uma
+        fração ao lado do resultado obriga quem lê a olhar para ela.
+        """
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal("j1"))
+        report.add_sinal_direcional(_sinal("j2"))
+        report.sinais_com_ambos_os_lados = 1
+
+        vies = report.direcao_sem_fill()["vies_de_ambos_os_lados"]
+
+        assert vies["instantes"] == 1
+        assert vies["fracao_dos_sinais"] == pytest.approx(0.5)
+
+    def test_sem_sinal_a_fracao_do_vies_e_nula_e_nao_zero(self):
+        """Zero diria "medi e não há"; None diz "não há o que medir"."""
+        vies = BacktestReport().direcao_sem_fill()["vies_de_ambos_os_lados"]
+
+        assert vies["fracao_dos_sinais"] is None
 
     def test_a_leitura_separa_direcao_de_lucro(self):
         """Acurácia acima de 0,5 com custo maior que a margem continua
