@@ -537,6 +537,47 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **108**: 47 no portão, 27 nas travas novas, 20 no relógio do servidor, 14 na sincronia NTP |
+| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **rodando desde 2026-08-31 00:44 UTC** (PID 26423), depois do conserto do `relogio_derivado` — ver abaixo. Falta completar as 24 h |
+
+*(A linha 3.13 sumiu do quadro num merge entre as duas sessões e foi
+restaurada em 2026-08-31. Fica o registro: conflito neste arquivo é o mais
+provável de todos, e uma linha perdida em merge é indistinguível de um item
+que nunca existiu.)*
+
+### 3.13 — a primeira tentativa não mediu nada, e o motivo tem nome
+
+A rodada anterior (PID 24507) gravou **3.050 entradas e recusou todas** com
+`relogio_derivado`. Não era relógio: era latência de rede até a Polymarket,
+~1.278 ms medidos, contra um teto de 250 ms.
+
+`_portao_do_relogio` aplicava o teto **em todos os modos**. A ausência de
+fonte já tinha a exceção certa — fora do LIVE não recusa, senão o SHADOW não
+ensaia —, mas o atraso acima do teto não tinha, e apagava o diário inteiro.
+Corrigido: **só o LIVE recusa por `relogio_derivado`**; a fonte muda
+(`atraso_ms = None`) continua recusando em qualquer modo, porque não saber
+custa o mesmo que saber que está ruim.
+
+**O que a primeira hora do ensaio corrigido mostrou** (~2.280 tentativas):
+
+| | |
+|---|---|
+| intenções aprovadas | **25** |
+| recusas | 2.255, **todas** `pausa_por_sequencia` |
+| PnL realizado | **+19,27 USDC** |
+| perdas seguidas no fim da hora | 2 |
+
+**Os três avisos que este número exige.** (a) O SHADOW **não prova
+preenchimento** — ninguém do outro lado sabe que a ordem existe, então o PnL é
+uma conta sobre fill assumido, não uma observação. (b) 25 entradas não
+sustentam veredito nenhum. (c) `pausa_por_sequencia` em 98,9 % das linhas **não
+é 98,9 % do tempo**: o bot continua tentando durante a pausa, e cada tentativa
+vira uma linha.
+
+**A trava 3.8 disparou ao vivo pela primeira vez, e está certa.** Quatro perdas
+seguidas pausam por 1 h. A consequência operacional é que 24 h de ensaio
+produzem ordens em poucas dezenas, não milhares — o que **limita o que o 3.13
+pode concluir**, e é melhor saber disso antes de ler o resultado do que depois.
+Não é motivo para afrouxar a trava.
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
