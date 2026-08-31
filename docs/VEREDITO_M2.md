@@ -1436,6 +1436,38 @@ dia (`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`, `M2_VIES`) dão
 `por_janela` = **0,4157 com p = 1,16e−05**, ao dígito. O número não é artefato
 de uma execução.
 
+### §2d-septies. Inverter a regra é PIOR — e a razão encerra a rota taker
+
+A última correção que restava na mesa: se a direção acerta 0,4157, o lado
+oposto acerta 0,5843. Medido sobre as mesmas 688 janelas, com o preço de cada
+lado guardado no instante do sinal (`M2_INVERSAO_20260824.json`):
+
+| | acurácia | preço pago | PnL/share |
+|---|---|---|---|
+| como está | 0,4157 | 0,4219 | **−0,00618** |
+| **invertido** | 0,5843 | 0,5991 | **−0,01477** |
+
+**Inverter perde 2,4× mais**, e a razão é o preço, não a direção. A soma dos
+dois asks é **1,0210** — o mercado cobra 2,1 % de spread para estar nos dois
+lados. Acertar 58 % pagando 0,5991 perde mais do que acertar 42 % pagando
+0,4219, porque o prêmio do favorito cresce mais rápido que a vantagem
+direcional que ele carrega.
+
+**As duas pontas perdem.** Não existe lado desta aposta que pague, neste dia,
+com este spread. É o resultado que a intuição errava: "a regra erra, então
+inverta" trata direção como se fosse a única variável, e a variável que decide
+é quanto se paga por ela.
+
+**O que isto encerra:** a rota taker não tem correção conhecida. A regra
+seleciona pior que o acaso (§2d-quater), exigir convicção não salva
+(§2d-sexies), e inverter é pior (aqui). O que resta é a rota maker — que
+ganha do spread em vez de pagá-lo, e é exatamente por isso.
+
+**O que isto NÃO estabelece:** que nenhuma regra de entrada funcione. Foram
+testadas três — a original, a filtrada e a invertida —, todas sobre o mesmo
+sinal e o mesmo dia. Um sinal diferente, ou um dia diferente, é outro
+experimento.
+
 ### §2d-sexies. Exigir convicção mínima NÃO salva a regra
 
 A primeira correção que ocorre a quem lê o déficit é óbvia: se a regra erra
