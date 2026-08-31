@@ -1314,6 +1314,54 @@ coorte). Até ele existir, a inclinação da latência é indício, não prova.
 > hora não sustentam veredito — ela existiu para validar o instrumento, e é só
 > isso que ela estabelece.
 
+### §2d-quater. O teste rodou, e a causa da reprovação mudou de nome
+
+`relatorios/M2_DIRECAO_20260824.json` — 24 h de 2026-08-24, 126,7 M registros,
+**688 janelas independentes** (uma observação por janela, sem repetição).
+
+| medida | valor | |
+|---|---|---|
+| `direcao_sem_fill.por_janela` | **0,4157** | n=688, janelas=688, p=**1,16e−05** |
+| `direcao_sem_fill.por_sinal` | 0,3101 | n=149.448 sobre as mesmas 688 janelas |
+| taxa-base (Up vence) | **0,5043** | 247.306 previsões |
+| calibração, cinco baldes | ECE **0,0126 a 0,0493** | 20 faixas ocupadas em todos |
+
+**Não é ausência de sinal. É seleção pior que o acaso.** A pergunta que este
+instrumento existia para responder era binária, e a resposta veio do lado que
+eu não tinha antecipado: a direção escolhida **erra sistematicamente**, com
+significância, sobre a coorte que não muda com o fill.
+
+**E o preditor não é o culpado — ele está calibrado.** Em 247 mil previsões o
+`P(Up)` médio fica entre 0,4945 e 0,5012 contra realizado de 0,4984 a 0,5128, e
+o ECE não passa de 0,0493 em balde nenhum, com as 20 faixas ocupadas. Um modelo
+que erra a probabilidade não produz esses números.
+
+Quem escolhe é a regra `edge = prob − preço > threshold`. Ela seleciona 688
+momentos de 247 mil e acerta 0,4157, quando **sortear daria 0,50**. A regra
+não é neutra: ela é anti-informativa.
+
+**A leitura econômica — que é inferência, e está marcada como tal.** Quando o
+modelo discorda muito do preço, a explicação mais barata é que o mercado sabe
+algo que o modelo não sabe, e não que apareceu oportunidade. Entrar exatamente
+onde a discordância é maior é escolher a dedo os casos em que o modelo falha.
+É seleção adversa, e o formato do número — calibrado no agregado, ruim no
+selecionado — é a assinatura dela. **Não está medido que a causa seja essa.**
+
+**O que muda de lugar:** o conserto do 1.1/1.4 não é trocar o preditor.
+Trocá-lo por outro igualmente calibrado daria o mesmo resultado, porque o
+defeito está em QUANDO se entra, não em QUANTO se prevê.
+
+**Três coisas que este número NÃO estabelece**, e nenhuma é detalhe:
+
+1. **Que inverter a regra dá lucro.** Não foi testado. Inverter é comprar o que
+   o modelo acha caro, e isso não tem razão a priori de funcionar — a
+   simetria de uma regra ruim não é uma regra boa.
+2. **Que a causa é seleção adversa.** É a explicação mais econômica do formato
+   observado, não uma medição. Falsificá-la exigiria comparar o resultado das
+   entradas contra o de instantes pareados sem discordância.
+3. **Que um dia decide.** Continua valendo a regra desta página: 2026-08-24 é
+   um dia. Qualquer conclusão daqui precisa repetir em dia independente.
+
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
 borda, havia superconfiança". Foi essa a ramificação que ocorreu.

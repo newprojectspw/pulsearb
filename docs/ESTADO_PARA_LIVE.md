@@ -32,6 +32,31 @@ M2_25AGO 2026-08-25). Os cinco critérios do maker passam nos dados disponíveis
 registros — e 1.7/1.8 saíram idênticos aos de antes (−0,1974 e 65,922 h),
 porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
 
+> ### 🔬 2026-08-31 — o taker não reprova por falta de sinal. Reprova pela REGRA.
+>
+> O teste de direção rodou sobre o dia inteiro
+> (`relatorios/M2_DIRECAO_20260824.json`, **688 janelas independentes**) e a
+> resposta veio do lado que eu não tinha antecipado:
+>
+> | | |
+> |---|---|
+> | direção escolhida acerta | **0,4157** · p = **1,16e−05** |
+> | se sorteasse, acertaria | 0,5043 (taxa-base de 247.306 previsões) |
+> | o preditor está calibrado? | **sim** — ECE 0,0126 a 0,0493, 20 faixas nos 5 baldes |
+>
+> **O preditor prevê bem e a regra escolhe mal.** `edge = prob − preço >
+> threshold` seleciona 688 momentos de 247 mil e acerta **menos que sortear**.
+> Não é ausência de borda: é uma regra de entrada anti-informativa, medida
+> sobre uma coorte que não muda com o fill.
+>
+> **Isso move o conserto de lugar:** trocar o preditor por outro igualmente
+> calibrado daria o mesmo resultado. O defeito está em QUANDO se entra.
+>
+> **E não autoriza inverter a regra** — comprar o que o modelo acha caro não
+> tem razão a priori de funcionar, e não foi testado. A leitura de seleção
+> adversa é a explicação mais econômica do formato, **não uma medição**.
+> Delimitação completa na §2d-quater do `VEREDITO_M2.md`.
+
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
 1000 ms), e eu citava esse decaimento como evidência de sinal direcional real.
@@ -1137,7 +1162,7 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | **o instrumento existe e foi validado em dado real; falta RODAR sobre amostra que decida.** `direcao_sem_fill` mede a acurácia da direção sobre **todos** os instantes que cruzaram o threshold, preenchidos ou não, com p-valor binomial bilateral. É a coorte fixa que a §2d-ter pedia: há teste travando que ela **não muda entre 150 ms e 1000 ms**, enquanto o `hit_rate` muda. **A validação (1 h de 24/08, 4 janelas) já pagou por si:** `por_janela` deu 1,000 com p=0,13 e `por_sinal` deu 0,321 com p=1,4e−33 — respostas OPOSTAS sobre as MESMAS 4 janelas. Daí `janelas_distintas` passar a sair ao lado de `n`, e o `resumo_m2.py` avisar quando `n ≥ 10 × janelas`. **O que ele decide, quando houver amostra:** direção ≈ 0,5 ⇒ não há sinal, e o taker encerra no registro; direção ≠ 0,5 com p < 0,05 ⇒ há informação, e a reprovação é de execução/capacidade — conserto diferente. Não é critério novo: os dez foram escritos antes dos números |
+| **1.1 / 1.4 — a REGRA DE ENTRADA seleciona pior que o acaso** (bandas de −22,54 a −113,64; irrestrito −67,27) | **medido em 2026-08-31**, e a causa mudou de nome | **RODOU: `M2_DIRECAO_20260824.json`, 24 h, 688 janelas independentes.** `direcao_sem_fill` deu **acurácia 0,4157 com p = 1,16e−05** — a direção escolhida erra sistematicamente, sobre coorte que **não muda com o fill**. E o preditor **não é o culpado**: em 247.306 previsões ele sai calibrado (ECE 0,0126–0,0493, 20 faixas em todos os cinco baldes) e a taxa-base é 0,5043. Ou seja: prever, ele prevê; quem escolhe mal é a regra `edge = prob − preço > threshold`, que seleciona 688 momentos e acerta menos que sortear. **O conserto muda de lugar** — não adianta trocar o preditor, é a regra de entrada. **O que NÃO está estabelecido:** que inverter a regra dê lucro (não testado, e comprar o que o modelo acha caro não tem razão a priori de funcionar), nem que um dia baste |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 
