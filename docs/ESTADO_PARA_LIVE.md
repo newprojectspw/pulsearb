@@ -360,11 +360,33 @@ fixou antes de existir dado. Nenhuma duração passa.
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
-**Achado do M2_25AGO: 594 das 599 janelas sem pool de reward.** As 5 que têm
-são todas de 4 h. Em 5 min, 15 min e 1 h não há uma sequer — estes mercados
-updown participam esporadicamente (≈ 1% das janelas). Quando o pool está
-presente, porém, a conta do maker fecha positiva com fator=0,3 e fórmula
-confirmada: **+35,6 USDC/8h** (rewards 25,8 + exec. líquida 9,7).
+### O pool de reward não é esporádico — ele é da JANELA DE 4 H
+
+Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
+aritmética e **errada na leitura**. Quebrando por duração no dia inteiro de
+2026-08-24 (`M2_20260824.json`, 739 janelas):
+
+| duração | com pool | sem pool | % com pool |
+|---|---|---|---|
+| 5 min | 1 | 518 | 0,2 % |
+| 15 min | 1 | 167 | 0,6 % |
+| 1 h | 0 | 44 | **0,0 %** |
+| **4 h** | **8** | **0** | **100 %** |
+
+**Todas as janelas de 4 h têm pool. Nenhuma outra duração tem.** O "1 %" saía
+de dividir 10 por 739 — e 739 é dominado pelas 518 janelas de 5 min, que
+existem em muito maior número justamente por serem curtas. Contar janela como
+unidade mistura coisas de tamanhos diferentes.
+
+O motivo das 729 sem pool é **um só**: `sem_taxa_diaria` (`rewards_daily_rate`
+ausente na Gamma, com `rewards_max_spread` e `rewards_min_size` presentes). A
+cadeia do dado foi conferida ponta a ponta — não é campo que ninguém lê.
+
+**A consequência prática inverte o veredito da rota:** ela não é inviável por
+falta de pool; ela é **restrita à janela de 4 h**, onde o pool está sempre lá.
+É nessas janelas que o 1.6 foi avaliado, e é por isso que o **+35,6 USDC/8h**
+(rewards 25,8 + exec. líquida 9,7, fator=0,3) é o número da rota viável, e não
+uma média sobre um universo que inclui mercados que não pagam.
 
 **O 1.6 PASSA com a fórmula confirmada (S(v,s)=((v-s)/v)²×b, §15.2).** A
 avaliação com fator=0,3 substitui a posição desconhecida na fila pela hipótese
@@ -1135,7 +1157,8 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 
 | # | Condição | Estado |
 |---|---|---|
-| 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ |
+| 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ — **e a estratégia que o backtest teria de aprovar não existe em código.** O taker está medido e reprovado (1.1/1.4/1.5); a rota que resta é a maker, e o motor dela **não começou** — ver 4.0 abaixo |
+| **4.0** | **Motor MAKER — a rota que sobrou, e que não tem código** | ⬜ **NÃO COMEÇOU.** `live/motor.py` é 100 % taker: ordena a `best_ask` (linha 415) e o cliente fixa **`FOK`** (`execution/cliente.py:51`). Operar maker exige o que não existe: **(a)** decidir `distancia_ticks` e tamanho em tempo real — hoje só há `OrdemHipotetica` com cenários fixos para análise pós-gravação (`analysis/rewards.py`); **(b)** `orderType` configurável para **GTC**, já que FOK nunca repousa no livro e maker é ordem que espera; **(c)** reposicionar e cancelar cotação conforme o livro anda; **(d)** posição na fila, que o WS agregado não mostra (`limitacao_de_fila`). O que JÁ existe e serve: a fórmula de score confirmada `S(v,s)=((v-s)/v)²×b`, o `OrderBook`, os portões e o `orcamento_por_unidade_de_score_p50` por mercado |
 | 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
