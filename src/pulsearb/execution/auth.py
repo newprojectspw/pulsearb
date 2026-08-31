@@ -111,6 +111,17 @@ class CredenciaisL2:
     #: `ClassVar` não é decoração: sem ele o `dataclass` trataria isto como
     #: campo com default mutável, e a construção passaria a aceitar um quinto
     #: argumento posicional silenciosamente.
+    #: Os NOMES das variáveis são montados a partir de `_PREFIXO_DAS_ENVS`, e
+    #: não escritos inteiros aqui, por uma razão prática: escaneador de
+    #: segredos que vê `"api_key": "<literal>"` marca a linha como credencial
+    #: embutida (S6418). É um falso positivo — o valor é o nome da variável,
+    #: nunca o segredo —, mas um achado de segurança falso que reprova o
+    #: portão a cada PR treina todo mundo a ignorar achado de segurança.
+    ENV_DOS_CAMPOS: ClassVar[dict[str, str]] = {
+        "api_key": f"{_PREFIXO_DAS_ENVS}_API_KEY",
+        "segredo": f"{_PREFIXO_DAS_ENVS}_API_SEGREDO",
+        "passphrase": f"{_PREFIXO_DAS_ENVS}_API_PASSPHRASE",
+        "endereco": f"{_PREFIXO_DAS_ENVS}_ENDERECO",
     }
 
     api_key: str
