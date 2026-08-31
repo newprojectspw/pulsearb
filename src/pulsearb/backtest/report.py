@@ -45,6 +45,55 @@ class Trade:
         return self.payout_usdc - self.custo_usdc - self.fee_usdc
 
 
+@dataclass(frozen=True, slots=True)
+class SinalDirecional:
+    """Um instante em que o gatilho disparou — **preenchido ou não**.
+
+    A diferença para `Trade` é a única coisa que este tipo existe para ter: o
+    `Trade` só nasce quando a ordem preenche, e por isso a coorte dele MUDA
+    quando muda a latência, o book ou o teto de entradas. Um `hit_rate` sobre
+    ela não separa "o sinal não tem direção" de "os cenários operaram trades
+    diferentes" — que é a ressalva registrada na §2d-ter do VEREDITO_M2.
+
+    Aqui a coorte é fixa por construção: o sinal é calculado em `t` e não
+    depende de nada a jusante. É o que permite perguntar *há informação
+    direcional?* sem que a resposta carregue a execução junto.
+    """
+
+    slug: str
+    bucket_tempo: str
+    lado_up: bool
+    prob: float
+    resolveu_up: bool
+
+    @property
+    def acertou(self) -> bool:
+        return self.lado_up == self.resolveu_up
+
+
+def _p_valor_binomial(acertos: int, n: int) -> float:
+    """P-valor bilateral contra a hipótese de moeda honesta (p = 0,5).
+
+    Aproximação normal com correção de continuidade. Não usa `scipy` de
+    propósito: a dependência não existe no projeto, e para `n` desta ordem a
+    aproximação e o exato concordam nas casas que importam para a decisão.
+
+    Sem o p-valor o número não decide nada. `hit_rate` 0,52 em 50 sinais e
+    0,52 em 50 mil sinais são a mesma fração e conclusões opostas, e é
+    exatamente esse engano que um "melhor que 0,5" sem amostra produz.
+    """
+    if n <= 0:
+        return float("nan")
+    desvio = math.sqrt(0.25 * n)
+    if desvio == 0:  # pragma: no cover - n > 0 garante desvio > 0
+        return float("nan")
+    # A correção de 0,5 evita p-valor otimista demais em amostra pequena.
+    excesso = abs(acertos - 0.5 * n) - 0.5
+    if excesso <= 0:
+        return 1.0
+    return math.erfc(excesso / desvio / math.sqrt(2.0))
+
+
 #: Largura das faixas da curva de confiabilidade. 0,05 dá 20 faixas entre 0
 #: e 1 — fino o bastante para separar um modelo calibrado de um constante, e
 #: grosso o bastante para cada faixa ter amostra.
@@ -221,6 +270,18 @@ class BacktestReport:
     #: motor ao vivo continuaria operando ali. Cobrir horizontes maiores exige
     #: MEDIR horizontes maiores, não esticar os que existem.
     instantes_alem_da_curva: Counter[str] = field(default_factory=Counter)
+    #: TODO sinal que cruzou o threshold, preenchido ou não — a coorte fixa do
+    #: teste de direção. Ver `SinalDirecional` para por que ela não pode ser a
+    #: lista de `trades`.
+    sinais_direcionais: list[SinalDirecional] = field(default_factory=list)
+    #: slug → o PRIMEIRO sinal daquela janela. A janela é a unidade que se
+    #: aproxima de independente: dentro de uma, os instantes compartilham
+    #: âncora, preço e resultado, então 240 instantes de uma janela não são
+    #: 240 observações — são uma, repetida. Contar todos infla `n` e encolhe o
+    #: p-valor sem que nenhuma informação nova tenha entrado.
+    primeiro_sinal_da_janela: dict[str, SinalDirecional] = field(
+        default_factory=dict
+    )
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -230,6 +291,16 @@ class BacktestReport:
         """Um instante em que o gatilho dispararia, tenha operado ou não."""
         self.oportunidades_por_bucket[bucket] += 1
         self.janelas_com_oportunidade[bucket].add(slug)
+
+    def add_sinal_direcional(self, sinal: SinalDirecional) -> None:
+        """Registra a direção apostada e o resultado, ANTES de qualquer fill.
+
+        Chamado no mesmo ponto de `add_oportunidade` e pela mesma razão: a
+        pergunta é "o sinal existiu, e apontou para o lado certo?", não
+        "operamos?".
+        """
+        self.sinais_direcionais.append(sinal)
+        self.primeiro_sinal_da_janela.setdefault(sinal.slug, sinal)
 
     def add_calibration(self, bucket: str, prob_up: float, resolveu_up: bool) -> None:
         """Calibração é medida sobre TODAS as previsões, não só as negociadas.
@@ -257,6 +328,79 @@ class BacktestReport:
             if self.trades
             else float("nan")
         )
+
+    def direcao_sem_fill(self) -> dict[str, Any]:
+        """O teste direto de direção — o que a §2d-ter registra como pendente.
+
+        Responde UMA pergunta: dos instantes em que o gatilho disparou, em que
+        fração o lado escolhido foi o que venceu? Sem book, sem latência, sem
+        teto de entradas — nada que a execução mude entra aqui.
+
+        **Por que isso não é o `hit_rate`.** O `hit_rate` é medido sobre
+        `trades`, e um trade só existe quando a ordem preencheu. Trocar a
+        latência troca quais ordens preenchem, então os cenários de
+        `sensibilidade_latencia` comparam populações diferentes. Aqui a coorte
+        é a mesma em qualquer cenário, porque o sinal é calculado em `t` e não
+        olha para frente.
+
+        **Duas contagens, e a que decide é a segunda.** `por_sinal` usa todos
+        os instantes; `por_janela` usa o primeiro de cada janela. Dentro de uma
+        janela os instantes dividem âncora, preço e resultado — são a mesma
+        observação repetida, e contá-los como independentes encolhe o p-valor
+        sem que informação nova tenha entrado. `por_janela` é a leitura
+        conservadora, e é a que deve ser citada.
+
+        **O que este teste NÃO responde:** se a estratégia é lucrativa.
+        Direção acima de 0,5 com custo de execução maior que a margem continua
+        perdendo dinheiro — o 1.5 (capacidade) e o 1.1 (PnL) são critérios
+        separados de propósito.
+        """
+
+        def _bloco(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            n = len(sinais)
+            # SEMPRE publicado, e ao lado de `n`, porque é ele que diz quanto
+            # o `n` vale. A primeira rodada real desta medição deu, numa hora,
+            # `por_sinal` com n=1.141 e p=0,000 — sobre QUATRO janelas. Sem
+            # este campo ao lado, o p-valor lê-se como evidência forte.
+            janelas = len({s.slug for s in sinais})
+            if n == 0:
+                # Sem sinal não há acurácia. Devolver 0,5 aqui — "no meio" —
+                # seria inventar uma medição para uma amostra que não existe.
+                return {
+                    "n": 0,
+                    "janelas_distintas": 0,
+                    "acertos": 0,
+                    "acuracia": None,
+                    "p_valor": None,
+                    "difere_de_meio_a_meio": None,
+                }
+            acertos = sum(1 for s in sinais if s.acertou)
+            p = _p_valor_binomial(acertos, n)
+            return {
+                "n": n,
+                "janelas_distintas": janelas,
+                "acertos": acertos,
+                "acuracia": acertos / n,
+                "p_valor": p,
+                # 0,05 escrito aqui, e não escolhido depois de ver o número.
+                "difere_de_meio_a_meio": bool(p < 0.05),
+            }
+
+        por_janela = list(self.primeiro_sinal_da_janela.values())
+        return {
+            "por_sinal": _bloco(self.sinais_direcionais),
+            "por_janela": _bloco(por_janela),
+            "leitura": (
+                "por_janela e a leitura conservadora e e a que decide: dentro "
+                "de uma janela os instantes dividem ancora, preco e resultado, "
+                "entao contar todos infla n sem informacao nova. Acuracia > 0,5 "
+                "com p < 0,05 e evidencia de direcao; nao e evidencia de lucro, "
+                "que depende de execucao e capacidade (1.1 e 1.5). "
+                "Compare n com janelas_distintas em por_sinal: quando os dois "
+                "estao longe, o p-valor de por_sinal e espurio — foi o que a "
+                "primeira rodada real mostrou, com n=1141 sobre 4 janelas."
+            ),
+        }
 
     @property
     def fees_pagas(self) -> float:
@@ -315,6 +459,7 @@ class BacktestReport:
                     else None
                 ),
             },
+            "direcao_sem_fill": self.direcao_sem_fill(),
             "funil_de_sinais": {
                 "gerados": self.sinais_gerados,
                 "descartados_sem_book": self.sinais_sem_book,

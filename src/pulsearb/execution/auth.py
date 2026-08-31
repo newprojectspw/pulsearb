@@ -75,6 +75,9 @@ ASSINATURA_EOA = 0
 #: a validação que impede o segredo malformado de virar chave HMAC vazia.
 _PARA_ALFABETO_PADRAO = str.maketrans("-_", "+/")
 
+#: Prefixo comum das variáveis de ambiente do projeto.
+_PREFIXO_DAS_ENVS = "PULSEARB"
+
 
 def _normalizado(texto: str) -> bytes:
     """O segredo no alfabeto padrão e com padding, pronto para validação.
@@ -108,11 +111,6 @@ class CredenciaisL2:
     #: `ClassVar` não é decoração: sem ele o `dataclass` trataria isto como
     #: campo com default mutável, e a construção passaria a aceitar um quinto
     #: argumento posicional silenciosamente.
-    ENV_DOS_CAMPOS: ClassVar[dict[str, str]] = {
-        "api_key": "PULSEARB_API_KEY",
-        "segredo": "PULSEARB_API_SEGREDO",
-        "passphrase": "PULSEARB_API_PASSPHRASE",
-        "endereco": "PULSEARB_ENDERECO",
     }
 
     api_key: str

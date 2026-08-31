@@ -711,6 +711,66 @@ def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
     print()
 
 
+def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
+    """HÁ direção no sinal? — separado de "a estratégia lucra?".
+
+    **Não é um critério.** Os dez foram escritos antes dos números e não
+    ganham um décimo primeiro depois. É diagnóstico, e serve para ler o 1.1 e
+    o 1.4: PnL negativo com direção medida acima de 0,5 aponta para execução e
+    capacidade; PnL negativo com direção em 0,5 aponta para ausência de sinal.
+    São consertos opostos, e sem este número os dois casos são o mesmo número.
+
+    O `hit_rate` não responde isso: ele é medido sobre trades preenchidos, e a
+    coorte deles muda com a latência (§2d-ter do VEREDITO_M2).
+    """
+    bloco = (relatorio.get("backtest") or {}).get("direcao_sem_fill") or {}
+    por_janela = bloco.get("por_janela") or {}
+    if not por_janela.get("n"):
+        return
+
+    print("=" * 74)
+    print("DIRECAO DO SINAL, SEM FILL  (diagnostico, nao e criterio)")
+    print("=" * 74)
+    for rotulo, chave in (("por janela", "por_janela"), ("por sinal", "por_sinal")):
+        celula = bloco.get(chave) or {}
+        n = celula.get("n") or 0
+        if not n:
+            continue
+        acuracia = celula.get("acuracia")
+        p = celula.get("p_valor")
+        marca = "SIM" if celula.get("difere_de_meio_a_meio") else "nao"
+        janelas = celula.get("janelas_distintas")
+        print(
+            f"  {rotulo:<12} n={n:<6} janelas={janelas if janelas is not None else '?'!s:<6}"
+            f" acuracia={_numero(acuracia)}   p={_numero(p)}"
+            f"   difere de 0,5: {marca}"
+        )
+    print()
+    # O aviso sai do DADO, e não é rodapé fixo: quando `n` e
+    # `janelas_distintas` estão longe, o p-valor de `por_sinal` é espúrio, e
+    # quem lê precisa ver isso na hora — não deduzir depois. A primeira rodada
+    # real deu n=1.141 sobre 4 janelas, com p=0,000 apontando para o lado
+    # OPOSTO do que `por_janela` dizia.
+    sinal = bloco.get("por_sinal") or {}
+    n_sinal = sinal.get("n") or 0
+    janelas_sinal = sinal.get("janelas_distintas") or 0
+    if janelas_sinal and n_sinal >= 10 * janelas_sinal:
+        print(
+            f"  !! por_sinal tem {n_sinal} instantes de apenas {janelas_sinal} "
+            "janela(s): o p-valor\n"
+            "     dele NAO vale, sao a mesma observacao repetida. Leia por_janela."
+        )
+        print()
+    print(
+        "  A leitura que decide e a POR JANELA: dentro de uma janela os\n"
+        "  instantes dividem ancora, preco e resultado, entao contar todos\n"
+        "  infla n sem informacao nova.\n"
+        "  Acuracia > 0,5 com p < 0,05 e evidencia de DIRECAO — nao de lucro.\n"
+        "  Lucro depende de execucao e capacidade, que sao o 1.1 e o 1.5."
+    )
+    print()
+
+
 def _imprimir(rotulo: str, valor: Any) -> None:
     print(f"{rotulo:<38} {valor}")
 
@@ -742,44 +802,53 @@ def _imprimir_criterios(titulo: str, criterios: list[Criterio], exige: str) -> N
 _ORDEM_DAS_BANDAS = (">240s", "240-120s", "120-60s", "60-30s", "<30s")
 
 
-def _imprimir_horizonte(relatorio: dict[str, Any]) -> None:
-    """A curva de horizonte: o preditor CRU forcado a operar em cada banda.
+def _bandas_ordenadas(por_banda: dict[str, Any]) -> list[str]:
+    """As bandas na ordem de leitura, com as desconhecidas no fim.
 
-    Responde a pergunta do M3 escolhida por Paulo — o edge nao existe em lugar
-    nenhum, ou existe num horizonte que a v1 nao opera? A regra de leitura ja
-    esta no relatorio (`alguma_banda_com_edge`), computada pela §2d-bis; aqui
-    so a torno legivel.
+    Banda que o relatorio traga e `_ORDEM_DAS_BANDAS` nao conheca sai impressa
+    do mesmo jeito: sumir com ela seria esconder dado do leitor.
     """
-    curva = relatorio.get("curva_de_horizonte") or {}
-    por_banda = curva.get("por_banda") or {}
-    if not por_banda:
-        return
-    print("=" * 74)
-    print("EDGE POR HORIZONTE  (preditor CRU, uma rodada por banda — §2d-bis)")
-    print("=" * 74)
-    print(f"  {'banda':<12}{'trades':>8}{'hit':>9}{'PnL USDC':>12}"
-          f"{'PnL/share':>12}  edge?")
-    ordenadas = [b for b in _ORDEM_DAS_BANDAS if b in por_banda]
-    ordenadas += [b for b in por_banda if b not in _ORDEM_DAS_BANDAS]
-    com_edge = set(curva.get("bandas_com_edge") or [])
-    fraco = set(curva.get("sinal_fraco") or [])
-    for banda in ordenadas:
-        d = por_banda[banda]
-        hit = d.get("hit_rate")
-        pnl = d.get("pnl_liquido_usdc")
-        pps = d.get("pnl_por_share")
-        marca = (
-            "SIM" if banda in com_edge
-            else "fraco (n<40)" if banda in fraco
-            else "nao"
-        )
-        print(
-            f"  {banda:<12}{d.get('trades', 0):>8}"
-            f"{(f'{hit:.4f}' if hit is not None else '   -'):>9}"
-            f"{(f'{pnl:.4f}' if pnl is not None else '   -'):>12}"
-            f"{(f'{pps:.6f}' if pps is not None else '   -'):>12}  {marca}"
-        )
-    print()
+    conhecidas = [b for b in _ORDEM_DAS_BANDAS if b in por_banda]
+    return conhecidas + [b for b in por_banda if b not in _ORDEM_DAS_BANDAS]
+
+
+def _marca_de_edge(banda: str, com_edge: set[str], fraco: set[str]) -> str:
+    """A coluna `edge?` da banda. A regra ja veio decidida pela §2d-bis."""
+    if banda in com_edge:
+        return "SIM"
+    if banda in fraco:
+        return "fraco (n<40)"
+    return "nao"
+
+
+def _celula_numerica(valor: Any, casas: int, largura: int) -> str:
+    """Numero alinhado, ou `-` quando a banda nao tem o dado.
+
+    Ausente e diferente de zero: imprimir 0,0000 onde nao houve medida faria o
+    leitor decidir sobre um numero que ninguem mediu.
+    """
+    if valor is None:
+        return f"{'-':>{largura}}"
+    return f"{valor:>{largura}.{casas}f}"
+
+
+def _linha_da_banda(
+    banda: str, d: dict[str, Any], com_edge: set[str], fraco: set[str]
+) -> str:
+    """Uma linha da tabela de horizonte."""
+    return (
+        f"  {banda:<12}{d.get('trades', 0):>8}"
+        f"{_celula_numerica(d.get('hit_rate'), 4, 9)}"
+        f"{_celula_numerica(d.get('pnl_liquido_usdc'), 4, 12)}"
+        f"{_celula_numerica(d.get('pnl_por_share'), 6, 12)}"
+        f"  {_marca_de_edge(banda, com_edge, fraco)}"
+    )
+
+
+def _veredito_do_horizonte(
+    curva: dict[str, Any], com_edge: set[str], fraco: set[str]
+) -> None:
+    """O que a tabela quer dizer — a regra ja esta computada no relatorio."""
     if curva.get("alguma_banda_com_edge"):
         print(
             f"  >> EDGE EM {', '.join(sorted(com_edge))}: o defeito e de "
@@ -798,6 +867,31 @@ def _imprimir_horizonte(relatorio: dict[str, Any]) -> None:
             "— pnl>0 e hit>0,5\n     mas n<40, dentro do ruido do proprio "
             "hit_rate."
         )
+
+
+def _imprimir_horizonte(relatorio: dict[str, Any]) -> None:
+    """A curva de horizonte: o preditor CRU forcado a operar em cada banda.
+
+    Responde a pergunta do M3 escolhida por Paulo — o edge nao existe em lugar
+    nenhum, ou existe num horizonte que a v1 nao opera? A regra de leitura ja
+    esta no relatorio (`alguma_banda_com_edge`), computada pela §2d-bis; aqui
+    so a torno legivel.
+    """
+    curva = relatorio.get("curva_de_horizonte") or {}
+    por_banda = curva.get("por_banda") or {}
+    if not por_banda:
+        return
+    print("=" * 74)
+    print("EDGE POR HORIZONTE  (preditor CRU, uma rodada por banda — §2d-bis)")
+    print("=" * 74)
+    print(f"  {'banda':<12}{'trades':>8}{'hit':>9}{'PnL USDC':>12}"
+          f"{'PnL/share':>12}  edge?")
+    com_edge = set(curva.get("bandas_com_edge") or [])
+    fraco = set(curva.get("sinal_fraco") or [])
+    for banda in _bandas_ordenadas(por_banda):
+        print(_linha_da_banda(banda, por_banda[banda], com_edge, fraco))
+    print()
+    _veredito_do_horizonte(curva, com_edge, fraco)
     print()
 
 
@@ -954,6 +1048,10 @@ def main(argv: list[str] | None = None) -> None:
         "TAKER VIAVEL exige as CINCO",
     )
     _imprimir_diagnostico_da_calibracao(relatorio)
+    # Logo depois dos cinco do taker, e antes do maker: é ali que quem lê
+    # acabou de ver o 1.1 e o 1.4 reprovarem e precisa saber se a causa é
+    # ausência de sinal ou custo de execução.
+    _imprimir_direcao_sem_fill(relatorio)
     if not variante_encolhida:
         _imprimir_horizonte(relatorio_topo)
     _imprimir_criterios(
