@@ -214,9 +214,32 @@ Alternativa com Docker:
 
 ```bash
 docker build -f deploy/Dockerfile -t pulsearb-recorder .
+
+# O chown NÃO é opcional. O container roda como `pulsearb` (UID 10001,
+# fixado no Dockerfile); num bind mount quem manda é o dono do lado do
+# HOST, e um diretório criado por root deixa o recorder sem escrita.
+sudo mkdir -p /opt/pulsearb/data
+sudo chown 10001:10001 /opt/pulsearb/data
+
 docker run -d --restart=always --name pulsearb-recorder \
   -v /opt/pulsearb/data:/data pulsearb-recorder --duration 72h
 ```
+
+**Como esse erro se apresenta, se o `chown` for pulado:** o container sobe,
+falha na primeira escrita com `PermissionError`, e o `--restart=always` o
+reinicia em laço. O `docker ps` mostra o container "rodando" — reiniciando é
+um estado que se parece com rodando à distância — e nenhum `.jsonl.gz`
+aparece. Confira sempre com:
+
+```bash
+docker logs --tail 30 pulsearb-recorder
+ls -la /opt/pulsearb/data          # tem que ter arquivo CRESCENDO
+```
+
+*(Escrito em 2026-08-31 a partir da leitura do Dockerfile, **sem build de
+verificação** — não há Docker na máquina de análise. O item 5.2 segue 🟡 por
+isso: o primeiro build ainda vai acontecer, e é nele que isto se confirma ou
+se desmente.)*
 
 ## 6. Uso de disco — MEDIDO em produção
 
