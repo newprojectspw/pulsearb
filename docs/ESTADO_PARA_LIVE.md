@@ -489,7 +489,7 @@ defeitos nele:
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (34 testes: L2 HMAC-SHA256 + typed data do L1 + `CredenciaisL2.do_ambiente`) e `execution/ordem.py` (35 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 15 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
-| 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **código completo, nunca falou com o CLOB de verdade** — `execution/cliente.py` (47 testes), com o transporte `httpx` já escrito e testado contra `MockTransport`: FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). Falta **uma resposta do servidor de verdade** — o que exige rede e credencial, não código. O `content=` (e não `json=`) é o que preserva os bytes assinados; falha de rede vira `INCERTA` e nunca recusa, porque recusa autorizaria reenviar uma ordem que talvez esteja no livro |
+| 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **código completo; a encanação já falou com o CLOB, a ordem assinada não** — `execution/cliente.py` (47 testes) contra `MockTransport`: FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). **Medido ao vivo em 2026-08-31** (`scripts/smoke_clob_rest.py`, só GET público): DNS, TLS e os endpoints respondem 200, com **p50 de 218 ms e p99 de ~970 ms** — ver API_NOTES §16. Falta o que sempre faltou: **uma ordem assinada recebendo resposta**, que exige credencial e move dinheiro. Nenhum GET substitui isso. O `content=` (e não `json=`) é o que preserva os bytes assinados; falha de rede vira `INCERTA` e nunca recusa, porque recusa autorizaria reenviar uma ordem que talvez esteja no livro |
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
 
 ### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
@@ -548,7 +548,16 @@ que nunca existiu.)*
 
 A rodada anterior (PID 24507) gravou **3.050 entradas e recusou todas** com
 `relogio_derivado`. Não era relógio: era latência de rede até a Polymarket,
-~1.278 ms medidos, contra um teto de 250 ms.
+~1.278 ms no diário, contra um teto de 250 ms.
+
+**E a latência foi medida por fora depois, o que fecha o argumento**
+(API_NOTES §16, 2026-08-31): `GET /ok` e `GET /time` dão **p50 de ~218 ms e p99
+de ~970 ms** de ida e volta, do mesmo Mac. O teto do item 3.10 é 250 ms — ou
+seja, a recusa não vinha de relógio ruim, vinha de a régua ser menor que a
+distância. O offset do relógio também foi estimado, e **não decide nada**: o
+espalhamento das amostras ficou maior que a mediana nas duas rodadas, então a
+medição só diz "sub-segundo". É por isso que o 5.4 exige daemon de NTP, e não
+uma conta nossa.
 
 `_portao_do_relogio` aplicava o teto **em todos os modos**. A ausência de
 fonte já tinha a exceção certa — fora do LIVE não recusa, senão o SHADOW não
