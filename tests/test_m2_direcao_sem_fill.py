@@ -73,6 +73,27 @@ class TestDuasContagens:
         assert saida["por_sinal"]["n"] == 51
         assert saida["por_janela"]["n"] == 2
 
+    def test_janelas_distintas_sai_ao_lado_do_n(self):
+        """O campo que diz quanto o `n` vale, e sem o qual o p-valor engana.
+
+        Medido na PRIMEIRA rodada real (1 h de 2026-08-24): `por_sinal` deu
+        n=1.141 com p=0,000 — sobre QUATRO janelas, e apontando para o lado
+        oposto do que `por_janela` dizia. Publicar o p-valor sem
+        `janelas_distintas` ao lado convida a ler 1.141 observações
+        independentes onde há 4.
+        """
+        report = BacktestReport()
+        for i in range(300):
+            report.add_sinal_direcional(_sinal(f"janela-{i % 4}"))
+
+        por_sinal = report.direcao_sem_fill()["por_sinal"]
+
+        assert por_sinal["n"] == 300
+        assert por_sinal["janelas_distintas"] == 4
+
+    def test_a_leitura_manda_comparar_n_com_janelas_distintas(self):
+        assert "janelas_distintas" in BacktestReport().direcao_sem_fill()["leitura"]
+
     def test_o_primeiro_sinal_e_o_que_fica_e_nao_o_ultimo(self):
         """A estratégia opera o primeiro gatilho da janela; é ele o que conta.
 

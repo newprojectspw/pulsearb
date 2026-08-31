@@ -358,11 +358,17 @@ class BacktestReport:
 
         def _bloco(sinais: list[SinalDirecional]) -> dict[str, Any]:
             n = len(sinais)
+            # SEMPRE publicado, e ao lado de `n`, porque é ele que diz quanto
+            # o `n` vale. A primeira rodada real desta medição deu, numa hora,
+            # `por_sinal` com n=1.141 e p=0,000 — sobre QUATRO janelas. Sem
+            # este campo ao lado, o p-valor lê-se como evidência forte.
+            janelas = len({s.slug for s in sinais})
             if n == 0:
                 # Sem sinal não há acurácia. Devolver 0,5 aqui — "no meio" —
                 # seria inventar uma medição para uma amostra que não existe.
                 return {
                     "n": 0,
+                    "janelas_distintas": 0,
                     "acertos": 0,
                     "acuracia": None,
                     "p_valor": None,
@@ -372,6 +378,7 @@ class BacktestReport:
             p = _p_valor_binomial(acertos, n)
             return {
                 "n": n,
+                "janelas_distintas": janelas,
                 "acertos": acertos,
                 "acuracia": acertos / n,
                 "p_valor": p,
@@ -388,7 +395,10 @@ class BacktestReport:
                 "de uma janela os instantes dividem ancora, preco e resultado, "
                 "entao contar todos infla n sem informacao nova. Acuracia > 0,5 "
                 "com p < 0,05 e evidencia de direcao; nao e evidencia de lucro, "
-                "que depende de execucao e capacidade (1.1 e 1.5)."
+                "que depende de execucao e capacidade (1.1 e 1.5). "
+                "Compare n com janelas_distintas em por_sinal: quando os dois "
+                "estao longe, o p-valor de por_sinal e espurio — foi o que a "
+                "primeira rodada real mostrou, com n=1141 sobre 4 janelas."
             ),
         }
 

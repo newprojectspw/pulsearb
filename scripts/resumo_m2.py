@@ -739,11 +739,28 @@ def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
         acuracia = celula.get("acuracia")
         p = celula.get("p_valor")
         marca = "SIM" if celula.get("difere_de_meio_a_meio") else "nao"
+        janelas = celula.get("janelas_distintas")
         print(
-            f"  {rotulo:<12} n={n:<7} acuracia={_numero(acuracia)}"
-            f"   p={_numero(p)}   difere de 0,5: {marca}"
+            f"  {rotulo:<12} n={n:<6} janelas={janelas if janelas is not None else '?'!s:<6}"
+            f" acuracia={_numero(acuracia)}   p={_numero(p)}"
+            f"   difere de 0,5: {marca}"
         )
     print()
+    # O aviso sai do DADO, e não é rodapé fixo: quando `n` e
+    # `janelas_distintas` estão longe, o p-valor de `por_sinal` é espúrio, e
+    # quem lê precisa ver isso na hora — não deduzir depois. A primeira rodada
+    # real deu n=1.141 sobre 4 janelas, com p=0,000 apontando para o lado
+    # OPOSTO do que `por_janela` dizia.
+    sinal = bloco.get("por_sinal") or {}
+    n_sinal = sinal.get("n") or 0
+    janelas_sinal = sinal.get("janelas_distintas") or 0
+    if janelas_sinal and n_sinal >= 10 * janelas_sinal:
+        print(
+            f"  !! por_sinal tem {n_sinal} instantes de apenas {janelas_sinal} "
+            "janela(s): o p-valor\n"
+            "     dele NAO vale, sao a mesma observacao repetida. Leia por_janela."
+        )
+        print()
     print(
         "  A leitura que decide e a POR JANELA: dentro de uma janela os\n"
         "  instantes dividem ancora, preco e resultado, entao contar todos\n"

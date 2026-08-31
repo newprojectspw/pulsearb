@@ -1289,6 +1289,30 @@ coorte). Até ele existir, a inclinação da latência é indício, não prova.
 > custo de execução maior que a margem continua perdendo — por isso ele é
 > diagnóstico e não um décimo primeiro critério. Os dez foram escritos antes
 > dos números e não ganham companhia depois.
+>
+> **A primeira rodada real justificou o desenho, e por pouco.** Sobre 1 h de
+> 2026-08-24 (20:00 UTC, 4 janelas), as duas contagens deram respostas
+> **opostas**:
+>
+> | contagem | n | janelas | acurácia | p | difere de 0,5 |
+> |---|---|---|---|---|---|
+> | `por_janela` | 4 | 4 | 1,000 | 0,134 | não |
+> | `por_sinal` | 1.141 | **4** | 0,321 | 1,4e−33 | "sim" |
+>
+> Publicado sozinho, o `por_sinal` lê-se como *sinal forte, na direção
+> contrária, com p praticamente zero*. São **quatro janelas**. O primeiro sinal
+> de cada uma acertou; ao longo delas o gatilho virou de lado e passou a errar,
+> e cada instante virou uma "observação".
+>
+> Duas correções entraram por causa disso: `janelas_distintas` passou a sair
+> **ao lado de `n`** em cada contagem, e o `resumo_m2.py` imprime um aviso
+> quando `n ≥ 10 × janelas_distintas` — tirado do dado, não escrito como
+> rodapé fixo. Sem isso, o número mais chamativo do bloco era também o mais
+> enganoso.
+>
+> **E o que essa rodada NÃO mede:** nada sobre borda. Quatro janelas de uma
+> hora não sustentam veredito — ela existiu para validar o instrumento, e é só
+> isso que ela estabelece.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
