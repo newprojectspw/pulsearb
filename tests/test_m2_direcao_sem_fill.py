@@ -1,0 +1,195 @@
+"""O teste direto de direção — a pendência registrada na §2d-ter.
+
+O `hit_rate` do relatório é medido sobre `trades`, e um trade só existe
+quando a ordem PREENCHEU. Trocar a latência troca quais ordens preenchem,
+então os cenários de `sensibilidade_latencia` comparam populações diferentes
+— e é por isso que a inclinação da latência não separa "não há direção" de
+"a execução ficou mais barata".
+
+Cada teste aqui trava uma propriedade que faz `direcao_sem_fill` responder à
+pergunta que o `hit_rate` não responde.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from pulsearb.backtest.report import BacktestReport, SinalDirecional
+
+
+def _sinal(
+    slug: str = "btc-updown-5m-1",
+    *,
+    lado_up: bool = True,
+    resolveu_up: bool = True,
+    prob: float = 0.7,
+    bucket: str = "240-120s",
+) -> SinalDirecional:
+    return SinalDirecional(
+        slug=slug,
+        bucket_tempo=bucket,
+        lado_up=lado_up,
+        prob=prob,
+        resolveu_up=resolveu_up,
+    )
+
+
+class TestOSinalRegistraDirecaoEResultado:
+    def test_acertou_compara_lado_apostado_com_resultado(self):
+        assert _sinal(lado_up=True, resolveu_up=True).acertou
+        assert _sinal(lado_up=False, resolveu_up=False).acertou
+        assert not _sinal(lado_up=True, resolveu_up=False).acertou
+        assert not _sinal(lado_up=False, resolveu_up=True).acertou
+
+    def test_o_sinal_nao_carrega_preco_nem_book(self):
+        """O tipo existe para NÃO ter esses campos.
+
+        Se `SinalDirecional` guardasse preço pago ou profundidade, alguém
+        acabaria calculando PnL a partir dele — e o PnL depende de fill, que é
+        exatamente o que esta medição existe para excluir.
+        """
+        campos = set(SinalDirecional.__slots__)
+
+        assert not campos & {"preco_pago", "custo_usdc", "shares", "latencia_ms"}
+
+
+class TestDuasContagens:
+    def test_por_janela_conta_o_primeiro_sinal_de_cada_janela(self):
+        """240 instantes de uma janela não são 240 observações.
+
+        Eles dividem âncora, preço e resultado — são a mesma observação
+        repetida. Contá-los como independentes encolhe o p-valor sem que
+        informação nova tenha entrado.
+        """
+        report = BacktestReport()
+        for _ in range(50):
+            report.add_sinal_direcional(_sinal("janela-a"))
+        report.add_sinal_direcional(_sinal("janela-b"))
+
+        saida = report.direcao_sem_fill()
+
+        assert saida["por_sinal"]["n"] == 51
+        assert saida["por_janela"]["n"] == 2
+
+    def test_o_primeiro_sinal_e_o_que_fica_e_nao_o_ultimo(self):
+        """A estratégia opera o primeiro gatilho da janela; é ele o que conta.
+
+        Guardar o último deixaria a medição escolher, dentro da janela, o
+        instante que já sabe como ela terminou.
+        """
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal("j", lado_up=True, resolveu_up=True))
+        report.add_sinal_direcional(_sinal("j", lado_up=False, resolveu_up=True))
+
+        assert report.primeiro_sinal_da_janela["j"].lado_up is True
+        assert report.direcao_sem_fill()["por_janela"]["acertos"] == 1
+
+
+class TestAAcuracia:
+    def test_todos_certos_da_um(self):
+        report = BacktestReport()
+        for i in range(10):
+            report.add_sinal_direcional(_sinal(f"j{i}", lado_up=True, resolveu_up=True))
+
+        assert report.direcao_sem_fill()["por_janela"]["acuracia"] == 1.0
+
+    def test_metade_certa_da_meio_a_meio(self):
+        report = BacktestReport()
+        for i in range(10):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", lado_up=True, resolveu_up=i % 2 == 0)
+            )
+
+        assert report.direcao_sem_fill()["por_janela"]["acuracia"] == pytest.approx(0.5)
+
+    def test_sem_sinal_nenhum_a_acuracia_e_nula_e_nao_meio_a_meio(self):
+        """Devolver 0,5 — "no meio" — inventaria medição para amostra que não
+        existe. É o defeito do `cobertura_da_gravacao`, que o M2 já pagou."""
+        saida = BacktestReport().direcao_sem_fill()
+
+        assert saida["por_janela"]["n"] == 0
+        assert saida["por_janela"]["acuracia"] is None
+        assert saida["por_janela"]["difere_de_meio_a_meio"] is None
+
+
+class TestOPValor:
+    """Sem ele o número não decide nada: 0,52 em 50 e 0,52 em 50 mil são a
+    mesma fração e conclusões opostas."""
+
+    def test_amostra_pequena_com_desvio_grande_nao_e_significativa(self):
+        report = BacktestReport()
+        for i in range(10):
+            report.add_sinal_direcional(_sinal(f"j{i}", resolveu_up=i < 7))
+
+        saida = report.direcao_sem_fill()["por_janela"]
+
+        assert saida["acuracia"] == pytest.approx(0.7)
+        assert not saida["difere_de_meio_a_meio"]
+
+    def test_amostra_grande_com_desvio_pequeno_e_significativa(self):
+        """0,55 em 1.000 decide; 0,7 em 10 não. É essa a inversão que só o
+        p-valor produz, e é a razão de ele estar no relatório."""
+        report = BacktestReport()
+        for i in range(1000):
+            report.add_sinal_direcional(_sinal(f"j{i}", resolveu_up=i % 100 < 55))
+
+        saida = report.direcao_sem_fill()["por_janela"]
+
+        assert saida["acuracia"] == pytest.approx(0.55)
+        assert saida["difere_de_meio_a_meio"]
+
+    def test_moeda_honesta_nao_acusa_direcao(self):
+        report = BacktestReport()
+        for i in range(1000):
+            report.add_sinal_direcional(_sinal(f"j{i}", resolveu_up=i % 2 == 0))
+
+        saida = report.direcao_sem_fill()["por_janela"]
+
+        assert saida["p_valor"] == pytest.approx(1.0)
+        assert not saida["difere_de_meio_a_meio"]
+
+    def test_direcao_ERRADA_tambem_e_significativa(self):
+        """Acurácia 0,42 em amostra grande é informação, não ruído — só que
+        apontando para o outro lado. Um teste unilateral esconderia isso, e é
+        exatamente o número que a rodada de 24 h produziu (0,4172)."""
+        report = BacktestReport()
+        for i in range(1000):
+            report.add_sinal_direcional(_sinal(f"j{i}", resolveu_up=i % 100 < 42))
+
+        saida = report.direcao_sem_fill()["por_janela"]
+
+        assert saida["acuracia"] == pytest.approx(0.42)
+        assert saida["difere_de_meio_a_meio"]
+
+    def test_o_p_valor_fica_entre_zero_e_um(self):
+        for acertos, n in ((0, 10), (10, 10), (5, 10), (500, 1000), (900, 1000)):
+            report = BacktestReport()
+            for i in range(n):
+                report.add_sinal_direcional(_sinal(f"j{i}", resolveu_up=i < acertos))
+            p = report.direcao_sem_fill()["por_janela"]["p_valor"]
+
+            assert 0.0 <= p <= 1.0, f"{acertos}/{n} deu p={p}"
+            assert not math.isnan(p)
+
+
+class TestAPublicacao:
+    def test_o_relatorio_traz_o_bloco_com_a_leitura(self):
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal())
+
+        bloco = report.to_dict()["direcao_sem_fill"]
+
+        assert set(bloco) == {"por_sinal", "por_janela", "leitura"}
+        # A leitura diz qual das duas contagens decide. Sem ela, quem lê o
+        # JSON cita a de `n` maior, que é a inflada.
+        assert "por_janela" in bloco["leitura"]
+
+    def test_a_leitura_separa_direcao_de_lucro(self):
+        """Acurácia acima de 0,5 com custo maior que a margem continua
+        perdendo dinheiro. O 1.1 e o 1.5 são critérios separados de propósito,
+        e o texto do relatório não pode sugerir que este bloco os substitui."""
+        leitura = BacktestReport().to_dict()["direcao_sem_fill"]["leitura"]
+
+        assert "nao e evidencia de lucro" in leitura

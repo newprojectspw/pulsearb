@@ -1269,6 +1269,27 @@ markout sobre coorte pareada entre latências (o relatório já publica `trades`
 `hit_rate` por cenário em `sensibilidade_latencia`; falta a comparação por
 coorte). Até ele existir, a inclinação da latência é indício, não prova.
 
+> **O instrumento foi construído em 2026-08-31 — e ainda não foi rodado sobre
+> gravação real.** `direcao_sem_fill` registra, para cada instante em que o
+> gatilho disparou, a direção escolhida e o resultado da janela — **antes de
+> qualquer gate de execução**, então nem book, nem latência, nem teto de
+> entradas entram. A coorte é fixa por construção, e há teste travando que ela
+> sai **idêntica** a 150 ms e a 1000 ms enquanto o `hit_rate` varia: é
+> exatamente a comparação pareada que faltava.
+>
+> Publica duas contagens. `por_sinal` usa todos os instantes; `por_janela` usa
+> o primeiro de cada janela e **é a que decide** — dentro de uma janela os
+> instantes dividem âncora, preço e resultado, então são a mesma observação
+> repetida, e contá-los como independentes encolhe o p-valor sem informação
+> nova ter entrado. O p-valor é binomial bilateral, e bilateral de propósito:
+> 0,4172 em amostra grande é informação apontando para o outro lado, e um teste
+> unilateral a esconderia.
+>
+> **O que ele NÃO responde:** se a estratégia lucra. Direção acima de 0,5 com
+> custo de execução maior que a margem continua perdendo — por isso ele é
+> diagnóstico e não um décimo primeiro critério. Os dez foram escritos antes
+> dos números e não ganham companhia depois.
+
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
 borda, havia superconfiança". Foi essa a ramificação que ocorreu.

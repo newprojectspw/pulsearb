@@ -711,6 +711,49 @@ def _imprimir_diagnostico_da_calibracao(relatorio: dict[str, Any]) -> None:
     print()
 
 
+def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
+    """HÁ direção no sinal? — separado de "a estratégia lucra?".
+
+    **Não é um critério.** Os dez foram escritos antes dos números e não
+    ganham um décimo primeiro depois. É diagnóstico, e serve para ler o 1.1 e
+    o 1.4: PnL negativo com direção medida acima de 0,5 aponta para execução e
+    capacidade; PnL negativo com direção em 0,5 aponta para ausência de sinal.
+    São consertos opostos, e sem este número os dois casos são o mesmo número.
+
+    O `hit_rate` não responde isso: ele é medido sobre trades preenchidos, e a
+    coorte deles muda com a latência (§2d-ter do VEREDITO_M2).
+    """
+    bloco = (relatorio.get("backtest") or {}).get("direcao_sem_fill") or {}
+    por_janela = bloco.get("por_janela") or {}
+    if not por_janela.get("n"):
+        return
+
+    print("=" * 74)
+    print("DIRECAO DO SINAL, SEM FILL  (diagnostico, nao e criterio)")
+    print("=" * 74)
+    for rotulo, chave in (("por janela", "por_janela"), ("por sinal", "por_sinal")):
+        celula = bloco.get(chave) or {}
+        n = celula.get("n") or 0
+        if not n:
+            continue
+        acuracia = celula.get("acuracia")
+        p = celula.get("p_valor")
+        marca = "SIM" if celula.get("difere_de_meio_a_meio") else "nao"
+        print(
+            f"  {rotulo:<12} n={n:<7} acuracia={_numero(acuracia)}"
+            f"   p={_numero(p)}   difere de 0,5: {marca}"
+        )
+    print()
+    print(
+        "  A leitura que decide e a POR JANELA: dentro de uma janela os\n"
+        "  instantes dividem ancora, preco e resultado, entao contar todos\n"
+        "  infla n sem informacao nova.\n"
+        "  Acuracia > 0,5 com p < 0,05 e evidencia de DIRECAO — nao de lucro.\n"
+        "  Lucro depende de execucao e capacidade, que sao o 1.1 e o 1.5."
+    )
+    print()
+
+
 def _imprimir(rotulo: str, valor: Any) -> None:
     print(f"{rotulo:<38} {valor}")
 
@@ -954,6 +997,10 @@ def main(argv: list[str] | None = None) -> None:
         "TAKER VIAVEL exige as CINCO",
     )
     _imprimir_diagnostico_da_calibracao(relatorio)
+    # Logo depois dos cinco do taker, e antes do maker: é ali que quem lê
+    # acabou de ver o 1.1 e o 1.4 reprovarem e precisa saber se a causa é
+    # ausência de sinal ou custo de execução.
+    _imprimir_direcao_sem_fill(relatorio)
     if not variante_encolhida:
         _imprimir_horizonte(relatorio_topo)
     _imprimir_criterios(

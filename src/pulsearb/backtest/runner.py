@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
-from pulsearb.backtest.report import BacktestReport, Trade
+from pulsearb.backtest.report import BacktestReport, SinalDirecional, Trade
 from pulsearb.engine.decisao import (
     JOGO_TWAP,
     encolher_para_a_base,
@@ -400,6 +400,20 @@ class BacktestRunner:
                 # Contado ANTES de qualquer gate de execução: a pergunta aqui
                 # é "o sinal existiu neste instante?", não "operamos?".
                 report.add_oportunidade(est.bucket_tempo, janela.slug)
+                # E a DIREÇÃO dele, pela mesma razão e no mesmo lugar. O
+                # `hit_rate` só vê trades preenchidos, e a coorte deles muda
+                # com a latência; esta não muda com nada a jusante. É o teste
+                # que a §2d-ter do VEREDITO_M2 registra como pendente.
+                lado_up, _token, prob = candidatos[0]
+                report.add_sinal_direcional(
+                    SinalDirecional(
+                        slug=janela.slug,
+                        bucket_tempo=est.bucket_tempo,
+                        lado_up=lado_up,
+                        prob=prob,
+                        resolveu_up=bool(janela.resolveu_up),
+                    )
+                )
 
             if not candidatos or not self._pode_entrar(
                 seconds_left=seconds_left,
