@@ -1471,3 +1471,61 @@ onde `v` = max spread da config do mercado (em centavos = `rewardsMaxSpread`),
 A cadência era assumida como 1/s; é 1/min. Erro de 60× na contagem de amostras.
 
 ---
+
+## 16. Latência e relógio do CLOB REST `[VERIFICADO ao vivo]`
+
+Medido em **2026-08-31**, do Mac de análise, por `scripts/smoke_clob_rest.py`
+(só GET público — nenhuma ordem, nenhuma credencial). 12 amostras em série por
+endpoint, `httpx`, com o mesmo User-Agent do `smoke_discovery.py`.
+
+### 16.1. Os endpoints públicos respondem
+
+| endpoint | status | p50 | p99 |
+|---|---|---|---|
+| `GET /ok` | 200 | 218,0 ms | 790,5 ms |
+| `GET /time` | 200 | 213,7 ms | 261,9 ms |
+| `GET /rewards/markets/current?sponsored=false` | 200 | 689,7 ms | 968,9 ms |
+
+`GET /ok` e `GET /time` não estavam registrados aqui e são os dois mais baratos
+para sondar a borda. `/time` devolve o epoch em **segundos**, como texto.
+
+### 16.2. A latência, e por que ela derrubou a primeira tentativa do SHADOW
+
+**p50 de ida e volta ≈ 218 ms; o p99 chega a ~970 ms** — contra o
+`atraso_max_ms` de **250 ms** do item 3.10. Esta é a ordem de grandeza que fez
+o portão de relógio recusar **todas** as 3.050 entradas do primeiro diário do
+SHADOW, antes de a recusa ser escopada ao LIVE.
+
+**Ida-e-volta NÃO é o que o portão mede.** O portão lê
+`chegada_local − carimbo_servidor`, que é **uma via mais o offset** numa
+subtração só (§3.10). O número acima é um teto grosseiro daquele: serve para
+dizer a ordem de grandeza, não para substituir a medição.
+
+### 16.3. O offset: medido, e a medição não decide nada
+
+Com ida e volta dá para estimar `offset ≈ ts_servidor − (t0 + t1)/2` — o que o
+sensor de uma via não consegue, porque nele latência e offset se cancelam.
+
+O resultado, em duas rodadas de 12 amostras:
+
+| rodada | p50 | min | max | espalhamento |
+|---|---|---|---|---|
+| 1 | −0,311 s | −0,834 | +0,057 | 0,891 s |
+| 2 | −0,166 s | −0,752 | +0,183 | 0,935 s |
+
+**O espalhamento é MAIOR que o próprio p50, nas duas.** A estimativa não
+separa relógio adiantado de atrasado — diz só que o desvio é sub-segundo. O
+script imprime esse aviso a partir do dado (`espalhamento ≥ |p50|`), e não como
+rodapé fixo, justamente para que ninguém cite o p50 como se fosse o offset.
+
+A causa é conhecida e não tem conserto aqui: a conta supõe **caminho
+simétrico**, e com centenas de ms de latência a assimetria entra inteira no
+resultado. É o mesmo compromisso do NTP — e é exatamente por isso que o item
+5.4 exige um **daemon de verdade** em vez de confiar numa estimativa nossa.
+
+### 16.4. O que isto NÃO fecha
+
+O item **3.5 continua 🟡**. O que foi exercitado é a encanação — DNS, TLS,
+timeout, parsing, e a existência dos endpoints. O que falta é o que sempre
+faltou: **uma ordem assinada recebendo resposta do servidor**, que exige
+credencial e move dinheiro. Nenhum GET público substitui isso.
