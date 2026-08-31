@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pulsearb.backtest.book import simulate_taker_buy
 from pulsearb.backtest.runner import edge_liquido
 from pulsearb.engine.decisao import JOGO_TWAP, estimar_prob_up
 from pulsearb.engine.fees import fee_pp_por_share
@@ -427,20 +428,37 @@ class MotorAoVivo:
             )
             self.tentativas += 1
             if decisao.pode:
+                # O PREÇO SAI DA MESMA FUNÇÃO DO BACKTEST, e isso não é
+                # detalhe de implementação — é a regra do "mesmo caminho".
+                #
+                # Aqui ficava `preco_pago=livro.best_ask`: o topo do livro,
+                # como se a ordem inteira coubesse no primeiro nível e não
+                # custasse slippage nenhum. O backtest atravessa o livro com
+                # `simulate_taker_buy` e paga o preço médio real. Duas contas
+                # diferentes para a MESMA coisa fazem o SHADOW e o backtest
+                # discordarem sobre o próprio resultado — e a diferença
+                # apareceria como "o mercado ao vivo é melhor", quando é só
+                # aritmética otimista.
+                fill = simulate_taker_buy(livro, ordem.shares)
+                if not fill.preenchido:
+                    # Livro sem profundidade para a ordem. Registrar posição
+                    # aqui inventaria uma execução que não aconteceria.
+                    self._pular(PULOU_SEM_LIVRO)
+                    return False
+                self.ja_operadas.add(janela.condition_id)
                 # Uma entrada por janela: o M2.7 mediu que mais entradas
                 # sobem PnL e drawdown na mesma proporção — alavancagem, não
                 # borda.
-                self.ja_operadas.add(janela.condition_id)
                 self.posicoes[_chave(janela.condition_id)] = PosicaoAberta(
                     slug=janela.slug,
                     token_up=janela.token_up,
                     token_down=janela.token_down,
                     lado_up=lado_up,
-                    shares=ordem.shares,
-                    preco_pago=livro.best_ask,
-                    fee_usdc=ordem.shares
+                    shares=fill.shares,
+                    preco_pago=fill.preco_medio,
+                    fee_usdc=fill.shares
                     * fee_pp_por_share(
-                        livro.best_ask,
+                        fill.preco_medio,
                         rate=janela.fee_rate,
                         exponent=janela.fee_exponent,
                     ),
