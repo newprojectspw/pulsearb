@@ -65,10 +65,32 @@ class SinalDirecional:
     lado_up: bool
     prob: float
     resolveu_up: bool
+    #: `ask` do lado apostado e o do lado oposto, no instante do sinal.
+    #:
+    #: Existem para responder "e se a regra comprasse o outro lado?" **sem
+    #: mexer na execução**. Inverter a regra de verdade exigiria mudar o
+    #: caminho que decide e arriscar um bug no motor de medição; guardar os
+    #: dois preços permite a mesma conta como observação. `None` quando o
+    #: livro do oposto não existia no instante — que é informação, não zero.
+    preco_do_lado: float | None = None
+    preco_do_oposto: float | None = None
 
     @property
     def acertou(self) -> bool:
         return self.lado_up == self.resolveu_up
+
+    def pnl_por_share(self, *, invertido: bool = False) -> float | None:
+        """PnL por share desta aposta, ou da oposta. Sem taxa.
+
+        A share vencedora paga 1,00 — a mesma conta de `Trade.pnl_usdc`, sem
+        o `fee` porque aqui o que se compara é a DIREÇÃO, e a taxa incide
+        igual nos dois lados.
+        """
+        preco = self.preco_do_oposto if invertido else self.preco_do_lado
+        if preco is None:
+            return None
+        acertou = (not self.acertou) if invertido else self.acertou
+        return (1.0 if acertou else 0.0) - preco
 
 
 def _p_valor_binomial(acertos: int, n: int) -> float:
@@ -105,10 +127,28 @@ LARGURA_DA_FAIXA = 0.05
 MINIMO_DE_FAIXAS = 3
 
 
+#: Compensa o erro de representação binária na divisão. `0.60 / 0.05` dá
+#: **11,999999999999998**, não 12 — então `int()` truncava para 11 e o valor
+#: 0,60 caía no rótulo `0.55-0.60`, que mente sobre o próprio conteúdo. O
+#: mesmo acontecia com 0,70 e 0,95; com 0,55, 0,65, 0,75, 0,80, 0,85 e 0,90,
+#: não. Ou seja: o defeito atingia ALGUMAS bordas, o que é pior que atingir
+#: todas — o padrão não aparece numa conferência rápida.
+#:
+#: 1e-9 é folgado para o erro real (da ordem de 1e-15) e pequeno demais para
+#: puxar um valor legítimo da faixa vizinha: 0,5999999 continua em `0.55-0.60`.
+_EPSILON_DA_FAIXA = 1e-9
+
+
 def faixa_de_probabilidade(prob: float) -> str:
-    """Rótulo da faixa de `prob`, no formato `0.60-0.65`."""
+    """Rótulo da faixa de `prob`, no formato `0.60-0.65`.
+
+    O piso é INCLUSIVO e o teto exclusivo: 0,60 pertence a `0.60-0.65`. Sem o
+    epsilon isso era falso justamente nos valores redondos, que são os que
+    alguém escreve num teste ou confere à mão.
+    """
     prob = min(max(prob, 0.0), 1.0)
-    indice = min(int(prob / LARGURA_DA_FAIXA), int(1 / LARGURA_DA_FAIXA) - 1)
+    bruto = int(prob / LARGURA_DA_FAIXA + _EPSILON_DA_FAIXA)
+    indice = min(bruto, int(1 / LARGURA_DA_FAIXA) - 1)
     piso = indice * LARGURA_DA_FAIXA
     return f"{piso:.2f}-{piso + LARGURA_DA_FAIXA:.2f}"
 
@@ -282,6 +322,12 @@ class BacktestReport:
     primeiro_sinal_da_janela: dict[str, SinalDirecional] = field(
         default_factory=dict
     )
+    #: Instantes em que OS DOIS lados passaram do threshold. Nesses, o lado
+    #: registrado é Up por ordem da lista, não por decisão — então é aqui que
+    #: mora o único viés conhecido de `direcao_sem_fill`. Publicado ao lado do
+    #: resultado para que a leitura possa descontá-lo em vez de confiar que é
+    #: desprezível.
+    sinais_com_ambos_os_lados: int = 0
 
     # ------------------------------------------------------------- coleta
     def add_trade(self, trade: Trade) -> None:
@@ -386,10 +432,141 @@ class BacktestReport:
                 "difere_de_meio_a_meio": bool(p < 0.05),
             }
 
+        def _por_faixa(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """A mesma acurácia, quebrada pela confiança do modelo.
+
+            Responde a pergunta que o número agregado deixa em aberto: a regra
+            erra em toda parte, ou erra **onde ela opera**? São diagnósticos
+            diferentes. Se a acurácia acompanha a faixa — baixa onde o modelo
+            diz 0,5, alta onde ele diz 0,9 —, o preditor discrimina e o defeito
+            é de escolha de momento. Se for ruim em todas, é o sinal.
+
+            A faixa é a do lado APOSTADO, não a do `P(Up)` cru: apostar Down
+            com `P(Up)=0,1` é uma aposta de confiança 0,9, e agrupá-la com as
+            de `P(Up)=0,1` que compraram Up misturaria duas coisas opostas.
+            """
+            grupos: dict[str, list[SinalDirecional]] = defaultdict(list)
+            for s in sinais:
+                confianca = s.prob if s.lado_up else 1.0 - s.prob
+                grupos[faixa_de_probabilidade(confianca)].append(s)
+            saida = {}
+            for faixa, itens in sorted(grupos.items()):
+                acertos = sum(1 for s in itens if s.acertou)
+                # A confiança MÉDIA das apostas da faixa, não o meio dela.
+                # É contra este número que a acurácia tem de ser lida: um
+                # modelo calibrado NAS APOSTAS acertaria `confianca_media`.
+                # Usar o meio da faixa erraria em até meia largura, e o
+                # `deficit` é justamente uma diferença pequena entre dois
+                # números grandes — o tipo de conta que a aproximação estraga.
+                media = sum(
+                    s.prob if s.lado_up else 1.0 - s.prob for s in itens
+                ) / len(itens)
+                saida[faixa] = {
+                    "n": len(itens),
+                    "janelas_distintas": len({s.slug for s in itens}),
+                    "acertos": acertos,
+                    "acuracia": acertos / len(itens),
+                    "confianca_media": media,
+                    # Negativo = o modelo acerta MENOS nas apostas do que
+                    # promete. Com o modelo calibrado no agregado, isso é a
+                    # assinatura de seleção adversa: a regra escolhe, dentro
+                    # da faixa, justamente os instantes em que ele falha.
+                    "deficit": acertos / len(itens) - media,
+                }
+            return saida
+
+        def _por_limiar(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """E se a regra exigisse convicção mínima para operar?
+
+            É a primeira correção que ocorre a quem lê o déficit: se a regra
+            erra onde o modelo não sabe, que ela só opere onde ele sabe. A
+            varredura responde antes que alguém implemente e descubra depois.
+
+            O ponto de atenção é o `n`: subir o limiar corta amostra rápido, e
+            uma acurácia bonita sobre 20 apostas não é resultado. Por isso o
+            p-valor sai junto de cada linha.
+            """
+            saida = {}
+            for passo in range(10, 17):  # 0,50 a 0,80
+                limiar = passo * LARGURA_DA_FAIXA
+                elegiveis = [
+                    s
+                    for s in sinais
+                    if (s.prob if s.lado_up else 1.0 - s.prob) >= limiar
+                ]
+                if not elegiveis:
+                    continue
+                acertos = sum(1 for s in elegiveis if s.acertou)
+                saida[f"{limiar:.2f}"] = {
+                    "apostas": len(elegiveis),
+                    "acertos": acertos,
+                    "acuracia": acertos / len(elegiveis),
+                    "p_valor": _p_valor_binomial(acertos, len(elegiveis)),
+                }
+            return saida
+
+        def _regra_invertida(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """E se a regra comprasse o OUTRO lado? A conta, com o aviso.
+
+            A direção erra com significância, então a inversão dela acerta na
+            mesma medida — 1 − 0,4157. Isso é aritmética, e sozinho não diz
+            nada sobre lucro: inverter compra o token oposto, a **outro
+            preço**, e é o preço que decide se acertar 58 % paga.
+
+            Por isso o que sai aqui é PnL por share nos dois sentidos, sobre a
+            mesma coorte e com a mesma conta. Sem taxa: ela incide igual nos
+            dois lados, e o que se compara é a direção.
+
+            **INVERTER UMA REGRA QUE PERDEU É A FORMA MAIS FÁCIL DE
+            SOBREAJUSTAR.** Se o número der positivo, ele não autoriza nada —
+            exige repetir em dia independente, porque escolher a inversão
+            DEPOIS de ver o resultado é escolher pelo resultado.
+            """
+            com_preco = [s for s in sinais if s.preco_do_lado is not None]
+            invertiveis = [s for s in sinais if s.preco_do_oposto is not None]
+            direto = [s.pnl_por_share() for s in com_preco]
+            oposto = [s.pnl_por_share(invertido=True) for s in invertiveis]
+            return {
+                "n_com_preco": len(com_preco),
+                "n_invertivel": len(invertiveis),
+                "pnl_por_share_como_esta": (
+                    sum(direto) / len(direto) if direto else None
+                ),
+                "pnl_por_share_invertido": (
+                    sum(oposto) / len(oposto) if oposto else None
+                ),
+                "aviso": (
+                    "Inverter uma regra que perdeu e a forma mais facil de "
+                    "sobreajustar: a escolha da inversao vem DEPOIS de ver o "
+                    "resultado. Numero positivo aqui NAO autoriza adotar — "
+                    "exige repetir em dia independente. E PnL por share sem "
+                    "taxa nem slippage: nao e o 1.1, que mede o liquido."
+                ),
+            }
+
         por_janela = list(self.primeiro_sinal_da_janela.values())
+        total = len(self.sinais_direcionais)
         return {
             "por_sinal": _bloco(self.sinais_direcionais),
             "por_janela": _bloco(por_janela),
+            "por_faixa_de_confianca": _por_faixa(por_janela),
+            "se_exigisse_confianca_minima": _por_limiar(por_janela),
+            "se_comprasse_o_outro_lado": _regra_invertida(por_janela),
+            # O único viés conhecido desta medição, publicado como número.
+            "vies_de_ambos_os_lados": {
+                "instantes": self.sinais_com_ambos_os_lados,
+                "fracao_dos_sinais": (
+                    self.sinais_com_ambos_os_lados / total if total else None
+                ),
+                "nota": (
+                    "instantes em que OS DOIS lados passaram do threshold. "
+                    "Ali o lado registrado e Up por ordem da lista, nao por "
+                    "decisao. Fracao alta invalida a leitura de direcao; "
+                    "fracao perto de zero deixa o vies desprezivel — e o "
+                    "numero esta aqui para que isso seja conferido, e nao "
+                    "assumido."
+                ),
+            },
             "leitura": (
                 "por_janela e a leitura conservadora e e a que decide: dentro "
                 "de uma janela os instantes dividem ancora, preco e resultado, "

@@ -1356,12 +1356,6 @@ defeito está em QUANDO se entra, não em QUANTO se prevê.
 1. **Que inverter a regra dá lucro.** Não foi testado. Inverter é comprar o que
    o modelo acha caro, e isso não tem razão a priori de funcionar — a
    simetria de uma regra ruim não é uma regra boa.
-2. **Que a causa é seleção adversa.** É a explicação mais econômica do formato
-   observado, não uma medição. Falsificá-la exigiria comparar o resultado das
-   entradas contra o de instantes pareados sem discordância.
-3. **Que um dia decide.** Continua valendo a regra desta página: 2026-08-24 é
-   um dia. Qualquer conclusão daqui precisa repetir em dia independente.
-
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
 borda, havia superconfiança". Foi essa a ramificação que ocorreu.
