@@ -28,7 +28,9 @@ por ausência de borda e por capacidade, não mais por calibração. O MAKER
 desbloqueou: **1.10 confirmada** (fórmula quadrática, 2026-08-30) e **1.6
 avaliada e positiva** com fórmula confirmada e fator=0,3 (**+35,6 USDC/8h**,
 M2_25AGO 2026-08-25). Os cinco critérios do maker passam nos dados disponíveis.
-Falta M2.2 (24 h com fórmula corrigida) para confirmar 1.7 e 1.8.
+**O M2.2 rodou em 2026-08-31** — 24 h com a fórmula confirmada, 126,7 M
+registros — e 1.7/1.8 saíram idênticos aos de antes (−0,1974 e 65,922 h),
+porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
 
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
@@ -57,9 +59,10 @@ ligar o LIVE com a estratégia taker atual.
 **Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
 ou virar para a rota maker — **1.10 confirmada** (fórmula quadrática, 2026-08-30)
 e **1.6 avaliada e positiva** (fator=0,3, +35,6 USDC/8h, M2_25AGO 2026-08-25).
-Os cinco critérios do maker passam nos dados disponíveis. Falta M2.2 (24 h com
-fórmula corrigida) para confirmar 1.7 e 1.8 com a fórmula certa, e M3 para
-dimensionar o capital_imobilizado.
+Os cinco critérios do maker passam nos dados disponíveis, e o **M2.2 fechou em
+2026-08-31**: 1.7 e 1.8 remedidos em 24 h com a fórmula certa, iguais aos de
+antes. Falta o **M3** para dimensionar o `capital_imobilizado` — o único termo
+da conta do maker que ainda é hipótese.
 
 Atualizado: 2026-08-30 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
@@ -306,13 +309,13 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-### MAKER — 1.6 a 1.10 passam; M2.2 confirma 1.7 e 1.8 com fórmula corrigida
+### MAKER — 1.6 a 1.10 passam; **M2.2 RODOU e confirmou 1.7 e 1.8**
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
 | 1.6 | Conta fechada com fator 0,3 | positiva | **+35,6 USDC/8h** — rewards 25,8 (pool≈86 USDC × 0,3) + exec. líq. 9,7 (0,0902 ¢/share × 30% fills) — fórmula confirmada, M2_25AGO 2026-08-25 | ✅ |
-| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
-| 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
+| 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
+| 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
@@ -328,6 +331,37 @@ conservadora de 30% do pool por snapshot — resolve o `o_que_falta_para_fechar`
 de modo pré-registrado. O `capital_imobilizado` segue como decisão do M3.
 
 **1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
+
+### O M2.2 rodou (2026-08-31), e os números de 1.7 e 1.8 NÃO mudaram
+
+24 h de 2026-08-24, 126.724.222 registros, 7 h 37 min de processamento —
+`relatorios/M2_20260824.json`, com `analysis/rewards.py` já usando
+`S(v,s)=((v-s)/v)²×b`.
+
+| | antes (M2_24AGO_MEDIDO) | **M2.2, fórmula confirmada** |
+|---|---|---|
+| 1.7 markout 5 s | −0,1974 (246.504 exec.) | **−0,1974 (246.504 exec.)** |
+| 1.8 horas na célula | 65,915 h | **65,922 h** |
+
+**Iguais, e isso é o resultado — não um erro de rodada.** Markout é o que o
+preço faz depois da execução, e horas de amostra é quanto tempo a célula
+existiu: nenhum dos dois passa pela fórmula de reward. O que a fórmula move é
+o **1.6**, que é onde ela entra na conta. A pendência dizia "confirmar 1.7 e
+1.8 com a fórmula certa", e a confirmação é literalmente esta: eles não
+dependiam dela. Sem rodar, isso era suposição.
+
+**A captação desta rodada é a melhor do projeto:** `pior_fracao_coberta` 1,0,
+**100 % nos oito ativos**, 0 silêncios, 896 janelas conhecidas e 820 com
+resolução. A âncora saiu **CONFIRMADA** com τ=0 explicando 100 % das 768
+janelas elegíveis, quartis 190/192/196/190 e `concentrada: false`.
+
+**E o taker afundou onde já estava reprovado.** A curva de horizonte com o
+preditor cru dá `hit_rate` **abaixo de 0,5 nas cinco bandas**, e piorando
+conforme o horizonte encurta: 0,4172 (>240 s) · 0,3657 · 0,2881 · 0,2010 ·
+**0,1222** (<30 s). Nenhuma banda tem edge. Um `hit_rate` de 0,12 não é
+ausência de sinal — é sinal com o **lado invertido**, e é exatamente a
+pergunta que o `direcao_sem_fill` existe para responder sobre uma coorte que
+não muda com o fill. Ainda **não rodado** sobre esta amostra.
 
 ### A âncora está fechada
 
