@@ -319,6 +319,67 @@ class TestSeExigisseConfiancaMinima:
         assert celula["p_valor"] > 0.05, "12/20 não deveria ser significativo"
 
 
+class TestSeComprasseOOutroLado:
+    """A conta da regra invertida — feita sem tocar na execução."""
+
+    def test_a_inversao_troca_acerto_por_erro_e_o_preco_pelo_do_oposto(self):
+        """Comprar Down a 0,55 numa janela que resolveu Up é perda de 0,55.
+
+        A mesma aposta, do lado certo, teria pago 1 − 0,40 = 0,60. É a
+        assimetria de PREÇO que decide se acertar mais paga mais — e é ela
+        que o número agregado de acurácia não carrega.
+        """
+        s = SinalDirecional(
+            slug="j",
+            bucket_tempo=">240s",
+            lado_up=True,
+            prob=0.6,
+            resolveu_up=True,
+            preco_do_lado=0.40,
+            preco_do_oposto=0.55,
+        )
+
+        assert s.pnl_por_share() == pytest.approx(0.60)
+        assert s.pnl_por_share(invertido=True) == pytest.approx(-0.55)
+
+    def test_sem_preco_do_oposto_a_conta_e_nula_e_nao_zero(self):
+        """Livro ausente é ignorância. Zero entraria numa média como se
+        fosse uma aposta que não custou nada."""
+        s = SinalDirecional(
+            slug="j",
+            bucket_tempo=">240s",
+            lado_up=True,
+            prob=0.6,
+            resolveu_up=True,
+            preco_do_lado=0.40,
+        )
+
+        assert s.pnl_por_share() == pytest.approx(0.60)
+        assert s.pnl_por_share(invertido=True) is None
+
+    def test_o_bloco_traz_os_dois_sentidos_e_o_aviso_de_sobreajuste(self):
+        report = BacktestReport()
+        report.add_sinal_direcional(
+            SinalDirecional("j1", ">240s", True, 0.6, False, 0.40, 0.55)
+        )
+
+        bloco = report.direcao_sem_fill()["se_comprasse_o_outro_lado"]
+
+        assert bloco["pnl_por_share_como_esta"] == pytest.approx(-0.40)
+        assert bloco["pnl_por_share_invertido"] == pytest.approx(0.45)
+        # O aviso precisa dizer que numero positivo NAO autoriza adotar.
+        assert "NAO autoriza adotar" in bloco["aviso"]
+
+    def test_sinal_sem_preco_nenhum_nao_entra_na_media(self):
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal("j1"))  # sem preços
+
+        bloco = report.direcao_sem_fill()["se_comprasse_o_outro_lado"]
+
+        assert bloco["n_com_preco"] == 0
+        assert bloco["pnl_por_share_como_esta"] is None
+
+
 class TestAPublicacao:
     def test_o_relatorio_traz_o_bloco_com_a_leitura(self):
         report = BacktestReport()
@@ -331,6 +392,7 @@ class TestAPublicacao:
             "por_janela",
             "por_faixa_de_confianca",
             "se_exigisse_confianca_minima",
+            "se_comprasse_o_outro_lado",
             "vies_de_ambos_os_lados",
             "leitura",
         }

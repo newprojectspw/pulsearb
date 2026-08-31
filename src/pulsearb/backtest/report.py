@@ -65,10 +65,32 @@ class SinalDirecional:
     lado_up: bool
     prob: float
     resolveu_up: bool
+    #: `ask` do lado apostado e o do lado oposto, no instante do sinal.
+    #:
+    #: Existem para responder "e se a regra comprasse o outro lado?" **sem
+    #: mexer na execução**. Inverter a regra de verdade exigiria mudar o
+    #: caminho que decide e arriscar um bug no motor de medição; guardar os
+    #: dois preços permite a mesma conta como observação. `None` quando o
+    #: livro do oposto não existia no instante — que é informação, não zero.
+    preco_do_lado: float | None = None
+    preco_do_oposto: float | None = None
 
     @property
     def acertou(self) -> bool:
         return self.lado_up == self.resolveu_up
+
+    def pnl_por_share(self, *, invertido: bool = False) -> float | None:
+        """PnL por share desta aposta, ou da oposta. Sem taxa.
+
+        A share vencedora paga 1,00 — a mesma conta de `Trade.pnl_usdc`, sem
+        o `fee` porque aqui o que se compara é a DIREÇÃO, e a taxa incide
+        igual nos dois lados.
+        """
+        preco = self.preco_do_oposto if invertido else self.preco_do_lado
+        if preco is None:
+            return None
+        acertou = (not self.acertou) if invertido else self.acertou
+        return (1.0 if acertou else 0.0) - preco
 
 
 def _p_valor_binomial(acertos: int, n: int) -> float:
@@ -483,6 +505,45 @@ class BacktestReport:
                 }
             return saida
 
+        def _regra_invertida(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """E se a regra comprasse o OUTRO lado? A conta, com o aviso.
+
+            A direção erra com significância, então a inversão dela acerta na
+            mesma medida — 1 − 0,4157. Isso é aritmética, e sozinho não diz
+            nada sobre lucro: inverter compra o token oposto, a **outro
+            preço**, e é o preço que decide se acertar 58 % paga.
+
+            Por isso o que sai aqui é PnL por share nos dois sentidos, sobre a
+            mesma coorte e com a mesma conta. Sem taxa: ela incide igual nos
+            dois lados, e o que se compara é a direção.
+
+            **INVERTER UMA REGRA QUE PERDEU É A FORMA MAIS FÁCIL DE
+            SOBREAJUSTAR.** Se o número der positivo, ele não autoriza nada —
+            exige repetir em dia independente, porque escolher a inversão
+            DEPOIS de ver o resultado é escolher pelo resultado.
+            """
+            com_preco = [s for s in sinais if s.preco_do_lado is not None]
+            invertiveis = [s for s in sinais if s.preco_do_oposto is not None]
+            direto = [s.pnl_por_share() for s in com_preco]
+            oposto = [s.pnl_por_share(invertido=True) for s in invertiveis]
+            return {
+                "n_com_preco": len(com_preco),
+                "n_invertivel": len(invertiveis),
+                "pnl_por_share_como_esta": (
+                    sum(direto) / len(direto) if direto else None
+                ),
+                "pnl_por_share_invertido": (
+                    sum(oposto) / len(oposto) if oposto else None
+                ),
+                "aviso": (
+                    "Inverter uma regra que perdeu e a forma mais facil de "
+                    "sobreajustar: a escolha da inversao vem DEPOIS de ver o "
+                    "resultado. Numero positivo aqui NAO autoriza adotar — "
+                    "exige repetir em dia independente. E PnL por share sem "
+                    "taxa nem slippage: nao e o 1.1, que mede o liquido."
+                ),
+            }
+
         por_janela = list(self.primeiro_sinal_da_janela.values())
         total = len(self.sinais_direcionais)
         return {
@@ -490,6 +551,7 @@ class BacktestReport:
             "por_janela": _bloco(por_janela),
             "por_faixa_de_confianca": _por_faixa(por_janela),
             "se_exigisse_confianca_minima": _por_limiar(por_janela),
+            "se_comprasse_o_outro_lado": _regra_invertida(por_janela),
             # O único viés conhecido desta medição, publicado como número.
             "vies_de_ambos_os_lados": {
                 "instantes": self.sinais_com_ambos_os_lados,
