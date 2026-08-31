@@ -349,6 +349,48 @@ class BacktestRunner:
         # divergir por construção.
         return PortaoDaCurva(entra=True, alcance_s=curva_do_ativo.horizonte_maximo_s)
 
+    def _encolhida(self, est: Any) -> Any:
+        """A estimativa com o encolhimento do config já aplicado.
+
+        Aplicado ANTES da calibração e do edge, de propósito: encolher só o
+        gatilho e medir a calibração no cru produziria um ECE que não descreve
+        o preditor que operou. Sem `fator_de_encolhimento` a estimativa passa
+        intacta — é o mesmo objeto, não uma cópia.
+        """
+        fator = self.config.fator_de_encolhimento
+        if fator is None:
+            return est
+        return replace(est, prob_up=encolher_para_a_base(est.prob_up, fator))
+
+    def _registrar_sinal(
+        self,
+        janela: WindowState,
+        est: Any,
+        candidatos: list[tuple[bool, str, float]],
+        report: BacktestReport,
+    ) -> None:
+        """Contabiliza o sinal do instante — antes de qualquer gate de execução.
+
+        A pergunta aqui é "o sinal existiu neste instante?", não "operamos?".
+        E a DIREÇÃO dele, pela mesma razão e no mesmo lugar: o `hit_rate` só vê
+        trades preenchidos, e a coorte deles muda com a latência; esta não muda
+        com nada a jusante. É o teste que a §2d-ter do VEREDITO_M2 registra
+        como pendente.
+        """
+        if not candidatos:
+            return
+        report.add_oportunidade(est.bucket_tempo, janela.slug)
+        lado_up, _token, prob = candidatos[0]
+        report.add_sinal_direcional(
+            SinalDirecional(
+                slug=janela.slug,
+                bucket_tempo=est.bucket_tempo,
+                lado_up=lado_up,
+                prob=prob,
+                resolveu_up=bool(janela.resolveu_up),
+            )
+        )
+
     def _run_window(
         self,
         janela: WindowState,
@@ -377,17 +419,9 @@ class BacktestRunner:
             if alcance is not None and seconds_left > alcance:
                 report.instantes_alem_da_curva[janela.asset] += 1
                 continue
-            est = self._estimar(janela, twap, vol, preco_spot, seconds_left)
-            if cfg.fator_de_encolhimento is not None:
-                # ANTES da calibração e do edge, de propósito: encolher só o
-                # gatilho e medir a calibração no cru produziria um ECE que
-                # não descreve o preditor que operou.
-                est = replace(
-                    est,
-                    prob_up=encolher_para_a_base(
-                        est.prob_up, cfg.fator_de_encolhimento
-                    ),
-                )
+            est = self._encolhida(
+                self._estimar(janela, twap, vol, preco_spot, seconds_left)
+            )
 
             # Calibração: medida em TODA previsão, não só onde se operou.
             report.add_calibration(est.bucket_tempo, est.prob_up, janela.resolveu_up)
@@ -396,24 +430,7 @@ class BacktestRunner:
                 continue
 
             candidatos = self._candidatos_com_edge(janela, est, ts_ns)
-            if candidatos:
-                # Contado ANTES de qualquer gate de execução: a pergunta aqui
-                # é "o sinal existiu neste instante?", não "operamos?".
-                report.add_oportunidade(est.bucket_tempo, janela.slug)
-                # E a DIREÇÃO dele, pela mesma razão e no mesmo lugar. O
-                # `hit_rate` só vê trades preenchidos, e a coorte deles muda
-                # com a latência; esta não muda com nada a jusante. É o teste
-                # que a §2d-ter do VEREDITO_M2 registra como pendente.
-                lado_up, _token, prob = candidatos[0]
-                report.add_sinal_direcional(
-                    SinalDirecional(
-                        slug=janela.slug,
-                        bucket_tempo=est.bucket_tempo,
-                        lado_up=lado_up,
-                        prob=prob,
-                        resolveu_up=bool(janela.resolveu_up),
-                    )
-                )
+            self._registrar_sinal(janela, est, candidatos, report)
 
             if not candidatos or not self._pode_entrar(
                 seconds_left=seconds_left,
