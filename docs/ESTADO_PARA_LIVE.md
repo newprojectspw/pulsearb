@@ -24,10 +24,12 @@ contra 0,207 na banda com o modelo derivado. **E a borda desapareceu no mesmo
 movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
 cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
-por ausência de borda e por capacidade, não mais por calibração. O MAKER
-desbloqueou: **1.10 confirmada** (fórmula quadrática, 2026-08-30) e **1.6
-avaliada e positiva** com fórmula confirmada e fator=0,3 (**+35,6 USDC/8h**,
-M2_25AGO 2026-08-25). Os cinco critérios do maker passam nos dados disponíveis.
+por ausência de borda e por capacidade, não mais por calibração. **O MAKER
+também não passa nos cinco:** 1.7, 1.8, 1.9 e 1.10 passam, mas o **1.6 é NÃO
+AVALIÁVEL** — esta página chegou a marcá-lo ✅ com +35,6 USDC/8h e isso foi
+**revertido em 2026-08-31**, porque contradizia o `resumo_m2.py` e o
+`VEREDITO_M2.md`. O número segue registrado como estimativa de ordem de
+grandeza, com o método à vista.
 **O M2.2 rodou em 2026-08-31** — 24 h com a fórmula confirmada, 126,7 M
 registros — e 1.7/1.8 saíram idênticos aos de antes (−0,1974 e 65,922 h),
 porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
@@ -98,14 +100,24 @@ exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
 ligar o LIVE com a estratégia taker atual.
 
 **Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
-ou virar para a rota maker — **1.10 confirmada** (fórmula quadrática, 2026-08-30)
-e **1.6 avaliada e positiva** (fator=0,3, +35,6 USDC/8h, M2_25AGO 2026-08-25).
-Os cinco critérios do maker passam nos dados disponíveis, e o **M2.2 fechou em
-2026-08-31**: 1.7 e 1.8 remedidos em 24 h com a fórmula certa, iguais aos de
-antes. Falta o **M3** para dimensionar o `capital_imobilizado` — o único termo
-da conta do maker que ainda é hipótese.
+ou virar para a rota maker. **O que mudou em 2026-08-31 torna a escolha mais
+dura, não mais fácil:**
 
-Atualizado: 2026-08-30 · fonte dos números correntes:
+- o **taker** tem causa medida — a regra de entrada seleciona pior que o
+  acaso (0,4157, p=1,16e−05, quatro rodadas) — e a correção óbvia (exigir
+  convicção mínima) foi testada e **não salva**;
+- o **maker** perdeu o ✅ do 1.6, que era o critério que fazia a rota parecer
+  aprovada. Passa em 1.7, 1.8, 1.9 e 1.10; o 1.6 é **não avaliável por
+  construção** enquanto a fila não for observável;
+- o **motor maker não existe** (item 4.0): `live/motor.py` é 100 % taker e o
+  cliente fixa `FOK`, que nunca repousa no livro.
+
+O que o M2.2 fechou: 1.7 e 1.8 remedidos em 24 h com a fórmula certa, iguais
+aos de antes. O que sobra do lado bom: o pool **existe em 100 % das janelas de
+4 h**, e a peça que decide onde cotar já está escrita e testada
+(`live/cotacao.py`, 20 testes).
+
+Atualizado: 2026-08-31 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
 2026-08-24 (126,7 M registros, `pior_fracao_coberta 1,0`, 0 silêncios),
 avaliadas com o preditor de variância **medida** sobre a curva de 23/08
@@ -350,11 +362,11 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-### MAKER — 1.6 a 1.10 passam; **M2.2 RODOU e confirmou 1.7 e 1.8**
+### MAKER — 1.7 a 1.10 passam; **o 1.6 NÃO é avaliável** (revertido em 31/08)
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | **+35,6 USDC/8h** — rewards 25,8 (pool≈86 USDC × 0,3) + exec. líq. 9,7 (0,0902 ¢/share × 30% fills) — fórmula confirmada, M2_25AGO 2026-08-25 | ✅ |
+| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — `o_que_falta_para_fechar` continua com os 3 termos, e o `resumo_m2.py` reporta assim em toda rodada. A estimativa de +35,6 USDC/8h **não fecha o critério**: ver abaixo | ⚠️ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
@@ -388,10 +400,36 @@ falta de pool; ela é **restrita à janela de 4 h**, onde o pool está sempre l�
 (rewards 25,8 + exec. líquida 9,7, fator=0,3) é o número da rota viável, e não
 uma média sobre um universo que inclui mercados que não pagam.
 
-**O 1.6 PASSA com a fórmula confirmada (S(v,s)=((v-s)/v)²×b, §15.2).** A
-avaliação com fator=0,3 substitui a posição desconhecida na fila pela hipótese
-conservadora de 30% do pool por snapshot — resolve o `o_que_falta_para_fechar`
-de modo pré-registrado. O `capital_imobilizado` segue como decisão do M3.
+### ⚠️ O 1.6 estava marcado ✅ e foi REVERTIDO em 2026-08-31
+
+Esta página dizia *"o 1.6 PASSA com a fórmula confirmada"*, com **+35,6
+USDC/8h**. O `resumo_m2.py` — o instrumento que lê o relatório — reporta **NÃO
+AVALIÁVEL** em toda rodada, e o `VEREDITO_M2.md` §"MAKER" diz, desde o
+primeiro veredito, que o critério é *"não avaliável **por construção**, não
+por falta de amostra"*. O quadro contradizia os dois.
+
+**Como o número foi construído, e onde ele escorrega.** O relatório publica
+`rewards_usdc = 39,37` para 200 shares @ 1 tick, 2 lados, em 7,995 h — e esse
+número **já é a nossa fatia pro-rata**. A avaliação anterior dividiu-o pela
+fatia média (0,457) para estimar o pool total (≈ 86 USDC) e aplicou o fator
+0,3 **sobre o pool**, chegando a 25,8. Aplicar o mesmo 0,3 sobre a fatia que a
+fórmula já dá levaria a 39,37 × 0,3 = **11,8**. As duas leituras do mesmo
+"fator 0,3" diferem por **2,2×**, e nenhuma das duas está escrita no critério
+pré-registrado — que é o que o torna não avaliável.
+
+**Os três termos que faltam continuam faltando**, e nenhum deles é amostra:
+`volume_taker_usdc` e `custo_de_markout` em USDC dependem de **quais** das
+nossas cotações teriam sido executadas — isto é, da posição na fila, que o WS
+agregado não entrega —, e `capital_imobilizado` é decisão do M3.
+
+**O que o número vale:** é uma estimativa de ordem de grandeza, útil para
+decidir se vale construir o motor maker (item 4.0). Não é medição, e não fecha
+critério. Fica registrado como estimativa, com o método à vista, em vez de
+apagado — apagar esconderia que a rota chegou a parecer aprovada.
+
+**Consequência no placar:** o MAKER **não passa nos cinco**. Passa em 1.7,
+1.8, 1.9 e 1.10; o 1.6 fica não avaliável até existir medição de fila ou uma
+definição pré-registrada do que o fator 0,3 desconta.
 
 **1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
 
