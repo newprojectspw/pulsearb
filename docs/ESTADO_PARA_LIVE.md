@@ -58,9 +58,14 @@ porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
 > **A seleção adversa deixou de ser hipótese (§2d-quinquies).** Quebrando as
 > 688 apostas pela confiança do lado apostado: **543 delas (79 %) saem entre
 > 0,45 e 0,55** — a regra opera onde o modelo não sabe —, e ali ele realiza
-> **9,3 pontos abaixo do que promete** (0,413 contra 0,505). No agregado de
-> 247 mil previsões o mesmo modelo é calibrado. A comparação é pareada por
-> construção, e a diferença é a seleção.
+> **8,75 pontos abaixo do que promete**. No agregado de 247 mil previsões o
+> mesmo modelo é calibrado. A comparação é pareada por construção, e a
+> diferença é a seleção.
+>
+> **O número aguenta peso:** reproduziu ao dígito em **quatro** rodadas
+> independentes, e o único viés conhecido do instrumento — quando os dois
+> lados passam do threshold, o registrado é Up por ordem da lista — foi
+> medido em **0 de 149.448 sinais**.
 >
 > **O mecanismo:** `edge = prob − ask > threshold` dispara em qualquer lado.
 > Com o modelo em 0,48 e o ask em 0,44 a margem existe *se o modelo estiver

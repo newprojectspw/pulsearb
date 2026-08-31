@@ -1370,9 +1370,15 @@ aparece responde a §2d-quater:
 
 | confiança | n | o modelo promete | realiza | déficit |
 |---|---|---|---|---|
-| 0,45–0,50 | 215 | 0,475 | 0,363 | **−0,112** |
-| 0,50–0,55 | 328 | 0,525 | 0,445 | **−0,080** |
-| **ponderado** | **543 (79 %)** | **0,505** | **0,413** | **−0,093** |
+| 0,45–0,50 | 215 | 0,4945 | 0,3628 | **−0,1317** |
+| 0,50–0,55 | 328 | 0,5037 | 0,4451 | **−0,0586** |
+| **ponderado** | **543 (79 %)** | | | **−0,0875** |
+
+*(Os "promete" são a **confiança média das apostas** da faixa, não o meio dela
+— `confianca_media` foi acrescentada ao relatório justamente porque o déficit
+é a diferença entre dois números grandes e próximos, e meia largura de faixa
+seria erro da ordem do efeito. A estimativa anterior pelo meio dava −0,093;
+com o valor exato, −0,0875. Mesma conclusão, número diferente.)*
 
 **A regra opera onde o modelo não sabe.** 543 das 688 apostas — 79 % — saem
 com confiança entre 0,45 e 0,55, ou seja, a um passo de cara-ou-coroa. As
@@ -1425,9 +1431,28 @@ estava certa — mas ela só vale escrita aqui porque foi conferida, e não porq
 parecia óbvia. O conserto continua valendo para quem vier depois com dado
 discreto ou probabilidade arredondada, onde as bordas deixam de ser raras.
 
-**De quebra, a direção reproduziu.** Três rodadas independentes do mesmo dia
-(`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`) dão `por_janela` = **0,4157
-com p = 1,16e−05**, ao dígito. O número não é artefato de uma execução.
+**De quebra, a direção reproduziu.** **Quatro** rodadas independentes do mesmo
+dia (`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`, `M2_VIES`) dão
+`por_janela` = **0,4157 com p = 1,16e−05**, ao dígito. O número não é artefato
+de uma execução.
+
+### O viés do próprio instrumento: suspeitado, medido, e é zero
+
+`_candidatos_com_edge` monta a lista sempre na ordem `(Up, Down)`, e o registro
+lê `candidatos[0]`. **Quando os dois lados passam do threshold, o lado
+registrado é Up por ordem da lista, não por decisão** — e isso enviesaria a
+acurácia que sustenta todo o diagnóstico acima.
+
+A condição para os dois passarem é `ask_up + ask_down < 1 − 2×threshold`, ou
+seja 0,96 com o threshold de 0,02: book tão fino que comprar os dois lados
+custaria menos que o payoff. Eu supunha que fosse raro. Medido:
+
+    0 instantes em 149.448 sinais  —  0,0000 %
+
+O mercado sempre cobrou spread suficiente. **O viés não existe nesta amostra**,
+e o 0,4157 está limpo dele. Continua publicado (`vies_de_ambos_os_lados`) e
+impresso no resumo, porque num dia de book mais fino a fração pode deixar de
+ser zero — e quem ler o número precisa poder conferir, não confiar.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
