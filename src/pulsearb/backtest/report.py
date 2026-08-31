@@ -453,12 +453,43 @@ class BacktestReport:
                 }
             return saida
 
+        def _por_limiar(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """E se a regra exigisse convicção mínima para operar?
+
+            É a primeira correção que ocorre a quem lê o déficit: se a regra
+            erra onde o modelo não sabe, que ela só opere onde ele sabe. A
+            varredura responde antes que alguém implemente e descubra depois.
+
+            O ponto de atenção é o `n`: subir o limiar corta amostra rápido, e
+            uma acurácia bonita sobre 20 apostas não é resultado. Por isso o
+            p-valor sai junto de cada linha.
+            """
+            saida = {}
+            for passo in range(10, 17):  # 0,50 a 0,80
+                limiar = passo * LARGURA_DA_FAIXA
+                elegiveis = [
+                    s
+                    for s in sinais
+                    if (s.prob if s.lado_up else 1.0 - s.prob) >= limiar
+                ]
+                if not elegiveis:
+                    continue
+                acertos = sum(1 for s in elegiveis if s.acertou)
+                saida[f"{limiar:.2f}"] = {
+                    "apostas": len(elegiveis),
+                    "acertos": acertos,
+                    "acuracia": acertos / len(elegiveis),
+                    "p_valor": _p_valor_binomial(acertos, len(elegiveis)),
+                }
+            return saida
+
         por_janela = list(self.primeiro_sinal_da_janela.values())
         total = len(self.sinais_direcionais)
         return {
             "por_sinal": _bloco(self.sinais_direcionais),
             "por_janela": _bloco(por_janela),
             "por_faixa_de_confianca": _por_faixa(por_janela),
+            "se_exigisse_confianca_minima": _por_limiar(por_janela),
             # O único viés conhecido desta medição, publicado como número.
             "vies_de_ambos_os_lados": {
                 "instantes": self.sinais_com_ambos_os_lados,

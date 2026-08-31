@@ -783,6 +783,44 @@ def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
         )
         print()
     _imprimir_faixas_de_confianca(bloco.get("por_faixa_de_confianca") or {})
+    _imprimir_varredura_de_confianca(
+        bloco.get("se_exigisse_confianca_minima") or {}
+    )
+
+
+def _imprimir_varredura_de_confianca(varredura: dict[str, Any]) -> None:
+    """Existe limiar de convicção que salve a regra?
+
+    É a primeira correção que ocorre a quem lê o déficit — "se ela erra onde o
+    modelo não sabe, que só opere onde ele sabe". Responder aqui evita que
+    alguém a implemente e descubra depois de gastar uma campanha.
+    """
+    if not varredura:
+        return
+    print("  e se a regra exigisse conviccao minima:")
+    print(f"    {'limiar':<9}{'apostas':>9}{'acuracia':>11}{'p':>10}")
+    algum_salva = False
+    for limiar, d in sorted(varredura.items()):
+        n = d.get("apostas") or 0
+        if not n:
+            continue
+        p = d.get("p_valor")
+        ac = d.get("acuracia")
+        # "Salva" exige as duas coisas: acertar acima de 0,5 E ter amostra
+        # que sustente. Uma sozinha e ruido escolhido a dedo.
+        salva = ac is not None and p is not None and ac > 0.5 and p < 0.05
+        algum_salva = algum_salva or salva
+        marca = "  <== SALVA" if salva else ""
+        print(f"    {limiar:<9}{n:>9}{_numero(ac):>11}{_numero(p):>10}{marca}")
+    print()
+    if not algum_salva:
+        print(
+            "    >> NENHUM limiar salva: nao ha corte de conviccao com acuracia\n"
+            "       acima de 0,5 E amostra que sustente. Exigir mais conviccao\n"
+            "       corta a amostra antes de corrigir a direcao — o problema\n"
+            "       nao e o limiar."
+        )
+        print()
 
 
 def _imprimir_faixas_de_confianca(faixas: dict[str, Any]) -> None:

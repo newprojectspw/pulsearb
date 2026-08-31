@@ -1436,6 +1436,39 @@ dia (`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`, `M2_VIES`) dão
 `por_janela` = **0,4157 com p = 1,16e−05**, ao dígito. O número não é artefato
 de uma execução.
 
+### §2d-sexies. Exigir convicção mínima NÃO salva a regra
+
+A primeira correção que ocorre a quem lê o déficit é óbvia: se a regra erra
+onde o modelo não sabe, que ela só opere onde ele sabe. Medido antes de
+alguém implementar e gastar uma campanha descobrindo:
+
+| limiar de confiança | apostas | acurácia | p |
+|---|---|---|---|
+| ≥ 0,50 | 395 | 0,4506 | 0,056 |
+| ≥ 0,55 | 67 | 0,4776 | 0,807 |
+| ≥ 0,60 | 56 | 0,4464 | 0,504 |
+| ≥ 0,65 | 48 | 0,4583 | 0,665 |
+| ≥ 0,70 | 41 | 0,4634 | 0,755 |
+| ≥ 0,75 | 32 | 0,5312 | 0,860 |
+| ≥ 0,80 | 24 | 0,5833 | 0,540 |
+
+**Nenhum limiar entrega as duas coisas ao mesmo tempo** — acurácia acima de
+0,5 *e* amostra que sustente. O melhor número da coluna (0,5833) vem de 24
+apostas com p = 0,54: ruído. Escolher esse limiar por ele ser o mais alto
+seria sobreajuste com uma casa decimal.
+
+**Por que a curva se comporta assim.** Subir o limiar corta a amostra antes de
+corrigir a direção: de 395 apostas para 24. As duas condições que a regra
+precisa — modelo convicto **e** preço discordando — quase não coincidem. Faz
+sentido: quando o modelo tem convicção e o preço concorda, não há margem;
+quando tem convicção e o preço discorda, ou é oportunidade rara, ou o modelo
+está errado. Os dados dizem que é predominantemente o segundo caso.
+
+**O que isto fecha:** a linha de investigação "filtrar por convicção". O
+problema não é o limiar. Está publicado em
+`direcao_sem_fill.se_exigisse_confianca_minima`, e o `resumo_m2.py` imprime o
+veredito a partir do dado, não como texto fixo.
+
 ### O viés do próprio instrumento: suspeitado, medido, e é zero
 
 `_candidatos_com_edge` monta a lista sempre na ordem `(Up, Down)`, e o registro

@@ -285,6 +285,40 @@ class TestPorFaixaDeConfianca:
         assert faixas["0.90-0.95"]["n"] == 1
 
 
+class TestSeExigisseConfiancaMinima:
+    """A primeira correção que ocorre a quem lê o déficit — respondida antes
+    de alguém implementá-la e descobrir depois."""
+
+    def test_o_limiar_corta_as_apostas_de_baixa_conviccao(self):
+        report = BacktestReport()
+        for i in range(50):  # confiança 0,52 — some acima de 0,55
+            report.add_sinal_direcional(_sinal(f"baixa{i}", prob=0.52))
+        for i in range(30):  # confiança 0,72 — sobrevive até 0,70
+            report.add_sinal_direcional(_sinal(f"alta{i}", prob=0.72))
+
+        varredura = report.direcao_sem_fill()["se_exigisse_confianca_minima"]
+
+        assert varredura["0.50"]["apostas"] == 80
+        assert varredura["0.55"]["apostas"] == 30
+        assert varredura["0.70"]["apostas"] == 30
+        assert "0.75" not in varredura, "acima de 0,72 não deve sobrar aposta"
+
+    def test_cada_linha_traz_o_p_valor_junto_da_acuracia(self):
+        """Subir o limiar corta amostra rápido, e acurácia bonita sobre 20
+        apostas não é resultado. Sem o p-valor ao lado, a varredura vira um
+        convite a escolher o limiar que deu o número mais alto."""
+        report = BacktestReport()
+        for i in range(20):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.80, resolveu_up=i < 12)
+            )
+
+        celula = report.direcao_sem_fill()["se_exigisse_confianca_minima"]["0.80"]
+
+        assert celula["acuracia"] == pytest.approx(0.60)
+        assert celula["p_valor"] > 0.05, "12/20 não deveria ser significativo"
+
+
 class TestAPublicacao:
     def test_o_relatorio_traz_o_bloco_com_a_leitura(self):
         report = BacktestReport()
@@ -296,6 +330,7 @@ class TestAPublicacao:
             "por_sinal",
             "por_janela",
             "por_faixa_de_confianca",
+            "se_exigisse_confianca_minima",
             "vies_de_ambos_os_lados",
             "leitura",
         }
