@@ -769,6 +769,49 @@ def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
         "  Lucro depende de execucao e capacidade, que sao o 1.1 e o 1.5."
     )
     print()
+    _imprimir_faixas_de_confianca(bloco.get("por_faixa_de_confianca") or {})
+
+
+def _imprimir_faixas_de_confianca(faixas: dict[str, Any]) -> None:
+    """A regra erra em toda parte, ou erra ONDE ELA OPERA?
+
+    Duas leituras opostas saem daqui. Se a acuracia acompanha a faixa — ruim
+    perto de 0,5, boa perto de 1,0 —, o preditor discrimina e o defeito e de
+    escolha de momento. Se for ruim em todas, o problema e o sinal.
+
+    A faixa e a do lado APOSTADO: apostar Down com P(Up)=0,1 conta como
+    confianca 0,9.
+    """
+    if not faixas:
+        return
+    print("  onde a regra opera, e como ela se sai la:")
+    print(f"    {'confianca':<14}{'n':>6}{'acertos':>9}{'acuracia':>10}")
+    for faixa, d in sorted(faixas.items()):
+        n = d.get("n") or 0
+        if not n:
+            continue
+        print(
+            f"    {faixa:<14}{n:>6}{d.get('acertos', 0):>9}"
+            f"{_numero(d.get('acuracia')):>10}"
+        )
+    # Concentracao: se quase tudo cai perto de 0,5, a regra opera na duvida,
+    # e ali acertar pouco e esperado — o diagnostico muda de "sinal ruim"
+    # para "gatilho disparando onde o modelo nao sabe".
+    total = sum((d.get("n") or 0) for d in faixas.values())
+    indecisas = sum(
+        (d.get("n") or 0)
+        for f, d in faixas.items()
+        if f in ("0.50-0.55", "0.55-0.60")
+    )
+    if total and indecisas / total >= 0.5:
+        print()
+        print(
+            f"    !! {indecisas} de {total} apostas ({100 * indecisas / total:.0f}%)"
+            " saem com confianca < 0,60.\n"
+            "       A regra opera onde o modelo nao sabe — e ali acertar pouco"
+            " nao\n       acusa o preditor, acusa o GATILHO."
+        )
+    print()
 
 
 def _imprimir(rotulo: str, valor: Any) -> None:
