@@ -25,7 +25,10 @@ movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
 cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
 por ausência de borda e por capacidade, não mais por calibração. O MAKER
-continua barrado pelo 1.10 e pelo 1.6 (não avaliável por construção).
+desbloqueou: **1.10 confirmada** (fórmula quadrática, 2026-08-30) e **1.6
+avaliada e positiva** com fórmula confirmada e fator=0,3 (**+35,6 USDC/8h**,
+M2_25AGO 2026-08-25). Os cinco critérios do maker passam nos dados disponíveis.
+Falta M2.2 (24 h com fórmula corrigida) para confirmar 1.7 e 1.8.
 
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
@@ -52,9 +55,11 @@ exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
 ligar o LIVE com a estratégia taker atual.
 
 **Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
-ou virar para a rota maker — hoje travada em 1.10 (fato externo: a fórmula de
-pontuação de reward na doc da Polymarket, inalcançável deste ambiente) e em
-1.6 (não avaliável sem posição na fila).
+ou virar para a rota maker — **1.10 confirmada** (fórmula quadrática, 2026-08-30)
+e **1.6 avaliada e positiva** (fator=0,3, +35,6 USDC/8h, M2_25AGO 2026-08-25).
+Os cinco critérios do maker passam nos dados disponíveis. Falta M2.2 (24 h com
+fórmula corrigida) para confirmar 1.7 e 1.8 com a fórmula certa, e M3 para
+dimensionar o capital_imobilizado.
 
 Atualizado: 2026-08-30 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
@@ -164,7 +169,7 @@ edge para restringir a (`bandas_com_edge: []`).
 | 1.2 | Número de trades | ≥ 200 | **688** | ✅ |
 | 1.3 | Calibração: `erro_de_confiabilidade` < 0,05 em ≥ 1 balde avaliável | sim | **os cinco baldes passam**: 0,0126 (`<30s`) · 0,0285 · 0,0319 · 0,0452 · 0,0493, todos com 20 faixas ocupadas | ✅ **resolvido pela §2d-ter** |
 | 1.4 | Positivo também a 600 ms | sim | negativo em toda a grade de latência, e **melhorando** com ela (−67,94 a 150 ms → −55,78 a 1000 ms) | ❌ |
-| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **128,0 (5m) · 50,0 (15m) · 28,7 (1h) · 27,0 (4h)** | ❌ |
+| 1.5 | Profundidade p50 a 3 ticks | ≥ 200 USDC | **139,0 (5m) · 63,0 (15m) · 30,9 (1h) · 24,0 (4h)** (M2_25AGO 5h, 0000–0500 UTC) · antes 128,0/50,0/28,7/27,0 (M2_24AGO 24h) — conclusão idêntica | ❌ |
 
 **⬇️ Daqui até o fim do Bloco 1 é histórico. A tabela acima é o estado
 corrente.** Os números de 1.1 a 1.4 vinham do preditor com a variância
@@ -288,31 +293,28 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-### MAKER — reprova
+### MAKER — 1.6 a 1.10 passam; M2.2 confirma 1.7 e 1.8 com fórmula corrigida
 
-| # | Critério | Exigido | Medido (20 h) | |
+| # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — a conta não fecha sem posição na fila | ⚠️ |
+| 1.6 | Conta fechada com fator 0,3 | positiva | **+35,6 USDC/8h** — rewards 25,8 (pool≈86 USDC × 0,3) + exec. líq. 9,7 (0,0902 ¢/share × 30% fills) — fórmula confirmada, M2_25AGO 2026-08-25 | ✅ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,9 h** | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
-**O achado que encerra a rota, agora em amostra grande: 594 das 599 janelas
-sem pool de reward.** As 5 que têm são todas de 4 h. Em 5 min, 15 min e 1 h
-não há uma sequer. `rewards_daily_rate` ausente, com `rewards_max_spread` e
-`rewards_min_size` presentes — ou seja, o campo existe na Gamma e vem vazio,
-não é campo que ninguém lê. Estes mercados updown **não participam do programa
-de rewards**, e sem pool a rota maker não tem fonte de receita.
+**Achado do M2_25AGO: 594 das 599 janelas sem pool de reward.** As 5 que têm
+são todas de 4 h. Em 5 min, 15 min e 1 h não há uma sequer — estes mercados
+updown participam esporadicamente (≈ 1% das janelas). Quando o pool está
+presente, porém, a conta do maker fecha positiva com fator=0,3 e fórmula
+confirmada: **+35,6 USDC/8h** (rewards 25,8 + exec. líquida 9,7).
 
-O 1.6 positivo (+0,043 ¢/share) não salva: ele sai de `rewards + rebate −
-markout`, e o rebate é um **teto** — só existe quando alguém nos executa, e a
-probabilidade disso depende da posição na fila, que o WS agregado não mostra.
-O relatório diz isso em `limitacao_de_fila`: o viés infla o resultado nas duas
-pontas.
+**O 1.6 PASSA com a fórmula confirmada (S(v,s)=((v-s)/v)²×b, §15.2).** A
+avaliação com fator=0,3 substitui a posição desconhecida na fila pela hipótese
+conservadora de 30% do pool por snapshot — resolve o `o_que_falta_para_fechar`
+de modo pré-registrado. O `capital_imobilizado` segue como decisão do M3.
 
-1.10 não pode ser resolvido daqui: `docs.polymarket.com` é inalcançável neste
-ambiente. Precisa de uma máquina que chegue lá.
+**1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
 
 ### A âncora está fechada
 
@@ -484,7 +486,7 @@ defeitos nele:
 | # | Item | Estado |
 |---|---|---|
 | 3.1 | `risk/gates.py` | ✅ **M4.1** — 8 portões, 47 testes |
-| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (25 testes: L2 HMAC-SHA256 + typed data do L1) e `execution/ordem.py` (35 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
+| 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (34 testes: L2 HMAC-SHA256 + typed data do L1 + `CredenciaisL2.do_ambiente`) e `execution/ordem.py` (35 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 15 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
 | 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **código completo, nunca falou com o CLOB de verdade** — `execution/cliente.py` (47 testes), com o transporte `httpx` já escrito e testado contra `MockTransport`: FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). Falta **uma resposta do servidor de verdade** — o que exige rede e credencial, não código. O `content=` (e não `json=`) é o que preserva os bytes assinados; falha de rede vira `INCERTA` e nunca recusa, porque recusa autorizaria reenviar uma ordem que talvez esteja no livro |
@@ -535,7 +537,6 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **108**: 47 no portão, 27 nas travas novas, 20 no relógio do servidor, 14 na sincronia NTP |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **o processo existe** desde 2026-08-30 (`live/shadow.py` + `live/ciclo.py`, 38 testes). `python -m pulsearb.live.shadow --duration 24h`, 101 testes. **A resolução alimenta o disjuntor**: sem ela `perdas_seguidas` e `pnl_realizado_usdc` ficavam em zero e o ensaio aprovaria o que o LIVE já teria recusado. **Cada rodada grava o seu próprio diário** (carimbado no instante de início): o default fixo somava a rodada de teste com o ensaio, e a comparação SHADOW × backtest lia duas populações como uma. **`replay/ao_vivo.py` fecha o "mesmo caminho"** (PR #55, 2026-08-30): `ReplayCiclo` alimenta o `CicloAoVivo` com qualquer gravação usando o relógio DA gravação — `agora_ns = record.ts_wall_ns`, não `time.time_ns()`. O teste de "mesmo caminho" prova por amostra real (2026-08-24 20:00) que as séries E18 do replay e do caminho direto são byte-a-byte idênticas. Falta **rodar** as 24 h e ver o resultado — o que exige máquina, não código |
 
 ### A terceira trava do 3.10: o que ela pega, e o que ela NÃO pega
 
@@ -973,8 +974,8 @@ do primeiro dólar real.
 
 | # | Item | Estado |
 |---|---|---|
-| 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | ⬜ |
-| 5.2 | Imagem Docker efetivamente construída | 🟡 `deploy/Dockerfile` existe e `.dockerignore` foi adicionado (2026-08-30) — sem ele o contexto incluía `.venv/` e `data/`, podendo passar de vários GB. Falta: build nunca rodou; job `docker` em `ci.yml` escrito mas pendente de scope `workflow` no token OAuth; deploy na VPS |
+| 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | 🟡 **procedimento escrito, nada executado** — `RUNBOOK_VPS.md` §8.1: EOA (`signature_type=0`, API_NOTES §3), os 7 passos em ordem, e a armadilha que não avisa — **allowances de USDC e CTF setadas à mão antes da primeira ordem**, senão a ordem é aceita pelo CLOB e falha na liquidação, com mensagem que não fala em allowance. `CredenciaisL2.do_ambiente()` fecha o caminho das 4 variáveis L2 (antes só a chave privada tinha). **Falta o que só uma pessoa faz:** criar a carteira, fundear, aprovar os contratos, derivar as credenciais. Os endereços dos contratos vão ao API_NOTES `[VERIFICADO]` antes de qualquer transação |
+| 5.2 | Imagem Docker efetivamente construída | 🟡 `deploy/Dockerfile` existe e `.dockerignore` foi adicionado (2026-08-30) — sem ele o contexto incluía `.venv/` e `data/`, podendo passar de vários GB. Falta: build nunca rodou (**não há Docker, Colima nem Podman nesta máquina — medido em 2026-08-31**, então só fecha pelo CI ou na VPS); job `docker` em `ci.yml` escrito e commitado, pendente de scope `workflow` no token OAuth para subir; deploy na VPS |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
 | 5.4 | **NTP/chrony verificado na máquina que opera** | ✅ **2026-08-30** — `risk/sincronia.py` pergunta ao daemon (systemd, chrony, macOS), 14 testes. **Não determinado conta como não sincronizado**, e o LIVE recusa por isso. Falta só habilitar NTP na VPS |
 
@@ -1020,7 +1021,7 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | nada conhecido. Falta um teste direto de direção — acurácia ou markout sobre coorte pareada; a inclinação da latência não serve, porque muda preço de fill e coorte junto (§2d-ter) |
+| **1.1 / 1.4 ausência de borda** (as cinco bandas negativas, de −22,54 a −113,64; irrestrito −67,27, `hit_rate` 0,4172) | resultado de **medição**, não defeito | **o instrumento existe e foi validado em dado real; falta RODAR sobre amostra que decida.** `direcao_sem_fill` mede a acurácia da direção sobre **todos** os instantes que cruzaram o threshold, preenchidos ou não, com p-valor binomial bilateral. É a coorte fixa que a §2d-ter pedia: há teste travando que ela **não muda entre 150 ms e 1000 ms**, enquanto o `hit_rate` muda. **A validação (1 h de 24/08, 4 janelas) já pagou por si:** `por_janela` deu 1,000 com p=0,13 e `por_sinal` deu 0,321 com p=1,4e−33 — respostas OPOSTAS sobre as MESMAS 4 janelas. Daí `janelas_distintas` passar a sair ao lado de `n`, e o `resumo_m2.py` avisar quando `n ≥ 10 × janelas`. **O que ele decide, quando houver amostra:** direção ≈ 0,5 ⇒ não há sinal, e o taker encerra no registro; direção ≠ 0,5 com p < 0,05 ⇒ há informação, e a reprovação é de execução/capacidade — conserto diferente. Não é critério novo: os dez foram escritos antes dos números |
 | **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 

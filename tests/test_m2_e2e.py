@@ -213,6 +213,46 @@ def test_sensibilidade_respeita_a_faixa_de_operacao(indexado):
         assert celula["trades"] < irrestrita[f"{latencia:.0f}ms"]["trades"]
 
 
+def test_a_direcao_sem_fill_nao_muda_com_a_latencia(indexado):
+    """A propriedade que faz o teste de direção valer alguma coisa.
+
+    O `hit_rate` é medido sobre trades preenchidos, e trocar a latência troca
+    QUAIS ordens preenchem — então os cenários de `sensibilidade_latencia`
+    comparam populações diferentes. É por isso que a inclinação da latência
+    não separa "não há direção" de "a execução ficou mais barata" (§2d-ter).
+
+    `direcao_sem_fill` é registrado antes de qualquer gate de execução, então
+    a coorte tem de ser **idêntica** nos dois cenários. Se este teste
+    quebrar, alguma coisa a jusante do sinal passou a influenciá-la — e o
+    bloco deixou de responder à pergunta que existe para responder.
+    """
+    janelas = _ancoradas(indexado)
+    blocos = {}
+    for latencia in (150.0, 1000.0):
+        report = BacktestRunner(
+            BacktestConfig(latencia_ms=latencia, threshold_edge=0.02)
+        ).run(janelas, indexado.streams)
+        blocos[latencia] = report.to_dict()["direcao_sem_fill"]
+
+    assert blocos[150.0]["por_janela"]["n"] > 0, "sem sinal o teste nao prova nada"
+    assert blocos[150.0] == blocos[1000.0]
+
+
+def test_a_direcao_sem_fill_ve_mais_que_os_trades(indexado):
+    """Sinal que não preencheu continua contando para a direção.
+
+    Se os dois números batessem sempre, `direcao_sem_fill` seria só um
+    apelido de `hit_rate` — e o viés de coorte que ele existe para remover
+    continuaria lá.
+    """
+    report = BacktestRunner(BacktestConfig(threshold_edge=0.02)).run(
+        _ancoradas(indexado), indexado.streams
+    )
+    saida = report.to_dict()
+
+    assert saida["direcao_sem_fill"]["por_sinal"]["n"] >= len(report.trades)
+
+
 def test_faixa_de_operacao_default_e_irrestrita(indexado):
     """Sem `operacao`, os tres diagnosticos reproduzem o comportamento legado.
 

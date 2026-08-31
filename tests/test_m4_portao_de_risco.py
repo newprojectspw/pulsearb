@@ -359,8 +359,13 @@ class TestPortaoDoRelogio:
 
         assert decisao.pode
 
-    def test_o_relogio_e_conferido_no_shadow_quando_ha_fonte(self, tmp_path):
-        """Com fonte instalada, o SHADOW confere igual — senão não ensaia."""
+    def test_shadow_com_latencia_alta_nao_recusa(self, tmp_path):
+        """No SHADOW, latência de rede ao servidor não é deriva de relógio.
+
+        Polymarket tem ~1278 ms de latência estrutural; recusar por isso
+        apagaria todo o diário — mesma razão pela qual ausência de fonte não
+        recusa em SHADOW. Só o LIVE recusa por `relogio_derivado`.
+        """
         portao = _portao(
             tmp_path, modo=Mode.SHADOW, relogio_do_servidor=_RelogioFalso(900.0)
         )
@@ -368,7 +373,7 @@ class TestPortaoDoRelogio:
             _ordem(), feeds_saudaveis=True, **LIVRO_SADIO
         )
 
-        assert decisao.motivo == MOTIVOS.RELOGIO_DERIVADO
+        assert decisao.pode
 
     def test_feed_parado_vence_relogio_derivado(self, tmp_path):
         """Ordem entre os dois: o feed é a causa mais geral.
