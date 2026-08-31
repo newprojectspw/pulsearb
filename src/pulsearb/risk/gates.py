@@ -429,6 +429,11 @@ class PortaoDeRisco:
             # ABS, e não só o positivo: carimbo do servidor no futuro do nosso
             # relógio significa relógio LOCAL atrasado, que estraga o
             # `seconds_left` na direção oposta e igualmente cara.
+            # Fora do LIVE não recusa: latência de rede ao servidor é estrutural
+            # (~1278 ms com Polymarket) e não é deriva de relógio — recusar aqui
+            # apagaria todo o diário do SHADOW. Mesma razão da ausência de fonte.
+            if self.modo is not Mode.LIVE:
+                return None
             return Decisao(
                 False,
                 MOTIVOS.RELOGIO_DERIVADO,
