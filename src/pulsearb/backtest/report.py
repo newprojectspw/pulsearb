@@ -386,10 +386,39 @@ class BacktestReport:
                 "difere_de_meio_a_meio": bool(p < 0.05),
             }
 
+        def _por_faixa(sinais: list[SinalDirecional]) -> dict[str, Any]:
+            """A mesma acurácia, quebrada pela confiança do modelo.
+
+            Responde a pergunta que o número agregado deixa em aberto: a regra
+            erra em toda parte, ou erra **onde ela opera**? São diagnósticos
+            diferentes. Se a acurácia acompanha a faixa — baixa onde o modelo
+            diz 0,5, alta onde ele diz 0,9 —, o preditor discrimina e o defeito
+            é de escolha de momento. Se for ruim em todas, é o sinal.
+
+            A faixa é a do lado APOSTADO, não a do `P(Up)` cru: apostar Down
+            com `P(Up)=0,1` é uma aposta de confiança 0,9, e agrupá-la com as
+            de `P(Up)=0,1` que compraram Up misturaria duas coisas opostas.
+            """
+            grupos: dict[str, list[SinalDirecional]] = defaultdict(list)
+            for s in sinais:
+                confianca = s.prob if s.lado_up else 1.0 - s.prob
+                grupos[faixa_de_probabilidade(confianca)].append(s)
+            saida = {}
+            for faixa, itens in sorted(grupos.items()):
+                acertos = sum(1 for s in itens if s.acertou)
+                saida[faixa] = {
+                    "n": len(itens),
+                    "janelas_distintas": len({s.slug for s in itens}),
+                    "acertos": acertos,
+                    "acuracia": acertos / len(itens),
+                }
+            return saida
+
         por_janela = list(self.primeiro_sinal_da_janela.values())
         return {
             "por_sinal": _bloco(self.sinais_direcionais),
             "por_janela": _bloco(por_janela),
+            "por_faixa_de_confianca": _por_faixa(por_janela),
             "leitura": (
                 "por_janela e a leitura conservadora e e a que decide: dentro "
                 "de uma janela os instantes dividem ancora, preco e resultado, "

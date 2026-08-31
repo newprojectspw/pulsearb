@@ -195,6 +195,58 @@ class TestOPValor:
             assert not math.isnan(p)
 
 
+class TestPorFaixaDeConfianca:
+    """A quebra que separa "erra em toda parte" de "erra onde opera"."""
+
+    def test_a_faixa_e_a_do_lado_APOSTADO_e_nao_a_do_P_up(self):
+        """Apostar Down com `P(Up)=0,1` é uma aposta de confiança 0,9.
+
+        Agrupá-la com as de `P(Up)=0,1` que compraram Up misturaria duas
+        apostas opostas na mesma linha, e a leitura sairia invertida em
+        metade dos casos.
+        """
+        report = BacktestReport()
+        report.add_sinal_direcional(
+            _sinal("j1", lado_up=True, prob=0.9, resolveu_up=True)
+        )
+        report.add_sinal_direcional(
+            _sinal("j2", lado_up=False, prob=0.1, resolveu_up=False)
+        )
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert list(faixas) == ["0.90-0.95"]
+        assert faixas["0.90-0.95"]["n"] == 2
+        assert faixas["0.90-0.95"]["acuracia"] == 1.0
+
+    def test_separa_faixa_confiante_de_faixa_indecisa(self):
+        report = BacktestReport()
+        for i in range(10):  # confiança 0,9 — acerta sempre
+            report.add_sinal_direcional(
+                _sinal(f"alta{i}", prob=0.92, resolveu_up=True)
+            )
+        for i in range(10):  # confiança ~0,5 — cara ou coroa
+            report.add_sinal_direcional(
+                _sinal(f"meio{i}", prob=0.52, resolveu_up=i % 2 == 0)
+            )
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert faixas["0.90-0.95"]["acuracia"] == 1.0
+        assert faixas["0.50-0.55"]["acuracia"] == pytest.approx(0.5)
+
+    def test_usa_a_coorte_POR_JANELA_e_nao_todos_os_instantes(self):
+        """Mesma razão do bloco principal: instantes da mesma janela são a
+        mesma observação repetida, e inflariam cada faixa."""
+        report = BacktestReport()
+        for _ in range(30):
+            report.add_sinal_direcional(_sinal("uma-janela-so", prob=0.9))
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert faixas["0.90-0.95"]["n"] == 1
+
+
 class TestAPublicacao:
     def test_o_relatorio_traz_o_bloco_com_a_leitura(self):
         report = BacktestReport()
@@ -202,7 +254,12 @@ class TestAPublicacao:
 
         bloco = report.to_dict()["direcao_sem_fill"]
 
-        assert set(bloco) == {"por_sinal", "por_janela", "leitura"}
+        assert set(bloco) == {
+            "por_sinal",
+            "por_janela",
+            "por_faixa_de_confianca",
+            "leitura",
+        }
         # A leitura diz qual das duas contagens decide. Sem ela, quem lê o
         # JSON cita a de `n` maior, que é a inflada.
         assert "por_janela" in bloco["leitura"]
