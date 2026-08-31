@@ -137,6 +137,55 @@ def test_os_numeros_aparecem_no_texto_do_quadro():
     )
 
 
+#: Onde um caminho citado no quadro pode estar. O quadro escreve
+#: `risk/gates.py` querendo dizer `src/pulsearb/risk/gates.py`, e
+#: `ci.yml` querendo dizer `.github/workflows/ci.yml` — a citação é a que o
+#: leitor usa para achar a evidência, então todas as formas contam.
+PREFIXOS_DE_BUSCA = (
+    "",
+    "src/pulsearb",
+    "docs",
+    "tests",
+    "scripts",
+    "deploy",
+    ".github/workflows",
+)
+
+#: Extensões que valem conferir. `.json` fica de fora de propósito: o quadro
+#: cita relatórios (`M2_25AGO.json`) que moram em `relatorios/`, um diretório
+#: que não é versionado — exigir que existam faria o teste falhar em clone
+#: novo, que é o oposto do que ele existe para pegar.
+EXTENSOES_CONFERIDAS = ("py", "sh", "yml", "md")
+
+
+def test_os_arquivos_citados_como_evidencia_existem():
+    """Citação que não resolve é evidência que ninguém consegue conferir.
+
+    O quadro aponta arquivo e símbolo o tempo todo — é assim que ele sustenta
+    um ✅. Um arquivo renomeado deixa a linha apontando para o nada, e o
+    defeito é invisível: o texto continua com a mesma cara de evidência, e só
+    quem for procurar descobre que não há o que ler.
+    """
+    texto = QUADRO.read_text(encoding="utf-8")
+    padrao = rf"`([a-z_][a-z0-9_/]*\.(?:{'|'.join(EXTENSOES_CONFERIDAS)}))`"
+    citados = sorted(set(re.findall(padrao, texto)))
+
+    assert citados, "nenhum arquivo citado — o padrão de busca quebrou"
+
+    sumidos = [
+        c
+        for c in citados
+        if not any((RAIZ / p / c).exists() for p in PREFIXOS_DE_BUSCA)
+    ]
+
+    assert not sumidos, (
+        "o quadro cita como evidência arquivos que não existem: "
+        + ", ".join(sumidos)
+        + "\nRenomeou algo? A linha do quadro que aponta para ele precisa "
+        "mudar no MESMO commit (Regra 1 do CLAUDE.md)."
+    )
+
+
 def test_o_quadro_existe_e_tem_a_legenda_dos_simbolos():
     """A legenda é o que dá sentido a ✅/🟡/❌ — sem ela o quadro não se lê."""
     texto = QUADRO.read_text(encoding="utf-8")
