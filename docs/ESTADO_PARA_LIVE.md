@@ -537,7 +537,6 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **108**: 47 no portão, 27 nas travas novas, 20 no relógio do servidor, 14 na sincronia NTP |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **rodando desde 2026-08-31 00:46 UTC** (PID 26423), depois do conserto do `relogio_derivado` — ver abaixo. Às 2,8 h: sem crash, 32 aprovadas, **quatro** portões exercitados. Falta completar as 24 h |
 
 *(A linha 3.13 sumiu do quadro num merge entre as duas sessões e foi
 restaurada em 2026-08-31. Fica o registro: conflito neste arquivo é o mais
@@ -556,30 +555,6 @@ ensaia —, mas o atraso acima do teto não tinha, e apagava o diário inteiro.
 Corrigido: **só o LIVE recusa por `relogio_derivado`**; a fonte muda
 (`atraso_ms = None`) continua recusando em qualquer modo, porque não saber
 custa o mesmo que saber que está ruim.
-
-**O ensaio corrigido às 2,8 h** (7.684 tentativas registradas):
-
-| | |
-|---|---|
-| intenções aprovadas | **32** |
-| `pausa_por_sequencia` | 7.604 |
-| `preco_fora_da_faixa` | 32 |
-| `livro_desconhecido` | 16 |
-| PnL realizado | **+18,48 USDC** |
-| perdas seguidas / disjuntor | 0 / desarmado |
-
-**Os três avisos que este número exige.** (a) O SHADOW **não prova
-preenchimento** — ninguém do outro lado sabe que a ordem existe, então o PnL é
-uma conta sobre fill assumido, não uma observação. (b) 32 entradas não
-sustentam veredito nenhum. (c) `pausa_por_sequencia` em 99 % das linhas **não é
-99 % do tempo**: o bot continua tentando durante a pausa, e cada tentativa vira
-uma linha.
-
-**O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
-`pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
-aparecendo no diário, não um. `preco_fora_da_faixa` e `livro_desconhecido`
-sendo exercitados é o que dá sentido ao ensaio — um diário com um motivo só
-não distingue "as travas funcionam" de "uma trava está engolindo tudo".
 
 **A trava 3.8 disparou ao vivo pela primeira vez, e está certa.** Quatro perdas
 seguidas pausam por 1 h. A consequência operacional é que 24 h de ensaio
