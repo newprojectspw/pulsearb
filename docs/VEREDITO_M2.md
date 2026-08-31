@@ -1407,10 +1407,27 @@ numa conferência de olho, e a função alimenta a curva de confiabilidade que
 decide o critério **1.3**. Corrigido com epsilon de 1e-9 (o erro real é da
 ordem de 1e-15) e travado com as 20 bordas parametrizadas.
 
-**Impacto nos ECEs já publicados: não medido.** Só previsões exatamente em
-0,60, 0,70 ou 0,95 mudam de faixa, e em série contínua isso é raro — mas
-"raro" não é "zero", e a próxima rodada é que dirá. Os números de 1.3 no
-quadro (0,0126–0,0493) foram computados com a versão defeituosa.
+**Impacto nos ECEs já publicados: MEDIDO, e é zero.**
+`relatorios/M2_FAIXA_CORRIGIDA_20260824.json` re-rodou as mesmas 24 h com a
+função consertada:
+
+| balde | ECE antes | ECE depois | Δ | faixas |
+|---|---|---|---|---|
+| `<30s` | 0,0126 | 0,0126 | 0,000000 | 20 → 20 |
+| `60-30s` | 0,0285 | 0,0285 | 0,000000 | 20 → 20 |
+| `240-120s` | 0,0319 | 0,0319 | 0,000000 | 20 → 20 |
+| `120-60s` | 0,0452 | 0,0452 | 0,000000 | 20 → 20 |
+| `>240s` | 0,0493 | 0,0493 | 0,000000 | 20 → 20 |
+
+Nenhum número do 1.3 se move: previsões que caem **exatamente** em 0,60, 0,70
+ou 0,95 são raras demais numa série contínua para deslocar a média. A hipótese
+estava certa — mas ela só vale escrita aqui porque foi conferida, e não porque
+parecia óbvia. O conserto continua valendo para quem vier depois com dado
+discreto ou probabilidade arredondada, onde as bordas deixam de ser raras.
+
+**De quebra, a direção reproduziu.** Três rodadas independentes do mesmo dia
+(`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`) dão `por_janela` = **0,4157
+com p = 1,16e−05**, ao dígito. O número não é artefato de uma execução.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
