@@ -79,6 +79,19 @@ demais blocos são estado corrente. O veredito de 20 h, com 837 s de silêncio e
 > Um item só vira ✅ com número de gravação real. Número de gravação
 > sintética não conta — é a regra que o M2 existe para fazer valer.
 
+**As contagens de teste desta página são conferidas pela suíte**
+(`tests/test_quadro_nao_mente.py`, 2026-08-31). Quando um item diz "47
+testes" como evidência, esse número é comparado com o que o pytest coleta de
+verdade, e o teste quebra se divergirem — com a mensagem dizendo qual linha
+daqui ficou para trás. É a Regra 1 do `CLAUDE.md` executável: sem isso, o
+número envelhece em silêncio, porque quem adiciona um teste raramente abre o
+quadro, e a linha segue afirmando o valor antigo com cara de evidência.
+
+*(A primeira versão desse teste passava verde sem conferir nada: procurava
+`N tests collected` na saída do pytest, que no modo `-q` sai como
+`tests/arquivo.py: N`, não achava, e caía num `skip`. Agora ausência de
+medição é falha, não skip — teste que não mede tem de falhar alto.)*
+
 ---
 
 ## Bloco 0 — Captação (bloqueia tudo o que vem depois)
