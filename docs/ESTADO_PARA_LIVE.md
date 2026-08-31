@@ -53,9 +53,20 @@ porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
 > calibrado daria o mesmo resultado. O defeito está em QUANDO se entra.
 >
 > **E não autoriza inverter a regra** — comprar o que o modelo acha caro não
-> tem razão a priori de funcionar, e não foi testado. A leitura de seleção
-> adversa é a explicação mais econômica do formato, **não uma medição**.
-> Delimitação completa na §2d-quater do `VEREDITO_M2.md`.
+> tem razão a priori de funcionar, e não foi testado.
+>
+> **A seleção adversa deixou de ser hipótese (§2d-quinquies).** Quebrando as
+> 688 apostas pela confiança do lado apostado: **543 delas (79 %) saem entre
+> 0,45 e 0,55** — a regra opera onde o modelo não sabe —, e ali ele realiza
+> **9,3 pontos abaixo do que promete** (0,413 contra 0,505). No agregado de
+> 247 mil previsões o mesmo modelo é calibrado. A comparação é pareada por
+> construção, e a diferença é a seleção.
+>
+> **O mecanismo:** `edge = prob − ask > threshold` dispara em qualquer lado.
+> Com o modelo em 0,48 e o ask em 0,44 a margem existe *se o modelo estiver
+> certo*, e a regra compra Up mesmo achando Down mais provável. Ela otimiza a
+> discordância com o preço, não a convicção — e quando a convicção é nula, o
+> que resta é o caso em que discordar do mercado sai caro.
 
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a

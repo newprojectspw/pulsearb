@@ -1356,11 +1356,61 @@ defeito está em QUANDO se entra, não em QUANTO se prevê.
 1. **Que inverter a regra dá lucro.** Não foi testado. Inverter é comprar o que
    o modelo acha caro, e isso não tem razão a priori de funcionar — a
    simetria de uma regra ruim não é uma regra boa.
-2. **Que a causa é seleção adversa.** É a explicação mais econômica do formato
-   observado, não uma medição. Falsificá-la exigiria comparar o resultado das
-   entradas contra o de instantes pareados sem discordância.
+2. ~~**Que a causa é seleção adversa.**~~ **MEDIDO em 2026-08-31 — ver
+   §2d-quinquies.** A falsificação que faltava foi feita, e a hipótese
+   sobreviveu.
 3. **Que um dia decide.** Continua valendo a regra desta página: 2026-08-24 é
    um dia. Qualquer conclusão daqui precisa repetir em dia independente.
+
+### §2d-quinquies. A seleção adversa saiu de hipótese para medida
+
+`relatorios/M2_FAIXAS_20260824.json` quebra as 688 apostas pela **confiança do
+lado apostado** — `P(Up)` se comprou Up, `1 − P(Up)` se comprou Down. O que
+aparece responde a §2d-quater:
+
+| confiança | n | o modelo promete | realiza | déficit |
+|---|---|---|---|---|
+| 0,45–0,50 | 215 | 0,475 | 0,363 | **−0,112** |
+| 0,50–0,55 | 328 | 0,525 | 0,445 | **−0,080** |
+| **ponderado** | **543 (79 %)** | **0,505** | **0,413** | **−0,093** |
+
+**A regra opera onde o modelo não sabe.** 543 das 688 apostas — 79 % — saem
+com confiança entre 0,45 e 0,55, ou seja, a um passo de cara-ou-coroa. As
+faixas confiantes existem, mas com 5 a 15 apostas cada: irrelevantes no total.
+
+**E lá o modelo perde 9,3 pontos do que promete.** Este é o teste que faltava:
+no agregado de 247 mil previsões ele é calibrado (ECE 0,0126–0,0493), mas
+**dentro da mesma faixa**, os instantes que a regra escolhe realizam pior que
+a faixa inteira. A comparação é pareada por construção — mesmo modelo, mesma
+faixa de confiança, mesma janela — e a diferença é a seleção.
+
+**O mecanismo, agora explícito.** `_candidatos_com_edge` avalia os dois lados
+e dispara em qualquer um com `edge = prob − ask > threshold`. Com o modelo em
+0,48 e o ask em 0,44, a margem existe **se o modelo estiver certo** — e a
+regra compra Up mesmo achando Down mais provável. O que ela otimiza é a
+discordância com o preço, não a convicção. Quando a convicção é nula, o que
+resta é justamente o caso em que discordar do mercado é caro.
+
+**O que isso fecha, e o que não fecha.** Fecha a pergunta "é o sinal ou é a
+regra?": é a regra. Não fecha o que fazer — e continua valendo que inverter
+não foi testado, e que 2026-08-24 é um dia.
+
+### Um defeito achado ao escrever o teste acima
+
+`faixa_de_probabilidade` **não tinha teste nenhum**, e classificava errado
+alguns valores de borda: `0.60 / 0.05` vale 11,999999999999998 em binário, o
+`int()` truncava para 11, e 0,60 caía no rótulo `0.55-0.60`. O mesmo com 0,70
+e 0,95 — **mas não** com 0,55, 0,65, 0,75, 0,80, 0,85 e 0,90.
+
+Errar em algumas bordas é pior do que errar em todas: o padrão não aparece
+numa conferência de olho, e a função alimenta a curva de confiabilidade que
+decide o critério **1.3**. Corrigido com epsilon de 1e-9 (o erro real é da
+ordem de 1e-15) e travado com as 20 bordas parametrizadas.
+
+**Impacto nos ECEs já publicados: não medido.** Só previsões exatamente em
+0,60, 0,70 ou 0,95 mudam de faixa, e em série contínua isso é raro — mas
+"raro" não é "zero", e a próxima rodada é que dirá. Os números de 1.3 no
+quadro (0,0126–0,0493) foram computados com a versão defeituosa.
 
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia

@@ -785,15 +785,37 @@ def _imprimir_faixas_de_confianca(faixas: dict[str, Any]) -> None:
     if not faixas:
         return
     print("  onde a regra opera, e como ela se sai la:")
-    print(f"    {'confianca':<14}{'n':>6}{'acertos':>9}{'acuracia':>10}")
+    print(
+        f"    {'confianca':<12}{'n':>6}{'promete':>10}{'realiza':>10}{'deficit':>10}"
+    )
     for faixa, d in sorted(faixas.items()):
         n = d.get("n") or 0
         if not n:
             continue
         print(
-            f"    {faixa:<14}{n:>6}{d.get('acertos', 0):>9}"
+            f"    {faixa:<12}{n:>6}"
+            f"{_numero(d.get('confianca_media')):>10}"
             f"{_numero(d.get('acuracia')):>10}"
+            f"{_numero(d.get('deficit')):>10}"
         )
+    # O déficit ponderado sobre as faixas com amostra é o número que decide
+    # entre "o sinal não presta" e "a regra escolhe os piores momentos".
+    com_amostra = [(f, d) for f, d in faixas.items() if (d.get("n") or 0) >= 20]
+    total_n = sum(d["n"] for _, d in com_amostra)
+    if total_n:
+        deficit = sum(d["deficit"] * d["n"] for _, d in com_amostra) / total_n
+        print()
+        print(
+            f"    deficit ponderado (faixas com n>=20, {total_n} apostas):"
+            f" {deficit:+.4f}"
+        )
+        if deficit <= -0.03:
+            print(
+                "    >> O modelo acerta MENOS nas apostas do que promete. Com a\n"
+                "       calibracao boa no agregado, isso e SELECAO ADVERSA: a\n"
+                "       regra escolhe, dentro da faixa, os instantes em que ele\n"
+                "       falha. Trocar o preditor nao conserta o gatilho."
+            )
     # Concentracao: se quase tudo cai perto de 0,5, a regra opera na duvida,
     # e ali acertar pouco e esperado — o diagnostico muda de "sinal ruim"
     # para "gatilho disparando onde o modelo nao sabe".

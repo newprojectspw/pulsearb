@@ -105,10 +105,28 @@ LARGURA_DA_FAIXA = 0.05
 MINIMO_DE_FAIXAS = 3
 
 
+#: Compensa o erro de representação binária na divisão. `0.60 / 0.05` dá
+#: **11,999999999999998**, não 12 — então `int()` truncava para 11 e o valor
+#: 0,60 caía no rótulo `0.55-0.60`, que mente sobre o próprio conteúdo. O
+#: mesmo acontecia com 0,70 e 0,95; com 0,55, 0,65, 0,75, 0,80, 0,85 e 0,90,
+#: não. Ou seja: o defeito atingia ALGUMAS bordas, o que é pior que atingir
+#: todas — o padrão não aparece numa conferência rápida.
+#:
+#: 1e-9 é folgado para o erro real (da ordem de 1e-15) e pequeno demais para
+#: puxar um valor legítimo da faixa vizinha: 0,5999999 continua em `0.55-0.60`.
+_EPSILON_DA_FAIXA = 1e-9
+
+
 def faixa_de_probabilidade(prob: float) -> str:
-    """Rótulo da faixa de `prob`, no formato `0.60-0.65`."""
+    """Rótulo da faixa de `prob`, no formato `0.60-0.65`.
+
+    O piso é INCLUSIVO e o teto exclusivo: 0,60 pertence a `0.60-0.65`. Sem o
+    epsilon isso era falso justamente nos valores redondos, que são os que
+    alguém escreve num teste ou confere à mão.
+    """
     prob = min(max(prob, 0.0), 1.0)
-    indice = min(int(prob / LARGURA_DA_FAIXA), int(1 / LARGURA_DA_FAIXA) - 1)
+    bruto = int(prob / LARGURA_DA_FAIXA + _EPSILON_DA_FAIXA)
+    indice = min(bruto, int(1 / LARGURA_DA_FAIXA) - 1)
     piso = indice * LARGURA_DA_FAIXA
     return f"{piso:.2f}-{piso + LARGURA_DA_FAIXA:.2f}"
 
@@ -406,11 +424,26 @@ class BacktestReport:
             saida = {}
             for faixa, itens in sorted(grupos.items()):
                 acertos = sum(1 for s in itens if s.acertou)
+                # A confiança MÉDIA das apostas da faixa, não o meio dela.
+                # É contra este número que a acurácia tem de ser lida: um
+                # modelo calibrado NAS APOSTAS acertaria `confianca_media`.
+                # Usar o meio da faixa erraria em até meia largura, e o
+                # `deficit` é justamente uma diferença pequena entre dois
+                # números grandes — o tipo de conta que a aproximação estraga.
+                media = sum(
+                    s.prob if s.lado_up else 1.0 - s.prob for s in itens
+                ) / len(itens)
                 saida[faixa] = {
                     "n": len(itens),
                     "janelas_distintas": len({s.slug for s in itens}),
                     "acertos": acertos,
                     "acuracia": acertos / len(itens),
+                    "confianca_media": media,
+                    # Negativo = o modelo acerta MENOS nas apostas do que
+                    # promete. Com o modelo calibrado no agregado, isso é a
+                    # assinatura de seleção adversa: a regra escolhe, dentro
+                    # da faixa, justamente os instantes em que ele falha.
+                    "deficit": acertos / len(itens) - media,
                 }
             return saida
 

@@ -235,6 +235,44 @@ class TestPorFaixaDeConfianca:
         assert faixas["0.90-0.95"]["acuracia"] == 1.0
         assert faixas["0.50-0.55"]["acuracia"] == pytest.approx(0.5)
 
+    def test_o_deficit_compara_com_a_confianca_MEDIA_e_nao_com_o_meio(self):
+        """O `deficit` é a diferença entre dois números grandes e próximos.
+
+        Comparar com o meio da faixa erraria em até meia largura (0,025), e é
+        justamente esse tipo de aproximação que estraga a conta. Aqui as
+        apostas têm confiança 0,46 — perto da borda da faixa 0.45-0.50, cujo
+        meio é 0,475.
+        """
+        report = BacktestReport()
+        for i in range(100):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.46, resolveu_up=i < 40)
+            )
+
+        celula = report.direcao_sem_fill()["por_faixa_de_confianca"]["0.45-0.50"]
+
+        assert celula["confianca_media"] == pytest.approx(0.46)
+        assert celula["acuracia"] == pytest.approx(0.40)
+        assert celula["deficit"] == pytest.approx(-0.06)
+
+    def test_deficit_positivo_quando_a_regra_escolhe_bem(self):
+        """O campo tem de saber dizer o contrário também, senão não mede nada.
+
+        `prob=0.60` exato é de propósito: ele cai em `0.60-0.65` — e caía em
+        `0.55-0.60` antes do conserto de ponto flutuante em
+        `faixa_de_probabilidade`, que este teste também exercita de lado.
+        """
+        report = BacktestReport()
+        for i in range(100):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.60, resolveu_up=i < 80)
+            )
+
+        celula = report.direcao_sem_fill()["por_faixa_de_confianca"]["0.60-0.65"]
+
+        assert celula["confianca_media"] == pytest.approx(0.60)
+        assert celula["deficit"] == pytest.approx(0.20)
+
     def test_usa_a_coorte_POR_JANELA_e_nao_todos_os_instantes(self):
         """Mesma razão do bloco principal: instantes da mesma janela são a
         mesma observação repetida, e inflariam cada faixa."""
