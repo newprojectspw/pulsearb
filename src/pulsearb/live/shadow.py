@@ -87,9 +87,17 @@ def montar_ciclo(
     ligação mais importante do M4, e ela precisa ser testável sem abrir socket.
 
     **A ligação:** o `PortaoDeRisco` recebe `relogio_do_servidor=precos.relogio`.
-    Sem isso a trava de relógio (item 3.10) diria "não sei" a cada ordem — que é
-    recusa —, e o SHADOW registraria `relogio_nao_monitorado` em toda linha do
-    diário em vez de exercitar os portões que interessam.
+    Sem ela a trava de relógio (item 3.10) **não é exercitada no ensaio**: fora
+    do LIVE, fonte ausente não recusa — de propósito, senão o SHADOW não
+    ensaiaria nada. O custo do esquecimento não é um diário cheio de recusas; é
+    um diário que passou por cima do portão sem dizer, e um `atraso_ms` que
+    ninguém mediu até a primeira ordem valer dinheiro.
+
+    O que a fonte instalada ainda recusa em qualquer modo é a fonte **muda**
+    (`atraso_ms` devolvendo `None`): não saber custa o mesmo que saber que está
+    ruim. O que só recusa em LIVE é o atraso ACIMA do teto — latência de rede
+    ao servidor é estrutural (~1,3 s medidos contra a Polymarket) e não é
+    deriva de relógio; recusar por ela apagaria o diário inteiro.
     """
     precos = PrecosAoVivo()
     portao = PortaoDeRisco(

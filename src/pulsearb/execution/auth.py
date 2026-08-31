@@ -51,7 +51,7 @@ import hmac
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 #: `[VERIFICADO]` API_NOTES §3 — domínio do typed data do L1.
 DOMINIO_DE_AUTH = "ClobAuthDomain"
@@ -102,10 +102,54 @@ class CredenciaisL2:
     recusar.
     """
 
+    #: De onde cada campo sai. Variáveis de ambiente, nunca o `config.yaml` —
+    #: pela mesma razão de `AssinadorLocal.ENV_DA_CHAVE`: o `config.yaml` é
+    #: versionado, e segredo em repositório é segredo publicado.
+    #: `ClassVar` não é decoração: sem ele o `dataclass` trataria isto como
+    #: campo com default mutável, e a construção passaria a aceitar um quinto
+    #: argumento posicional silenciosamente.
+    ENV_DOS_CAMPOS: ClassVar[dict[str, str]] = {
+        "api_key": "PULSEARB_API_KEY",
+        "segredo": "PULSEARB_API_SEGREDO",
+        "passphrase": "PULSEARB_API_PASSPHRASE",
+        "endereco": "PULSEARB_ENDERECO",
+    }
+
     api_key: str
     segredo: str
     passphrase: str
     endereco: str
+
+    @classmethod
+    def do_ambiente(cls, env: dict[str, str] | None = None) -> CredenciaisL2:
+        """Constrói a partir das quatro variáveis de `ENV_DOS_CAMPOS`.
+
+        Existe pela mesma razão que `AssinadorLocal.do_ambiente`: sem ela, a
+        única forma de as credenciais chegarem ao cliente seria alguém as
+        escrever no código ou num arquivo — e o `config.yaml` é versionado.
+
+        **Falha fechada, e nomeando TODOS os campos que faltam.** Reportar um
+        por vez faria o operador consertar, rodar, descobrir o próximo — cada
+        volta achando que era a última, com uma credencial de dinheiro real na
+        mão. É a mesma escolha de `risk/autorizacao.py`.
+
+        A mensagem cita o NOME da variável, nunca o valor: uma credencial
+        parcial num traceback é uma credencial vazada.
+        """
+        import os
+
+        ambiente = os.environ if env is None else env
+        valores = {
+            campo: ambiente.get(nome, "").strip()
+            for campo, nome in cls.ENV_DOS_CAMPOS.items()
+        }
+        ausentes = [cls.ENV_DOS_CAMPOS[campo] for campo, v in valores.items() if not v]
+        if ausentes:
+            raise ErroDeAuth(
+                f"credenciais L2 ausentes no ambiente: {', '.join(sorted(ausentes))}"
+                " — elas vêm do ambiente, nunca do config.yaml, que é versionado"
+            )
+        return cls(**valores)
 
     def __post_init__(self) -> None:
         faltando = [
