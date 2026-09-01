@@ -257,9 +257,11 @@ class ProcessoShadow:
         self.ciclo.on_feed_event(event)
 
     # ──────────────────────────────────────────────────────────────── laços
-    async def laco_de_decisao(self, deadline: float) -> None:
+    async def laco_de_decisao(
+        self, deadline: float, deadline_de_parede: float | None = None
+    ) -> None:
         """Um `passo()` por cadência, até o prazo."""
-        while time.monotonic() < deadline:
+        while not prazo_vencido(deadline, deadline_de_parede):
             await _dormir_ate(CADENCIA_DA_DECISAO_S, deadline)
             try:
                 self.passos += 1
@@ -296,9 +298,12 @@ class ProcessoShadow:
                 )
 
     async def laco_de_descoberta(
-        self, discovery: MarketDiscovery, deadline: float
+        self,
+        discovery: MarketDiscovery,
+        deadline: float,
+        deadline_de_parede: float | None = None,
     ) -> None:
-        while time.monotonic() < deadline:
+        while not prazo_vencido(deadline, deadline_de_parede):
             try:
                 await self._um_ciclo_de_descoberta(discovery)
             except Exception as erro:
@@ -346,8 +351,10 @@ class ProcessoShadow:
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
 
-    async def laco_de_relato(self, deadline: float) -> None:
-        while time.monotonic() < deadline:
+    async def laco_de_relato(
+        self, deadline: float, deadline_de_parede: float | None = None
+    ) -> None:
+        while not prazo_vencido(deadline, deadline_de_parede):
             await _dormir_ate(CADENCIA_DO_RELATO_S, deadline)
             if time.monotonic() >= deadline:
                 # Não relata depois do prazo: o resumo final já sai no `run`.
@@ -367,7 +374,28 @@ class ProcessoShadow:
 
     # ───────────────────────────────────────────────────────────────── run
     async def run(self, duration_seconds: float) -> dict[str, Any]:
+        # DOIS PRAZOS, e encerra no primeiro que vencer. Item 3.14.
+        #
+        # `time.monotonic()` no macOS **não conta o tempo em suspensão** — ele
+        # sai de `mach_absolute_time()`, que congela quando a máquina dorme.
+        # Medido nesta máquina: 190,8 h de monotonic contra 370,8 h de relógio
+        # de parede desde o boot, ou seja **180 h de sono**. Um `--duration
+        # 24h` calculado só em monotonic vira 24 h + o que a máquina dormir, e
+        # foi assim que o ensaio do 3.13 seguiu vivo em 24,6 h de parede.
+        #
+        # `caffeinate -i` não resolve: ele impede o sono por INATIVIDADE, não
+        # o de tampa fechada nem o forçado.
+        #
+        # Só relógio de parede também não serve: um ajuste de NTP para frente
+        # encerraria a rodada antes da hora, e é justamente o relógio que o
+        # item 3.10 diz não poder assumir estável.
+        #
+        # Com os dois, o pior caso é encerrar no menor dos prazos — que para
+        # um ensaio de medição é o lado certo de errar: rodada curta demais se
+        # descobre no resumo, rodada que não termina se descobre no dia
+        # seguinte.
         deadline = time.monotonic() + duration_seconds
+        deadline_de_parede = time.time() + duration_seconds
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent}, timeout=15.0
         ) as http:
@@ -388,9 +416,17 @@ class ProcessoShadow:
                 await feed.start()
             await self.poly.start()
             tarefas = [
-                asyncio.create_task(self.laco_de_descoberta(discovery, deadline)),
-                asyncio.create_task(self.laco_de_decisao(deadline)),
-                asyncio.create_task(self.laco_de_relato(deadline)),
+                asyncio.create_task(
+                    self.laco_de_descoberta(
+                        discovery, deadline, deadline_de_parede
+                    )
+                ),
+                asyncio.create_task(
+                    self.laco_de_decisao(deadline, deadline_de_parede)
+                ),
+                asyncio.create_task(
+                    self.laco_de_relato(deadline, deadline_de_parede)
+                ),
             ]
             try:
                 # `wait` com prazo, e não `gather`: uma descoberta em voo pode
@@ -424,6 +460,30 @@ class ProcessoShadow:
                     await feed.stop()
                 await self.poly.stop()
         return self.estado()
+
+
+def prazo_vencido(deadline: float, deadline_de_parede: float | None = None) -> bool:
+    """Venceu QUALQUER um dos dois relógios? — item 3.14.
+
+    `deadline` é monotônico e `deadline_de_parede` é `time.time()`. Os dois
+    existem porque cada um falha de um jeito, e em direções opostas:
+
+    - **monotônico** não conta suspensão (no macOS, `mach_absolute_time`).
+      Máquina que dorme 3 h estica um ensaio de 24 h para 27 h de parede.
+    - **parede** salta com NTP. Uma correção para frente encerraria a rodada
+      antes da hora.
+
+    Encerrar no PRIMEIRO limita o estrago dos dois: o pior caso vira "a
+    rodada foi mais curta que o pedido", que aparece no resumo, em vez de "a
+    rodada não terminou", que só aparece no dia seguinte.
+
+    `deadline_de_parede=None` mantém o comportamento antigo — é o que os
+    testes de laço isolado usam, e o que faz esta função ser retrocompatível
+    com quem passa um prazo só.
+    """
+    if time.monotonic() >= deadline:
+        return True
+    return deadline_de_parede is not None and time.time() >= deadline_de_parede
 
 
 async def _dormir_ate(cadencia: float, deadline: float) -> None:
