@@ -24,12 +24,6 @@ contra 0,207 na banda com o modelo derivado. **E a borda desapareceu no mesmo
 movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
 cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
-por ausência de borda e por capacidade, não mais por calibração. **O MAKER
-também não passa nos cinco:** 1.7, 1.8, 1.9 e 1.10 passam, mas o **1.6 é NÃO
-AVALIÁVEL** — esta página chegou a marcá-lo ✅ com +35,6 USDC/8h e isso foi
-**revertido em 2026-08-31**, porque contradizia o `resumo_m2.py` e o
-`VEREDITO_M2.md`. O número segue registrado como estimativa de ordem de
-grandeza, com o método à vista.
 **O M2.2 rodou em 2026-08-31** — 24 h com a fórmula confirmada, 126,7 M
 registros — e 1.7/1.8 saíram idênticos aos de antes (−0,1974 e 65,922 h),
 porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
@@ -55,25 +49,6 @@ porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
 > calibrado daria o mesmo resultado. O defeito está em QUANDO se entra.
 >
 > **E não autoriza inverter a regra** — comprar o que o modelo acha caro não
-> tem razão a priori de funcionar, e não foi testado.
->
-> **A seleção adversa deixou de ser hipótese (§2d-quinquies).** Quebrando as
-> 688 apostas pela confiança do lado apostado: **543 delas (79 %) saem entre
-> 0,45 e 0,55** — a regra opera onde o modelo não sabe —, e ali ele realiza
-> **8,75 pontos abaixo do que promete**. No agregado de 247 mil previsões o
-> mesmo modelo é calibrado. A comparação é pareada por construção, e a
-> diferença é a seleção.
->
-> **O número aguenta peso:** reproduziu ao dígito em **quatro** rodadas
-> independentes, e o único viés conhecido do instrumento — quando os dois
-> lados passam do threshold, o registrado é Up por ordem da lista — foi
-> medido em **0 de 149.448 sinais**.
->
-> **O mecanismo:** `edge = prob − ask > threshold` dispara em qualquer lado.
-> Com o modelo em 0,48 e o ask em 0,44 a margem existe *se o modelo estiver
-> certo*, e a regra compra Up mesmo achando Down mais provável. Ela otimiza a
-> discordância com o preço, não a convicção — e quando a convicção é nula, o
-> que resta é o caso em que discordar do mercado sai caro.
 
 **A sensibilidade à latência inverteu.** Com o modelo defeituoso o PnL da
 banda decaía monotonicamente com a latência (+3,3119 a 150 ms → +0,4736 a
@@ -99,28 +74,6 @@ Isto NÃO invalida o M4 (portões de risco, SHADOW, ciclo ao vivo): é
 exatamente a máquina que permite medir sem arriscar. Invalida a decisão de
 ligar o LIVE com a estratégia taker atual.
 
-**Decisão pré-registrada em aberto, de Paulo:** encerrar o taker no registro,
-ou virar para a rota maker. **O que mudou em 2026-08-31 torna a escolha mais
-dura, não mais fácil:**
-
-- o **taker** tem causa medida — a regra de entrada seleciona pior que o
-  acaso (0,4157, p=1,16e−05, quatro rodadas) — e **as duas correções óbvias
-  foram testadas e falharam**: exigir convicção mínima não salva, e inverter é
-  2,4× pior. O motivo de inverter falhar é o que encerra a rota: a soma dos
-  asks é **1,0210**, e o spread de 2,1 % é maior que qualquer vantagem
-  direcional. **As duas pontas perdem** — o taker paga o spread, e é isso;
-- o **maker** perdeu o ✅ do 1.6, que era o critério que fazia a rota parecer
-  aprovada. Passa em 1.7, 1.8, 1.9 e 1.10; o 1.6 é **não avaliável por
-  construção** enquanto a fila não for observável;
-- o **motor maker não existe** (item 4.0): `live/motor.py` é 100 % taker e o
-  cliente fixa `FOK`, que nunca repousa no livro.
-
-O que o M2.2 fechou: 1.7 e 1.8 remedidos em 24 h com a fórmula certa, iguais
-aos de antes. O que sobra do lado bom: o pool **existe em 100 % das janelas de
-4 h**, e a peça que decide onde cotar já está escrita e testada
-(`live/cotacao.py`, 20 testes).
-
-Atualizado: 2026-08-31 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
 2026-08-24 (126,7 M registros, `pior_fracao_coberta 1,0`, 0 silêncios),
 avaliadas com o preditor de variância **medida** sobre a curva de 23/08
@@ -365,21 +318,12 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-### MAKER — 1.7 a 1.10 passam; **o 1.6 NÃO é avaliável** (revertido em 31/08)
-
-| # | Critério | Exigido | Medido | |
-|---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — `o_que_falta_para_fechar` continua com os 3 termos, e o `resumo_m2.py` reporta assim em toda rodada. A estimativa de +35,6 USDC/8h **não fecha o critério**: ver abaixo | ⚠️ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
-
-Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
-aritmética e **errada na leitura**. Quebrando por duração no dia inteiro de
-2026-08-24 (`M2_20260824.json`, 739 janelas):
 
 | duração | com pool | sem pool | % com pool |
 |---|---|---|---|
@@ -433,34 +377,6 @@ apagado — apagar esconderia que a rota chegou a parecer aprovada.
 **Consequência no placar:** o MAKER **não passa nos cinco**. Passa em 1.7,
 1.8, 1.9 e 1.10; o 1.6 fica não avaliável até existir medição de fila ou uma
 definição pré-registrada do que o fator 0,3 desconta.
-
-### O terceiro termo do 1.6 é decidível — e ele reprova o tamanho avaliado
-
-`o_que_falta_para_fechar` lista três termos. Os dois primeiros dependem da
-fila. **O terceiro, `capital_imobilizado`, não** — ele sai dos tetos que já
-estão no `RiskSettings`, e ninguém tinha feito a conta:
-
-| cotação | rewards 8 h | capital preso | retorno/capital | cabe no teto de 50 USDC? |
-|---|---|---|---|---|
-| 200 shares, 2 lados | 39,37 | **200 USDC** | 19,7 % | **ESTOURA 4×** |
-| 50 shares, 2 lados | 22,75 | 50 USDC | **45,5 %** | sim |
-| 50 shares, 1 lado | 15,65 | 25 USDC | **62,6 %** | sim |
-
-**O 1.6 foi avaliado com 200 shares nos dois lados — que prende 200 USDC
-contra o teto de exposição de 50** (item 3.9). A cotação que fundamentou o
-"+35,6 USDC/8h" não passaria pelo próprio portão de risco do projeto.
-
-**E o tamanho menor rende MAIS por USDC imobilizado**, não menos: 45,5 %
-contra 19,7 % em 8 h. O motivo está na fórmula — o score é linear no tamanho,
-mas a nossa entrada também engorda o denominador, então dobrar a cotação menos
-que dobra a fatia. Com o fator 0,3, 50 shares em dois lados dão **6,83 USDC em
-8 h sobre 50 de capital (13,7 %)**.
-
-**O que isso fecha e o que não fecha.** Fecha o terceiro termo: o capital é
-decidível, e a decisão é ≤ 50 shares por lado. Não fecha o 1.6 — os dois
-primeiros termos continuam dependendo da fila. O que muda é que o número que
-circulava (+35,6) vem de um dimensionamento que o portão recusa, e o número do
-dimensionamento admissível é **cinco vezes menor**.
 
 **1.10 confirmada em 2026-08-30** — ver linha 1.10 acima e API_NOTES §15.3.
 
@@ -668,7 +584,6 @@ defeitos nele:
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (34 testes: L2 HMAC-SHA256 + typed data do L1 + `CredenciaisL2.do_ambiente`) e `execution/ordem.py` (35 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 15 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
-| 3.5 | Ordens FOK, conexão quente, nonce/idempotência, rejeição e timeout | 🟡 **código completo; a encanação já falou com o CLOB, a ordem assinada não** — `execution/cliente.py` (**50 testes**, com `tipo_de_ordem` configurável desde 31/08 — ver 4.0) contra `MockTransport`: FOK, id determinístico, e **timeout ≠ recusa** (três estados; `INCERTA` é terminal e obriga reconciliação). **Medido ao vivo em 2026-08-31** (`scripts/smoke_clob_rest.py`, só GET público): DNS, TLS e os endpoints respondem 200, com **p50 de 218 ms e p99 de ~970 ms** — ver API_NOTES §16. Falta o que sempre faltou: **uma ordem assinada recebendo resposta**, que exige credencial e move dinheiro. Nenhum GET substitui isso. O `content=` (e não `json=`) é o que preserva os bytes assinados; falha de rede vira `INCERTA` e nunca recusa, porque recusa autorizaria reenviar uma ordem que talvez esteja no livro |
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
 
 ### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
@@ -787,11 +702,6 @@ pausa, e cada tentativa vira uma linha.
 > backtest do mesmo motor dá negativo. Corrigido no motor, com teste de topo
 > raso travando `preco_pago > best_ask`.
 >
-> **O ensaio NÃO foi reiniciado** — o que ele mede sobre estabilidade e
-> portões vale, e reiniciar custaria as horas já corridas. Ele completou
-> **24,58 h e fechou o 3.13**. Mas o **PnL dele (+113,85) sai enviesado para
-> cima** e não entra em conta nenhuma. O item **4.2** exige um ensaio com o
-> motor corrigido, e esse ainda **não começou**.
 
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
@@ -1228,7 +1138,6 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 | # | Condição | Estado |
 |---|---|---|
 | 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ — **e a estratégia que o backtest teria de aprovar não existe em código.** O taker está medido e reprovado (1.1/1.4/1.5); a rota que resta é a maker, e o motor dela **não começou** — ver 4.0 abaixo |
-| **4.0** | **Motor MAKER — a rota que sobrou** | 🟡 **duas peças de quatro, em 2026-08-31.** ✅ **(a) onde cotar:** `live/cotacao.py` escolhe `distancia_ticks` e tamanho pelo líquido `rewards − markout`, usando a **mesma** `score_de_nivel` do backtest; publica as parcelas separadas porque uma é estimativa com hipótese de fila e a outra é medida (1.7); 20 testes. ✅ **(b) `orderType` configurável:** `ClienteDeOrdens(tipo_de_ordem="GTC")`, com tipo desconhecido falhando na **construção** e não no envio (`[VERIFICADO]` §4.1); default segue FOK. 🟡 **(c) repousar:** `live/repouso.py` decide *mexer ou deixar* com **histerese dupla** — piso de ganho (0,50 USDC) e tempo mínimo repousada (30 s) —, porque reposicionar custa a fila e o livro pisca; cotação que **deixa de pontuar** vence as duas travas, já que ficar seria pagar risco de execução por zero reward. Toda decisão sai com **motivo nomeado**, como no `risk/gates.py`. 17 testes. **Falta o I/O:** cancelar de fato e reconciliar o que ficou aberto entre reinícios. ⬜ **(d) posição na fila:** o WS agregado não mostra, e é dela que dependem os 3 termos que travam o 1.6 |
 | 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
@@ -1243,7 +1152,6 @@ do primeiro dólar real.
 | # | Item | Estado |
 |---|---|---|
 | 5.1 | Carteira **dedicada**, só com o capital de operação em USDC na Polygon | 🟡 **procedimento escrito, nada executado** — `RUNBOOK_VPS.md` §8.1: EOA (`signature_type=0`, API_NOTES §3), os 7 passos em ordem, e a armadilha que não avisa — **allowances de USDC e CTF setadas à mão antes da primeira ordem**, senão a ordem é aceita pelo CLOB e falha na liquidação, com mensagem que não fala em allowance. `CredenciaisL2.do_ambiente()` fecha o caminho das 4 variáveis L2 (antes só a chave privada tinha). **Falta o que só uma pessoa faz:** criar a carteira, fundear, aprovar os contratos, derivar as credenciais. Os endereços dos contratos vão ao API_NOTES `[VERIFICADO]` antes de qualquer transação |
-| 5.2 | Imagem Docker efetivamente construída | 🟡 **build nunca rodou** — não há Docker, Colima nem Podman nesta máquina (medido 2026-08-31), então só fecha pelo CI ou na VPS. O que foi conferido sem build: contexto de **0,81 MB / 72 arquivos** (medido; sem `.dockerignore` seriam **247 MB** aqui, e GB na VPS que grava 470 MB/h), ENTRYPOINT válido (`python -m pulsearb.recorder --help` responde), 11 deps de runtime todas pinadas. **E um defeito achado na leitura:** `VOLUME ["/data"]` criava o ponto como root e o container roda como não-root — primeira escrita morreria com `PermissionError`, e com `--restart=always` viraria laço de reinício que o `docker ps` mostra como "rodando". Corrigido com `mkdir`+`chown` e **UID fixo 10001**; o RUNBOOK §5 passou a mandar `chown 10001:10001` no host, que é o que o bind mount obedece. **E o outro modo de o build morrer foi descartado com medida:** `python:3.12-slim` não traz compilador, então uma dep sem wheel Linux quebraria o `pip install`. Consultado o PyPI para as 11 diretas e as 10 transitivas do `eth-account` — **todas têm wheel manylinux ou são puro Python, em x86_64 E aarch64** (`bitarray`, `ckzg`, `uvloop`, `orjson`, `websockets`, `pyyaml` são as nativas). **O que sobra não está verificado** — o resto saiu de leitura, não de build. Falta: scope `workflow` no token para subir o job `docker` do `ci.yml`; deploy na VPS |
 | 5.3 | **CI que roda `pytest` e `ruff` a cada push** | ✅ **RODANDO** — `.github/workflows/ci.yml`, check `testes` verde nos PRs #41/#42/#43 |
 | 5.4 | **NTP/chrony verificado na máquina que opera** | ✅ **2026-08-30** — `risk/sincronia.py` pergunta ao daemon (systemd, chrony, macOS), 14 testes. **Não determinado conta como não sincronizado**, e o LIVE recusa por isso. Falta só habilitar NTP na VPS |
 
@@ -1289,8 +1197,6 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.1 / 1.4 — a REGRA DE ENTRADA seleciona pior que o acaso** (bandas de −22,54 a −113,64; irrestrito −67,27) | **medido em 2026-08-31**, e a causa mudou de nome | **RODOU: `M2_DIRECAO_20260824.json`, 24 h, 688 janelas independentes.** `direcao_sem_fill` deu **acurácia 0,4157 com p = 1,16e−05** — a direção escolhida erra sistematicamente, sobre coorte que **não muda com o fill**. E o preditor **não é o culpado**: em 247.306 previsões ele sai calibrado (ECE 0,0126–0,0493, 20 faixas em todos os cinco baldes) e a taxa-base é 0,5043. Ou seja: prever, ele prevê; quem escolhe mal é a regra `edge = prob − preço > threshold`, que seleciona 688 momentos e acerta menos que sortear. **O conserto muda de lugar** — não adianta trocar o preditor, é a regra de entrada. **As DUAS correções óbvias foram testadas, e nenhuma serve.** (§2d-sexies) exigir convicção mínima não salva: nenhum limiar de 0,50 a 0,80 dá acurácia acima de 0,5 *com* amostra que sustente — o melhor (0,5833) sai de 24 apostas com p=0,54, e subir o limiar corta de 395 para 24 antes de corrigir a direção. (§2d-septies) **inverter é 2,4× PIOR**: −0,01477 contra −0,00618 por share. A razão é o preço, não a direção — a soma dos asks é 1,0210, e acertar 58 % pagando 0,5991 perde mais que acertar 42 % pagando 0,4219. **As duas pontas perdem: o spread de 2,1 % é maior que qualquer vantagem direcional.** **SEGUNDO DIA (§2d-octies, 25/08, 97 janelas, curva de 23/08):** a direção **reproduz** — 0,3711 com p=0,0148, errando como no dia 24. Mas **a inversão NÃO**: positiva (+0,058) no dia 25 e negativa (−0,015) no dia 24. Rodando só o dia 25 eu concluiria "inverter funciona", e estaria errado — no dia com 7× mais amostra o mesmo movimento perde. **O erro de direção é robusto; a lucratividade da inversão não é.** **O que NÃO está estabelecido:** que nenhuma regra funcione — foram testadas três |
-| **1.5 profundidade** (p50 115 USDC a 3 ticks em 300 s, dia 24; 28 USDC em 4 h) | teto de **capacidade** do book, e **critério da rota TAKER** | nada sob nosso controle — é liquidez do mercado, e 115 contra 200 não sugere contestar o limiar. **MAS a leitura muda com a rota (medido 2026-08-31):** o mesmo book raso que impede o taker de mover 200 USDC é o que dá ao maker uma **fatia alta do pool**. Nossa cotação de 200 shares a ~0,50 vale ~100 USDC por lado; num livro cujo p50 a 3 ticks é 115 USDC, isso é ~46 % do total — que é **exatamente** a `fatia_media` de 0,457 que o relatório publica. O 1.5 reprova o taker e **não é critério do maker** (os do maker são 1.6 a 1.10). Book raso não é obstáculo para quem cota; é obstáculo para quem atravessa |
 | ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 
 E uma última, que é metodológica e vale para qualquer resultado acima: **um dia
