@@ -789,9 +789,22 @@ pausa, e cada tentativa vira uma linha.
 >
 > **O ensaio NÃO foi reiniciado** — o que ele mede sobre estabilidade e
 > portões vale, e reiniciar custaria as horas já corridas. Ele completou
-> **24,58 h e fechou o 3.13**. Mas o **PnL dele (+113,85) sai enviesado para
-> cima** e não entra em conta nenhuma. O item **4.2** exige um ensaio com o
-> motor corrigido, e esse ainda **não começou**.
+> **29,07 h e fechou o 3.13**, com PnL de **+101,92** que **não conta**.
+>
+> **E o ensaio seguinte mostrou que o viés era material.** As primeiras 5 h
+> com o motor corrigido (01/09, PID 56001):
+>
+> | ensaio | PnL | trades | PnL/trade |
+> |---|---|---|---|
+> | motor com `best_ask` (31/08) | +101,92 | 295 | **+0,345** |
+> | motor que atravessa (01/09) | −17,39 | 34 | **−0,511** |
+>
+> **Diferença de 0,857 USDC por trade, e o sinal inverte.** Isso é o que a
+> regra do *mesmo caminho* protege: ler o topo do livro em vez de atravessá-lo
+> fazia o ensaio parecer lucrativo. **Ressalvas que a comparação exige:** dias
+> diferentes, mercados diferentes, e 34 trades não sustentam veredito. O que
+> ela estabelece é que o viés era **material** — não que o número novo seja o
+> verdadeiro.
 
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
