@@ -716,7 +716,8 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **108**: 47 no portão, 27 nas travas novas, 20 no relógio do servidor, 14 na sincronia NTP |
-| 3.13 | SHADOW rodando 24 h sem crash | 🟡 **rodando desde 2026-08-31 00:46 UTC** (PID 26423), depois do conserto do `relogio_derivado` — ver abaixo. **Às 7,2 h: sem crash, 72 aprovadas, cinco portões exercitados, PnL −11,82** (era +18,48 às 2,8 h). Falta completar as 24 h |
+| 3.13 | SHADOW rodando 24 h sem crash | ✅ **CUMPRIDO em 2026-08-31** — PID 26423, de 00:46 a 01:20 do dia seguinte: **24,58 h de diário contínuo, sem crash**. 45.652 linhas, **259 intenções aprovadas**, **cinco portões exercitados** (`pausa_por_sequencia` 44.701 · `spread_anomalo` 525 · `preco_fora_da_faixa` 95 · `livro_desconhecido` 66 · `feed_parado` 6), disjuntor desarmado. **O PnL de +113,85 NÃO conta** — este ensaio rodou com o motor que gravava `preco_pago = best_ask`, corrigido só depois; ver o aviso abaixo e o item 4.2. **E um defeito apareceu no fim:** o processo **não encerrou no prazo** — ver 3.14 |
+| **3.14** | **`--duration` não encerra o processo** | ❌ **medido em 2026-08-31.** Com `--duration 24h`, o processo seguia vivo em **24,6 h** e continuava fazendo HTTP de descoberta (`clob-markets/…`) depois de o diário parar de crescer — ou seja, o laço de decisão terminou e o de descoberta não. `parse_duration("24h")` devolve 86400,0 (conferido), e o `run()` tem `asyncio.wait(timeout=…)` mais `cancel()` no `finally`, então o defeito está em algo que não responde ao cancelamento — **causa raiz ainda não isolada**. Consequência: quem lança um ensaio de N horas precisa matar na mão, e um `--duration` que não encerra é pior que não ter, porque o operador confia nele |
 
 *(A linha 3.13 sumiu do quadro num merge entre as duas sessões e foi
 restaurada em 2026-08-31. Fica o registro: conflito neste arquivo é o mais
@@ -786,11 +787,11 @@ pausa, e cada tentativa vira uma linha.
 > backtest do mesmo motor dá negativo. Corrigido no motor, com teste de topo
 > raso travando `preco_pago > best_ask`.
 >
-> **O ensaio em curso NÃO foi reiniciado** — o que ele mede sobre estabilidade
-> e portões continua valendo, e reiniciar custaria as 10,6 h já corridas. Mas
-> o **PnL dele sai enviesado para cima**, e por isso não entra em conta
-> nenhuma. O item **4.2** (SHADOW ≥ 2 semanas com edge líquido medido) exige
-> um ensaio com o motor corrigido.
+> **O ensaio NÃO foi reiniciado** — o que ele mede sobre estabilidade e
+> portões vale, e reiniciar custaria as horas já corridas. Ele completou
+> **24,58 h e fechou o 3.13**. Mas o **PnL dele (+113,85) sai enviesado para
+> cima** e não entra em conta nenhuma. O item **4.2** exige um ensaio com o
+> motor corrigido, e esse ainda **não começou**.
 
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
