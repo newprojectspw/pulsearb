@@ -853,6 +853,125 @@ def _processo(tmp_path, ciclo):
     return ProcessoShadow(_settings(tmp_path), ciclo)
 
 
+class TestORunRespeitaOPrazo:
+    """Item 3.14 — medido em produção antes de existir teste.
+
+    Os testes de prazo existentes exercitam `_dormir_ate` e cada laço
+    ISOLADO. Nenhum exercitava `run()` inteiro, e foi exatamente aí que o
+    defeito apareceu: com `--duration 24h`, o processo seguia vivo em 24,6 h
+    fazendo HTTP de descoberta depois de o diário parar de crescer.
+    """
+
+    def test_o_prazo_vence_pelo_relogio_de_PAREDE_quando_a_maquina_dorme(self):
+        """A causa raiz do 3.14, medida nesta máquina.
+
+        `time.monotonic()` no macOS sai de `mach_absolute_time()`, que
+        **congela em suspensão**. Medido: 190,8 h de monotonic contra 370,8 h
+        de parede desde o boot — **180 h de sono**. Um `--duration 24h` só em
+        monotonic vira 24 h + o que a máquina dormir, e foi assim que o ensaio
+        do 3.13 seguiu vivo em 24,6 h de parede.
+
+        `caffeinate -i` não cobre: ele impede o sono por INATIVIDADE, não o de
+        tampa fechada.
+        """
+        import time as _time
+
+        from pulsearb.live.shadow import prazo_vencido
+
+        # A máquina "dormiu": o monotonic ainda tem folga, o de parede não.
+        assert prazo_vencido(
+            deadline=_time.monotonic() + 3600,
+            deadline_de_parede=_time.time() - 1,
+        )
+
+    def test_o_prazo_vence_pelo_MONOTONICO_quando_o_relogio_salta(self):
+        """O outro lado, e a razão de não trocar um pelo outro.
+
+        Um ajuste de NTP para trás faria o relógio de parede nunca vencer. O
+        monotônico é imune a isso — é a metade que ele cobre bem, e é por isso
+        que os dois ficam.
+        """
+        import time as _time
+
+        from pulsearb.live.shadow import prazo_vencido
+
+        assert prazo_vencido(
+            deadline=_time.monotonic() - 1,
+            deadline_de_parede=_time.time() + 86400,
+        )
+
+    def test_sem_prazo_de_parede_o_comportamento_e_o_antigo(self):
+        """Retrocompatível: quem passa um prazo só continua funcionando."""
+        import time as _time
+
+        from pulsearb.live.shadow import prazo_vencido
+
+        assert not prazo_vencido(_time.monotonic() + 60)
+        assert prazo_vencido(_time.monotonic() - 1)
+
+    async def test_run_retorna_no_prazo_mesmo_com_descoberta_LENTA(
+        self, tmp_path, monkeypatch
+    ):
+        """O cenário do 3.14: um ciclo de descoberta que demora mais que o
+        prazo inteiro.
+
+        Ao vivo, `discover()` faz uma requisição `clob-markets/{id}` por
+        mercado — dezenas em sequência, cada uma com timeout de 15 s. Se o
+        prazo vence no meio disso, o `cancel()` do `finally` tem de
+        interromper. Este teste falha se ele não interromper.
+        """
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DA_DECISAO_S", 0.01)
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DA_DESCOBERTA_S", 0.01)
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DO_RELATO_S", 0.01)
+
+        class _PolyMudo:
+            """O `run()` chama `start`/`stop` além de subscribe/unsubscribe."""
+
+            async def start(self):
+                return None
+
+            async def stop(self):
+                return None
+
+            async def subscribe(self, tokens):
+                return None
+
+            async def unsubscribe(self, tokens):
+                return None
+
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.poly = _PolyMudo()
+        processo.rtds_feeds = []
+
+        async def descoberta_lenta():
+            # Muito maior que o prazo do teste: se o cancelamento não
+            # funcionar, o `run` fica pendurado aqui e o `wait_for` estoura.
+            await asyncio.sleep(30.0)
+            return []
+
+        class _DescobertaLenta:
+            async def discover(self):
+                return await descoberta_lenta()
+
+        monkeypatch.setattr(
+            "pulsearb.live.shadow.MarketDiscovery",
+            lambda **_: _DescobertaLenta(),
+        )
+
+        inicio = _time.monotonic()
+        await asyncio.wait_for(processo.run(0.2), timeout=10.0)
+        decorrido = _time.monotonic() - inicio
+
+        # Folga generosa: o que se mede aqui é "encerrou", não "encerrou
+        # rápido". Sem o conserto isto estoura os 10 s do `wait_for`.
+        assert decorrido < 5.0, (
+            f"run() levou {decorrido:.1f}s para um prazo de 0,2s — o "
+            "cancelamento não interrompeu a descoberta (item 3.14)"
+        )
+
+
 class TestACadencia:
     async def test_o_laco_decide_e_para_no_prazo(self, tmp_path, monkeypatch):
         monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DA_DECISAO_S", 0.01)
