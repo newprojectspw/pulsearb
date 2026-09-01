@@ -769,6 +769,122 @@ def _imprimir_direcao_sem_fill(relatorio: dict[str, Any]) -> None:
         "  Lucro depende de execucao e capacidade, que sao o 1.1 e o 1.5."
     )
     print()
+    # O viés conhecido sai ANTES das faixas, e sempre: se ele for material,
+    # toda a leitura abaixo muda, e saber disso depois seria tarde.
+    vies = bloco.get("vies_de_ambos_os_lados") or {}
+    fracao = vies.get("fracao_dos_sinais")
+    if fracao is not None:
+        marca = "desprezivel" if fracao < 0.01 else ">> MATERIAL, desconte na leitura"
+        print(
+            f"  vies conhecido: {vies.get('instantes', 0)} instantes com OS DOIS"
+            f" lados acima do\n  threshold ({100 * fracao:.2f}% dos sinais)."
+            f" Ali o lado registrado e Up por ordem\n  da lista, nao por decisao"
+            f"  —  {marca}"
+        )
+        print()
+    _imprimir_faixas_de_confianca(bloco.get("por_faixa_de_confianca") or {})
+    _imprimir_varredura_de_confianca(
+        bloco.get("se_exigisse_confianca_minima") or {}
+    )
+
+
+def _imprimir_varredura_de_confianca(varredura: dict[str, Any]) -> None:
+    """Existe limiar de convicção que salve a regra?
+
+    É a primeira correção que ocorre a quem lê o déficit — "se ela erra onde o
+    modelo não sabe, que só opere onde ele sabe". Responder aqui evita que
+    alguém a implemente e descubra depois de gastar uma campanha.
+    """
+    if not varredura:
+        return
+    print("  e se a regra exigisse conviccao minima:")
+    print(f"    {'limiar':<9}{'apostas':>9}{'acuracia':>11}{'p':>10}")
+    algum_salva = False
+    for limiar, d in sorted(varredura.items()):
+        n = d.get("apostas") or 0
+        if not n:
+            continue
+        p = d.get("p_valor")
+        ac = d.get("acuracia")
+        # "Salva" exige as duas coisas: acertar acima de 0,5 E ter amostra
+        # que sustente. Uma sozinha e ruido escolhido a dedo.
+        salva = ac is not None and p is not None and ac > 0.5 and p < 0.05
+        algum_salva = algum_salva or salva
+        marca = "  <== SALVA" if salva else ""
+        print(f"    {limiar:<9}{n:>9}{_numero(ac):>11}{_numero(p):>10}{marca}")
+    print()
+    if not algum_salva:
+        print(
+            "    >> NENHUM limiar salva: nao ha corte de conviccao com acuracia\n"
+            "       acima de 0,5 E amostra que sustente. Exigir mais conviccao\n"
+            "       corta a amostra antes de corrigir a direcao — o problema\n"
+            "       nao e o limiar."
+        )
+        print()
+
+
+def _imprimir_faixas_de_confianca(faixas: dict[str, Any]) -> None:
+    """A regra erra em toda parte, ou erra ONDE ELA OPERA?
+
+    Duas leituras opostas saem daqui. Se a acuracia acompanha a faixa — ruim
+    perto de 0,5, boa perto de 1,0 —, o preditor discrimina e o defeito e de
+    escolha de momento. Se for ruim em todas, o problema e o sinal.
+
+    A faixa e a do lado APOSTADO: apostar Down com P(Up)=0,1 conta como
+    confianca 0,9.
+    """
+    if not faixas:
+        return
+    print("  onde a regra opera, e como ela se sai la:")
+    print(
+        f"    {'confianca':<12}{'n':>6}{'promete':>10}{'realiza':>10}{'deficit':>10}"
+    )
+    for faixa, d in sorted(faixas.items()):
+        n = d.get("n") or 0
+        if not n:
+            continue
+        print(
+            f"    {faixa:<12}{n:>6}"
+            f"{_numero(d.get('confianca_media')):>10}"
+            f"{_numero(d.get('acuracia')):>10}"
+            f"{_numero(d.get('deficit')):>10}"
+        )
+    # O déficit ponderado sobre as faixas com amostra é o número que decide
+    # entre "o sinal não presta" e "a regra escolhe os piores momentos".
+    com_amostra = [(f, d) for f, d in faixas.items() if (d.get("n") or 0) >= 20]
+    total_n = sum(d["n"] for _, d in com_amostra)
+    if total_n:
+        deficit = sum(d["deficit"] * d["n"] for _, d in com_amostra) / total_n
+        print()
+        print(
+            f"    deficit ponderado (faixas com n>=20, {total_n} apostas):"
+            f" {deficit:+.4f}"
+        )
+        if deficit <= -0.03:
+            print(
+                "    >> O modelo acerta MENOS nas apostas do que promete. Com a\n"
+                "       calibracao boa no agregado, isso e SELECAO ADVERSA: a\n"
+                "       regra escolhe, dentro da faixa, os instantes em que ele\n"
+                "       falha. Trocar o preditor nao conserta o gatilho."
+            )
+    # Concentracao: se quase tudo cai perto de 0,5, a regra opera na duvida,
+    # e ali acertar pouco e esperado — o diagnostico muda de "sinal ruim"
+    # para "gatilho disparando onde o modelo nao sabe".
+    total = sum((d.get("n") or 0) for d in faixas.values())
+    indecisas = sum(
+        (d.get("n") or 0)
+        for f, d in faixas.items()
+        if f in ("0.50-0.55", "0.55-0.60")
+    )
+    if total and indecisas / total >= 0.5:
+        print()
+        print(
+            f"    !! {indecisas} de {total} apostas ({100 * indecisas / total:.0f}%)"
+            " saem com confianca < 0,60.\n"
+            "       A regra opera onde o modelo nao sabe — e ali acertar pouco"
+            " nao\n       acusa o preditor, acusa o GATILHO."
+        )
+    print()
 
 
 def _imprimir(rotulo: str, valor: Any) -> None:

@@ -14,7 +14,12 @@ import pytest
 from tests.synthetic import gerar_gravacao
 
 from pulsearb.backtest.book import OrderBook, simulate_taker_buy
-from pulsearb.backtest.report import BacktestReport, Trade
+from pulsearb.backtest.report import (
+    LARGURA_DA_FAIXA,
+    BacktestReport,
+    Trade,
+    faixa_de_probabilidade,
+)
 from pulsearb.backtest.runner import edge_liquido
 from pulsearb.recorder.__main__ import parse_duration
 from pulsearb.recorder.gaps import GapKind, GapTracker, resumo_gaps
@@ -315,6 +320,40 @@ def test_calibracao_mede_todas_as_previsoes():
     assert bucket.prob_media_prevista == pytest.approx(0.8)
     assert bucket.freq_realizada == pytest.approx(0.8)
     assert bucket.erro_calibracao == pytest.approx(0.0)  # perfeitamente calibrado
+
+
+class TestAFaixaDeProbabilidade:
+    """A função que fatia a curva de confiabilidade — e que não tinha teste.
+
+    Foi essa ausência que deixou passar um erro de ponto flutuante por toda a
+    campanha do M2: `0.60 / 0.05` vale **11,999999999999998** em binário, o
+    `int()` truncava para 11, e o valor 0,60 caía no rótulo `0.55-0.60`.
+    """
+
+    @pytest.mark.parametrize("passo", range(20))
+    def test_o_piso_de_cada_faixa_cai_nela_mesma(self, passo):
+        """O rótulo tem de conter o próprio piso.
+
+        Atingia 0,60, 0,70 e 0,95, mas não 0,55, 0,65, 0,75, 0,80, 0,85 e
+        0,90 — e faixa errada em ALGUMAS bordas é pior do que em todas: o
+        padrão não aparece numa conferência de olho.
+        """
+        piso = round(passo * LARGURA_DA_FAIXA, 2)
+
+        assert faixa_de_probabilidade(piso) == f"{piso:.2f}-{piso + 0.05:.2f}"
+
+    def test_o_epsilon_nao_puxa_valor_legitimo_da_faixa_vizinha(self):
+        """Corrigir a borda não pode arrastar quem estava certo."""
+        assert faixa_de_probabilidade(0.5999999) == "0.55-0.60"
+        assert faixa_de_probabilidade(0.6000001) == "0.60-0.65"
+
+    @pytest.mark.parametrize(
+        ("prob", "esperado"),
+        [(0.0, "0.00-0.05"), (1.0, "0.95-1.00"), (-5.0, "0.00-0.05"), (9.0, "0.95-1.00")],
+    )
+    def test_extremos_e_valores_fora_da_faixa_nao_estouram(self, prob, esperado):
+        """1,0 não pode abrir uma faixa `1.00-1.05`, e fora de [0,1] satura."""
+        assert faixa_de_probabilidade(prob) == esperado
 
 
 # ------------------------------------------------- streaming do reader

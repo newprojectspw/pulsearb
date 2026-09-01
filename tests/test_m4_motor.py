@@ -335,6 +335,51 @@ class TestAResolucaoAlimentaODisjuntor:
             esperado - posicao.fee_usdc
         )
 
+    def test_o_preco_pago_ATRAVESSA_o_livro_como_no_backtest(self, tmp_path):
+        """A outra metade do "mesmo caminho", e ela custou dinheiro no papel.
+
+        Aqui ficava `preco_pago = livro.best_ask`: o topo, como se a ordem
+        inteira coubesse no primeiro nível. O backtest sempre atravessou o
+        livro com `simulate_taker_buy`. Com topo raso as duas contas divergem,
+        e a divergência tem sinal — o SHADOW saía mais barato, sempre.
+
+        Um SHADOW otimista por aritmética faz o ensaio de 2 semanas (item 4.2)
+        aprovar uma estratégia que o backtest reprova, e a diferença pareceria
+        "o mercado ao vivo é melhor".
+        """
+        from pulsearb.backtest.book import simulate_taker_buy
+
+        cenario = Cenario(tmp_path)
+        cenario.alimentar_precos()
+        # Topo RASO: 2 shares a 0,30 e o resto a 0,40. Uma ordem de 5 shares
+        # não cabe no primeiro nível — é onde as duas contas divergem.
+        ts_ns = int((FECHA_EPOCH - 100) * 1e9)
+        cenario.livros.aplicar(
+            {
+                "event_type": "book",
+                "asset_id": "tok-up",
+                "bids": [{"price": "0.29", "size": "500"}],
+                "asks": [
+                    {"price": "0.30", "size": "2"},
+                    {"price": "0.40", "size": "500"},
+                ],
+            },
+            ts_ns=ts_ns,
+        )
+        cenario.livros.aplicar(_snapshot("tok-down", "0.30"), ts_ns=ts_ns)
+        cenario.tick(faltam=100.0)
+
+        posicao = cenario.motor.posicoes["aa"]
+        assert posicao.lado_up, "o cenário precisa entrar em Up para medir o ask raso"
+        livro = cenario.livros.livro("tok-up", agora_ns=ts_ns)
+        esperado = simulate_taker_buy(livro, posicao.shares)
+
+        assert posicao.preco_pago == pytest.approx(esperado.preco_medio)
+        assert posicao.preco_pago > livro.best_ask, (
+            "com topo raso o preço médio TEM de ficar acima do best_ask — "
+            "se não ficou, o motor voltou a ler só o topo"
+        )
+
     def test_resolver_duas_vezes_NAO_conta_duas_vezes(self, tmp_path):
         """A resolução pode chegar por mais de um caminho (evento e consulta
         à Gamma). Somar duas vezes inflaria o disjuntor."""

@@ -362,12 +362,27 @@ class BacktestRunner:
             return est
         return replace(est, prob_up=encolher_para_a_base(est.prob_up, fator))
 
+    def _ask_no_instante(
+        self, janela: WindowState, token: str, ts_ns: int
+    ) -> float | None:
+        """`best_ask` do token naquele instante, ou `None` se não havia livro.
+
+        `None` e não zero: livro ausente é ignorância, e zero seria um preço
+        bom demais entrando numa média.
+        """
+        timeline = janela.books.get(token)
+        if timeline is None:
+            return None
+        book = timeline.at(ts_ns)
+        return None if book is None else book.best_ask
+
     def _registrar_sinal(
         self,
         janela: WindowState,
         est: Any,
         candidatos: list[tuple[bool, str, float]],
         report: BacktestReport,
+        ts_ns: int,
     ) -> None:
         """Contabiliza o sinal do instante — antes de qualquer gate de execução.
 
@@ -380,7 +395,22 @@ class BacktestRunner:
         if not candidatos:
             return
         report.add_oportunidade(est.bucket_tempo, janela.slug)
-        lado_up, _token, prob = candidatos[0]
+        # `candidatos[0]` é o lado que a execução TENTA primeiro, e é por isso
+        # que é ele o registrado — a medição tem de descrever a decisão que
+        # seria tomada, não uma média das opções.
+        #
+        # MAS a lista sai sempre na ordem (Up, Down), então quando OS DOIS
+        # lados passam do threshold o registrado é Up por construção, e não
+        # por decisão. Isso enviesaria a acurácia. A condição é
+        # `ask_up + ask_down < 1 − 2×threshold`, ou seja, book tão fino que
+        # comprar os dois lados custaria menos que o payoff — raro, mas não
+        # impossível. Contado para que "raro" seja um número e não uma
+        # suposição minha: se `ambos_os_lados` for material perto de
+        # `sinais_direcionais`, o viés é real e a leitura precisa mudar.
+        if len(candidatos) > 1:
+            report.sinais_com_ambos_os_lados += 1
+        lado_up, token, prob = candidatos[0]
+        oposto = janela.token_down if lado_up else janela.token_up
         report.add_sinal_direcional(
             SinalDirecional(
                 slug=janela.slug,
@@ -388,6 +418,8 @@ class BacktestRunner:
                 lado_up=lado_up,
                 prob=prob,
                 resolveu_up=bool(janela.resolveu_up),
+                preco_do_lado=self._ask_no_instante(janela, token, ts_ns),
+                preco_do_oposto=self._ask_no_instante(janela, oposto, ts_ns),
             )
         )
 
@@ -430,7 +462,7 @@ class BacktestRunner:
                 continue
 
             candidatos = self._candidatos_com_edge(janela, est, ts_ns)
-            self._registrar_sinal(janela, est, candidatos, report)
+            self._registrar_sinal(janela, est, candidatos, report, ts_ns)
 
             if not candidatos or not self._pode_entrar(
                 seconds_left=seconds_left,

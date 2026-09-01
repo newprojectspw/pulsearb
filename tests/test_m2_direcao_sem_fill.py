@@ -195,6 +195,191 @@ class TestOPValor:
             assert not math.isnan(p)
 
 
+class TestPorFaixaDeConfianca:
+    """A quebra que separa "erra em toda parte" de "erra onde opera"."""
+
+    def test_a_faixa_e_a_do_lado_APOSTADO_e_nao_a_do_P_up(self):
+        """Apostar Down com `P(Up)=0,1` é uma aposta de confiança 0,9.
+
+        Agrupá-la com as de `P(Up)=0,1` que compraram Up misturaria duas
+        apostas opostas na mesma linha, e a leitura sairia invertida em
+        metade dos casos.
+        """
+        report = BacktestReport()
+        report.add_sinal_direcional(
+            _sinal("j1", lado_up=True, prob=0.9, resolveu_up=True)
+        )
+        report.add_sinal_direcional(
+            _sinal("j2", lado_up=False, prob=0.1, resolveu_up=False)
+        )
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert list(faixas) == ["0.90-0.95"]
+        assert faixas["0.90-0.95"]["n"] == 2
+        assert faixas["0.90-0.95"]["acuracia"] == 1.0
+
+    def test_separa_faixa_confiante_de_faixa_indecisa(self):
+        report = BacktestReport()
+        for i in range(10):  # confiança 0,9 — acerta sempre
+            report.add_sinal_direcional(
+                _sinal(f"alta{i}", prob=0.92, resolveu_up=True)
+            )
+        for i in range(10):  # confiança ~0,5 — cara ou coroa
+            report.add_sinal_direcional(
+                _sinal(f"meio{i}", prob=0.52, resolveu_up=i % 2 == 0)
+            )
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert faixas["0.90-0.95"]["acuracia"] == 1.0
+        assert faixas["0.50-0.55"]["acuracia"] == pytest.approx(0.5)
+
+    def test_o_deficit_compara_com_a_confianca_MEDIA_e_nao_com_o_meio(self):
+        """O `deficit` é a diferença entre dois números grandes e próximos.
+
+        Comparar com o meio da faixa erraria em até meia largura (0,025), e é
+        justamente esse tipo de aproximação que estraga a conta. Aqui as
+        apostas têm confiança 0,46 — perto da borda da faixa 0.45-0.50, cujo
+        meio é 0,475.
+        """
+        report = BacktestReport()
+        for i in range(100):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.46, resolveu_up=i < 40)
+            )
+
+        celula = report.direcao_sem_fill()["por_faixa_de_confianca"]["0.45-0.50"]
+
+        assert celula["confianca_media"] == pytest.approx(0.46)
+        assert celula["acuracia"] == pytest.approx(0.40)
+        assert celula["deficit"] == pytest.approx(-0.06)
+
+    def test_deficit_positivo_quando_a_regra_escolhe_bem(self):
+        """O campo tem de saber dizer o contrário também, senão não mede nada.
+
+        `prob=0.60` exato é de propósito: ele cai em `0.60-0.65` — e caía em
+        `0.55-0.60` antes do conserto de ponto flutuante em
+        `faixa_de_probabilidade`, que este teste também exercita de lado.
+        """
+        report = BacktestReport()
+        for i in range(100):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.60, resolveu_up=i < 80)
+            )
+
+        celula = report.direcao_sem_fill()["por_faixa_de_confianca"]["0.60-0.65"]
+
+        assert celula["confianca_media"] == pytest.approx(0.60)
+        assert celula["deficit"] == pytest.approx(0.20)
+
+    def test_usa_a_coorte_POR_JANELA_e_nao_todos_os_instantes(self):
+        """Mesma razão do bloco principal: instantes da mesma janela são a
+        mesma observação repetida, e inflariam cada faixa."""
+        report = BacktestReport()
+        for _ in range(30):
+            report.add_sinal_direcional(_sinal("uma-janela-so", prob=0.9))
+
+        faixas = report.direcao_sem_fill()["por_faixa_de_confianca"]
+
+        assert faixas["0.90-0.95"]["n"] == 1
+
+
+class TestSeExigisseConfiancaMinima:
+    """A primeira correção que ocorre a quem lê o déficit — respondida antes
+    de alguém implementá-la e descobrir depois."""
+
+    def test_o_limiar_corta_as_apostas_de_baixa_conviccao(self):
+        report = BacktestReport()
+        for i in range(50):  # confiança 0,52 — some acima de 0,55
+            report.add_sinal_direcional(_sinal(f"baixa{i}", prob=0.52))
+        for i in range(30):  # confiança 0,72 — sobrevive até 0,70
+            report.add_sinal_direcional(_sinal(f"alta{i}", prob=0.72))
+
+        varredura = report.direcao_sem_fill()["se_exigisse_confianca_minima"]
+
+        assert varredura["0.50"]["apostas"] == 80
+        assert varredura["0.55"]["apostas"] == 30
+        assert varredura["0.70"]["apostas"] == 30
+        assert "0.75" not in varredura, "acima de 0,72 não deve sobrar aposta"
+
+    def test_cada_linha_traz_o_p_valor_junto_da_acuracia(self):
+        """Subir o limiar corta amostra rápido, e acurácia bonita sobre 20
+        apostas não é resultado. Sem o p-valor ao lado, a varredura vira um
+        convite a escolher o limiar que deu o número mais alto."""
+        report = BacktestReport()
+        for i in range(20):
+            report.add_sinal_direcional(
+                _sinal(f"j{i}", prob=0.80, resolveu_up=i < 12)
+            )
+
+        celula = report.direcao_sem_fill()["se_exigisse_confianca_minima"]["0.80"]
+
+        assert celula["acuracia"] == pytest.approx(0.60)
+        assert celula["p_valor"] > 0.05, "12/20 não deveria ser significativo"
+
+
+class TestSeComprasseOOutroLado:
+    """A conta da regra invertida — feita sem tocar na execução."""
+
+    def test_a_inversao_troca_acerto_por_erro_e_o_preco_pelo_do_oposto(self):
+        """Comprar Down a 0,55 numa janela que resolveu Up é perda de 0,55.
+
+        A mesma aposta, do lado certo, teria pago 1 − 0,40 = 0,60. É a
+        assimetria de PREÇO que decide se acertar mais paga mais — e é ela
+        que o número agregado de acurácia não carrega.
+        """
+        s = SinalDirecional(
+            slug="j",
+            bucket_tempo=">240s",
+            lado_up=True,
+            prob=0.6,
+            resolveu_up=True,
+            preco_do_lado=0.40,
+            preco_do_oposto=0.55,
+        )
+
+        assert s.pnl_por_share() == pytest.approx(0.60)
+        assert s.pnl_por_share(invertido=True) == pytest.approx(-0.55)
+
+    def test_sem_preco_do_oposto_a_conta_e_nula_e_nao_zero(self):
+        """Livro ausente é ignorância. Zero entraria numa média como se
+        fosse uma aposta que não custou nada."""
+        s = SinalDirecional(
+            slug="j",
+            bucket_tempo=">240s",
+            lado_up=True,
+            prob=0.6,
+            resolveu_up=True,
+            preco_do_lado=0.40,
+        )
+
+        assert s.pnl_por_share() == pytest.approx(0.60)
+        assert s.pnl_por_share(invertido=True) is None
+
+    def test_o_bloco_traz_os_dois_sentidos_e_o_aviso_de_sobreajuste(self):
+        report = BacktestReport()
+        report.add_sinal_direcional(
+            SinalDirecional("j1", ">240s", True, 0.6, False, 0.40, 0.55)
+        )
+
+        bloco = report.direcao_sem_fill()["se_comprasse_o_outro_lado"]
+
+        assert bloco["pnl_por_share_como_esta"] == pytest.approx(-0.40)
+        assert bloco["pnl_por_share_invertido"] == pytest.approx(0.45)
+        # O aviso precisa dizer que numero positivo NAO autoriza adotar.
+        assert "NAO autoriza adotar" in bloco["aviso"]
+
+    def test_sinal_sem_preco_nenhum_nao_entra_na_media(self):
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal("j1"))  # sem preços
+
+        bloco = report.direcao_sem_fill()["se_comprasse_o_outro_lado"]
+
+        assert bloco["n_com_preco"] == 0
+        assert bloco["pnl_por_share_como_esta"] is None
+
+
 class TestAPublicacao:
     def test_o_relatorio_traz_o_bloco_com_a_leitura(self):
         report = BacktestReport()
@@ -202,10 +387,41 @@ class TestAPublicacao:
 
         bloco = report.to_dict()["direcao_sem_fill"]
 
-        assert set(bloco) == {"por_sinal", "por_janela", "leitura"}
+        assert set(bloco) == {
+            "por_sinal",
+            "por_janela",
+            "por_faixa_de_confianca",
+            "se_exigisse_confianca_minima",
+            "se_comprasse_o_outro_lado",
+            "vies_de_ambos_os_lados",
+            "leitura",
+        }
         # A leitura diz qual das duas contagens decide. Sem ela, quem lê o
         # JSON cita a de `n` maior, que é a inflada.
         assert "por_janela" in bloco["leitura"]
+
+    def test_o_vies_conhecido_sai_como_NUMERO_e_nao_como_ressalva(self):
+        """O único viés desta medição é publicado, não descrito.
+
+        Quando os dois lados passam do threshold, o registrado é Up por ordem
+        da lista — não por decisão. Uma ressalva em prosa seria pulada; uma
+        fração ao lado do resultado obriga quem lê a olhar para ela.
+        """
+        report = BacktestReport()
+        report.add_sinal_direcional(_sinal("j1"))
+        report.add_sinal_direcional(_sinal("j2"))
+        report.sinais_com_ambos_os_lados = 1
+
+        vies = report.direcao_sem_fill()["vies_de_ambos_os_lados"]
+
+        assert vies["instantes"] == 1
+        assert vies["fracao_dos_sinais"] == pytest.approx(0.5)
+
+    def test_sem_sinal_a_fracao_do_vies_e_nula_e_nao_zero(self):
+        """Zero diria "medi e não há"; None diz "não há o que medir"."""
+        vies = BacktestReport().direcao_sem_fill()["vies_de_ambos_os_lados"]
+
+        assert vies["fracao_dos_sinais"] is None
 
     def test_a_leitura_separa_direcao_de_lucro(self):
         """Acurácia acima de 0,5 com custo maior que a margem continua

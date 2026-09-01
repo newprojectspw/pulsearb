@@ -242,6 +242,37 @@ class TestOEnvio:
         assert b'"orderType":"FOK"' in corpo
         assert TIPO_DE_ORDEM == "FOK"
 
+    async def test_o_tipo_pode_ser_GTC_para_a_rota_maker(self):
+        """A rota maker (item 4.0) precisa de ordem que REPOUSE no livro.
+
+        `[VERIFICADO]` API_NOTES §4.1: `Literal["GTC","GTD","FAK","FOK"]`.
+        Aceitar o tipo é a metade fácil — cancelamento, reposicionamento e
+        reconciliação do que ficou aberto continuam não existindo, e é por
+        isso que o 4.0 segue ⬜.
+        """
+        cliente = _cliente((200, {"success": True}), tipo_de_ordem="GTC")
+
+        await cliente.enviar(_ordem(), janela="j1")
+
+        _, _, corpo = cliente.transporte.chamadas[0]
+        assert b'"orderType":"GTC"' in corpo
+
+    async def test_tipo_desconhecido_falha_na_CONSTRUCAO_e_nao_no_envio(self):
+        """Um tipo que a corretora não conhece volta como recusa genérica, e
+        o operador procuraria o erro na assinatura ou na credencial antes de
+        olhar para uma string de três letras."""
+        with pytest.raises(ValueError) as erro:
+            _cliente((200, {"success": True}), tipo_de_ordem="IOC")
+
+        assert "IOC" in str(erro.value)
+        assert "FOK" in str(erro.value)  # a mensagem lista os aceitos
+
+    async def test_o_default_continua_FOK(self):
+        """Quem não escolhe recebe o caminho do taker, que é o já medido."""
+        cliente = _cliente((200, {"success": True}))
+
+        assert cliente.tipo_de_ordem == "FOK"
+
     async def test_o_corpo_no_fio_e_o_corpo_assinado(self):
         """A regra do `auth.py`, exercitada de ponta a ponta: o que o
         transporte recebe é byte a byte o que entrou no HMAC."""

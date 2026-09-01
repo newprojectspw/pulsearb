@@ -15,13 +15,20 @@ tem três valores e não dois, e por isso `INCERTA` é um estado **terminal**:
 quem o recebe não reenvia, reconcilia. A reconciliação é leitura (`GET`), que
 é segura de repetir; o envio não é.
 
-POR QUE FOK, E SÓ FOK
-──────────────────────
+POR QUE FOK É O DEFAULT
+────────────────────────
 `[VERIFICADO]` API_NOTES §4.1: ordem a mercado aceita FAK ou FOK. A decisão do
 M4 é **FOK** — tudo ou nada. FAK aceitaria preenchimento parcial, e parcial
 numa janela de 5 minutos é a pior das posições: exposição real com tamanho
 diferente do que o portão autorizou, e sem tempo de corrigir antes da
 resolução. FAK fica anotado para a v2, quando houver como gerenciar o resto.
+
+O tipo virou parâmetro em 2026-08-31 (`tipo_de_ordem`), porque a rota maker
+precisa de **GTC**. O default não mudou, e a mudança é menor do que parece:
+aceitar o tipo é o passo fácil. Uma ordem GTC **repousa no livro**, e isso
+exige cancelamento, reposicionamento e reconciliação do que ficou aberto —
+nada disso existe aqui. Ver o item 4.0 do `ESTADO_PARA_LIVE.md`, e não confunda
+"o cliente aceita GTC" com "o bot opera maker".
 
 O QUE ESTE MÓDULO NÃO FAZ
 ──────────────────────────
@@ -48,7 +55,23 @@ from pulsearb.risk import OrdemPretendida
 log = get_logger(__name__)
 
 #: `[VERIFICADO]` API_NOTES §4.1 — tudo ou nada. Ver o cabeçalho.
+#:
+#: É o DEFAULT, e continua sendo: quem não escolher tipo nenhum recebe o
+#: comportamento do taker, que é o caminho já medido pelo M2.
 TIPO_DE_ORDEM = "FOK"
+
+#: `[VERIFICADO]` API_NOTES §4.1 — `Literal["GTC", "GTD", "FAK", "FOK"]`.
+#:
+#: **GTC é a rota maker (item 4.0), e é outro animal.** FOK resolve na hora:
+#: ou preencheu, ou morreu, e o `EstadoDoEnvio` cobre os três desfechos numa
+#: chamada. GTC **repousa no livro** — é essa a razão de existir da rota, já
+#: que reward se ganha por estar lá —, e uma ordem que repousa exige o que
+#: este cliente ainda NÃO tem: cancelamento, reposicionamento quando o livro
+#: anda, e reconciliação do que ficou aberto entre reinícios.
+#:
+#: Aceitar o tipo aqui é metade do caminho, e a metade fácil. A outra metade
+#: está no item 4.0 e não deve ser confundida com esta.
+TIPOS_DE_ORDEM_ACEITOS = frozenset({"FOK", "FAK", "GTC", "GTD"})
 
 #: `[VERIFICADO]` API_NOTES §2.1 — o caminho REST de envio de ordem.
 CAMINHO_DA_ORDEM = "/order"
@@ -214,13 +237,25 @@ class ClienteDeOrdens:
         minimo_de_shares: float = 5.0,
         envios_lembrados: int = ENVIOS_LEMBRADOS,
         timeout_s: float = TIMEOUT_DO_ENVIO_S,
+        tipo_de_ordem: str = TIPO_DE_ORDEM,
     ) -> None:
+        if tipo_de_ordem not in TIPOS_DE_ORDEM_ACEITOS:
+            # Recusa na CONSTRUÇÃO, não no envio: um tipo que a corretora não
+            # conhece volta como recusa genérica, e o operador procuraria o
+            # erro na assinatura ou na credencial antes de olhar para uma
+            # string de três letras.
+            raise ValueError(
+                f"tipo de ordem desconhecido: {tipo_de_ordem!r} — "
+                f"aceitos: {', '.join(sorted(TIPOS_DE_ORDEM_ACEITOS))} "
+                "(API_NOTES §4.1)"
+            )
         self.credenciais = credenciais
         self.construtor = construtor
         self.transporte = transporte
         self.minimo_de_shares = minimo_de_shares
         self.envios_lembrados = envios_lembrados
         self.timeout_s = timeout_s
+        self.tipo_de_ordem = tipo_de_ordem
         #: Ids já enviados nesta sessão, em ordem de envio. É a trava de
         #: idempotência do NOSSO lado; a do lado deles é o próprio id.
         self._enviados: dict[str, EstadoDoEnvio] = {}
@@ -267,7 +302,7 @@ class ClienteDeOrdens:
             )
 
         corpo = dict(self.construtor.corpo_da_ordem(ordem, id_do_cliente=identificador))
-        corpo["orderType"] = TIPO_DE_ORDEM
+        corpo["orderType"] = self.tipo_de_ordem
         cabecalhos, bytes_do_corpo = assinar_l2(
             self.credenciais,
             metodo="POST",
