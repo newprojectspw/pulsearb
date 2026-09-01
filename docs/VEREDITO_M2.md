@@ -1436,6 +1436,37 @@ dia (`M2_DIRECAO`, `M2_FAIXAS`, `M2_FAIXA_CORRIGIDA`, `M2_VIES`) dão
 `por_janela` = **0,4157 com p = 1,16e−05**, ao dígito. O número não é artefato
 de uma execução.
 
+### §2d-octies. O segundo dia: a direção reproduz, a inversão NÃO
+
+`relatorios/M2_DIA_INDEPENDENTE_25AGO.json` — 5 h de 2026-08-25, 97 janelas,
+avaliadas com a **mesma** curva de 23/08. Dia independente do 24/08.
+
+| dia | n | acurácia | preço lado | preço oposto | soma | PnL direto | PnL invertido |
+|---|---|---|---|---|---|---|---|
+| 24/08 (24 h) | 688 | 0,4157 | 0,4219 | 0,5991 | 1,0210 | −0,00618 | **−0,01477** |
+| 25/08 (5 h) | 97 | 0,3711 | 0,4464 | 0,5708 | 1,0172 | −0,07526 | **+0,05805** |
+
+**O que REPRODUZ:** a direção erra sistematicamente nos dois dias — 0,4157 e
+0,3711 —, ambos com significância (p = 1,16e−05 e p = 0,0148). O achado
+central da §2d-quater sobrevive ao segundo dia.
+
+**O que NÃO reproduz: a inversão.** Ela é 2,4× pior no dia 24 e **positiva** no
+dia 25. Sinais opostos, mesma estratégia, dois dias.
+
+**Esta é a razão de "um dia não é veredito", em números.** Rodando só o dia 25,
+a conclusão seria *"inverter funciona: +0,058 por share"* — e estaria errada,
+porque no dia com 7× mais amostra o mesmo movimento perde. O sinal da inversão
+depende de duas coisas que variam: quão extrema é a acurácia (mais extrema,
+mais vantagem em inverter) e quanto custa o spread (1,72 % contra 2,10 %).
+
+**Delimitação.** As amostras não pesam igual: 688 janelas de 24 h contra 97 de
+5 h, com p-valor uma ordem de grandeza mais fraco. O dia 25 **não derruba** a
+§2d-septies; ele mostra que a inversão **não é estável**, o que já basta para
+não adotá-la.
+
+**Somando os dois dias:** a regra erra a direção de forma reprodutível; nenhuma
+correção testada é estável; o taker segue sem rota conhecida.
+
 ### §2d-septies. Inverter a regra é PIOR — e a razão encerra a rota taker
 
 A última correção que restava na mesa: se a direção acerta 0,4157, o lado
