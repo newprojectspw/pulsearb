@@ -24,12 +24,13 @@ contra 0,207 na banda com o modelo derivado. **E a borda desapareceu no mesmo
 movimento:** 688 trades, PnL **−67,27**, `bandas_com_edge: []` — nenhuma das
 cinco bandas de horizonte é positiva. Placar do taker: **1.2 e 1.3 ✅ · 1.1,
 1.4 e 1.5 ❌**. Como o critério exige as CINCO, **o taker segue reprovado** —
-por ausência de borda e por capacidade, não mais por calibração. **O MAKER
-também não passa nos cinco:** 1.7, 1.8, 1.9 e 1.10 passam, mas o **1.6 é NÃO
-AVALIÁVEL** — esta página chegou a marcá-lo ✅ com +35,6 USDC/8h e isso foi
-**revertido em 2026-08-31**, porque contradizia o `resumo_m2.py` e o
-`VEREDITO_M2.md`. O número segue registrado como estimativa de ordem de
-grandeza, com o método à vista.
+por ausência de borda e por capacidade, não mais por calibração. **E o MAKER
+REPROVA — não por falta de medição, mas por medição.** Em 2026-09-01 o 1.6
+deixou de ser "não avaliável": `analysis/fila.py` mede os **dois extremos da
+fila**, e os dois dão negativo (**−39,50 USDC/h** no melhor caso, −338,16 no
+pior). Como qualquer posição real cai entre eles, **a fila deixou de ser
+necessária para decidir**. O markout come 15× os rewards. Esta página chegou a
+marcar o 1.6 ✅ com +35,6 USDC/8h; foi revertido em 31/08 e agora está medido.
 **O M2.2 rodou em 2026-08-31** — 24 h com a fórmula confirmada, 126,7 M
 registros — e 1.7/1.8 saíram idênticos aos de antes (−0,1974 e 65,922 h),
 porque nenhum dos dois passa pela fórmula de reward. A pendência fecha.
@@ -369,7 +370,7 @@ fixou antes de existir dado. Nenhuma duração passa.
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
-| 1.6 | Conta fechada com fator 0,3 | positiva | **NÃO AVALIÁVEL** — `o_que_falta_para_fechar` continua com os 3 termos, e o `resumo_m2.py` reporta assim em toda rodada. A estimativa de +35,6 USDC/8h **não fecha o critério**: ver abaixo | ⚠️ |
+| 1.6 | Conta fechada com fator 0,3 | positiva | **❌ NEGATIVA nos dois extremos da fila** (medido 2026-09-01, `analysis/fila.py`): −39,50 USDC/h no melhor caso (últimos da fila, 8,0 % do fluxo) e −338,16 no pior. O markout come **15×** os rewards, e o ponto de equilíbrio exigiria executar 11.525 shares/8 h contra os 171.632 medidos. **A fila deixou de ser necessária:** os dois limites têm o mesmo sinal, então qualquer posição real cai entre eles | ❌ |
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
@@ -433,6 +434,49 @@ apagado — apagar esconderia que a rota chegou a parecer aprovada.
 **Consequência no placar:** o MAKER **não passa nos cinco**. Passa em 1.7,
 1.8, 1.9 e 1.10; o 1.6 fica não avaliável até existir medição de fila ou uma
 definição pré-registrada do que o fator 0,3 desconta.
+
+### ⛔ 1.6 MEDIDO em 2026-09-01: a conta do maker fecha NEGATIVA nos dois extremos da fila
+
+O que travava o 1.6 era `shares_executadas`, que depende da posição na fila —
+não observável no WS agregado. **A fila continua não observável, e o 1.6
+deixou de precisar dela:** `analysis/fila.py` mede os **dois extremos**, e
+qualquer posição real cai entre eles.
+
+Medido sobre 5 h de 2026-08-25 (166 janelas, 64.314 execuções no topo),
+cotação de 50 shares por lado, normalizado por hora:
+
+| | shares executadas | % do fluxo | markout | **líquido** |
+|---|---|---|---|---|
+| **pior caso** (primeiros da fila) | 863.748 | 64,2 % | −341,01 /h | **−338,16 /h** |
+| **melhor caso** (últimos da fila) | 107.270 | 8,0 % | −42,35 /h | **−39,50 /h** |
+
+*(rewards de 2,85 USDC/h, do relatório do dia 25)*
+
+**Os dois extremos são negativos, então a fila não decide.** Não é preciso
+saber onde a nossa ordem estaria: mesmo no cenário mais favorável — atrás de
+todo mundo, executando só o que sobra quando o nível esgota — o markout come
+**15×** o que os rewards pagam.
+
+**O ponto de equilíbrio é o número que resume tudo:** a conta fecharia se
+executássemos menos de **11.525 shares por 8 h**. O melhor caso medido dá
+**171.632**. Não é uma questão de ajustar tamanho ou distância — é uma ordem
+de grandeza.
+
+**Por que isso não aparecia antes.** O `resultado_parcial_usdc` do relatório
+soma rewards e rebate e **não subtrai o markout em USDC** — é a mesma
+observação que o `VEREDITO_M2.md` já fazia sobre o "+0,043 ¢/share" do
+primeiro veredito. A conta só fecha quando o markout entra multiplicado pelas
+shares que de fato executam, e era exatamente esse número que faltava.
+
+**A assimetria da fila é real, e não basta.** Reward não vê a fila; markout
+vê. Estar atrás **é** melhor — 8,0 % de execução contra 64,2 %. Mas 8 % de um
+fluxo de 1,35 milhão de shares ainda é 15× o que a rota suporta.
+
+**Delimitação.** Um período não é veredito: são 5 h de um dia. O rewards vem
+de 8 h e foi normalizado por hora para comparar — os dois deveriam sair da
+mesma janela, e sairão quando isto rodar em dia independente. E a medição
+supõe que o tamanho publicado no nível **não nos inclui**, o que é verdade num
+backtest e seria falso ao vivo.
 
 ### O terceiro termo do 1.6 é decidível — e ele reprova o tamanho avaliado
 
