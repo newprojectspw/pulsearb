@@ -318,17 +318,12 @@ trade**, e o lucro é de **+0,18 USDC por trade**. A duração mais líquida (5 
 tem p50 de 87,77 USDC a 3 ticks, **44 % do mínimo de 200** que o critério
 fixou antes de existir dado. Nenhuma duração passa.
 
-
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) | ✅ |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
-
-Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
-aritmética e **errada na leitura**. Quebrando por duração no dia inteiro de
-2026-08-24 (`M2_20260824.json`, 739 janelas):
 
 | duração | com pool | sem pool | % com pool |
 |---|---|---|---|
@@ -589,7 +584,6 @@ defeitos nele:
 | 3.2 | Cliente de ordens, assinatura EIP-712, auth do CLOB | ✅ **2026-08-30** — `execution/auth.py` (34 testes: L2 HMAC-SHA256 + typed data do L1 + `CredenciaisL2.do_ambiente`) e `execution/ordem.py` (35 testes: struct EIP-712, valores, `AssinadorLocal`). Travado por **conferência diferencial** contra o `polymarket-client==0.6.0`: sete casos de valores, o typed data e a assinatura, byte a byte. Fatos em API_NOTES §12.14. Falta só falar com o servidor de verdade |
 | 3.3 | Modo SHADOW | ✅ **M4.3** — decide tudo, envia nada, 15 testes |
 | 3.4 | Modo LIVE + trava tripla (`MODE=LIVE` + `CONFIRM_LIVE` + `EU ACEITO O RISCO`) | ✅ **2026-08-30** — `risk/autorizacao.py`, 22 testes. A frase é comparada EXATAMENTE; `escolher_executor` só chega em LIVE por ela, e a recusa lista TODOS os bloqueios |
-
 | 3.6 | Trava: stake máximo por trade e por janela (US$ 5) | ✅ **M4.1** — mais exposição total, posições e disjuntor |
 
 ### 3.1 e 3.6 fecharam — os portões vêm ANTES do cliente de ordens
@@ -694,6 +688,24 @@ uma conta sobre fill assumido, não uma observação. (b) 72 entradas não
 sustentam veredito nenhum, nem no sinal negativo. (c) `pausa_por_sequencia` em
 99 % das linhas **não é 99 % do tempo**: o bot continua tentando durante a
 pausa, e cada tentativa vira uma linha.
+
+> **⚠️ O PnL DESTE ensaio é otimista por construção, e o defeito era de código.**
+> Até 2026-08-31 o motor gravava `preco_pago = livro.best_ask` — o topo, como
+> se a ordem inteira coubesse no primeiro nível e não custasse slippage. O
+> backtest sempre atravessou o livro com `simulate_taker_buy`. **Duas contas
+> para a mesma coisa**, que é exatamente a violação que a regra do *mesmo
+> caminho* existe para impedir: a diferença apareceria como "o mercado ao vivo
+> é melhor", quando é aritmética.
+>
+> Achado ao investigar por que o shadow marcou **+126,77 às 10,6 h** enquanto o
+> backtest do mesmo motor dá negativo. Corrigido no motor, com teste de topo
+> raso travando `preco_pago > best_ask`.
+>
+> **O ensaio em curso NÃO foi reiniciado** — o que ele mede sobre estabilidade
+> e portões continua valendo, e reiniciar custaria as 10,6 h já corridas. Mas
+> o **PnL dele sai enviesado para cima**, e por isso não entra em conta
+> nenhuma. O item **4.2** (SHADOW ≥ 2 semanas com edge líquido medido) exige
+> um ensaio com o motor corrigido.
 
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
@@ -1130,7 +1142,6 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 | # | Condição | Estado |
 |---|---|---|
 | 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ — **e a estratégia que o backtest teria de aprovar não existe em código.** O taker está medido e reprovado (1.1/1.4/1.5); a rota que resta é a maker, e o motor dela **não começou** — ver 4.0 abaixo |
-| **4.0** | **Motor MAKER — a rota que sobrou** | 🟡 **duas peças de quatro, em 2026-08-31.** ✅ **(a) onde cotar:** `live/cotacao.py` escolhe `distancia_ticks` e tamanho pelo líquido `rewards − markout`, usando a **mesma** `score_de_nivel` do backtest; publica as parcelas separadas porque uma é estimativa com hipótese de fila e a outra é medida (1.7); 20 testes. ✅ **(b) `orderType` configurável:** `ClienteDeOrdens(tipo_de_ordem="GTC")`, com tipo desconhecido falhando na **construção** e não no envio (`[VERIFICADO]` §4.1); default segue FOK. ⬜ **(c) repousar de verdade:** cancelar, reposicionar quando o livro anda, e reconciliar o que ficou aberto entre reinícios — **nada disso existe**, e é o que separa "o cliente aceita GTC" de "o bot opera maker". ⬜ **(d) posição na fila:** o WS agregado não mostra, e é dela que dependem os 3 termos que travam o 1.6 |
 | 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
@@ -1190,7 +1201,6 @@ saber o que deixou de travar é parte do estado:
 | Pendência | Natureza | O que destrava |
 |---|---|---|
 | ~~**1.3 calibração**~~ **RESOLVIDO em 30/08** (ECE 0,0126–0,0493 nos cinco baldes) | era defeito de **variância**, não do sinal: 39–48× na variância, 6,3× no desvio | feito — a `V(t)` passou a ser MEDIDA em dia anterior ao avaliado (§2d-ter). **E com o conserto a borda sumiu:** `bandas_com_edge: []`, o que move a reprovação para 1.1 e 1.4 |
-| **1.5 profundidade** (p50 128 USDC contra 200) | teto de **capacidade** do book | nada sob nosso controle — é liquidez do mercado. Só cabe contestar o limiar com a `curva_de_capacidade`, e 128 contra 200 não sugere que contestaria |
 | ~~**1.10 fórmula de reward**~~ **CONFIRMADA em 30/08** — `S(v,s)=((v-s)/v)²×b` (quadrática em centavos, 1/min), com $1M em rewards para TWAP em agosto | fato externo — acessível na máquina Mac (docs.polymarket.com) | feito — API_NOTES §15.3. `analysis/rewards.py` corrigida. `resumo_m2.py` atualizado: critério 1.10 agora reporta **PASSA**. Falta re-rodar o M2.2 com dados reais: `./scripts/analisa_dia.sh 20260824 ~/pulsearb-dados ~/pulsearb-m2 relatorios/VARIANCIA_23AGO.json` (quarto arg adicionado em 2026-08-30) |
 
 E uma última, que é metodológica e vale para qualquer resultado acima: **um dia

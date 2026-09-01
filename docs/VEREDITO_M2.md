@@ -1356,6 +1356,7 @@ defeito está em QUANDO se entra, não em QUANTO se prevê.
 1. **Que inverter a regra dá lucro.** Não foi testado. Inverter é comprar o que
    o modelo acha caro, e isso não tem razão a priori de funcionar — a
    simetria de uma regra ruim não é uma regra boa.
+   
 **O que isso significa, na regra que eu mesmo registrei antes de rodar:** "se
 1.3 passar e o edge sumir, o veredito fica mais limpo do que era: não havia
 borda, havia superconfiança". Foi essa a ramificação que ocorreu.
