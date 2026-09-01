@@ -377,10 +377,6 @@ fixou antes de existir dado. Nenhuma duração passa.
 
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
-Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
-aritmética e **errada na leitura**. Quebrando por duração no dia inteiro de
-2026-08-24 (`M2_20260824.json`, 739 janelas):
-
 | duração | com pool | sem pool | % com pool |
 |---|---|---|---|
 | 5 min | 1 | 518 | 0,2 % |
@@ -716,8 +712,6 @@ capacidade (M2.14) dizer onde o teto está.
 | 3.10 | Trava: feed velho / relógio > 250 ms / spread anômalo | ✅ **3 de 3** — feed ✅ (M4.1), spread ✅ (M4.4, teto 0,04), relógio ✅ `live/relogio.py` detecta **anomalia** (pior ativo, 250 ms) e **salto**, e recusa em LIVE sem fonte. **O sensor não certifica sincronia** (equação de via única — ver §3.10 abaixo): isso é limitação física coberta pelo daemon NTP (5.4 ✅). Wiring: `live/shadow.py` passa `relogio_do_servidor=precos.relogio` ao `PortaoDeRisco` |
 | 3.11 | Kill switch: arquivo `KILL` + botão no dashboard | ✅ **2026-08-30** — arquivo ✅ **M4.4** (lido a cada ordem, ilegível = acionado); botão ✅ `ui/server.py`, 8 testes. **Só arma, não desarma**: o que para o bot fica parado até uma pessoa apagar o arquivo na máquina, e o dashboard não tem autenticação — uma rota que desarmasse seria uma rota para religar um bot parado de propósito. Chave puxada por `touch` fora da página aparece nela |
 | 3.12 | Suíte de testes das travas (uma por trava) | ✅ — **108**: 47 no portão, 27 nas travas novas, 20 no relógio do servidor, 14 na sincronia NTP |
-| 3.13 | SHADOW rodando 24 h sem crash | ✅ **CUMPRIDO em 2026-08-31** — PID 26423, de 00:46 a 01:20 do dia seguinte: **24,58 h de diário contínuo, sem crash**. 45.652 linhas, **259 intenções aprovadas**, **cinco portões exercitados** (`pausa_por_sequencia` 44.701 · `spread_anomalo` 525 · `preco_fora_da_faixa` 95 · `livro_desconhecido` 66 · `feed_parado` 6), disjuntor desarmado. **O PnL de +113,85 NÃO conta** — este ensaio rodou com o motor que gravava `preco_pago = best_ask`, corrigido só depois; ver o aviso abaixo e o item 4.2. **E um defeito apareceu no fim:** o processo **não encerrou no prazo** — ver 3.14 |
-| **3.14** | **`--duration` não encerrava: o relógio congela quando a máquina dorme** | ✅ **causa medida e corrigida em 2026-08-31.** O ensaio do 3.13 seguiu vivo em **24,6 h** com `--duration 24h`. Não era cancelamento preso — escrevi o teste de `run()` com descoberta lenta e ele **passou**. A causa é outra: `time.monotonic()` no macOS sai de `mach_absolute_time()`, que **congela em suspensão**. Medido nesta máquina: **190,8 h de monotonic contra 370,8 h de parede desde o boot — 180 h de sono**. O deadline era só monotônico, então `24h` virava 24 h + o que a máquina dormisse. `caffeinate -i` não cobre: impede o sono por inatividade, não o de tampa fechada. **Corrigido com prazo DUPLO** (`prazo_vencido`), encerrando no primeiro a vencer — só parede também não serviria, porque um ajuste de NTP encurtaria a rodada, e é o relógio que o 3.10 diz não poder assumir estável. 3 testes novos, um por modo de falha |
 
 *(A linha 3.13 sumiu do quadro num merge entre as duas sessões e foi
 restaurada em 2026-08-31. Fica o registro: conflito neste arquivo é o mais
@@ -789,9 +783,6 @@ pausa, e cada tentativa vira uma linha.
 >
 > **O ensaio NÃO foi reiniciado** — o que ele mede sobre estabilidade e
 > portões vale, e reiniciar custaria as horas já corridas. Ele completou
-> **24,58 h e fechou o 3.13**. Mas o **PnL dele (+113,85) sai enviesado para
-> cima** e não entra em conta nenhuma. O item **4.2** exige um ensaio com o
-> motor corrigido, e esse ainda **não começou**.
 
 **O que melhorou em relação à primeira hora** (25 aprovadas, PnL +19,27, e
 `pausa_por_sequencia` como ÚNICO motivo): agora há **quatro** portões
@@ -1229,7 +1220,6 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 |---|---|---|
 | 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ⬜ — **e a estratégia que o backtest teria de aprovar não existe em código.** O taker está medido e reprovado (1.1/1.4/1.5); a rota que resta é a maker, e o motor dela **não começou** — ver 4.0 abaixo |
 | **4.0** | **Motor MAKER — a rota que sobrou** | 🟡 **duas peças de quatro, em 2026-08-31.** ✅ **(a) onde cotar:** `live/cotacao.py` escolhe `distancia_ticks` e tamanho pelo líquido `rewards − markout`, usando a **mesma** `score_de_nivel` do backtest; publica as parcelas separadas porque uma é estimativa com hipótese de fila e a outra é medida (1.7); 20 testes. ✅ **(b) `orderType` configurável:** `ClienteDeOrdens(tipo_de_ordem="GTC")`, com tipo desconhecido falhando na **construção** e não no envio (`[VERIFICADO]` §4.1); default segue FOK. 🟡 **(c) repousar:** `live/repouso.py` decide *mexer ou deixar* com **histerese dupla** — piso de ganho (0,50 USDC) e tempo mínimo repousada (30 s) —, porque reposicionar custa a fila e o livro pisca; cotação que **deixa de pontuar** vence as duas travas, já que ficar seria pagar risco de execução por zero reward. Toda decisão sai com **motivo nomeado**, como no `risk/gates.py`. 17 testes. **Falta o I/O:** cancelar de fato e reconciliar o que ficou aberto entre reinícios. ⬜ **(d) posição na fila:** o WS agregado não mostra, e é dela que dependem os 3 termos que travam o 1.6 |
-| 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
 **Piso de tempo:** mesmo que a captação seja consertada hoje e o veredito venha
