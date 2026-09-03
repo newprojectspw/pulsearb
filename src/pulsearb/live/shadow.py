@@ -356,10 +356,28 @@ class ProcessoShadow:
     ) -> None:
         while not prazo_vencido(deadline, deadline_de_parede):
             await _dormir_ate(CADENCIA_DO_RELATO_S, deadline)
-            if time.monotonic() >= deadline:
+            if prazo_vencido(deadline, deadline_de_parede):
                 # Não relata depois do prazo: o resumo final já sai no `run`.
                 return
-            log.info("shadow", **self.estado())
+            try:
+                log.info("shadow", **self.estado())
+            except Exception as erro:
+                # ESTE laço não pode derrubar a rodada, e derrubava.
+                #
+                # `run()` usa `FIRST_COMPLETED`, que trata "tarefa morreu com
+                # exceção" igual a "tarefa terminou": qualquer erro aqui
+                # encerrava as três. E o `gather(return_exceptions=True)` do
+                # `finally` engolia o motivo, então a rodada saía com o JSON
+                # final normal, `falhou: null`, e nenhum rastro do porquê.
+                #
+                # Foi o que aconteceu no ensaio de 01/09: encerrou em 13,86 h
+                # de 24 h, limpo, sem uma linha explicando.
+                #
+                # Relato é observação, não é a rodada. Perder um relatório de
+                # 60 s custa um log; derrubar o ensaio custa as horas todas.
+                log.warning(
+                    "relato falhou", erro=f"{type(erro).__name__}: {erro}"
+                )
 
     def estado(self) -> dict[str, Any]:
         return {
@@ -455,11 +473,45 @@ class ProcessoShadow:
                 # Espera o cancelamento assentar antes de fechar os sockets:
                 # tarefa cancelada no meio de um `await` da rede reclamaria em
                 # cima de um feed já parado.
-                await asyncio.gather(*tarefas, return_exceptions=True)
+                resultados = await asyncio.gather(
+                    *tarefas, return_exceptions=True
+                )
+                # E OLHA o que veio. O `return_exceptions=True` existe para o
+                # cancelamento não estourar aqui — mas ele engole TUDO, e uma
+                # tarefa que morreu de verdade sumia junto com o motivo.
+                #
+                # No ensaio de 01/09 isso custou 10 h: o laço de relato
+                # levantou, o `FIRST_COMPLETED` encerrou os três, e a rodada
+                # saiu com o JSON final normal e `falhou: null`. Uma rodada que
+                # termina cedo sem dizer por quê é pior que uma que estoura,
+                # porque a segunda alguém investiga.
+                self._anotar_mortes(tarefas, resultados)
                 for feed in self.rtds_feeds:
                     await feed.stop()
                 await self.poly.stop()
         return self.estado()
+
+    def _anotar_mortes(self, tarefas: list[Any], resultados: list[Any]) -> None:
+        """Registra tarefa que morreu de exceção — `CancelledError` não conta.
+
+        Cancelamento é o caminho NORMAL: o `finally` cancela as três quando a
+        primeira sai. Tratá-lo como falha encheria `falhou` em toda rodada
+        bem-sucedida, e um campo que acusa sempre não acusa nada.
+        """
+        for tarefa, resultado in zip(tarefas, resultados, strict=False):
+            if not isinstance(resultado, BaseException):
+                continue
+            if isinstance(resultado, asyncio.CancelledError):
+                continue
+            motivo = (
+                f"{tarefa.get_coro().__qualname__}: "
+                f"{type(resultado).__name__}: {resultado}"
+            )
+            log.error("laço morreu e encerrou a rodada", erro=motivo)
+            # Só o PRIMEIRO: é ele que derrubou os outros pelo
+            # `FIRST_COMPLETED`, e os demais morreram de cancelamento.
+            if self.falhou is None:
+                self.falhou = motivo
 
 
 def prazo_vencido(deadline: float, deadline_de_parede: float | None = None) -> bool:

@@ -909,6 +909,77 @@ class TestORunRespeitaOPrazo:
         assert not prazo_vencido(_time.monotonic() + 60)
         assert prazo_vencido(_time.monotonic() - 1)
 
+    async def test_relato_que_levanta_NAO_derruba_a_rodada(
+        self, tmp_path, monkeypatch
+    ):
+        """O que custou 10 h no ensaio de 01/09.
+
+        `run()` usa `FIRST_COMPLETED`, que trata "tarefa morreu com exceção"
+        igual a "tarefa terminou". O laço de relato não tinha `try/except`, e
+        qualquer erro nele encerrava as três — com o JSON final normal e
+        `falhou: null`, porque o `gather(return_exceptions=True)` engolia.
+
+        Relato é observação, não é a rodada: perder um relatório de 60 s custa
+        um log; derrubar o ensaio custa as horas todas.
+        """
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DO_RELATO_S", 0.001)
+        processo = _processo(tmp_path, _CicloFalso())
+        monkeypatch.setattr(
+            processo, "estado", lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        fim = _time.monotonic() + 0.05
+
+        # Sem o try/except isto propaga e o teste falha com RuntimeError.
+        await asyncio.wait_for(processo.laco_de_relato(fim), timeout=2.0)
+
+    async def test_laco_que_morre_deixa_o_MOTIVO_em_falhou(
+        self, tmp_path, monkeypatch
+    ):
+        """Uma rodada que termina cedo sem dizer por quê é pior que uma que
+        estoura — a segunda alguém investiga."""
+        processo = _processo(tmp_path, _CicloFalso())
+
+        async def morre():
+            raise RuntimeError("o laço explodiu")
+
+        async def cancelada():
+            await asyncio.sleep(3600)
+
+        tarefas = [
+            asyncio.create_task(morre()),
+            asyncio.create_task(cancelada()),
+        ]
+        await asyncio.sleep(0.01)
+        for t in tarefas:
+            t.cancel()
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+
+        processo._anotar_mortes(tarefas, resultados)
+
+        assert processo.falhou is not None
+        assert "o laço explodiu" in processo.falhou
+        assert "RuntimeError" in processo.falhou
+
+    async def test_cancelamento_NAO_conta_como_morte(self, tmp_path):
+        """Cancelar é o caminho normal: o `finally` cancela as três quando a
+        primeira sai. Um campo que acusa sempre não acusa nada."""
+        processo = _processo(tmp_path, _CicloFalso())
+
+        async def dorme():
+            await asyncio.sleep(3600)
+
+        tarefas = [asyncio.create_task(dorme()) for _ in range(3)]
+        await asyncio.sleep(0.01)
+        for t in tarefas:
+            t.cancel()
+        resultados = await asyncio.gather(*tarefas, return_exceptions=True)
+
+        processo._anotar_mortes(tarefas, resultados)
+
+        assert processo.falhou is None
+
     async def test_run_retorna_no_prazo_mesmo_com_descoberta_LENTA(
         self, tmp_path, monkeypatch
     ):
