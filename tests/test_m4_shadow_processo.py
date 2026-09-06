@@ -1466,3 +1466,133 @@ class TestOCaminhoDoDiarioNaoVaiCRU:
         from pulsearb.live.shadow import caminho_do_diario_da_rodada
 
         assert caminho_do_diario_da_rodada().startswith("data/shadow/diario-")
+
+
+class TestOSensorDeVigilia:
+    """A segunda consequência do 3.14, que ficou nove horas sem sensor.
+
+    O 3.14 usou a divergência entre monotônico e parede para ENCERRAR a
+    rodada na hora certa. Mas o mesmo congelamento tem outro efeito: os dois
+    laços deste processo correm em tempo monotônico — decisão a cada 1 s,
+    relato a cada 60 s —, então congelam JUNTOS. O relato sai sempre com
+    +60 passos, e uma rodada suspensa fica indistinguível de uma saudável.
+
+    Medido em 05/09/2026, rodada de 24 h na bateria: 1,16 h acordada em
+    9,77 h de parede (**11,9%**), com `feeds_saudaveis: true` do começo ao
+    fim — e certo, porque os feeds não têm defeito quando o processo inteiro
+    está suspenso. O que faltava não era um alarme de feed: era comparar os
+    dois relógios.
+    """
+
+    def test_maquina_que_dorme_derruba_o_ciclo_de_trabalho(self, tmp_path, monkeypatch):
+        """O defeito de 05/09, reproduzido: parede anda, monotônico não."""
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.inicio_mono = processo._relato_mono = 1_000.0
+        processo.inicio_parede = processo._relato_parede = 50_000.0
+
+        # 600 s de parede, 60 s de monotônico: dormiu 540 s (ciclo 0,1).
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: 1_060.0)
+        monkeypatch.setattr("pulsearb.live.shadow.time.time", lambda: 50_600.0)
+
+        rodada = processo._vigilia()["da_rodada"]
+        assert rodada["parede_s"] == 600.0
+        assert rodada["acordado_s"] == 60.0
+        assert rodada["dormiu_s"] == 540.0
+        assert rodada["ciclo_de_trabalho"] == 0.1
+
+    def test_maquina_acordada_da_ciclo_de_trabalho_cheio(self, tmp_path, monkeypatch):
+        """O contraste que dá sentido ao número: na tomada, 1,0."""
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.inicio_mono = processo._relato_mono = 1_000.0
+        processo.inicio_parede = processo._relato_parede = 50_000.0
+
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: 1_600.0)
+        monkeypatch.setattr("pulsearb.live.shadow.time.time", lambda: 50_600.0)
+
+        rodada = processo._vigilia()["da_rodada"]
+        assert rodada["dormiu_s"] == 0.0
+        assert rodada["ciclo_de_trabalho"] == 1.0
+
+    def test_a_JANELA_denuncia_a_parada_que_o_acumulado_dilui(
+        self, tmp_path, monkeypatch
+    ):
+        """A razão de existirem duas faixas, e não só o acumulado.
+
+        Nove horas de rodada boa seguidas de uma parada nova dão acumulado
+        ainda alto — foi exatamente assim que a rodada de 05/09 pareceu
+        saudável enquanto degradava. `desde_o_relato` é quem grita na hora.
+        """
+        processo = _processo(tmp_path, _CicloFalso())
+        # 10 h de parede já decorridas, quase todas acordado.
+        processo.inicio_mono = 1_000.0
+        processo.inicio_parede = 50_000.0
+        # A janela do último relato começou há pouco.
+        processo._relato_mono = 36_000.0
+        processo._relato_parede = 85_000.0
+
+        # +60 s de parede na janela, mas só 1 s de monotônico: parou agora.
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: 36_001.0)
+        monkeypatch.setattr("pulsearb.live.shadow.time.time", lambda: 85_060.0)
+
+        vigilia = processo._vigilia()
+        assert vigilia["da_rodada"]["ciclo_de_trabalho"] > 0.9
+        assert vigilia["desde_o_relato"]["ciclo_de_trabalho"] < 0.02
+
+    def test_relogio_de_parede_para_TRAS_nao_inventa_ciclo_acima_de_um(
+        self, tmp_path, monkeypatch
+    ):
+        """NTP corrigindo para trás não pode virar 'acordado mais que o tempo'.
+
+        É a mesma incógnita do 3.10: o relógio de parede não é confiável. Um
+        `ciclo_de_trabalho` de 1,4 seria pior que inútil — ninguém sabe ler.
+        """
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.inicio_mono = processo._relato_mono = 1_000.0
+        processo.inicio_parede = processo._relato_parede = 50_000.0
+
+        # Monotônico andou 600 s; a parede, só 100 s (NTP puxou para trás).
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: 1_600.0)
+        monkeypatch.setattr("pulsearb.live.shadow.time.time", lambda: 50_100.0)
+
+        rodada = processo._vigilia()["da_rodada"]
+        assert rodada["dormiu_s"] == 0.0
+        assert rodada["ciclo_de_trabalho"] == 1.0
+
+    def test_so_o_laco_de_relato_fecha_a_janela(self, tmp_path, monkeypatch):
+        """Ler o estado por fora não pode zerar a medida de quem mede.
+
+        O resumo final chama `estado()`, e um teste ou um inspetor também
+        podem. Se qualquer leitura avançasse a janela, o próximo relato
+        mediria um intervalo que não existiu — e mediria 1,0, porque acabou
+        de começar. O sensor mentiria justamente quando consultado.
+        """
+        processo = _processo(tmp_path, _CicloFalso())
+        processo.inicio_mono = processo._relato_mono = 1_000.0
+        processo.inicio_parede = processo._relato_parede = 50_000.0
+
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: 1_060.0)
+        monkeypatch.setattr("pulsearb.live.shadow.time.time", lambda: 50_600.0)
+
+        processo._vigilia()
+        processo.estado()
+        assert processo._relato_mono == 1_000.0
+        assert processo._relato_parede == 50_000.0
+
+        processo.estado(avancar_vigilia=True)
+        assert processo._relato_mono == 1_060.0
+        assert processo._relato_parede == 50_600.0
+
+    def test_a_vigilia_sai_no_estado_SEMPRE(self, tmp_path):
+        """Campo que só aparece quando há problema é campo que ninguém procura.
+
+        Mesma regra que o `falhou` já segue neste resumo.
+        """
+        estado = _processo(tmp_path, _CicloFalso()).estado()
+        assert "vigilia" in estado
+        for faixa in ("da_rodada", "desde_o_relato"):
+            assert set(estado["vigilia"][faixa]) == {
+                "parede_s",
+                "acordado_s",
+                "dormiu_s",
+                "ciclo_de_trabalho",
+            }
