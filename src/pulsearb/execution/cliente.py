@@ -128,6 +128,46 @@ class ResultadoDoEnvio:
         return self.estado is EstadoDoEnvio.INCERTA
 
 
+class EstadoDoCancelamento(StrEnum):
+    """Três estados, como o envio — e pela mesma razão, mas o perigo INVERTE.
+
+    No envio, `INCERTA` é o estado caro: a ordem pode estar no livro e reenviar
+    dobra a posição. No cancelamento é o contrário. `INCERTA` aqui quer dizer
+    "não sei se ela ainda repousa", e a ação segura é **cancelar de novo**:
+    cancelar uma ordem que já sumiu é inócuo do lado deles (§4.4 — o id volta em
+    `not_canceled` com motivo, não vira erro). Por isso quem recebe `INCERTA`
+    reconcilia lendo (`GET`), e pode repetir o cancelamento sem medo de dobrar
+    nada — o oposto exato do envio.
+    """
+
+    #: O servidor confirmou: o id saiu do livro. Não há mais o que repousar.
+    CANCELADA = "cancelada"
+    #: O servidor respondeu e disse que NÃO cancelou este id, com motivo. Um id
+    #: que já não existia cai aqui também — e para a rota maker isso é tão bom
+    #: quanto cancelada: o objetivo era não ter a ordem repousando, e não tem.
+    NAO_CANCELADA = "nao_cancelada"
+    #: A resposta não chegou. A ordem PODE ainda estar repousando. Reconciliar.
+    INCERTA = "incerta"
+
+
+@dataclass(frozen=True)
+class ResultadoDoCancelamento:
+    """O que aconteceu com um pedido de cancelamento, sem ambiguidade."""
+
+    estado: EstadoDoCancelamento
+    #: O id da ordem no lado deles, ecoado. Existe sempre — é por ele que a
+    #: reconciliação procura a ordem que talvez ainda repouse.
+    order_id: str | None = None
+    #: Por que não cancelou, quando `NAO_CANCELADA`. Vem do servidor (§4.4).
+    motivo: str | None = None
+    detalhe: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def precisa_reconciliar(self) -> bool:
+        """`True` obriga a ler o lado deles: não sabemos se a ordem repousa."""
+        return self.estado is EstadoDoCancelamento.INCERTA
+
+
 class ErroDeTransporte(Exception):
     """O transporte não conseguiu dizer se a ordem chegou.
 
@@ -136,11 +176,18 @@ class ErroDeTransporte(Exception):
     """
 
 
-#: O transporte, injetado. Recebe (caminho, cabeçalhos, corpo em bytes) e
-#: devolve (status, json). Protocolo estreito pela mesma razão do
+#: O transporte, injetado. Recebe (método, caminho, cabeçalhos, corpo em bytes)
+#: e devolve (status, json). Protocolo estreito pela mesma razão do
 #: `FonteDeAtraso`: o teste passa um dublê e nenhuma rede entra na suíte.
+#:
+#: O **método** entrou no contrato quando o cancelamento chegou (§4.4): envio é
+#: `POST /order`, cancelamento é `DELETE /order` — mesmo caminho, verbo
+#: diferente. Ele é argumento e não duas funções porque a razão de este
+#: transporte existir é a **semântica de falha** (timeout = INCERTA), e ela é
+#: idêntica nos dois: duplicar o transporte duplicaria a allowlist e a regra de
+#: "erro de rede nunca vira status inventado" — e uma cópia divergiria da outra.
 Transporte = Callable[
-    [str, dict[str, str], bytes], Awaitable[tuple[int, dict[str, Any] | None]]
+    [str, str, dict[str, str], bytes], Awaitable[tuple[int, dict[str, Any] | None]]
 ]
 
 
@@ -217,6 +264,17 @@ def conferir_ordem(ordem: OrdemPretendida, *, minimo_de_shares: float) -> str | 
     if not ordem.token_id:
         return "token_id vazio"
     return None
+
+
+def require_order_id(order_id: str) -> str:
+    """O id não pode ser vazio: `DELETE /order` com `orderID` em branco sairia
+    para o fio assinado e voltaria como recusa genérica de auth, escondendo que
+    o defeito era um id que nunca chegou. Espelha o `require_nonempty` do SDK
+    (§4.4) — falha ANTES da rede, não depois."""
+    limpo = order_id.strip() if isinstance(order_id, str) else ""
+    if not limpo:
+        raise ValueError(f"order_id vazio para cancelamento: {order_id!r}")
+    return limpo
 
 
 class ClienteDeOrdens:
@@ -327,7 +385,7 @@ class ClienteDeOrdens:
 
         try:
             status, resposta = await asyncio.wait_for(
-                self.transporte(CAMINHO_DA_ORDEM, cabecalhos, bytes_do_corpo),
+                self.transporte("POST", CAMINHO_DA_ORDEM, cabecalhos, bytes_do_corpo),
                 timeout=self.timeout_s,
             )
         except (ErroDeTransporte, TimeoutError) as erro:
@@ -401,6 +459,105 @@ class ClienteDeOrdens:
             detalhe={"status": status},
         )
 
+    async def cancelar(self, order_id: str) -> ResultadoDoCancelamento:
+        """Cancela UMA ordem repousada pelo id do lado deles. Item 4.0(c).
+
+        `[VERIFICADO]` §4.4: `DELETE /order` com `{"orderID": id}`, corpo
+        assinado como o do envio. A resposta traz `canceled[]` e
+        `not_canceled{}`; o id está em um dos dois, e é isso que separa
+        `CANCELADA` de `NAO_CANCELADA`.
+
+        Sem trava de idempotência, e de propósito — é a diferença que o
+        `EstadoDoCancelamento` documenta. O envio trava a segunda tentativa
+        porque reenviar dobra posição; cancelar de novo é inócuo, então travar
+        só atrapalharia a reconciliação, que é justamente cancelar mais uma vez
+        o que ficou incerto.
+        """
+        alvo = require_order_id(order_id)
+        corpo: dict[str, Any] = {"orderID": alvo}
+        cabecalhos, bytes_do_corpo = assinar_l2(
+            self.credenciais,
+            metodo="DELETE",
+            caminho=CAMINHO_DA_ORDEM,
+            corpo=corpo,
+        )
+        try:
+            status, resposta = await asyncio.wait_for(
+                self.transporte(
+                    "DELETE", CAMINHO_DA_ORDEM, cabecalhos, bytes_do_corpo
+                ),
+                timeout=self.timeout_s,
+            )
+        except (ErroDeTransporte, TimeoutError) as erro:
+            # Mesma semântica do envio: a resposta não chegou. Mas aqui INCERTA
+            # não obriga parar — obriga reconciliar, e a reconciliação PODE
+            # recancelar. Ver `EstadoDoCancelamento`.
+            log.warning(
+                "cancelamento incerto: a ordem pode ainda repousar, reconciliar",
+                order_id=alvo,
+                erro=f"{type(erro).__name__}: {erro}",
+            )
+            return ResultadoDoCancelamento(
+                estado=EstadoDoCancelamento.INCERTA,
+                order_id=alvo,
+                detalhe={"erro": f"{type(erro).__name__}: {erro}"},
+            )
+        return self._resultado_do_cancelamento(status, resposta, order_id=alvo)
+
+    def _resultado_do_cancelamento(
+        self, status: int, resposta: dict[str, Any] | None, *, order_id: str
+    ) -> ResultadoDoCancelamento:
+        """Classifica a resposta do DELETE. 5xx é INCERTA, como no envio.
+
+        A distinção que importa e que o envio não tem: um 200 NÃO garante que
+        ESTE id foi cancelado. A resposta cancela em lote (§4.4), então é
+        preciso olhar em qual das duas listas o id caiu — um 200 cujo
+        `canceled` não traz o id é `NAO_CANCELADA`, não sucesso.
+        """
+        if status >= 500:
+            return ResultadoDoCancelamento(
+                estado=EstadoDoCancelamento.INCERTA,
+                order_id=order_id,
+                detalhe={"status": status, "resposta": resposta},
+            )
+        if status in (401, 403):
+            return ResultadoDoCancelamento(
+                estado=EstadoDoCancelamento.NAO_CANCELADA,
+                order_id=order_id,
+                motivo=MOTIVOS_DE_RECUSA.AUTH_RECUSADA,
+                detalhe={"status": status},
+            )
+        if status >= 400 or resposta is None:
+            return ResultadoDoCancelamento(
+                estado=EstadoDoCancelamento.NAO_CANCELADA,
+                order_id=order_id,
+                motivo=MOTIVOS_DE_RECUSA.SERVIDOR_RECUSOU,
+                detalhe={"status": status, "resposta": resposta},
+            )
+
+        canceladas = resposta.get("canceled") or []
+        nao_canceladas = resposta.get("not_canceled") or {}
+        if order_id in canceladas:
+            return ResultadoDoCancelamento(
+                estado=EstadoDoCancelamento.CANCELADA,
+                order_id=order_id,
+                detalhe={"status": status},
+            )
+        # O id em `not_canceled` traz o motivo do servidor; ausente das duas
+        # listas, o 200 não fala deste id — e afirmar "cancelada" a partir de um
+        # 200 que não o menciona é a suposição que §4.4 existe para barrar.
+        motivo_servidor = (
+            nao_canceladas.get(order_id)
+            if isinstance(nao_canceladas, dict)
+            else None
+        )
+        return ResultadoDoCancelamento(
+            estado=EstadoDoCancelamento.NAO_CANCELADA,
+            order_id=order_id,
+            motivo=MOTIVOS_DE_RECUSA.SERVIDOR_RECUSOU,
+            detalhe={"status": status, "motivo_do_servidor": motivo_servidor},
+        )
+
 
 def fazer_transporte(http: Any, *, base_do_clob: str) -> Transporte:
     """Adapta um `httpx.AsyncClient` ao contrato `Transporte`.
@@ -436,7 +593,7 @@ def fazer_transporte(http: Any, *, base_do_clob: str) -> Transporte:
     permitido = base + "/"
 
     async def transporte(
-        caminho: str, cabecalhos: dict[str, str], corpo: bytes
+        metodo: str, caminho: str, cabecalhos: dict[str, str], corpo: bytes
     ) -> tuple[int, dict[str, Any] | None]:
         url = base + caminho
         if not url.startswith(permitido):
@@ -444,12 +601,14 @@ def fazer_transporte(http: Any, *, base_do_clob: str) -> Transporte:
                 f"destino fora do CLOB configurado: {url!r} (permitido: {permitido!r})"
             )
         try:
-            resposta = await http.post(
+            resposta = await http.request(
+                metodo,
                 url,
                 # `content=`, e NÃO `json=`. Esta é a linha que a regra do
                 # `auth.py` protege: `json=` reserializaria o dicionário e os
                 # bytes no fio deixariam de ser os bytes assinados. O servidor
-                # recusaria com 401 e nada apontaria a causa.
+                # recusaria com 401 e nada apontaria a causa. Vale igual para o
+                # corpo do DELETE de cancelamento (§4.4), que também é assinado.
                 content=corpo,
                 headers={**cabecalhos, "Content-Type": "application/json"},
             )

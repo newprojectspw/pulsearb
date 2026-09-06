@@ -20,6 +20,7 @@ from pulsearb.execution.cliente import (
     TIPO_DE_ORDEM,
     ClienteDeOrdens,
     ErroDeTransporte,
+    EstadoDoCancelamento,
     EstadoDoEnvio,
     conferir_ordem,
     fazer_transporte,
@@ -50,14 +51,18 @@ class _Construtor:
 
 
 class _Transporte:
-    """Dublê da rede. `respostas` é uma fila; exceção na fila é levantada."""
+    """Dublê da rede. `respostas` é uma fila; exceção na fila é levantada.
+
+    `chamadas` guarda o MÉTODO junto — desde §4.4 o transporte recebe o verbo,
+    e o teste do cancelamento confere que ele sai como DELETE, não POST.
+    """
 
     def __init__(self, *respostas):
         self.respostas = list(respostas)
-        self.chamadas: list[tuple[str, dict, bytes]] = []
+        self.chamadas: list[tuple[str, str, dict, bytes]] = []
 
-    async def __call__(self, caminho, cabecalhos, corpo):
-        self.chamadas.append((caminho, cabecalhos, corpo))
+    async def __call__(self, metodo, caminho, cabecalhos, corpo):
+        self.chamadas.append((metodo, caminho, cabecalhos, corpo))
         resposta = self.respostas.pop(0) if self.respostas else (200, {"success": True})
         if isinstance(resposta, Exception):
             raise resposta
@@ -238,7 +243,7 @@ class TestOEnvio:
 
         await cliente.enviar(_ordem(), janela="j1")
 
-        _, _, corpo = cliente.transporte.chamadas[0]
+        _, _, _, corpo = cliente.transporte.chamadas[0]
         assert b'"orderType":"FOK"' in corpo
         assert TIPO_DE_ORDEM == "FOK"
 
@@ -254,7 +259,7 @@ class TestOEnvio:
 
         await cliente.enviar(_ordem(), janela="j1")
 
-        _, _, corpo = cliente.transporte.chamadas[0]
+        _, _, _, corpo = cliente.transporte.chamadas[0]
         assert b'"orderType":"GTC"' in corpo
 
     async def test_tipo_desconhecido_falha_na_CONSTRUCAO_e_nao_no_envio(self):
@@ -280,7 +285,7 @@ class TestOEnvio:
 
         await cliente.enviar(_ordem(), janela="j1")
 
-        _, cabecalhos, corpo = cliente.transporte.chamadas[0]
+        _, _, cabecalhos, corpo = cliente.transporte.chamadas[0]
         esperado = corpo_canonico(
             {
                 "tokenId": "tok-up",
@@ -354,7 +359,7 @@ class TestAJanelaAntesDoAwait:
         soltar = asyncio.Event()
         chamadas = []
 
-        async def transporte(caminho, cabecalhos, corpo):
+        async def transporte(metodo, caminho, cabecalhos, corpo):
             chamadas.append(caminho)
             entrou.set()
             await soltar.wait()
@@ -378,7 +383,7 @@ class TestAJanelaAntesDoAwait:
         entrou = asyncio.Event()
         soltar = asyncio.Event()
 
-        async def transporte(caminho, cabecalhos, corpo):
+        async def transporte(metodo, caminho, cabecalhos, corpo):
             entrou.set()
             await soltar.wait()
             return 200, {"success": True}
@@ -405,7 +410,7 @@ class TestOTimeoutDeclaradoEAplicado:
         `enviar` ficava pendurado para sempre e o `INCERTA` obrigatório nunca
         saía."""
 
-        async def transporte(caminho, cabecalhos, corpo):
+        async def transporte(metodo, caminho, cabecalhos, corpo):
             await asyncio.sleep(30)
             return 200, {"success": True}
 
@@ -429,7 +434,7 @@ class TestOTimeoutDeclaradoEAplicado:
         """O caso que junta os dois achados: engasgou, virou INCERTA, e a
         ordem pode estar no livro."""
 
-        async def transporte(caminho, cabecalhos, corpo):
+        async def transporte(metodo, caminho, cabecalhos, corpo):
             await asyncio.sleep(30)
 
         cliente = ClienteDeOrdens(
@@ -560,10 +565,142 @@ class TestOTransporteReal:
             transporte = fazer_transporte(http, base_do_clob=self.BASE)
 
             with pytest.raises(DestinoNaoPermitido):
-                await transporte("../../outro-host/order", {}, b"{}")
+                await transporte("POST", "../../outro-host/order", {}, b"{}")
+
+    async def test_o_metodo_chega_ao_http_real(self):
+        """§4.4: o transporte tem de repassar o verbo. Um DELETE que virasse
+        POST no fio cancelaria nada e o CLOB responderia com um erro sem
+        relação com a causa."""
+        import httpx
+
+        visto = {}
+
+        def manipulador(pedido):
+            visto["metodo"] = pedido.method
+            return httpx.Response(200, json={"canceled": ["o1"], "not_canceled": {}})
+
+        async with self._http(manipulador) as http:
+            transporte = fazer_transporte(http, base_do_clob=self.BASE)
+            status, _ = await transporte("DELETE", "/order", {}, b'{"orderID":"o1"}')
+
+        assert visto["metodo"] == "DELETE"
+        assert status == 200
 
     async def test_base_vazia_e_erro_na_construcao(self):
         """O transporte sairia para lugar nenhum, e o erro apareceria só na
         primeira ordem — que é o pior momento possível."""
         with pytest.raises(ValueError):
             fazer_transporte(object(), base_do_clob="")
+
+
+class TestCancelar:
+    """4.0(c) — cancelar UMA ordem repousada. §4.4 verificado no SDK.
+
+    O envio e o cancelamento partilham a semântica de falha (timeout = INCERTA),
+    mas o PERIGO inverte: no envio, INCERTA manda parar (a ordem pode estar no
+    livro e reenviar dobra posição); no cancelamento, INCERTA manda reconciliar,
+    e recancelar é seguro. Estes testes cobrem os dois lados.
+    """
+
+    async def test_sai_como_DELETE_no_caminho_da_ordem(self):
+        """§4.4: `DELETE /order`, não POST. O verbo tem de chegar ao transporte."""
+        cliente = _cliente((200, {"canceled": ["o1"], "not_canceled": {}}))
+
+        await cliente.cancelar("o1")
+
+        metodo, caminho, _, corpo = cliente.transporte.chamadas[0]
+        assert metodo == "DELETE"
+        assert caminho == "/order"
+        assert b'"orderID"' in corpo and b"o1" in corpo
+
+    async def test_id_em_canceled_e_CANCELADA(self):
+        cliente = _cliente((200, {"canceled": ["o1"], "not_canceled": {}}))
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.CANCELADA
+        assert r.order_id == "o1"
+        assert r.precisa_reconciliar is False
+
+    async def test_200_que_NAO_menciona_o_id_e_NAO_CANCELADA(self):
+        """A distinção que o envio não tem: cancelamento é em lote (§4.4), então
+        um 200 cujo `canceled` não traz o id NÃO cancelou este id. Afirmar
+        sucesso a partir do status seria a suposição que a §4.4 barra."""
+        cliente = _cliente((200, {"canceled": ["outro"], "not_canceled": {}}))
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.NAO_CANCELADA
+
+    async def test_id_em_not_canceled_carrega_o_motivo_do_servidor(self):
+        """Ordem que já sumiu cai aqui — e para a rota maker isso é tão bom
+        quanto cancelada, mas o motivo do servidor tem de aparecer no detalhe."""
+        cliente = _cliente(
+            (200, {"canceled": [], "not_canceled": {"o1": "order already filled"}})
+        )
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.NAO_CANCELADA
+        assert r.detalhe["motivo_do_servidor"] == "order already filled"
+
+    async def test_timeout_e_INCERTA_e_pede_reconciliacao(self):
+        """A ordem pode ainda repousar: não sabemos se o DELETE chegou."""
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.INCERTA
+        assert r.precisa_reconciliar is True
+        assert r.order_id == "o1"
+
+    async def test_5xx_e_INCERTA_como_no_envio(self):
+        cliente = _cliente((503, None))
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.INCERTA
+
+    async def test_401_e_NAO_CANCELADA_com_auth_recusada(self):
+        cliente = _cliente((401, None))
+
+        r = await cliente.cancelar("o1")
+
+        assert r.estado is EstadoDoCancelamento.NAO_CANCELADA
+        assert r.motivo == MOTIVOS_DE_RECUSA.AUTH_RECUSADA
+
+    async def test_recancelar_NAO_e_travado_ao_contrario_do_envio(self):
+        """A diferença central: cancelar de novo é inócuo (§4.4), então o
+        cliente NÃO trava a segunda chamada — é assim que a reconciliação de
+        um INCERTA recancela o que ficou em dúvida."""
+        cliente = _cliente(
+            ErroDeTransporte("timeout"),
+            (200, {"canceled": ["o1"], "not_canceled": {}}),
+        )
+
+        primeira = await cliente.cancelar("o1")
+        segunda = await cliente.cancelar("o1")
+
+        assert primeira.estado is EstadoDoCancelamento.INCERTA
+        assert segunda.estado is EstadoDoCancelamento.CANCELADA
+        assert len(cliente.transporte.chamadas) == 2
+
+    async def test_id_vazio_falha_antes_da_rede(self):
+        """`orderID` em branco assinado sairia para o fio e voltaria como auth
+        recusada, escondendo que o defeito era um id que nunca chegou."""
+        cliente = _cliente((200, {"canceled": [], "not_canceled": {}}))
+
+        with pytest.raises(ValueError, match="order_id vazio"):
+            await cliente.cancelar("   ")
+
+        assert len(cliente.transporte.chamadas) == 0
+
+    async def test_o_corpo_do_DELETE_vai_assinado(self):
+        """O corpo do cancelamento é assinado como o do envio: os cabeçalhos L2
+        têm de vir preenchidos, senão o CLOB recusa com 401 sem dizer por quê."""
+        cliente = _cliente((200, {"canceled": ["o1"], "not_canceled": {}}))
+
+        await cliente.cancelar("o1")
+
+        _, _, cabecalhos, _ = cliente.transporte.chamadas[0]
+        assert cabecalhos  # assinar_l2 devolve os cabeçalhos L2 preenchidos

@@ -266,6 +266,37 @@ aceita parcial e cancela o resto). Ordem *a mercado* só aceita **FAK ou FOK**.
 parcial pendurada, exatamente como o enunciado pede. FAK fica anotado como
 alternativa para quando a v2 quiser aceitar preenchimento parcial.
 
+### 4.4. Cancelamento de ordem
+
+`[VERIFICADO]` — sdist `polymarket-client==0.6.0`, lido em 2026-09-06:
+
+Cancelar UMA ordem aberta (`_internal/actions/orders/cancel.py`,
+`build_cancel_order_request`):
+
+- **método `DELETE`**, **caminho `/order`**, **corpo `{"orderID": <id>}`** (JSON).
+  O método sai de `clients/_transport.py` (`delete_json` → `_request("DELETE", ...)`,
+  linha 105/239); `clients/secure.py::cancel_order` é quem liga os dois.
+- **assinatura L2 igual à do envio**: `_header_resolver(method, path, body_str)`
+  assina método + caminho + corpo — os mesmos três que `assinar_l2` já recebe.
+  Cancelar reusa `assinar_l2(metodo="DELETE", caminho="/order", corpo=...)`.
+- **corpo assinado vai como bytes**, não reserializado — mesma armadilha do POST
+  (`content=`, não `json=`), pela mesma razão de §16.
+
+Resposta (`models/clob/cancel.py::CancelOrdersResponse`):
+
+```
+{ "canceled": [order_id, ...], "not_canceled": { order_id: motivo, ... } }
+```
+
+- **sucesso** = o id aparece em `canceled`.
+- **não cancelada** = aparece em `not_canceled` com um motivo (string). NÃO é
+  incerteza: o servidor respondeu e disse por que não. Um id que já não existe
+  cai aqui — cancelar é idempotente do lado do servidor.
+
+Lote: `/orders` com **lista** de ids (`build_cancel_orders_request`, teto 3.000);
+`/cancel-all` (corpo vazio); `/cancel-market-orders` com `{asset_id}`/`{market}`.
+Todos `DELETE`, todos com a mesma forma de resposta.
+
 ### 4.2. Tick size
 
 `[VERIFICADO]` — mesmo arquivo:
