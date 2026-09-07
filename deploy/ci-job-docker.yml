@@ -1,0 +1,115 @@
+# Item 5.2 — o job que CONSTRÓI a imagem, pronto para colar no `ci.yml`.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# POR QUE ESTE ARQUIVO NÃO É O `ci.yml`
+# ─────────────────────────────────────────────────────────────────────────────
+# Empurrar qualquer coisa em `.github/workflows/` exige um token com o scope
+# `workflow`, e o token desta máquina tem `gist, read:org, repo` (medido em
+# 2026-09-06 e de novo em 2026-09-07). Um push que toque naquele diretório é
+# recusado INTEIRO — não só o arquivo.
+#
+# Então o job mora aqui, versionado e revisável, até alguém com o scope o
+# aplicar. Deixá-lo só numa mensagem de PR seria perdê-lo no primeiro merge.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# COMO APLICAR (uma vez, por quem tiver o scope `workflow`)
+# ─────────────────────────────────────────────────────────────────────────────
+#   1. Copie o bloco `docker:` abaixo (da linha `  docker:` até o fim do
+#      arquivo) para dentro de `jobs:` em `.github/workflows/ci.yml`, logo
+#      depois do job `testes`.
+#   2. Confira a indentação: o bloco já está no nível que o `ci.yml` usa
+#      (dois espaços para o nome do job).
+#   3. Commit e push. O job roda no próximo PR.
+#
+# Ele NÃO publica imagem em registry: publicar exige credencial, é decisão
+# separada, e o 5.2 pede que a imagem seja *construída*, não distribuída.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# O QUE ELE PROVA, E POR QUE CADA PASSO EXISTE
+# ─────────────────────────────────────────────────────────────────────────────
+# O quadro registra que o 5.2 saiu de LEITURA, não de build. Estes três passos
+# atacam exatamente o que a leitura não alcança:
+#
+#   build   — o `pip install .` resolve de fato dentro do `python:3.12-slim`.
+#             A leitura conferiu no PyPI que as 21 deps têm wheel manylinux;
+#             o build é quem prova que a resolução inteira fecha.
+#
+#   arranca — `--help` roda o ENTRYPOINT de verdade. É o mesmo modo de falha
+#             que `test_5_2_imagem_do_recorder.py` simula (import ausente na
+#             imagem), agora sem simulação: se faltar dependência, morre aqui.
+#
+#   escreve — o defeito achado por leitura no M2: `VOLUME` num caminho que não
+#             existe cria o ponto como root, o processo roda como `pulsearb`
+#             (UID 10001) e a primeira gravação morre com `PermissionError`.
+#             Com `--restart=always` isso vira laço de reinício que o
+#             `docker ps` mostra como "rodando". O passo escreve num bind
+#             mount com o dono certo — que é o cenário do RUNBOOK §5 — e num
+#             volume anônimo, que é o que o `chown` da imagem cobre.
+#
+# O terceiro é o que mais vale: ele é a única prova de que o conserto do
+# `mkdir`+`chown` funciona. Hoje ele é acreditado, não medido.
+
+  docker:
+    # Roda em paralelo com `testes`: um build de imagem não depende da suíte,
+    # e encadear só faria a falha do Docker demorar mais para aparecer.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Mesma fixação por SHA do job `testes`, e pela mesma razão: uma tag
+      # pode ser movida por quem controla o repositório da action; um SHA não.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # `docker build` direto, sem action de terceiro. O runner do GitHub já
+      # traz Docker, e cada action a mais é uma dependência que herdaria as
+      # permissões do job — o `ci.yml` já declara `contents: read` justamente
+      # por essa preocupação. Uma action de build aqui não compraria nada que
+      # uma linha de `run` não faça.
+      - name: build da imagem
+        run: docker build -f deploy/Dockerfile -t pulsearb-recorder:ci .
+
+      # O ENTRYPOINT roda? É o modo de falha que passa no build e morre no
+      # arranque: `pip install .` instala só as deps de RUNTIME, e um import
+      # de dev em qualquer módulo do caminho do recorder quebraria aqui.
+      - name: a imagem arranca
+        run: docker run --rm pulsearb-recorder:ci --help
+
+      # O container é não-root? Se este passo imprimir 0, o `USER pulsearb`
+      # não pegou, e todo o raciocínio de permissão do Dockerfile cai junto.
+      - name: roda como nao-root, com o UID fixo
+        run: |
+          uid="$(docker run --rm --entrypoint id pulsearb-recorder:ci -u)"
+          echo "UID no container: $uid"
+          test "$uid" = "10001"
+
+      # O defeito do VOLUME, medido em vez de acreditado — volume ANÔNIMO,
+      # que é o que o `mkdir`+`chown` da imagem cobre.
+      - name: escreve no volume anonimo
+        run: |
+          docker run --rm -v /data \
+            --entrypoint sh pulsearb-recorder:ci \
+            -c 'touch /data/prova && echo ok'
+
+      # E o caso que o RUNBOOK §5 usa de verdade: bind mount. Aqui quem manda
+      # é o dono no HOST, e nenhuma linha do Dockerfile alcança isso — por
+      # isso o runbook manda `chown 10001:10001`. Este passo prova que a
+      # instrução do runbook é suficiente.
+      - name: escreve no bind mount com o chown do RUNBOOK
+        run: |
+          mkdir -p /tmp/pulsearb-data
+          sudo chown 10001:10001 /tmp/pulsearb-data
+          docker run --rm -v /tmp/pulsearb-data:/data \
+            --entrypoint sh pulsearb-recorder:ci \
+            -c 'touch /data/prova && echo ok'
+          test -f /tmp/pulsearb-data/prova
+
+      # O contexto de build continua pequeno? Sem `.dockerignore` seriam
+      # 247 MB aqui e GB na VPS que grava 470 MB/h. Falhar alto se alguém
+      # remover uma linha do ignore é mais barato que descobrir no deploy.
+      - name: o contexto de build continua enxuto
+        run: |
+          bytes="$(tar --exclude-vcs -cf - \
+            $(git ls-files | head -20000) 2>/dev/null | wc -c)"
+          echo "contexto aproximado: $bytes bytes"
+          test "$bytes" -lt 20000000

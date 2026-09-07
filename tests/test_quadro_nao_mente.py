@@ -40,6 +40,13 @@ QUADRO = RAIZ / "docs" / "ESTADO_PARA_LIVE.md"
 #: A falha deste teste é o lembrete de que o quadro ficou para trás.
 CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_portao_de_risco.py": (47, "3.1/3.6 — os 8 portões"),
+    # Estas duas sumiram do dicionario em mesclagem (#82 e #83) e ficaram
+    # sem cobertura EM SILENCIO: entrada ausente nao falha teste nenhum,
+    # ela so deixa de conferir. Mesma perda que ja levou as linhas 4.0 e
+    # 4.1 do quadro — aqui o efeito e o guardiao parar de guardar.
+    "test_m2_conta_pessimista.py": (9, "1.6/4.1 — limite pessimista"),
+    "test_5_2_imagem_do_recorder.py": (4, "5.2 — imagem do recorder"),
+    "test_5_2_job_docker.py": (8, "5.2 — job de build esperando"),
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
     "test_4_0c_reward_ao_vivo.py": (10, "4.0(c) — reward ao vivo"),
     "test_4_0c_laco_maker.py": (7, "4.0(c) — o laço maker"),
