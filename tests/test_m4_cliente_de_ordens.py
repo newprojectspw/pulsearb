@@ -704,3 +704,99 @@ class TestCancelar:
 
         _, _, cabecalhos, _ = cliente.transporte.chamadas[0]
         assert cabecalhos  # assinar_l2 devolve os cabeçalhos L2 preenchidos
+
+
+class TestListarOrdensAbertas:
+    """§4.5 — a leitura que a reconciliação de arranque usa.
+
+    A regra central e diferente do envio: leitura e FAIL-CLOSED. Um timeout
+    nao pode virar "nenhuma ordem aberta", porque isso declara o livro limpo
+    sem ter olhado.
+    """
+
+    async def test_sai_como_GET_no_caminho_pelado(self):
+        from pulsearb.execution.cliente import CAMINHO_LISTAR_ORDENS
+
+        cliente = _cliente((200, {"data": [], "next_cursor": "LTE="}))
+
+        await cliente.listar_ordens_abertas()
+
+        metodo, caminho, _, corpo = cliente.transporte.chamadas[0]
+        assert metodo == "GET"
+        assert caminho == CAMINHO_LISTAR_ORDENS  # pelado, sem query
+        assert corpo == b""  # GET nao tem corpo
+
+    async def test_filtro_de_token_vai_na_QUERY_nao_no_caminho_assinado(self):
+        """A query fica na URL; a assinatura cobre o path pelado (§4.5)."""
+        cliente = _cliente((200, {"data": [], "next_cursor": "LTE="}))
+
+        await cliente.listar_ordens_abertas(token_id="tok-up")
+
+        _, caminho, _, _ = cliente.transporte.chamadas[0]
+        assert caminho == "/data/orders?asset_id=tok-up"
+
+    async def test_parseia_as_ordens_do_data(self):
+        cliente = _cliente(
+            (
+                200,
+                {
+                    "data": [
+                        {
+                            "id": "o1",
+                            "asset_id": "tok-up",
+                            "side": "BUY",
+                            "price": "0.52",
+                            "original_size": "5",
+                            "size_matched": "0",
+                            "status": "LIVE",
+                        }
+                    ],
+                    "next_cursor": "LTE=",
+                },
+            )
+        )
+
+        abertas = await cliente.listar_ordens_abertas()
+
+        assert len(abertas) == 1
+        assert abertas[0].id == "o1"
+        assert abertas[0].token_id == "tok-up"
+        assert abertas[0].price == 0.52
+        assert abertas[0].size_matched == 0.0
+
+    async def test_segue_a_paginacao_ate_a_sentinela(self):
+        cliente = _cliente(
+            (200, {"data": [{"id": "o1"}], "next_cursor": "PAG2"}),
+            (200, {"data": [{"id": "o2"}], "next_cursor": "LTE="}),
+        )
+
+        abertas = await cliente.listar_ordens_abertas()
+
+        assert [o.id for o in abertas] == ["o1", "o2"]
+        assert len(cliente.transporte.chamadas) == 2
+        # a 2a chamada leva o cursor da 1a
+        assert "next_cursor=PAG2" in cliente.transporte.chamadas[1][1]
+
+    async def test_timeout_LEVANTA_e_nao_devolve_lista_vazia(self):
+        from pulsearb.execution.cliente import ErroDeLeitura
+
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        with pytest.raises(ErroDeLeitura):
+            await cliente.listar_ordens_abertas()
+
+    async def test_5xx_LEVANTA(self):
+        from pulsearb.execution.cliente import ErroDeLeitura
+
+        cliente = _cliente((503, None))
+
+        with pytest.raises(ErroDeLeitura):
+            await cliente.listar_ordens_abertas()
+
+    async def test_resposta_sem_data_de_lista_LEVANTA(self):
+        from pulsearb.execution.cliente import ErroDeLeitura
+
+        cliente = _cliente((200, {"nao_tem_data": True}))
+
+        with pytest.raises(ErroDeLeitura):
+            await cliente.listar_ordens_abertas()

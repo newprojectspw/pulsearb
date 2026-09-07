@@ -38,6 +38,7 @@ from pulsearb.execution.cliente import (
     ClienteDeOrdens,
     EstadoDoCancelamento,
     EstadoDoEnvio,
+    OrdemAberta,
 )
 from pulsearb.live.cotacao import Cotacao
 from pulsearb.live.repouso import AcaoNaCotacao, CotacaoAberta, Decisao
@@ -240,3 +241,84 @@ async def _colocar(
         aberta=None,
         detalhe={"motivo_da_recusa": resultado.motivo},
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Reconciliacao:
+    """O que o servidor diz repousar, comparado ao que ACHÁVAMOS que repousava.
+
+    A reconciliação de arranque existe porque um `INCERTA` — de envio ou de
+    cancelamento — deixa o nosso lado sem saber o estado do livro, e um reinício
+    perde a memória em RAM. Ler o servidor é a única fonte que resolve isso.
+    """
+
+    #: Ids que existem nos DOIS lados: a ordem está onde achávamos.
+    casadas: tuple[str, ...] = ()
+    #: Ordens que o servidor lista e que NÃO esperávamos. Órfã típica: um envio
+    #: que ficou `INCERTA` e afinal entrou. É posição real que ninguém está
+    #: gerenciando — o alvo número um da reconciliação.
+    orfas: tuple[OrdemAberta, ...] = ()
+    #: Ids que esperávamos e que o servidor NÃO lista: preencheram ou já foram
+    #: canceladas. O nosso lado tem de largar o registro delas.
+    fantasmas: tuple[str, ...] = ()
+
+    @property
+    def limpa(self) -> bool:
+        """Sem órfã nem fantasma: o nosso estado batia com o servidor."""
+        return not self.orfas and not self.fantasmas
+
+
+async def reconciliar(
+    cliente: ClienteDeOrdens,
+    esperadas: dict[str, CotacaoAberta],
+    *,
+    token_id: str | None = None,
+    market: str | None = None,
+) -> Reconciliacao:
+    """Casa as ordens abertas no servidor com as que o nosso lado espera.
+
+    `esperadas` é indexado pelo `order_id` do servidor — o mesmo por que se
+    cancela. A leitura é fail-closed: se `listar_ordens_abertas` levantar
+    `ErroDeLeitura`, ele SOBE. Engolir e devolver "nada aberto" faria a
+    reconciliação declarar o livro limpo sem ter olhado — e o arranque
+    seguiria como se não houvesse órfã, que é o pior desfecho possível aqui.
+    """
+    no_servidor = await cliente.listar_ordens_abertas(token_id=token_id, market=market)
+    ids_no_servidor = {o.id for o in no_servidor}
+    ids_esperados = set(esperadas)
+
+    casadas = tuple(sorted(ids_no_servidor & ids_esperados))
+    orfas = tuple(o for o in no_servidor if o.id not in ids_esperados)
+    fantasmas = tuple(sorted(ids_esperados - ids_no_servidor))
+    return Reconciliacao(casadas=casadas, orfas=orfas, fantasmas=fantasmas)
+
+
+async def cancelar_orfas(
+    cliente: ClienteDeOrdens, reconciliacao: Reconciliacao
+) -> dict[str, str]:
+    """Cancela as órfãs achadas. É a AÇÃO sobre a reconciliação, separada da
+    leitura — quem chama decide se e quando executá-la.
+
+    Cancelar órfã no arranque é a resposta certa por default: é ordem que
+    entrou sem que o nosso lado a estivesse gerenciando, e deixá-la repousando
+    é exposição que nenhum portão desta sessão autorizou. Devolve o estado do
+    cancelamento por id, para o diário — inclusive `INCERTA`, que pede outra
+    passada (recancelar é seguro, §4.4).
+    """
+    desfechos: dict[str, str] = {}
+    for orfa in reconciliacao.orfas:
+        if not orfa.id:
+            continue
+        resultado = await cliente.cancelar(orfa.id)
+        desfechos[orfa.id] = str(resultado.estado)
+        if orfa.size_matched > 0:
+            # Meio preenchida: cancelar tira o resto do livro, mas a metade que
+            # casou é posição REAL. O log nomeia isso para a reconciliação de
+            # PnL não perder que existiu exposição.
+            log.warning(
+                "orfa meio preenchida cancelada: ha posicao real a reconciliar",
+                order_id=orfa.id,
+                size_matched=orfa.size_matched,
+                original_size=orfa.original_size,
+            )
+    return desfechos

@@ -46,6 +46,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
+from urllib.parse import urlencode
 
 from pulsearb.execution.auth import CredenciaisL2, assinar_l2
 from pulsearb.markets.http import DestinoNaoPermitido
@@ -75,6 +76,16 @@ TIPOS_DE_ORDEM_ACEITOS = frozenset({"FOK", "FAK", "GTC", "GTD"})
 
 #: `[VERIFICADO]` API_NOTES §2.1 — o caminho REST de envio de ordem.
 CAMINHO_DA_ORDEM = "/order"
+
+#: `[VERIFICADO]` API_NOTES §4.5 — listar ordens abertas da conta. É o caminho
+#: PELADO, que é o que a assinatura L2 cobre; a query vai na URL, fora da
+#: assinatura (simétrico do `content=` do POST).
+CAMINHO_LISTAR_ORDENS = "/data/orders"
+
+#: Teto de páginas ao listar ordens abertas. A conta não tem milhares de ordens
+#: repousando ao mesmo tempo aqui; o teto existe só para um `next_cursor` que
+#: nunca terminasse não virar laço infinito na reconciliação de arranque.
+MAX_PAGINAS_DE_ORDENS = 50
 
 #: Teto de espera de um envio. Acima disto a resposta não chega a tempo de
 #: ser útil: a janela opera nos últimos 240 s e o edge some com o atraso.
@@ -166,6 +177,58 @@ class ResultadoDoCancelamento:
     def precisa_reconciliar(self) -> bool:
         """`True` obriga a ler o lado deles: não sabemos se a ordem repousa."""
         return self.estado is EstadoDoCancelamento.INCERTA
+
+
+@dataclass(frozen=True, slots=True)
+class OrdemAberta:
+    """Uma ordem que o CLOB diz estar repousando na conta (§4.5).
+
+    Os campos são os que a reconciliação de arranque precisa: casar pelo `id`,
+    e ver por `size_matched` se ela já preencheu em parte — uma ordem meio
+    preenchida não é uma ordem intacta, e cancelá-la deixa a metade preenchida
+    como posição real a reconciliar no PnL.
+    """
+
+    id: str
+    token_id: str
+    side: str
+    price: float
+    original_size: float
+    size_matched: float
+    status: str
+
+    @classmethod
+    def do_payload(cls, item: dict[str, Any]) -> OrdemAberta:
+        """De um item do `data[]` (§4.5). Campos ausentes viram vazio/zero em
+        vez de estourar: a reconciliação prefere uma ordem com dado faltando a
+        uma exceção que a impede de ler as outras — e o `id` é o que importa."""
+        return cls(
+            id=str(item.get("id") or item.get("orderID") or ""),
+            token_id=str(item.get("asset_id") or item.get("token_id") or ""),
+            side=str(item.get("side") or ""),
+            price=_float_ou_zero(item.get("price")),
+            original_size=_float_ou_zero(item.get("original_size")),
+            size_matched=_float_ou_zero(item.get("size_matched")),
+            status=str(item.get("status") or ""),
+        )
+
+
+def _float_ou_zero(valor: Any) -> float:
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class ErroDeLeitura(Exception):
+    """Não deu para LER o estado do lado deles — e ler é fail-closed.
+
+    Separada de `ErroDeTransporte` porque a consequência é outra: um envio que
+    não sabe se chegou vira `INCERTA`; uma leitura que não chegou não pode
+    virar "nenhuma ordem aberta". Assumir lista vazia num timeout faria a
+    reconciliação declarar o livro limpo e o bot seguir como se nada
+    repousasse — exatamente a suposição que a regra de falha-fechada proíbe.
+    """
 
 
 class ErroDeTransporte(Exception):
@@ -557,6 +620,73 @@ class ClienteDeOrdens:
             motivo=MOTIVOS_DE_RECUSA.SERVIDOR_RECUSOU,
             detalhe={"status": status, "motivo_do_servidor": motivo_servidor},
         )
+
+    async def listar_ordens_abertas(
+        self, *, token_id: str | None = None, market: str | None = None
+    ) -> list[OrdemAberta]:
+        """Lê as ordens repousadas da conta (§4.5). É a base da reconciliação.
+
+        `GET /data/orders`, paginado por `next_cursor`. A assinatura L2 cobre o
+        PATH PELADO (`/data/orders`), não a query — a query vai na URL, e
+        assiná-la junto produziria uma assinatura que o servidor não reproduz
+        (§4.5, simétrico do `content=` do POST).
+
+        **Falha-fechada.** Qualquer erro de leitura — timeout, 5xx, corpo
+        ilegível — levanta `ErroDeLeitura`, NUNCA devolve lista vazia. Uma
+        lista vazia significa "a conta não tem ordem aberta", e é uma afirmação
+        forte: quem reconcilia a partir dela declara o livro limpo. Não saber
+        ler não autoriza essa afirmação — é a mesma regra do `feeds_saudaveis`
+        que recusa quando não sabe.
+        """
+        abertas: list[OrdemAberta] = []
+        cursor: str | None = None
+        for _ in range(MAX_PAGINAS_DE_ORDENS):
+            caminho = _caminho_de_listagem(token_id=token_id, market=market, cursor=cursor)
+            # Assina o PELADO; a query só existe na URL que o transporte monta.
+            cabecalhos, corpo = assinar_l2(
+                self.credenciais, metodo="GET", caminho=CAMINHO_LISTAR_ORDENS, corpo=None
+            )
+            try:
+                status, resposta = await asyncio.wait_for(
+                    self.transporte("GET", caminho, cabecalhos, corpo),
+                    timeout=self.timeout_s,
+                )
+            except (ErroDeTransporte, TimeoutError) as erro:
+                raise ErroDeLeitura(
+                    f"nao consegui ler ordens abertas: {type(erro).__name__}: {erro}"
+                ) from erro
+            if status >= 400 or resposta is None:
+                raise ErroDeLeitura(
+                    f"leitura de ordens abertas falhou: status={status} resposta={resposta!r}"
+                )
+            dados = resposta.get("data")
+            if not isinstance(dados, list):
+                raise ErroDeLeitura(
+                    f"resposta de ordens abertas sem `data` de lista: {resposta!r}"
+                )
+            abertas.extend(OrdemAberta.do_payload(item) for item in dados)
+            cursor = resposta.get("next_cursor") or None
+            # `LTE=` é a sentinela de fim da paginação keyset (§2.2/§4.5).
+            if cursor is None or cursor == "LTE=":
+                break
+        return abertas
+
+
+def _caminho_de_listagem(
+    *, token_id: str | None, market: str | None, cursor: str | None
+) -> str:
+    """Monta `/data/orders?...` com só os filtros presentes (§4.5). A ordem dos
+    params é fixa para o caminho ser determinístico — ajuda o log e o teste."""
+    params: list[tuple[str, str]] = []
+    if token_id:
+        params.append(("asset_id", token_id))
+    if market:
+        params.append(("market", market))
+    if cursor:
+        params.append(("next_cursor", cursor))
+    if not params:
+        return CAMINHO_LISTAR_ORDENS
+    return f"{CAMINHO_LISTAR_ORDENS}?{urlencode(params)}"
 
 
 def fazer_transporte(http: Any, *, base_do_clob: str) -> Transporte:

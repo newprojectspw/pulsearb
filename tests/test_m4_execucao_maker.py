@@ -8,6 +8,8 @@ a posição dupla, agora entre dois makers.
 
 from __future__ import annotations
 
+import pytest
+
 from pulsearb.execution.cliente import (
     MOTIVOS_DE_RECUSA,
     ClienteDeOrdens,
@@ -254,3 +256,89 @@ class TestEfeito:
     def test_precisa_reconciliar_so_no_estado_reconciliar(self):
         assert Efeito(ResultadoDaAcao.RECONCILIAR, "x").precisa_reconciliar is True
         assert Efeito(ResultadoDaAcao.MANTIDA, "x").precisa_reconciliar is False
+
+
+class TestReconciliar:
+    """Casar o servidor com o que achávamos que repousava. Fail-closed."""
+
+    def _servidor(self, *ids_ou_ordens):
+        from pulsearb.execution.cliente import OrdemAberta
+
+        respostas_data = []
+        for x in ids_ou_ordens:
+            if isinstance(x, OrdemAberta):
+                respostas_data.append(
+                    {"id": x.id, "asset_id": x.token_id, "size_matched": x.size_matched}
+                )
+            else:
+                respostas_data.append({"id": x})
+        return _cliente((200, {"data": respostas_data, "next_cursor": "LTE="}))
+
+    async def test_tudo_casado_e_limpa(self):
+        from pulsearb.live.execucao_maker import reconciliar
+
+        cliente = self._servidor("o1", "o2")
+        esperadas = {
+            "o1": _aberta(order_id="o1"),
+            "o2": _aberta(order_id="o2"),
+        }
+
+        rec = await reconciliar(cliente, esperadas)
+
+        assert rec.limpa is True
+        assert set(rec.casadas) == {"o1", "o2"}
+
+    async def test_ordem_no_servidor_que_nao_esperavamos_e_ORFA(self):
+        """O caso que a reconciliação existe para pegar: um envio que ficou
+        INCERTA e afinal entrou. Posição real que ninguém gerencia."""
+        from pulsearb.live.execucao_maker import reconciliar
+
+        cliente = self._servidor("o1", "orfa-x")
+        esperadas = {"o1": _aberta(order_id="o1")}
+
+        rec = await reconciliar(cliente, esperadas)
+
+        assert rec.limpa is False
+        assert [o.id for o in rec.orfas] == ["orfa-x"]
+
+    async def test_ordem_que_esperavamos_e_sumiu_e_FANTASMA(self):
+        from pulsearb.live.execucao_maker import reconciliar
+
+        cliente = self._servidor("o1")
+        esperadas = {"o1": _aberta(order_id="o1"), "o2": _aberta(order_id="o2")}
+
+        rec = await reconciliar(cliente, esperadas)
+
+        assert rec.fantasmas == ("o2",)
+        assert rec.limpa is False
+
+    async def test_falha_de_leitura_SOBE_nao_vira_livro_limpo(self):
+        """Fail-closed: um timeout na leitura nao pode virar 'nada aberto'."""
+        from pulsearb.execution.cliente import ErroDeLeitura
+        from pulsearb.live.execucao_maker import reconciliar
+
+        cliente = _cliente(ErroDeTransporte("timeout"))
+
+        with pytest.raises(ErroDeLeitura):
+            await reconciliar(cliente, {"o1": _aberta(order_id="o1")})
+
+    async def test_cancelar_orfas_cancela_cada_uma(self):
+        from pulsearb.execution.cliente import OrdemAberta
+        from pulsearb.live.execucao_maker import Reconciliacao, cancelar_orfas
+
+        cliente = _cliente(
+            (200, {"canceled": ["orfa-x"], "not_canceled": {}}),
+            (200, {"canceled": ["orfa-y"], "not_canceled": {}}),
+        )
+        rec = Reconciliacao(
+            orfas=(
+                OrdemAberta("orfa-x", "tok", "BUY", 0.5, 5.0, 0.0, "LIVE"),
+                OrdemAberta("orfa-y", "tok", "BUY", 0.5, 5.0, 0.0, "LIVE"),
+            )
+        )
+
+        desfechos = await cancelar_orfas(cliente, rec)
+
+        assert set(desfechos) == {"orfa-x", "orfa-y"}
+        metodos = [c[0] for c in cliente.transporte.chamadas]
+        assert metodos == ["DELETE", "DELETE"]
