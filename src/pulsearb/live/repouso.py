@@ -69,8 +69,13 @@ class CotacaoAberta:
     #: Epoch em que ela foi colocada. É o relógio de quem chama, não o nosso:
     #: o módulo não lê tempo, para poder ser testado sem esperar.
     desde_epoch: float
-    #: Id do cliente, para cancelar. Opaco aqui de propósito.
+    #: Nosso id determinístico, para o diário e a reconciliação. Opaco aqui.
     id_do_cliente: str = ""
+    #: Id da ordem no lado DELES — é por ele que se cancela (`cancelar`, §4.4).
+    #: Vazio enquanto o envio não voltou `ACEITA` com um `orderID`: uma cotação
+    #: sem este id não pode ser cancelada por id, e a `execucao_maker` trata
+    #: isso explicitamente em vez de mandar um cancelamento vazio para o fio.
+    order_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
