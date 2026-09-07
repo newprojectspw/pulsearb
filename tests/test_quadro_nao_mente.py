@@ -40,6 +40,7 @@ QUADRO = RAIZ / "docs" / "ESTADO_PARA_LIVE.md"
 #: A falha deste teste é o lembrete de que o quadro ficou para trás.
 CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_portao_de_risco.py": (47, "3.1/3.6 — os 8 portões"),
+    "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
     "test_m4_cliente_de_ordens.py": (68, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (15, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (34, "3.2 — auth do CLOB"),
