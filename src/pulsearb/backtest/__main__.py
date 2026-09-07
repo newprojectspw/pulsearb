@@ -39,6 +39,7 @@ from pulsearb.analysis.integrity import (
 )
 from pulsearb.analysis.measurements import (
     conta_do_maker,
+    conta_pessimista_do_maker,
     medir_atraso_liquidacao,
     medir_markout,
     medir_mudanca_de_tick,
@@ -2236,6 +2237,15 @@ def main(argv: list[str] | None = None) -> int:
             fee_rebate_rate=_rebate_medio(integras),
             fee_rate=_medio_do_dado(integras, "fee_rate"),
             fee_exponent=_medio_do_dado(integras, "fee_exponent") or 1.0,
+        ),
+        # O limite inferior sai LADO A LADO com a conta aberta, e nao no
+        # lugar dela: sao perguntas diferentes. `conta_fechada` diz o que falta
+        # para a conta exata; esta diz se fecha MESMO no pior caso de fila —
+        # e e essa a pergunta do 4.1. Sai `avaliavel: false` enquanto a
+        # gravacao nao fornecer as shares varridas.
+        "limite_pessimista": conta_pessimista_do_maker(
+            rewards=rewards,
+            markout=relatorio["medicoes"]["markout"],
         ),
         "aviso": (
             "NADA aqui envia ordem. É simulação sobre gravação. "
