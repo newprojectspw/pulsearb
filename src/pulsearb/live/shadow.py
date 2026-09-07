@@ -192,6 +192,17 @@ def caminho_do_diario_da_rodada(agora: datetime | None = None) -> str:
     )
 
 
+def _portao_do_ciclo(ciclo: Any) -> Any:
+    """O portão de risco que o executor do ciclo já usa.
+
+    Tolerante como o `_caminho_do_executor`, e pela mesma razão: os testes do
+    processo passam ciclos-dublê. Devolver `None` aqui NÃO afrouxa nada — o
+    laço recusa cotar sem portão (`sem_portao`), que é falha fechada.
+    """
+    executor = getattr(getattr(ciclo, "motor", None), "executor", None)
+    return getattr(executor, "portao", None)
+
+
 def _caminho_do_executor(ciclo: Any) -> Path | None:
     """O arquivo do diário, se o ciclo tiver um executor que o exponha.
 
@@ -248,6 +259,10 @@ class ProcessoShadow:
                     caminho_do_diario=diario, modo=settings.mode
                 ),
                 tamanho_da_cotacao=settings.risk.stake_max_por_trade_usdc,
+                # O MESMO portão do taker. Sem ele a rota maker cotaria
+                # por fora do kill switch e do disjuntor — ver o
+                # cabeçalho do `laco_maker`.
+                portao=_portao_do_ciclo(ciclo),
             )
             if diario is not None
             else None
@@ -420,11 +435,13 @@ class ProcessoShadow:
                 return
             try:
                 agora = time.time()
+                agora_ns = time.time_ns()
                 await self.laco_maker.passo(
                     list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
                     livro_de=self.ciclo.motor.livros.livro,
                     agora_epoch=agora,
-                    agora_ns=time.time_ns(),
+                    agora_ns=agora_ns,
+                    feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
                 )
             except OSError as erro:
                 # Mesma leitura que o laço de decisão faz: I/O do diário não é

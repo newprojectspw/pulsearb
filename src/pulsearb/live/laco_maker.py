@@ -29,6 +29,26 @@ cancelada**. Sem isso, cada janela encerrada deixa uma ordem repousando num
 mercado que ninguém mais acompanha — e em 24 h isso são dezenas de órfãs que a
 reconciliação teria de limpar depois, se alguém lembrasse de rodá-la.
 
+## O portão barra ENTRAR, nunca SAIR
+
+Toda cotação nova passa pelos portões de risco — os MESMOS do taker, por
+`avaliar_risco`. Sem isso a rota maker cotaria por fora do kill switch, do
+disjuntor e do teto de exposição, e um portão que uma rota inteira contorna
+não é portão. Foi assim que o defeito apareceu: com o disjuntor armado, o
+taker recusava tudo e o maker cotava normalmente.
+
+**Cancelar NÃO passa pelo portão, e isso não é esquecimento.** Um kill switch
+que impedisse cancelar prenderia a cotação no livro exatamente quando alguém
+puxou a chave para tirá-la de lá. A trava existe para reduzir exposição; usá-la
+para bloquear a saída inverteria o que ela serve. Vale para os quatro portões:
+qualquer um deles pode dizer não a uma cotação NOVA, nenhum pode segurar uma
+retirada.
+
+Reposicionar é entrar de novo, então passa. Se o portão recusar no meio de um
+reposicionamento, o resultado é a cotação antiga cancelada e nenhuma nova — o
+livro fica sem a nossa ordem, que é o lado certo de errar quando uma trava de
+risco disse não.
+
 ## Sem pool, não cota
 
 Janela sem `reward_daily_rate` não tem numerador: cotar nela seria pagar risco
@@ -84,6 +104,10 @@ class LacoMaker:
 
     cliente: ClienteDeCotacao
     tamanho_da_cotacao: float
+    #: Os portões de risco. `None` só nos testes que exercitam a mecânica do
+    #: laço sem risco nenhum; em produção ele SEMPRE vem, e o `_passo_da_janela`
+    #: recusa cotar sem portão em vez de cotar sem trava.
+    portao: Any = None
     grade_de_ticks: tuple[int, ...] = GRADE_DE_TICKS
     #: O que repousa, por slug de janela. Uma cotação por janela: duas no mesmo
     #: mercado competiriam entre si pelo mesmo pool.
@@ -99,6 +123,7 @@ class LacoMaker:
         livro_de,
         agora_epoch: float,
         agora_ns: int,
+        feeds_saudaveis: bool = True,
     ) -> list[Efeito]:
         """Uma passada por todas as janelas abertas. Devolve o que mudou.
 
@@ -118,14 +143,24 @@ class LacoMaker:
         # 2) As abertas.
         for janela in janelas:
             efeito = await self._passo_da_janela(
-                janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
+                janela,
+                livro_de=livro_de,
+                agora_epoch=agora_epoch,
+                agora_ns=agora_ns,
+                feeds_saudaveis=feeds_saudaveis,
             )
             if efeito is not None:
                 efeitos.append(efeito)
         return efeitos
 
     async def _passo_da_janela(
-        self, janela: JanelaAoVivo, *, livro_de, agora_epoch: float, agora_ns: int
+        self,
+        janela: JanelaAoVivo,
+        *,
+        livro_de,
+        agora_epoch: float,
+        agora_ns: int,
+        feeds_saudaveis: bool,
     ) -> Efeito | None:
         params = self._parametros(janela)
         if params is None:
@@ -163,12 +198,58 @@ class LacoMaker:
 
         decisao = decidir(aberta, melhor, atual, agora_epoch=agora_epoch)
         self._contar(decisao.motivo)
+
+        # O portão, a CADA passada em que haja algo em jogo — e não só quando
+        # se vai cotar. Checar apenas no REPOSICIONAR deixava um buraco: com a
+        # decisão em MANTER, uma cotação já repousando NUNCA era reavaliada, e
+        # um disjuntor que armasse no meio da rodada não a tirava do livro. A
+        # trava tem de valer para a exposição que existe agora, não só para a
+        # que se vai criar.
+        candidata = decisao.nova if decisao.nova is not None else (
+            aberta.cotacao if aberta is not None else None
+        )
+        if candidata is not None:
+            recusa = self._portao_recusa(
+                candidata, janela, livro=livro, feeds_saudaveis=feeds_saudaveis
+            )
+            if recusa is not None:
+                self._contar(f"portao:{recusa}")
+                # Havia cotação e o risco mudou? Sai. Manter uma cotação que o
+                # portão não autorizaria HOJE é exposição que ninguém aprovou.
+                if aberta is not None:
+                    return await self._sair(janela.slug, motivo=f"portao:{recusa}")
+                return None
+
         if decisao.acao is AcaoNaCotacao.MANTER:
             # Nada a fazer no livro. Não chama o I/O: uma passada que não muda
             # nada não pode custar uma ida à rede.
             return None
 
         return await self._executar(decisao, janela, agora_epoch=agora_epoch)
+
+    def _portao_recusa(
+        self, nova: Cotacao, janela: JanelaAoVivo, *, livro, feeds_saudaveis: bool
+    ) -> str | None:
+        """O motivo da recusa, ou `None` se os portões liberam.
+
+        Usa `avaliar_risco`, e não `avaliar`: o portão de MODO existe para
+        impedir envio, e aqui não há envio para impedir. Rodá-lo faria toda
+        cotação sair como `modo_nao_opera` e o diário perderia justamente a
+        informação que justifica o SHADOW — qual trava seguraria em LIVE. É a
+        mesma escolha que o `ExecutorSombra` faz, e pela mesma razão.
+        """
+        if self.portao is None:
+            # Falha fechada: sem portão não se cota. Um laço que cotasse
+            # "porque ninguém passou trava" seria o oposto do que a trava serve.
+            return "sem_portao"
+        ordem = self._ordem_da_cotacao(janela)(nova)
+        decisao = self.portao.avaliar_risco(
+            ordem,
+            feeds_saudaveis=feeds_saudaveis,
+            melhor_bid=livro.best_bid,
+            melhor_ask=livro.best_ask,
+        )
+        return None if decisao.pode else (decisao.motivo or "recusado_sem_motivo")
 
     async def _executar(
         self, decisao: Decisao, janela: JanelaAoVivo, *, agora_epoch: float
