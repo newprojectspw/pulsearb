@@ -41,6 +41,7 @@ QUADRO = RAIZ / "docs" / "ESTADO_PARA_LIVE.md"
 CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_portao_de_risco.py": (47, "3.1/3.6 — os 8 portões"),
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
+    "test_4_0c_reward_ao_vivo.py": (10, "4.0(c) — reward ao vivo"),
     "test_m4_cliente_de_ordens.py": (68, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (15, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (34, "3.2 — auth do CLOB"),
@@ -195,3 +196,54 @@ def test_o_quadro_existe_e_tem_a_legenda_dos_simbolos():
     for simbolo in ("✅", "🟡", "❌", "⬜"):
         assert simbolo in texto, f"o quadro perdeu o símbolo {simbolo}"
     assert "Como ler" in texto, "o quadro perdeu a legenda de como lê-lo"
+
+
+#: Itens que TÊM de ter linha no quadro. Não é a lista completa — é a dos que
+#: já sumiram em mesclagem, mais os que decidem o LIVE.
+#:
+#: **Por que este teste existe.** A linha do 4.0 sumiu DUAS vezes em dois
+#: merges seguidos (#81 e #85), e a do 3.13 tinha sumido duas vezes antes
+#: disso. Nenhum dos outros testes daqui pegou: eles conferem contagens,
+#: números e caminhos citados — todos sobre o texto que RESTOU. Uma linha
+#: inteira que some não deixa nada para conferir, e some em silêncio.
+#:
+#: Pior que silencioso: quando o 4.0 sumiu, o quadro passou a AFIRMAR que o
+#: motor maker não existia, enquanto três módulos dele estavam mesclados e
+#: testados. Um quadro que mente sobre o que está pronto é pior que não ter
+#: quadro, porque alguém decide LIVE a partir dele.
+ITENS_COM_LINHA_OBRIGATORIA = (
+    ("3.13", "SHADOW rodando 24 h"),
+    ("3.14", "o relógio congela quando a máquina dorme"),
+    ("3.16", "sensor de vigília"),
+    ("4.0", "Motor MAKER"),
+    ("4.1", "backtest líquido positivo"),
+    ("4.2", "SHADOW ≥ 2 semanas"),
+    ("5.2", "imagem Docker"),
+)
+
+
+@pytest.mark.parametrize(("item", "pista"), ITENS_COM_LINHA_OBRIGATORIA)
+def test_a_linha_do_item_nao_sumiu_do_quadro(item, pista):
+    """Uma linha perdida em merge é indistinguível de um item que nunca foi
+    feito — e o quadro chega a afirmar o contrário do que o código faz.
+
+    Confere a PRESENÇA da linha, não o conteúdo dela: o conteúdo muda a cada
+    conserto, e travá-lo aqui faria este teste brigar com todo commit legítimo.
+    O que não pode mudar é o item ter uma linha.
+    """
+    texto = QUADRO.read_text(encoding="utf-8")
+
+    tem_linha = any(
+        linha.startswith(f"| {item} |") or linha.startswith(f"| **{item}** |")
+        for linha in texto.splitlines()
+    )
+
+    assert tem_linha, (
+        f"\nO item {item} nao tem mais linha no quadro (pista do conteudo: {pista!r}).\n\n"
+        "Isto quase sempre e uma linha PERDIDA EM MESCLAGEM, nao um item removido\n"
+        "de proposito — ja aconteceu com o 4.0 (duas vezes) e com o 3.13 (duas).\n"
+        "Recupere a linha do ultimo commit que a tinha:\n\n"
+        f"    git log -S'| {item} |' --oneline -- docs/ESTADO_PARA_LIVE.md\n\n"
+        "Se o item foi mesmo removido de proposito, tire-o de\n"
+        "ITENS_COM_LINHA_OBRIGATORIA no MESMO commit."
+    )

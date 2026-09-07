@@ -33,6 +33,7 @@ from pulsearb.markets.discovery import (
     duracao_do_slug,
     parse_end_date_epoch,
 )
+from pulsearb.markets.rewards_da_gamma import parametros_de_reward
 from pulsearb.obs.logging import get_logger
 
 log = get_logger(__name__)
@@ -45,6 +46,29 @@ DESCARTE_NAO_OPERAVEL = "nao_operavel"
 DESCARTE_SEM_FECHAMENTO = "sem_fechamento_legivel"
 DESCARTE_SEM_TOKENS = "sem_par_de_tokens"
 DESCARTE_JA_FECHADA = "ja_fechada"
+
+
+def _campos_de_reward(gamma: dict) -> dict:
+    """Os três campos de reward da janela, ou `None` nos três.
+
+    Uma função só, e não três chamadas soltas, porque os três andam juntos:
+    ter taxa sem spread máximo não permite calcular reward nenhum, e deixar um
+    preenchido e outro vazio convidaria quem lê a achar que dá para usar
+    metade. `parametros_de_reward` já devolve tudo ou nada por essa razão.
+    """
+    lidos = parametros_de_reward(gamma)
+    if lidos is None:
+        return {
+            "reward_daily_rate": None,
+            "reward_min_size": None,
+            "reward_max_spread": None,
+        }
+    taxa, min_size, max_spread = lidos
+    return {
+        "reward_daily_rate": taxa,
+        "reward_min_size": min_size,
+        "reward_max_spread": max_spread,
+    }
 
 
 @dataclass(frozen=True)
@@ -67,6 +91,18 @@ class JanelaAoVivo:
     min_order_size: float
     fee_rate: float
     fee_exponent: float
+    #: Parâmetros do pool de reward, lidos do payload CRU da Gamma pelas
+    #: MESMAS funções que o recorder usa (`markets/rewards_da_gamma.py`).
+    #: `None` quando o mercado não tem pool — e é `None` de propósito, não
+    #: zero: sem numerador a janela SAI da conta de reward em vez de receber
+    #: um default inventado, que produziria receita onde não há nenhuma.
+    reward_daily_rate: float | None = None
+    reward_min_size: float | None = None
+    #: Em FRAÇÃO, já convertido dos centavos que a Gamma manda. A conversão
+    #: mora no leitor compartilhado para os dois lados não divergirem sobre a
+    #: unidade: dividir duas vezes, ou nenhuma, dá pool 100x errado sem
+    #: levantar exceção.
+    reward_max_spread: float | None = None
 
     def seconds_left(self, agora_epoch: float) -> float:
         return self.fechamento_epoch - agora_epoch
@@ -152,6 +188,7 @@ class RastreadorDeJanelas:
             fechamento_epoch=fechamento,
             tick_size=mercado.tick_size,
             min_order_size=mercado.min_order_size,
+            **_campos_de_reward(mercado.raw_gamma),
             fee_rate=mercado.fee_rate,
             fee_exponent=mercado.fee_exponent,
         )

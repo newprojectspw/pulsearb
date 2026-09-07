@@ -55,6 +55,10 @@ from pulsearb.markets.discovery import (
     MarketDiscovery,
     parse_end_date_epoch,
 )
+from pulsearb.markets.rewards_da_gamma import (
+    forma_dos_rewards,
+    taxa_diaria_de_reward,
+)
 from pulsearb.obs import get_logger, setup_logging
 from pulsearb.recorder.gaps import GapTracker, resumo_gaps
 from pulsearb.recorder.writer import (
@@ -90,89 +94,12 @@ RESOLUTION_POLL_SECONDS = 120.0
 
 
 
-#: Onde a Gamma pode pôr a lista de rewards. `clobRewards` é o que se viu ao
-#: vivo (§12.8); `rewards_config` é o nome no SDK. Aceitar os dois custa uma
-#: linha; apostar no errado custou o marco inteiro no `price_change` (§6.1b).
-CHAVES_DE_LISTA_DE_REWARD = ("clobRewards", "rewards_config", "rewardsConfig")
-
-#: E como cada entrada pode chamar a taxa diária.
-CHAVES_DE_TAXA_DIARIA = (
-    "rewardsDailyRate",
-    "rewards_daily_rate",
-    "dailyRate",
-    "daily_rate",
-    "totalDailyRate",
-    "total_daily_rate",
-)
-
-
-def _lista_de_rewards(gamma: dict[str, Any]) -> tuple[str | None, list[Any]]:
-    """A lista de rewards e sob que chave ela veio."""
-    for chave in CHAVES_DE_LISTA_DE_REWARD:
-        bruto = gamma.get(chave)
-        if isinstance(bruto, list):
-            return chave, bruto
-    return None, []
-
-
-def _taxa_diaria_de_reward(gamma: dict[str, Any]) -> float | None:
-    """Soma as taxas diárias da lista de rewards (VERIFICADO ao vivo, 12.8).
-
-    É lista porque um mercado pode ter mais de uma fonte de reward (nativa e
-    patrocinada, que o CLOB expõe como `native_daily_rate` e
-    `sponsored_daily_rate`). Somar é o que corresponde ao `total_daily_rate`.
-
-    M2.7: passou a aceitar as grafias alternativas da lista E da taxa. A
-    gravação de 8h trouxe 199 janelas com `rewardsMinSize` e
-    `rewardsMaxSpread` PRESENTES e taxa diária ausente — o que é estranho
-    para mercado que não participa do programa, e é exatamente a assinatura
-    de leitor procurando a chave errada. Aceitar as variantes não decide a
-    questão sozinho: `forma_dos_rewards` conta qual apareceu de fato, e o
-    array cru vai gravado para que a próxima rodada resolva sem palpite.
-    """
-    _, bruto = _lista_de_rewards(gamma)
-    total = 0.0
-    achou = False
-    for item in bruto:
-        if not isinstance(item, dict):
-            continue
-        for chave in CHAVES_DE_TAXA_DIARIA:
-            taxa = _numero(item.get(chave))
-            if taxa is not None:
-                total += taxa
-                achou = True
-                break
-    return total if achou else None
-
-
-def _forma_dos_rewards(gamma: dict[str, Any]) -> dict[str, Any]:
-    """O que a Gamma REALMENTE mandou sobre reward, sem interpretação.
-
-    M2.7 tarefa 2. Três explicações produzem o mesmo `rewards_daily_rate:
-    None`, e elas têm consertos opostos:
-
-    1. **o mercado não participa** — a lista nem existe;
-    2. **o nosso leitor erra a chave** — a lista existe e as entradas usam um
-       nome de campo que não procurávamos (o defeito do `price_change` de
-       novo, §6.1b);
-    3. **o programa expirou para aquela janela** — a lista existe, tem taxa, e
-       tem `start_date`/`end_date` fora do intervalo da janela.
-
-    Nenhuma das três era distinguível na gravação anterior, porque
-    `raw_gamma` nunca chegava ao disco: só três campos derivados chegavam. Sem
-    o array cru gravado, a pergunta não tem resposta — e foi por isso que ela
-    não teve resposta.
-    """
-    chave, bruto = _lista_de_rewards(gamma)
-    entradas: list[dict[str, Any]] = [i for i in bruto if isinstance(i, dict)]
-    return {
-        "chave_da_lista": chave,
-        "n_entradas": len(entradas),
-        "chaves_das_entradas": sorted({k for item in entradas for k in item}),
-        # O array CRU, do jeito que veio. É ele que carrega start_date/
-        # end_date e permite decidir entre "expirou" e "não participa".
-        "entradas": entradas[:4],
-    }
+# As leituras de reward moram em `markets/rewards_da_gamma.py` desde que a
+# rota maker (4.0) passou a precisar dos MESMOS numeros ao vivo. Copiar
+# para o outro lado seria a divergencia que o CLAUDE.md chama de erro
+# grave — e aqui seria cara, porque a leitura e ambigua de proposito (tres
+# nomes de lista, seis de taxa) e duas copias divergiriam na primeira
+# grafia nova.
 
 
 def _numero(valor: Any) -> float | None:
@@ -228,11 +155,11 @@ def market_snapshot(
         # Orçamento do pool. Sem ele a simulação de reward (M2.2 B.1) não tem
         # numerador e a janela sai da conta em vez de receber um default
         # inventado.
-        "rewards_daily_rate": _taxa_diaria_de_reward(market.raw_gamma),
+        "rewards_daily_rate": taxa_diaria_de_reward(market.raw_gamma),
         # M2.7: o CRU da lista de rewards. Sem ele, "sem_taxa_diaria" é
         # indistinguível entre não participar, expirar, e o nosso leitor
         # errar a chave — ver `_forma_dos_rewards`.
-        "rewards_bruto": _forma_dos_rewards(market.raw_gamma),
+        "rewards_bruto": forma_dos_rewards(market.raw_gamma),
         "uma_reward": market.raw_gamma.get("umaReward"),
         "best_bid": market.raw_gamma.get("bestBid"),
         "best_ask": market.raw_gamma.get("bestAsk"),
