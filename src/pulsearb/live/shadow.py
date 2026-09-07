@@ -48,11 +48,13 @@ from typing import Any
 import httpx
 
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
+from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
 from pulsearb.execution.executor import escolher_executor
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
 from pulsearb.live.ciclo import CicloAoVivo
+from pulsearb.live.laco_maker import CADENCIA_DO_MAKER_S, LacoMaker
 from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo
@@ -190,10 +192,27 @@ def caminho_do_diario_da_rodada(agora: datetime | None = None) -> str:
     )
 
 
+def _caminho_do_executor(ciclo: Any) -> Path | None:
+    """O arquivo do diário, se o ciclo tiver um executor que o exponha.
+
+    Tolerante de propósito: os testes do processo passam ciclos-dublê que não
+    têm executor, e exigir o campo faria a suíte do 3.13 depender da rota
+    maker, que é ensaio novo.
+    """
+    executor = getattr(getattr(ciclo, "motor", None), "executor", None)
+    return getattr(executor, "caminho", None)
+
+
 class ProcessoShadow:
     """Sockets, descoberta e cadência em volta de um `CicloAoVivo`."""
 
-    def __init__(self, settings: Settings, ciclo: CicloAoVivo) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ciclo: CicloAoVivo,
+        *,
+        caminho_do_diario: Path | None = None,
+    ) -> None:
         self.settings = settings
         self.ciclo = ciclo
         self.tokens_assinados: set[str] = set()
@@ -213,6 +232,26 @@ class ProcessoShadow:
         #: mesmo instante, e nos testes pode ser muito antes.
         self.inicio_mono = time.monotonic()
         self.inicio_parede = time.time()
+        #: A rota maker (4.0). O cliente é o SOMBRA, sempre: este processo não
+        #: envia ordem, e o laço maker não é exceção — ver o topo do módulo.
+        #: Trocar por `ClienteDeOrdens` aqui é o que faria a rota cotar de
+        #: verdade, e é decisão de LIVE, que a autorização ainda recusa.
+        #: O diário do maker vai no MESMO arquivo do de intenções — ver
+        #: `cliente_sombra._registrar`. Quando o caminho não vem de fora (nos
+        #: testes), tenta o do executor; sem nenhum dos dois, o laço maker não
+        #: sobe, e isso é dito no log em vez de a rodada morrer: o taker é o
+        #: caminho medido, e a rota maker não pode custar as 24 h dele.
+        diario = caminho_do_diario or _caminho_do_executor(ciclo)
+        self.laco_maker = (
+            LacoMaker(
+                cliente=ClienteSombraDeOrdens(
+                    caminho_do_diario=diario, modo=settings.mode
+                ),
+                tamanho_da_cotacao=settings.risk.stake_max_por_trade_usdc,
+            )
+            if diario is not None
+            else None
+        )
         #: Marcas do relato anterior, para medir a JANELA e não só o
         #: acumulado. Ver `_vigilia`.
         self._relato_mono = self.inicio_mono
@@ -362,6 +401,46 @@ class ProcessoShadow:
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
 
+    async def laco_de_cotacao(
+        self, deadline: float, deadline_de_parede: float | None = None
+    ) -> None:
+        """A rota maker: cotar, repousar, mexer, sair — item 4.0(c).
+
+        Cadência PRÓPRIA, mais lenta que a da decisão (15 s contra 1 s). A
+        pergunta do maker é *vale trocar a cotação que está no livro?*, e a
+        histerese do `repouso` já tem piso de 30 s repousada: consultar a cada
+        segundo só produziria `repousada_ha_pouco_tempo` em série.
+        """
+        if self.laco_maker is None:
+            log.info("laco maker nao subiu: sem caminho de diario")
+            return
+        while not prazo_vencido(deadline, deadline_de_parede):
+            await _dormir_ate(CADENCIA_DO_MAKER_S, deadline)
+            if time.monotonic() >= deadline:
+                return
+            try:
+                agora = time.time()
+                await self.laco_maker.passo(
+                    list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
+                    livro_de=self.ciclo.motor.livros.livro,
+                    agora_epoch=agora,
+                    agora_ns=time.time_ns(),
+                )
+            except OSError as erro:
+                # Mesma leitura que o laço de decisão faz: I/O do diário não é
+                # "evento estranho", é a saída da rodada sumindo.
+                self.falhou = f"io_do_diario_maker: {erro}"
+                raise
+            except Exception as erro:
+                # O maker NÃO derruba a rodada. O taker é o caminho medido e
+                # aprovado; a rota maker é o ensaio novo, e um defeito nela
+                # não pode custar as 24 h do outro.
+                log.error(
+                    "laco maker falhou; a rodada segue sem cotar",
+                    erro=f"{type(erro).__name__}: {erro}",
+                )
+                return
+
     async def laco_de_relato(
         self, deadline: float, deadline_de_parede: float | None = None
     ) -> None:
@@ -452,6 +531,9 @@ class ProcessoShadow:
             # quando há erro é um campo que ninguém procura quando não há.
             "falhou": self.falhou,
             "vigilia": self._vigilia(avancar=avancar_vigilia),
+            "maker": (
+                self.laco_maker.resumo() if self.laco_maker is not None else None
+            ),
             **self.ciclo.resumo(agora_epoch=time.time(), agora_ns=time.time_ns()),
         }
 
@@ -512,6 +594,9 @@ class ProcessoShadow:
                 ),
                 asyncio.create_task(
                     self.laco_de_decisao(deadline, deadline_de_parede)
+                ),
+                asyncio.create_task(
+                    self.laco_de_cotacao(deadline, deadline_de_parede)
                 ),
                 asyncio.create_task(
                     self.laco_de_relato(deadline, deadline_de_parede)
@@ -699,7 +784,9 @@ def main(argv: list[str] | None = None) -> int:
         caminho_do_diario=caminho_do_diario,
         curvas_de_variancia=curvas,
     )
-    processo = ProcessoShadow(settings, ciclo)
+    processo = ProcessoShadow(
+        settings, ciclo, caminho_do_diario=caminho_do_diario
+    )
     estado = asyncio.run(processo.run(args.duration))
     print(json.dumps(estado, indent=2, ensure_ascii=False, default=str))
     # Rodada sem saída NÃO é sucesso. Sair com 0 depois de 24 h que não
