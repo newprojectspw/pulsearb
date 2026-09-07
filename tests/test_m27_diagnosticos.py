@@ -13,9 +13,16 @@ from pulsearb.analysis.measurements import medir_mudanca_de_tick
 from pulsearb.backtest.__main__ import RecordingIndex
 from pulsearb.backtest.report import BacktestReport
 from pulsearb.backtest.runner import BacktestConfig
-from pulsearb.recorder.__main__ import (
-    _forma_dos_rewards,
-    _taxa_diaria_de_reward,
+
+# As leituras de reward sairam do recorder para `markets/rewards_da_gamma.py`
+# quando a rota maker passou a precisar dos MESMOS numeros ao vivo. Os nomes
+# perderam o underscore porque deixaram de ser privados de um modulo: agora
+# sao a interface que os dois lados compartilham.
+from pulsearb.markets.rewards_da_gamma import (
+    forma_dos_rewards as _forma_dos_rewards,
+)
+from pulsearb.markets.rewards_da_gamma import (
+    taxa_diaria_de_reward as _taxa_diaria_de_reward,
 )
 
 HORA_NS = 3_600 * 10**9
