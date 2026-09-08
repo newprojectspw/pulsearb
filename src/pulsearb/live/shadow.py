@@ -48,11 +48,13 @@ from typing import Any
 import httpx
 
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
+from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
 from pulsearb.execution.executor import escolher_executor
 from pulsearb.feeds.base import FeedEvent
 from pulsearb.feeds.poly_ws import PolyMarketWsFeed
 from pulsearb.feeds.rtds import RtdsFeed
 from pulsearb.live.ciclo import CicloAoVivo
+from pulsearb.live.laco_maker import CADENCIA_DO_MAKER_S, LacoMaker
 from pulsearb.live.livros import LivrosAoVivo
 from pulsearb.live.motor import ConfigDoMotor, MotorAoVivo
 from pulsearb.live.precos import PrecosAoVivo
@@ -190,10 +192,38 @@ def caminho_do_diario_da_rodada(agora: datetime | None = None) -> str:
     )
 
 
+def _portao_do_ciclo(ciclo: Any) -> Any:
+    """O portão de risco que o executor do ciclo já usa.
+
+    Tolerante como o `_caminho_do_executor`, e pela mesma razão: os testes do
+    processo passam ciclos-dublê. Devolver `None` aqui NÃO afrouxa nada — o
+    laço recusa cotar sem portão (`sem_portao`), que é falha fechada.
+    """
+    executor = getattr(getattr(ciclo, "motor", None), "executor", None)
+    return getattr(executor, "portao", None)
+
+
+def _caminho_do_executor(ciclo: Any) -> Path | None:
+    """O arquivo do diário, se o ciclo tiver um executor que o exponha.
+
+    Tolerante de propósito: os testes do processo passam ciclos-dublê que não
+    têm executor, e exigir o campo faria a suíte do 3.13 depender da rota
+    maker, que é ensaio novo.
+    """
+    executor = getattr(getattr(ciclo, "motor", None), "executor", None)
+    return getattr(executor, "caminho", None)
+
+
 class ProcessoShadow:
     """Sockets, descoberta e cadência em volta de um `CicloAoVivo`."""
 
-    def __init__(self, settings: Settings, ciclo: CicloAoVivo) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ciclo: CicloAoVivo,
+        *,
+        caminho_do_diario: Path | None = None,
+    ) -> None:
         self.settings = settings
         self.ciclo = ciclo
         self.tokens_assinados: set[str] = set()
@@ -206,6 +236,41 @@ class ProcessoShadow:
         #: Motivo pelo qual a rodada foi abortada, ou `None`. Quando existe,
         #: `main` sai com código != 0: uma rodada sem saída não é sucesso.
         self.falhou: str | None = None
+        #: Os dois relógios no arranque. O 3.14 usou a divergência entre eles
+        #: para ENCERRAR a rodada na hora certa; aqui ela vira MEDIDA, porque
+        #: encerrar no prazo não diz quanto do prazo o bot passou acordado.
+        #: `run` os reposiciona — construir o processo e rodá-lo não é o
+        #: mesmo instante, e nos testes pode ser muito antes.
+        self.inicio_mono = time.monotonic()
+        self.inicio_parede = time.time()
+        #: A rota maker (4.0). O cliente é o SOMBRA, sempre: este processo não
+        #: envia ordem, e o laço maker não é exceção — ver o topo do módulo.
+        #: Trocar por `ClienteDeOrdens` aqui é o que faria a rota cotar de
+        #: verdade, e é decisão de LIVE, que a autorização ainda recusa.
+        #: O diário do maker vai no MESMO arquivo do de intenções — ver
+        #: `cliente_sombra._registrar`. Quando o caminho não vem de fora (nos
+        #: testes), tenta o do executor; sem nenhum dos dois, o laço maker não
+        #: sobe, e isso é dito no log em vez de a rodada morrer: o taker é o
+        #: caminho medido, e a rota maker não pode custar as 24 h dele.
+        diario = caminho_do_diario or _caminho_do_executor(ciclo)
+        self.laco_maker = (
+            LacoMaker(
+                cliente=ClienteSombraDeOrdens(
+                    caminho_do_diario=diario, modo=settings.mode
+                ),
+                tamanho_da_cotacao=settings.risk.stake_max_por_trade_usdc,
+                # O MESMO portão do taker. Sem ele a rota maker cotaria
+                # por fora do kill switch e do disjuntor — ver o
+                # cabeçalho do `laco_maker`.
+                portao=_portao_do_ciclo(ciclo),
+            )
+            if diario is not None
+            else None
+        )
+        #: Marcas do relato anterior, para medir a JANELA e não só o
+        #: acumulado. Ver `_vigilia`.
+        self._relato_mono = self.inicio_mono
+        self._relato_parede = self.inicio_parede
         # REDUNDÂNCIA, como no recorder: N conexões ao MESMO endpoint. Não é
         # paranoia — conexão individual do RTDS já produziu lacunas de 30 a
         # 306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder
@@ -351,6 +416,48 @@ class ProcessoShadow:
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
 
+    async def laco_de_cotacao(
+        self, deadline: float, deadline_de_parede: float | None = None
+    ) -> None:
+        """A rota maker: cotar, repousar, mexer, sair — item 4.0(c).
+
+        Cadência PRÓPRIA, mais lenta que a da decisão (15 s contra 1 s). A
+        pergunta do maker é *vale trocar a cotação que está no livro?*, e a
+        histerese do `repouso` já tem piso de 30 s repousada: consultar a cada
+        segundo só produziria `repousada_ha_pouco_tempo` em série.
+        """
+        if self.laco_maker is None:
+            log.info("laco maker nao subiu: sem caminho de diario")
+            return
+        while not prazo_vencido(deadline, deadline_de_parede):
+            await _dormir_ate(CADENCIA_DO_MAKER_S, deadline)
+            if time.monotonic() >= deadline:
+                return
+            try:
+                agora = time.time()
+                agora_ns = time.time_ns()
+                await self.laco_maker.passo(
+                    list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
+                    livro_de=self.ciclo.motor.livros.livro,
+                    agora_epoch=agora,
+                    agora_ns=agora_ns,
+                    feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
+                )
+            except OSError as erro:
+                # Mesma leitura que o laço de decisão faz: I/O do diário não é
+                # "evento estranho", é a saída da rodada sumindo.
+                self.falhou = f"io_do_diario_maker: {erro}"
+                raise
+            except Exception as erro:
+                # O maker NÃO derruba a rodada. O taker é o caminho medido e
+                # aprovado; a rota maker é o ensaio novo, e um defeito nela
+                # não pode custar as 24 h do outro.
+                log.error(
+                    "laco maker falhou; a rodada segue sem cotar",
+                    erro=f"{type(erro).__name__}: {erro}",
+                )
+                return
+
     async def laco_de_relato(
         self, deadline: float, deadline_de_parede: float | None = None
     ) -> None:
@@ -359,9 +466,80 @@ class ProcessoShadow:
             if time.monotonic() >= deadline:
                 # Não relata depois do prazo: o resumo final já sai no `run`.
                 return
-            log.info("shadow", **self.estado())
+            # `avancar_vigilia`: só ESTE chamador fecha a janela de medida. O
+            # resumo final e quem inspecionar o estado por fora leem sem
+            # mexer nela — senão uma leitura extra zeraria a janela e o
+            # próximo relato mediria um intervalo que não existiu.
+            log.info("shadow", **self.estado(avancar_vigilia=True))
 
-    def estado(self) -> dict[str, Any]:
+    def _vigilia(self, *, avancar: bool = False) -> dict[str, Any]:
+        """Quanto do tempo de PAREDE o processo passou de fato acordado.
+
+        O 3.14 mediu que `time.monotonic()` congela quando a máquina dorme e
+        usou isso para encerrar a rodada na hora certa. Mas o mesmo
+        congelamento tem uma segunda consequência, que ficou sem sensor: os
+        DOIS laços deste processo correm em tempo monotônico — decisão a cada
+        1 s, relato a cada 60 s —, então eles congelam JUNTOS. O relato sai
+        sempre com +60 passos, e uma rodada dormindo tem exatamente a mesma
+        cara de uma rodada saudável.
+
+        Medido em 05/09/2026: uma rodada de 24 h na bateria ficou 1,16 h
+        acordada em 9,77 h de parede — **11,9%** — e nada no relatório disse
+        isso. `feeds_saudaveis` estava `true` o tempo todo, e estava certo: os
+        feeds não têm defeito nenhum quando o processo inteiro está suspenso.
+        Nove horas se passaram antes que alguém comparasse os dois relógios.
+
+        Duas janelas, e as duas importam:
+
+        - `da_rodada` responde "esta rodada de 24 h vale como medida de 24 h?"
+        - `desde_o_relato` responde "e AGORA, está andando?". Sem ela, uma
+          parada nova entra diluída em horas de rodada boa e só aparece no
+          acumulado quando já custou o ensaio.
+
+        `avancar=False` deixa o método sem efeito colateral: o resumo final e
+        os testes podem chamá-lo sem mexer na janela do laço de relato.
+        """
+        mono, parede = time.monotonic(), time.time()
+
+        def faixa(desde_mono: float, desde_parede: float) -> dict[str, Any]:
+            decorrido = parede - desde_parede
+            acordado = mono - desde_mono
+            # Relógio de parede corrigido para TRÁS por NTP produz decorrido
+            # menor que acordado — e um `ciclo_de_trabalho` acima de 1 diria
+            # que o bot ficou acordado mais tempo do que existiu. Prender em
+            # 1.0 é honesto: a medida não distingue "não dormiu" de "o
+            # relógio andou para trás", e nenhuma das duas é dormir.
+            dormiu = max(0.0, decorrido - acordado)
+            return {
+                "parede_s": round(decorrido, 1),
+                "acordado_s": round(acordado, 1),
+                "dormiu_s": round(dormiu, 1),
+                "ciclo_de_trabalho": (
+                    round(min(1.0, acordado / decorrido), 3) if decorrido > 0 else None
+                ),
+            }
+
+        vigilia = {
+            "da_rodada": faixa(self.inicio_mono, self.inicio_parede),
+            "desde_o_relato": faixa(self._relato_mono, self._relato_parede),
+            "nota": (
+                "CICLO DE TRABALHO, e o unico numero que separa 'a rodada"
+                " esta parada' de 'a rodada esta saudavel e o mercado esta"
+                " quieto'. Os dois lacos correm em tempo MONOTONICO, que"
+                " congela no sono da maquina (3.14): eles congelam juntos, o"
+                " relato sai sempre com +60 passos e nada mais no resumo"
+                " denuncia a suspensao. Valor abaixo de 1 quer dizer que o"
+                " processo esteve suspenso, e uma rodada de 24 h com ciclo"
+                " 0,12 observou 2,9 h de mercado — nao fecha item que exija"
+                " medida sobre 24 h. Na tomada e com `caffeinate -dimsu` o"
+                " valor fica em 1,0; tampa fechada dorme de qualquer forma."
+            ),
+        }
+        if avancar:
+            self._relato_mono, self._relato_parede = mono, parede
+        return vigilia
+
+    def estado(self, *, avancar_vigilia: bool = False) -> dict[str, Any]:
         return {
             "passos": self.passos,
             "descobertas": self.descobertas,
@@ -369,6 +547,10 @@ class ProcessoShadow:
             # Sai no JSON SEMPRE, inclusive `None`. Um campo que só aparece
             # quando há erro é um campo que ninguém procura quando não há.
             "falhou": self.falhou,
+            "vigilia": self._vigilia(avancar=avancar_vigilia),
+            "maker": (
+                self.laco_maker.resumo() if self.laco_maker is not None else None
+            ),
             **self.ciclo.resumo(agora_epoch=time.time(), agora_ns=time.time_ns()),
         }
 
@@ -396,6 +578,12 @@ class ProcessoShadow:
         # seguinte.
         deadline = time.monotonic() + duration_seconds
         deadline_de_parede = time.time() + duration_seconds
+        # A vigília mede a RODADA, não o objeto. Entre construir o
+        # `ProcessoShadow` e chegar aqui houve descoberta, sockets e — nos
+        # testes — o que o teste quiser; contar isso como tempo de rodada
+        # inflaria `dormiu_s` com trabalho de arranque.
+        self.inicio_mono = self._relato_mono = time.monotonic()
+        self.inicio_parede = self._relato_parede = time.time()
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent}, timeout=15.0
         ) as http:
@@ -423,6 +611,9 @@ class ProcessoShadow:
                 ),
                 asyncio.create_task(
                     self.laco_de_decisao(deadline, deadline_de_parede)
+                ),
+                asyncio.create_task(
+                    self.laco_de_cotacao(deadline, deadline_de_parede)
                 ),
                 asyncio.create_task(
                     self.laco_de_relato(deadline, deadline_de_parede)
@@ -610,7 +801,9 @@ def main(argv: list[str] | None = None) -> int:
         caminho_do_diario=caminho_do_diario,
         curvas_de_variancia=curvas,
     )
-    processo = ProcessoShadow(settings, ciclo)
+    processo = ProcessoShadow(
+        settings, ciclo, caminho_do_diario=caminho_do_diario
+    )
     estado = asyncio.run(processo.run(args.duration))
     print(json.dumps(estado, indent=2, ensure_ascii=False, default=str))
     # Rodada sem saída NÃO é sucesso. Sair com 0 depois de 24 h que não

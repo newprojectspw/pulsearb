@@ -711,3 +711,169 @@ def conta_do_maker(
             "execução boa, menos execução ruim contabilizada)."
         ),
     }
+
+
+# ---------------------------------------------------------------- M2.2 B.4
+#: Estatística do markout usada como "pior caso" por padrão. A tabela guarda a
+#: distribuição inteira; `min` é a execução mais adversa que a gravação viu.
+#: Markout NEGATIVO = perdemos contra quem nos executou, então o pior é o menor.
+ESTATISTICA_ADVERSA = "min"
+
+
+def conta_pessimista_do_maker(
+    *,
+    rewards: dict[str, Any],
+    markout: dict[str, Any],
+    shares_executadas_por_recorte: dict[str, float] | None = None,
+    horizonte_markout: str = "5s",
+    estatistica_adversa: str = ESTATISTICA_ADVERSA,
+) -> dict[str, Any]:
+    """LIMITE INFERIOR do líquido maker — a conta que não precisa da fila.
+
+    ## Por que existe
+
+    O 1.6 está travado em três termos que dependem de **posição na fila**, e a
+    fila não é observável no WS agregado (ver `limitacao_de_fila`). A saída não
+    é estimar o inobservável com um fator: é **limitar por baixo** e ver se a
+    conta fecha mesmo no pior caso.
+
+    ## A assimetria que torna o limite possível
+
+    As duas parcelas do maker têm naturezas diferentes, e só uma depende da
+    fila:
+
+    | parcela | depende da fila? | por quê |
+    |---|---|---|
+    | **rewards** | **não** | `S(v,s)=((v-s)/v)² × b` (§15.3) pontua por
+      SPREAD e TAMANHO, amostrado 1×/min: ganha-se por ESTAR no livro |
+    | **markout** | sim | só incide sobre share que EXECUTOU |
+
+    Então rewards entram inteiros, e o que a fila governa é só o custo.
+
+    ## O que "pior caso" quer dizer aqui, exatamente
+
+    A nossa ordem sempre no FIM da fila. Isso não significa apenas executar
+    menos: significa executar **só quando o nível inteiro é varrido**, que são
+    exatamente as ocasiões de markout pior. O viés documentado em
+    `limitacao_de_fila` invertido — em vez de inflar as duas pontas, deprime as
+    duas. Por isso o custo usa a estatística ADVERSA do markout (`min`), e não
+    a média: supor que toda execução nossa foi a pior que a gravação viu.
+
+    ## Por que o rebate fica FORA
+
+    Rebate é parcela POSITIVA e depende do mesmo volume executado que não
+    sabemos. Omitir um termo positivo **preserva** a propriedade de limite
+    inferior — o resultado real só pode ser melhor. Incluí-lo exigiria o dado
+    que falta e quebraria a garantia. É de graça, e é o que mantém a conta
+    honesta sem esperar pela fila.
+
+    ## Falha fechada
+
+    Sem `shares_executadas_por_recorte` a conta NÃO é avaliável, e o retorno
+    diz isso em vez de devolver um número. Preencher shares com zero daria
+    custo zero e um "líquido positivo" que seria só a ausência de medida — o
+    mesmo defeito que o `cobertura_da_gravacao` já produziu neste projeto.
+    """
+    tabela_markout = markout.get("markout_centavos_por_share") or {}
+    por_ordem = rewards.get("por_ordem") or {}
+    faltando = shares_executadas_por_recorte is None
+
+    por_recorte: dict[str, dict[str, Any]] = {}
+    total_rewards = 0.0
+    total_custo_pior = 0.0
+    total_custo_medio = 0.0
+
+    for nome_da_ordem, recortes in por_ordem.items():
+        for recorte, dados in recortes.items():
+            horas = dados.get("horas_de_amostra") or 0.0
+            receita = dados.get("receita_usdc") or 0.0
+            dist = (tabela_markout.get(recorte) or {}).get(horizonte_markout) or {}
+            adverso_cent = dist.get(estatistica_adversa)
+            medio_cent = dist.get("media")
+            shares = (
+                (shares_executadas_por_recorte or {}).get(recorte)
+                if not faltando
+                else None
+            )
+
+            # centavos por share -> USDC. `abs` porque markout negativo é
+            # CUSTO: somá-lo com o sinal viraria receita.
+            custo_pior = (
+                abs(adverso_cent) / 100.0 * shares
+                if (adverso_cent is not None and shares is not None)
+                else None
+            )
+            custo_medio = (
+                abs(medio_cent) / 100.0 * shares
+                if (medio_cent is not None and shares is not None)
+                else None
+            )
+
+            chave = f"{nome_da_ordem} | {recorte}"
+            por_recorte[chave] = {
+                "horas_de_amostra": horas,
+                "rewards_usdc": round(receita, 6),
+                "shares_executadas_no_pior_caso": shares,
+                "markout_adverso_centavos_por_share": adverso_cent,
+                "markout_medio_centavos_por_share": medio_cent,
+                "execucoes_no_markout": dist.get("n", 0),
+                "custo_no_pior_caso_usdc": (
+                    round(custo_pior, 6) if custo_pior is not None else None
+                ),
+                "liquido_no_pior_caso_usdc": (
+                    round(receita - custo_pior, 6) if custo_pior is not None else None
+                ),
+                "liquido_no_markout_medio_usdc": (
+                    round(receita - custo_medio, 6) if custo_medio is not None else None
+                ),
+            }
+            total_rewards += receita
+            if custo_pior is not None:
+                total_custo_pior += custo_pior
+            if custo_medio is not None:
+                total_custo_medio += custo_medio
+
+    liquido_pior = None if faltando else round(total_rewards - total_custo_pior, 6)
+    liquido_medio = None if faltando else round(total_rewards - total_custo_medio, 6)
+
+    return {
+        "avaliavel": not faltando,
+        "por_ordem_e_recorte": dict(sorted(por_recorte.items())),
+        "total_rewards_usdc": round(total_rewards, 6),
+        "total_custo_no_pior_caso_usdc": (
+            None if faltando else round(total_custo_pior, 6)
+        ),
+        "liquido_no_pior_caso_usdc": liquido_pior,
+        "liquido_no_markout_medio_usdc": liquido_medio,
+        # A resposta que o 4.1 pede, e só ela fecha o critério: positivo aqui
+        # quer dizer positivo SEM depender de nenhuma hipótese de fila.
+        "fecha_no_pior_caso": (
+            None if liquido_pior is None else liquido_pior > 0.0
+        ),
+        "estatistica_adversa": estatistica_adversa,
+        "formula": (
+            "liquido_no_pior_caso = rewards - |markout_adverso| * shares_executadas "
+            "/ 100. Rebate OMITIDO de proposito: e parcela positiva que depende do "
+            "mesmo volume desconhecido, e omitir positivo preserva o limite inferior."
+        ),
+        "por_que_e_um_limite_inferior": (
+            "Rewards nao dependem de fila (§15.3: pontua por spread e tamanho, "
+            "amostrado 1x/min — ganha-se por ESTAR no livro). O unico termo que a "
+            "fila governa e o custo, e ele entra no maximo: nossa ordem sempre no "
+            "fim da fila executa SO quando o nivel e varrido, que sao as ocasioes "
+            "de markout pior, e o custo usa a estatistica adversa da distribuicao "
+            "em vez da media. O resultado real so pode ser melhor que este."
+        ),
+        "o_que_falta_para_avaliar": (
+            []
+            if not faltando
+            else [
+                (
+                    "shares_executadas_por_recorte: quantas shares nossas teriam "
+                    "sido varridas, por recorte. Sai de CONTAR varreduras de nivel "
+                    "na gravacao — nao precisa da fila, precisa do livro no tempo. "
+                    "E o unico dado que falta, e ele exige a gravacao de >=72h (4.1)."
+                )
+            ]
+        ),
+    }

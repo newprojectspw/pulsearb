@@ -266,6 +266,73 @@ aceita parcial e cancela o resto). Ordem *a mercado* só aceita **FAK ou FOK**.
 parcial pendurada, exatamente como o enunciado pede. FAK fica anotado como
 alternativa para quando a v2 quiser aceitar preenchimento parcial.
 
+### 4.4. Cancelamento de ordem
+
+`[VERIFICADO]` — sdist `polymarket-client==0.6.0`, lido em 2026-09-06:
+
+Cancelar UMA ordem aberta (`_internal/actions/orders/cancel.py`,
+`build_cancel_order_request`):
+
+- **método `DELETE`**, **caminho `/order`**, **corpo `{"orderID": <id>}`** (JSON).
+  O método sai de `clients/_transport.py` (`delete_json` → `_request("DELETE", ...)`,
+  linha 105/239); `clients/secure.py::cancel_order` é quem liga os dois.
+- **assinatura L2 igual à do envio**: `_header_resolver(method, path, body_str)`
+  assina método + caminho + corpo — os mesmos três que `assinar_l2` já recebe.
+  Cancelar reusa `assinar_l2(metodo="DELETE", caminho="/order", corpo=...)`.
+- **corpo assinado vai como bytes**, não reserializado — mesma armadilha do POST
+  (`content=`, não `json=`), pela mesma razão de §16.
+
+Resposta (`models/clob/cancel.py::CancelOrdersResponse`):
+
+```
+{ "canceled": [order_id, ...], "not_canceled": { order_id: motivo, ... } }
+```
+
+- **sucesso** = o id aparece em `canceled`.
+- **não cancelada** = aparece em `not_canceled` com um motivo (string). NÃO é
+  incerteza: o servidor respondeu e disse por que não. Um id que já não existe
+  cai aqui — cancelar é idempotente do lado do servidor.
+
+Lote: `/orders` com **lista** de ids (`build_cancel_orders_request`, teto 3.000);
+`/cancel-all` (corpo vazio); `/cancel-market-orders` com `{asset_id}`/`{market}`.
+Todos `DELETE`, todos com a mesma forma de resposta.
+
+### 4.5. Listar ordens abertas (reconciliação entre reinícios)
+
+`[VERIFICADO]` — sdist `polymarket-client==0.6.0`, lido em 2026-09-06:
+
+`_internal/actions/account.py::build_list_open_orders_request` e
+`clients/secure.py::list_open_orders`:
+
+- **método `GET`**, **caminho `/data/orders`** (`clients/_transport.py::get_json`
+  → `_request("GET", ...)`).
+- **query params opcionais**: `asset_id` (o token), `id` (um order id),
+  `market` (condition id), `next_cursor` (paginação). Todos filtram; nenhum é
+  obrigatório — sem params, lista todas as abertas da conta autenticada.
+- **assinatura L2 assina o PATH PELADO, não a query.** `_request` chama
+  `_header_resolver(method, path, body_str)` com o path SEM os params (eles vão
+  em `params=` separado, na URL mas fora da assinatura) e `body_str=None` no
+  GET. Ou seja: assinar `GET` + `/data/orders` + corpo vazio, e mandar a query
+  na URL. Assinar a query junto DIVERGIRIA do servidor — é o simétrico do
+  `content=` do POST (§4.4): o que é assinado tem de ser exatamente o que a
+  contraparte reconstrói.
+
+Resposta paginada (`account.py::parse_open_orders_page`): objeto com
+**`data`** (lista de `OpenOrder`) e **`next_cursor`**; fim quando `next_cursor`
+é a sentinela vazia (mesma paginação keyset do §2.2).
+
+`OpenOrder` (`models/clob/*`, `parse_open_orders_page`) — os campos que a
+reconciliação usa:
+
+- **`id`** — o order id do lado deles, a chave para casar com o que
+  guardamos e para `cancelar` (§4.4).
+- **`token_id`** (do `asset_id`), **`side`**, **`price`**, **`original_size`**,
+  **`size_matched`** (quanto já casou — `> 0` é ordem que preencheu em parte),
+  **`status`**, **`order_type`**, **`market`/`condition_id`**, **`created_at`**.
+
+`GET /order?id=...` (`get_order` → `OpenOrder`) devolve UMA por id, quando já se
+sabe qual procurar.
+
 ### 4.2. Tick size
 
 `[VERIFICADO]` — mesmo arquivo:
