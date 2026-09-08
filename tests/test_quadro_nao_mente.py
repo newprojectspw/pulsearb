@@ -49,7 +49,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_5_2_job_docker.py": (8, "5.2 — job de build esperando"),
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
     "test_4_0c_reward_ao_vivo.py": (10, "4.0(c) — reward ao vivo"),
-    "test_4_0c_laco_maker.py": (7, "4.0(c) — o laço maker"),
+    "test_4_0c_laco_maker.py": (12, "4.0(c) — o laço maker"),
     "test_m4_cliente_de_ordens.py": (68, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (15, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (34, "3.2 — auth do CLOB"),
