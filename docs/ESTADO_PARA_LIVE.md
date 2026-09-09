@@ -140,8 +140,33 @@ reconcilia (`live/execucao_maker.py`, 15) e o laço que os chama
 > **O teste que decide é barato e ainda não foi feito:** a gravação de agosto
 > guardou `raw_gamma`, e desde 2026-09-07 existe UM leitor compartilhado
 > (`markets/rewards_da_gamma.py`). Reler o `raw_gamma` de 24/08 com o leitor de
-> hoje separa (a) de (b) em uma passada — se os 8 continuarem com pool, o
-> programa mudou; se não, a leitura de agosto era artefato. Enquanto isso não
+> hoje separa (a) de (b) em uma passada — e a passada foi feita.
+>
+> **RESOLVIDO em 2026-09-09: é (a).** O leitor de HOJE
+> (`markets/rewards_da_gamma.py`) rodado sobre o relatório de agosto
+> (`relatorios/M2_20260824.json`) devolve `duracoes_com_pool:
+> {"14400": 8, "300": 1, "900": 1}` e, em `duracoes_sem_pool`,
+> `{"300": 518, "900": 167, "3600": 44}` — **sem nenhuma entrada `14400`**.
+> Isto é: em 24/08 as **8 de 8 janelas de 4 h tinham pool**, e nenhuma ficou
+> sem. A medida de agosto estava CERTA, e a afirmação do quadro também estava,
+> naquela data.
+>
+> Não é leitor diferente contando diferente: a extração de agosto registrou
+> `forma_do_rewards_bruto: {"sem_lista_de_rewards": 729}`, que é o MESMO
+> diagnóstico que hoje devolve `chave_da_lista: None`. Mesma pergunta, mesmo
+> campo, respostas opostas em datas diferentes.
+>
+> **Conclusão: o pool saiu das janelas de 4 h entre 24/08 e 08/09.** Mudou do
+> lado da Polymarket, não do nosso. A varredura de 2.500 mercados em 08/09
+> confirma que o programa segue vivo (940 com pool, 6.766 USDC/dia) — só que
+> agora em mercados de horizonte longo, e **nenhum** de janela curta.
+>
+> **O que isso muda para a decisão:** a rota maker não era inviável por
+> desenho, e o trabalho feito nela não foi desperdício — ela tinha onde ganhar
+> há duas semanas. O que a inviabiliza é uma mudança de programa da
+> contraparte, fora do nosso controle e que pode se reverter. Isso é diferente
+> de "a estratégia estava errada", e a decisão de encerrar ou esperar deve ser
+> tomada sabendo disso.
 > rodar, **nenhuma das duas seções deve ser citada como fato isolado**.
 
 Atualizado: 2026-08-31 · fonte dos números correntes:
