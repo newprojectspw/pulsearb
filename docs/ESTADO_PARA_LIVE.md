@@ -112,18 +112,37 @@ dura, não mais fácil:**
 - o **maker** perdeu o ✅ do 1.6, que era o critério que fazia a rota parecer
   aprovada. Passa em 1.7, 1.8, 1.9 e 1.10; o 1.6 é **não avaliável por
   construção** enquanto a fila não for observável;
-- o **motor maker não roda ainda** (item 4.0): `live/motor.py` é 100 % taker.
-  As peças de cotar, repousar e executar existem e são testadas
-  (`live/cotacao.py`, `live/repouso.py`, `live/execucao_maker.py`), e o
-  cliente aceita `GTC` — mas **nada as orquestra a cada tick**, então nenhuma
-  cotação nossa chega a repousar no livro.
+- o **motor maker rodou, e o resultado é pior que não rodar** (item 4.0):
+  o laço fechou em 2026-09-07 e a rodada de 24 h de 08/09 fez **44.430
+  avaliações sem uma única cotação repousar**, com motivo ÚNICO
+  `sem_pool_de_reward`. A peça que faltava deixou de ser o motor.
 
 O que o M2.2 fechou: 1.7 e 1.8 remedidos em 24 h com a fórmula certa, iguais
-aos de antes. O que sobra do lado bom: o pool **existe em 100 % das janelas de
-4 h**, e as peças do maker já estão escritas e testadas — onde cotar
-(`live/cotacao.py`, 20 testes), mexer ou deixar (`live/repouso.py`, 17) e o
-I/O que cancela, reposiciona e reconcilia (`live/execucao_maker.py`, 15).
-Falta o laço que as chama.
+aos de antes. O maker está inteiro em código — cotar (`live/cotacao.py`, 20
+testes), mexer ou deixar (`live/repouso.py`, 17), o I/O que cancela e
+reconcilia (`live/execucao_maker.py`, 15) e o laço que os chama
+(`live/laco_maker.py`, 7). **O que falta não é peça: é pool.**
+
+> ⚠️ **DUAS MEDIDAS DESTE DOCUMENTO SE CONTRADIZEM, e a contradição está
+> aberta.** A seção *"O pool de reward não é esporádico"* mede, sobre
+> `M2_20260824.json`, **8 de 8 janelas de 4 h COM pool (100 %)**. A rodada de
+> SHADOW de 2026-09-08 mede **44.430 avaliações sem uma única janela com
+> pool**, motivo único `sem_taxa_diaria`. As duas não podem estar certas ao
+> mesmo tempo sobre o mesmo programa.
+>
+> São três as leituras possíveis, e elas levam a decisões opostas: **(a)** o
+> programa mudou entre 24/08 e 08/09 e os updown de 4 h saíram dele — achado
+> sobre a Polymarket, não sobre nós; **(b)** a extração de agosto contava pool
+> que não existia, e aí a conclusão daquela seção (*"a rota é restrita à
+> janela de 4 h, onde o pool está sempre lá"*) **cai inteira**; **(c)** as duas
+> medem conjuntos de mercados diferentes.
+>
+> **O teste que decide é barato e ainda não foi feito:** a gravação de agosto
+> guardou `raw_gamma`, e desde 2026-09-07 existe UM leitor compartilhado
+> (`markets/rewards_da_gamma.py`). Reler o `raw_gamma` de 24/08 com o leitor de
+> hoje separa (a) de (b) em uma passada — se os 8 continuarem com pool, o
+> programa mudou; se não, a leitura de agosto era artefato. Enquanto isso não
+> rodar, **nenhuma das duas seções deve ser citada como fato isolado**.
 
 Atualizado: 2026-08-31 · fonte dos números correntes:
 **`relatorios/M2_24AGO_MEDIDO.json`** — 24 horas de gravação real de
