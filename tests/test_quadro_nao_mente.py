@@ -44,7 +44,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     # sem cobertura EM SILENCIO: entrada ausente nao falha teste nenhum,
     # ela so deixa de conferir. Mesma perda que ja levou as linhas 4.0 e
     # 4.1 do quadro — aqui o efeito e o guardiao parar de guardar.
-    "test_m2_conta_pessimista.py": (9, "1.6/4.1 — limite pessimista"),
+    "test_m2_conta_pessimista.py": (13, "1.6/4.1 — limite pessimista"),
     "test_5_2_imagem_do_recorder.py": (4, "5.2 — imagem do recorder"),
     "test_5_2_job_docker.py": (8, "5.2 — job de build esperando"),
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),

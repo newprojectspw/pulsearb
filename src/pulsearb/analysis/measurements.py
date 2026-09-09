@@ -836,8 +836,32 @@ def conta_pessimista_do_maker(
     liquido_pior = None if faltando else round(total_rewards - total_custo_pior, 6)
     liquido_medio = None if faltando else round(total_rewards - total_custo_medio, 6)
 
+    # REWARDS ZERO DECIDE SOZINHO, e por isso este ramo existe.
+    #
+    # O limite e `liquido = rewards - custo`, e o custo NUNCA e negativo: ele
+    # sai de |markout| * shares, com os dois fatores >= 0. Entao rewards = 0
+    # implica liquido <= 0 qualquer que seja o numero de shares varridas — o
+    # dado que falta deixa de ser necessario, porque nao ha valor dele que
+    # mude o SINAL.
+    #
+    # Reconhecer isso nao e afrouxar a falha fechada: e o oposto. A falha
+    # fechada existe para nao inventar numero ausente; aqui nao se inventa
+    # nada, apenas se nota que a resposta nao depende dele. Continuar
+    # devolvendo `avaliavel: false` seria esconder um veredito que a medida
+    # JA sustenta — e um item que fica ⬜ quando podia ser ❌ e um item que
+    # ninguem sabe que foi decidido.
+    #
+    # `sem_recortes` separa "medi zero rewards em N janelas" de "nao medi
+    # nada": sem nenhum recorte, o total tambem e 0.0, e ai o zero e ausencia
+    # de medida, nao medida de ausencia.
+    sem_recortes = not por_recorte
+    decidido_por_reward_zero = (
+        faltando and not sem_recortes and total_rewards <= 0.0
+    )
+
     return {
-        "avaliavel": not faltando,
+        "avaliavel": (not faltando) or decidido_por_reward_zero,
+        "decidido_por_reward_zero": decidido_por_reward_zero,
         "por_ordem_e_recorte": dict(sorted(por_recorte.items())),
         "total_rewards_usdc": round(total_rewards, 6),
         "total_custo_no_pior_caso_usdc": (
@@ -848,7 +872,9 @@ def conta_pessimista_do_maker(
         # A resposta que o 4.1 pede, e só ela fecha o critério: positivo aqui
         # quer dizer positivo SEM depender de nenhuma hipótese de fila.
         "fecha_no_pior_caso": (
-            None if liquido_pior is None else liquido_pior > 0.0
+            False
+            if decidido_por_reward_zero
+            else (None if liquido_pior is None else liquido_pior > 0.0)
         ),
         "estatistica_adversa": estatistica_adversa,
         "formula": (
@@ -866,7 +892,7 @@ def conta_pessimista_do_maker(
         ),
         "o_que_falta_para_avaliar": (
             []
-            if not faltando
+            if (not faltando) or decidido_por_reward_zero
             else [
                 (
                     "shares_executadas_por_recorte: quantas shares nossas teriam "
