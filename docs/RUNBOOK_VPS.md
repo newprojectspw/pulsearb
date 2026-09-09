@@ -260,6 +260,27 @@ Consequência prática, e é séria: com disco de 10 GB — o que este runbook
 recomendava — a gravação **morre por disco cheio em ~21 horas**, no meio das
 72h, sem completar.
 
+### A VPS ATUAL não comporta 72 h — medido em 2026-09-09
+
+O droplet de Londres (`46.101.73.186`, 1 vCPU / 1 GB) tem **23,17 GB de disco
+total**, com ~4,75 GB em uso — restam **~18,4 GB**.
+
+Pela regra de bolso acima, 18 GB compram **~36 horas**. Uma gravação de 72 h
+lançada nesta máquina morre por disco cheio **no meio**, sem completar, que é
+exatamente o modo de falha que a tabela acima existe para evitar.
+
+Antes de subir o serviço aqui, uma das três:
+
+1. **volume extra** (§6, "Descarga periódica ou volume extra") — 80 GB para
+   72 h sem tocar na máquina;
+2. **redimensionar o droplet**;
+3. **descarga a cada ~12 h** com `scripts/purge_recordings.sh`, que ainda
+   exige mais que os 23 GB atuais.
+
+**Decisão de 2026-09-09:** a gravação de 72 h daquele momento rodou no **Mac**
+(98 GB livres, em container Docker), e não aqui. A VPS foi atualizada e ficou
+pronta, mas sem serviço ativo — o disco é o que falta, não o software.
+
 ### Quanto disco pedir
 
 | Objetivo | Disco | Precisa de descarga durante a gravação? |
