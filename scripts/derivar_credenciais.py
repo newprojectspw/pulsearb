@@ -63,25 +63,27 @@ def _fazer_pedido(http: httpx.AsyncClient, base: str):
 
 
 def _gravar(destino: Path, creds: Any) -> None:
-    """Escreve o arquivo `0600`. O `umask` vem ANTES da criação: corrigir a
-    permissão depois deixa uma janela em que o segredo está legível."""
-    anterior = os.umask(0o077)
-    try:
-        destino.write_text(
-            "\n".join(
-                [
-                    f"PULSEARB_API_KEY={creds.api_key}",
-                    f"PULSEARB_API_SEGREDO={creds.segredo}",
-                    f"PULSEARB_API_PASSPHRASE={creds.passphrase}",
-                    f"PULSEARB_ENDERECO={creds.endereco}",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-    finally:
-        os.umask(anterior)
-    destino.chmod(0o600)
+    """Escreve o arquivo `0600` de forma ATÔMICA.
+
+    `os.open` com `O_CREAT | O_EXCL` cria o arquivo aqui mesmo ou falha: nunca
+    sobrescreve e nunca segue um symlink. Isso fecha a janela entre o
+    `exists()` do `main` e a escrita — em que outro processo, ou um symlink de
+    atacante, poderia surgir no caminho — e dispensa o `chmod` posterior, que
+    deixaria o segredo legível por um instante. O modo `0o600` vai no próprio
+    `open`, não depois. Mesmo idioma de criação exclusiva já usado em
+    `live/shadow.py`."""
+    conteudo = "\n".join(
+        [
+            f"PULSEARB_API_KEY={creds.api_key}",
+            f"PULSEARB_API_SEGREDO={creds.segredo}",
+            f"PULSEARB_API_PASSPHRASE={creds.passphrase}",
+            f"PULSEARB_ENDERECO={creds.endereco}",
+            "",
+        ]
+    )
+    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
+        arquivo.write(conteudo)
 
 
 async def _principal(destino: Path) -> int:
@@ -113,7 +115,18 @@ async def _principal(destino: Path) -> int:
             print(f"\nfalhou: {erro}", file=sys.stderr)
             return 1
 
-    _gravar(destino, creds)
+    try:
+        _gravar(destino, creds)
+    except FileExistsError:
+        # A criação exclusiva recusou: o caminho passou a existir entre o
+        # `exists()` do `main` e agora. Falha em segurança — não sobrescreve.
+        print(
+            f"\n{destino} passou a existir durante a derivacao — nao vou "
+            "sobrescrever credencial. Apague ou passe outro caminho e rode de novo.",
+            file=sys.stderr,
+        )
+        return 2
+
     print(f"\ncredenciais gravadas em {destino} (0600)")
     print("variaveis: PULSEARB_API_KEY, PULSEARB_API_SEGREDO, "
           "PULSEARB_API_PASSPHRASE, PULSEARB_ENDERECO")
@@ -127,7 +140,25 @@ async def _principal(destino: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    destino = Path(args[0]) if args else Path(DESTINO_PADRAO)
+    bruto = args[0] if args else DESTINO_PADRAO
+
+    # Valida o caminho ANTES de tocar o filesystem: `bruto` vem de `sys.argv`, e
+    # um `..` — ou um caminho absoluto — escaparia do diretorio de trabalho e
+    # gravaria a credencial onde nao deve. `realpath` normaliza (resolve `..` e
+    # symlinks) e `commonpath` exige que o alvo fique DENTRO do cwd, que e onde
+    # o RUNBOOK §8.1 manda gravar. Padrao de sanitizacao da regra de path
+    # injection do Sonar.
+    base = os.path.realpath(os.getcwd())
+    alvo = os.path.realpath(os.path.join(base, bruto))
+    if base != alvo and os.path.commonpath((base, alvo)) != base:
+        print(
+            f"caminho invalido: {bruto} sai do diretorio de trabalho ({base}). "
+            "Passe um caminho dentro do diretorio atual.",
+            file=sys.stderr,
+        )
+        return 2
+    destino = Path(alvo)
+
     if destino.exists():
         print(
             f"{destino} ja existe. Nao vou sobrescrever credencial existente — "
