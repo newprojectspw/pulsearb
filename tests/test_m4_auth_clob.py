@@ -360,3 +360,127 @@ class TestOSegredoMalformadoNaoViraChaveVazia:
         """`validate` só existe em `b64decode`, então traduzimos `-_` para
         `+/` antes. O byte de saída tem de continuar sendo o do urlsafe."""
         assert _credenciais().segredo_em_bytes() == base64.urlsafe_b64decode(SEGREDO)
+
+
+class TestDerivarCredenciais:
+    """Passo 6 do RUNBOOK §8.1 — o passo que não tinha código.
+
+    `cabecalhos_l1` existia e dizia no docstring que servia para derivar, mas
+    ninguém chamava `/auth/derive-api-key`. Sem isto o operador não conseguia
+    executar o passo 6 nem com a chave na mão.
+    """
+
+    class _Assinador:
+        endereco = "0xaAe999E43c9F01B5B73544ee1d478b1B31210C8C"
+
+        def assinar_typed_data(self, typed_data):
+            return "0xassinatura"
+
+    def _pedir(self, *respostas):
+        chamadas = []
+
+        async def pedir(metodo, caminho, cabecalhos):
+            chamadas.append((metodo, caminho, cabecalhos))
+            return respostas[len(chamadas) - 1]
+
+        pedir.chamadas = chamadas
+        return pedir
+
+    async def test_cria_na_primeira_vez(self):
+        from pulsearb.execution.auth import derivar_credenciais
+
+        pedir = self._pedir(
+            (200, {"apiKey": "k", "secret": "c2VncmVkbw==", "passphrase": "p"})
+        )
+
+        creds = await derivar_credenciais(self._Assinador(), pedir=pedir)
+
+        assert creds.api_key == "k"
+        assert creds.endereco == self._Assinador.endereco
+        assert pedir.chamadas[0][:2] == ("POST", "/auth/api-key")
+
+    async def test_400_na_criacao_CAI_para_derivar(self):
+        """400 ali não é erro: é o servidor dizendo que a credencial daquele
+        endereço já existe. Só criar falharia da segunda vez em diante."""
+        from pulsearb.execution.auth import derivar_credenciais
+
+        pedir = self._pedir(
+            (400, {"error": "already exists"}),
+            (200, {"apiKey": "k2", "secret": "c2VncmVkbw==", "passphrase": "p2"}),
+        )
+
+        creds = await derivar_credenciais(self._Assinador(), pedir=pedir)
+
+        assert creds.api_key == "k2"
+        assert [c[:2] for c in pedir.chamadas] == [
+            ("POST", "/auth/api-key"),
+            ("GET", "/auth/derive-api-key"),
+        ]
+
+    async def test_manda_os_quatro_cabecalhos_do_L1(self):
+        from pulsearb.execution.auth import derivar_credenciais
+
+        pedir = self._pedir(
+            (200, {"apiKey": "k", "secret": "c2VncmVkbw==", "passphrase": "p"})
+        )
+
+        await derivar_credenciais(self._Assinador(), pedir=pedir)
+
+        cabecalhos = pedir.chamadas[0][2]
+        assert set(cabecalhos) == {
+            "POLY_ADDRESS",
+            "POLY_SIGNATURE",
+            "POLY_TIMESTAMP",
+            "POLY_NONCE",
+        }
+
+    async def test_status_ruim_LEVANTA_e_nao_devolve_credencial_vazia(self):
+        from pulsearb.execution.auth import ErroDeDerivacao, derivar_credenciais
+
+        pedir = self._pedir((401, {"error": "unauthorized"}))
+
+        with pytest.raises(ErroDeDerivacao, match="status=401"):
+            await derivar_credenciais(self._Assinador(), pedir=pedir)
+
+
+class TestCredenciaisDaResposta:
+    """A armadilha do `apiKey` em camelCase."""
+
+    def test_le_apiKey_e_nao_key(self):
+        """O SDK chama de `key` e o nosso campo é `api_key`; o FIO manda
+        `apiKey`. Ler qualquer um dos outros devolveria None em silêncio, e a
+        credencial sairia vazia — falhando depois, no envio, longe da causa."""
+        from pulsearb.execution.auth import credenciais_da_resposta
+
+        creds = credenciais_da_resposta(
+            {"apiKey": "k", "secret": "c2VncmVkbw==", "passphrase": "p"},
+            endereco="0xabc",
+        )
+
+        assert creds.api_key == "k"
+
+    def test_campo_faltando_LEVANTA_nomeando_o_que_faltou(self):
+        from pulsearb.execution.auth import ErroDeDerivacao, credenciais_da_resposta
+
+        with pytest.raises(ErroDeDerivacao, match="passphrase"):
+            credenciais_da_resposta(
+                {"apiKey": "k", "secret": "s"}, endereco="0xabc"
+            )
+
+    def test_a_mensagem_de_erro_NAO_traz_os_valores(self):
+        """Um deles é o segredo, e mensagem de erro vai para log."""
+        from pulsearb.execution.auth import ErroDeDerivacao, credenciais_da_resposta
+
+        with pytest.raises(ErroDeDerivacao) as erro:
+            credenciais_da_resposta(
+                {"apiKey": "k", "secret": "SEGREDO-QUE-NAO-PODE-VAZAR"},
+                endereco="0xabc",
+            )
+
+        assert "SEGREDO-QUE-NAO-PODE-VAZAR" not in str(erro.value)
+
+    def test_resposta_que_nao_e_objeto_LEVANTA(self):
+        from pulsearb.execution.auth import ErroDeDerivacao, credenciais_da_resposta
+
+        with pytest.raises(ErroDeDerivacao, match="nao e objeto"):
+            credenciais_da_resposta(["lista"], endereco="0xabc")
