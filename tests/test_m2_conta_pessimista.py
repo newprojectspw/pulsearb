@@ -206,3 +206,45 @@ class TestRewardZeroDecideSozinho:
 
         assert conta["decidido_por_reward_zero"] is False
         assert conta["fecha_no_pior_caso"] is True
+
+
+class TestMedidaDeAusenciaVersusAusenciaDeMedida:
+    """O defeito que o ensaio sobre gravação real achou em 2026-09-09.
+
+    A simulação de rewards só gera recorte para janela COM pool. Quando
+    nenhuma tem, `por_ordem` chega vazio — e isso é indistinguível, pela
+    forma, de "não medi nada". Mas são casos opostos, e o primeiro tem
+    veredito.
+    """
+
+    def _sem_pool(self, total):
+        return {"por_ordem": {}, "janelas_sem_pool_de_reward": {"total": total}}
+
+    def test_janelas_MEDIDAS_sem_pool_decidem_mesmo_sem_recorte(self):
+        """2 janelas olhadas, nenhuma com pool: rewards é zero MEDIDO, e o
+        limite fecha negativo qualquer que seja o custo."""
+        conta = conta_pessimista_do_maker(
+            rewards=self._sem_pool(2), markout=_markout()
+        )
+
+        assert conta["decidido_por_reward_zero"] is True
+        assert conta["avaliavel"] is True
+        assert conta["fecha_no_pior_caso"] is False
+
+    def test_NENHUMA_janela_olhada_continua_sem_decidir(self):
+        """`total: 0` é o caso do relatório que não mediu nada — e aí o zero
+        de rewards é ausência de medida, não medida de ausência."""
+        conta = conta_pessimista_do_maker(
+            rewards=self._sem_pool(0), markout=_markout()
+        )
+
+        assert conta["decidido_por_reward_zero"] is False
+        assert conta["avaliavel"] is False
+        assert conta["fecha_no_pior_caso"] is None
+
+    def test_relatorio_sem_a_secao_de_sem_pool_nao_decide(self):
+        """Relatório antigo, ou de outra forma, não pode virar veredito."""
+        conta = conta_pessimista_do_maker(rewards={"por_ordem": {}}, markout={})
+
+        assert conta["decidido_por_reward_zero"] is False
+        assert conta["fecha_no_pior_caso"] is None

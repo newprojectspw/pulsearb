@@ -912,10 +912,23 @@ def conta_pessimista_do_maker(
     # `sem_recortes` separa "medi zero rewards em N janelas" de "nao medi
     # nada": sem nenhum recorte, o total tambem e 0.0, e ai o zero e ausencia
     # de medida, nao medida de ausencia.
-    sem_recortes = not por_recorte
-    decidido_por_reward_zero = (
-        faltando and not sem_recortes and total_rewards <= 0.0
-    )
+    # `sem_recortes` sozinho NAO era o discriminador certo, e o ensaio de
+    # 2026-09-09 sobre gravacao real mostrou por que: a simulacao de rewards so
+    # gera recorte para janela COM pool. Quando NENHUMA tem, `por_ordem` chega
+    # vazio — e isso e indistinguivel, pela forma, de "nao medi nada".
+    #
+    # Sao casos opostos:
+    #   - nao medi nada           -> ausencia de medida, NAO decide
+    #   - medi N janelas, 0 com pool -> MEDIDA de ausencia, decide
+    #
+    # O que os separa esta no proprio relatorio de rewards: quantas janelas a
+    # medicao OLHOU. `janelas_sem_pool_de_reward.total` > 0 prova que houve
+    # medicao e que ela nao achou pool — que e exatamente a evidencia que
+    # sustenta o veredito.
+    sem_pool = rewards.get("janelas_sem_pool_de_reward") or {}
+    janelas_medidas_sem_pool = sem_pool.get("total") or 0
+    houve_medicao = bool(por_recorte) or janelas_medidas_sem_pool > 0
+    decidido_por_reward_zero = faltando and houve_medicao and total_rewards <= 0.0
 
     return {
         "avaliavel": (not faltando) or decidido_por_reward_zero,
