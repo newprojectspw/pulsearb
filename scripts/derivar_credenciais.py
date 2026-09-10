@@ -63,15 +63,24 @@ def _fazer_pedido(http: httpx.AsyncClient, base: str):
 
 
 def _gravar(destino: Path, creds: Any) -> None:
-    """Escreve o arquivo `0600` de forma ATÔMICA.
+    """Escreve o arquivo `0600` de forma ATÔMICA e confinada ao cwd.
 
-    `os.open` com `O_CREAT | O_EXCL` cria o arquivo aqui mesmo ou falha: nunca
-    sobrescreve e nunca segue um symlink. Isso fecha a janela entre o
-    `exists()` do `main` e a escrita — em que outro processo, ou um symlink de
-    atacante, poderia surgir no caminho — e dispensa o `chmod` posterior, que
-    deixaria o segredo legível por um instante. O modo `0o600` vai no próprio
-    `open`, não depois. Mesmo idioma de criação exclusiva já usado em
-    `live/shadow.py`."""
+    `destino` deriva de `sys.argv`, entao a validacao vem IMEDIATAMENTE antes do
+    `os.open` e e o valor ja validado (`alvo`) que vai ao sink: `realpath`
+    normaliza (resolve `..` e symlinks) e `commonpath` exige que o alvo fique
+    DENTRO do diretorio de trabalho, fechando o path traversal.
+
+    `O_CREAT | O_EXCL` cria o arquivo aqui mesmo ou falha: nunca sobrescreve e
+    nunca segue um symlink — fecha a janela entre o `exists()` do `main` e a
+    escrita e dispensa o `chmod` posterior, que deixaria o segredo legivel por
+    um instante. O modo `0o600` vai no proprio `open`. Mesmo idioma de criacao
+    exclusiva ja usado em `live/shadow.py`."""
+    base = os.path.realpath(os.getcwd())
+    alvo = os.path.realpath(os.fspath(destino))
+    if base != alvo and os.path.commonpath((base, alvo)) != base:
+        raise ValueError(
+            f"caminho fora do diretorio de trabalho ({base}): {destino}"
+        )
     conteudo = "\n".join(
         [
             f"PULSEARB_API_KEY={creds.api_key}",
@@ -81,7 +90,7 @@ def _gravar(destino: Path, creds: Any) -> None:
             "",
         ]
     )
-    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(alvo, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
         arquivo.write(conteudo)
 
