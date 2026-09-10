@@ -720,6 +720,95 @@ def conta_do_maker(
 ESTATISTICA_ADVERSA = "min"
 
 
+def _arredonda(valor: float | None, casas: int = 6) -> float | None:
+    """`round()`, mas None-safe: propaga a ausência de dado em vez de estourar."""
+    return None if valor is None else round(valor, casas)
+
+
+def _custo_usdc(centavos: float | None, shares: float | None) -> float | None:
+    """|markout| (centavos/share) × shares → USDC de custo, ou None se faltar dado.
+
+    `abs` porque markout negativo é CUSTO: somá-lo com o sinal viraria receita.
+    """
+    if centavos is None or shares is None:
+        return None
+    return abs(centavos) / 100.0 * shares
+
+
+def _liquido_pessimista(receita: float, custo: float | None) -> float | None:
+    """rewards − custo, None-safe: sem custo medido não há líquido a reportar."""
+    return None if custo is None else round(receita - custo, 6)
+
+
+def _linha_pessimista(
+    nome_da_ordem: str,
+    recorte: str,
+    dados: dict[str, Any],
+    tabela_markout: dict[str, Any],
+    horizonte_markout: str,
+    shares: float | None,
+    estatistica_adversa: str,
+) -> tuple[str, dict[str, Any], float, float, float]:
+    """Uma linha (recorte) da conta pessimista: chave, valores, receita e custos.
+
+    Extraída do laço de `conta_pessimista_do_maker` para mantê-lo legível — a
+    linha é só aritmética por recorte, sem estado entre iterações. Devolve
+    também `receita` e os dois custos JÁ prontos para somar (custo ausente vira
+    0.0), para o laço acumular os totais sem recalcular nem ramificar.
+    """
+    dist = (tabela_markout.get(recorte) or {}).get(horizonte_markout) or {}
+    receita = dados.get("receita_usdc") or 0.0
+    adverso_cent = dist.get(estatistica_adversa)
+    medio_cent = dist.get("media")
+    custo_pior = _custo_usdc(adverso_cent, shares)
+    custo_medio = _custo_usdc(medio_cent, shares)
+
+    chave = f"{nome_da_ordem} | {recorte}"
+    linha = {
+        "horas_de_amostra": dados.get("horas_de_amostra") or 0.0,
+        "rewards_usdc": round(receita, 6),
+        "shares_executadas_no_pior_caso": shares,
+        "markout_adverso_centavos_por_share": adverso_cent,
+        "markout_medio_centavos_por_share": medio_cent,
+        "execucoes_no_markout": dist.get("n", 0),
+        "custo_no_pior_caso_usdc": _arredonda(custo_pior),
+        "liquido_no_pior_caso_usdc": _liquido_pessimista(receita, custo_pior),
+        "liquido_no_markout_medio_usdc": _liquido_pessimista(receita, custo_medio),
+    }
+    return chave, linha, receita, custo_pior or 0.0, custo_medio or 0.0
+
+
+def _fecha_no_pior_caso(
+    decidido_por_reward_zero: bool, liquido_pior: float | None
+) -> bool | None:
+    """Veredito do 1.6: positivo SEM depender de nenhuma hipótese de fila.
+
+    `False` quando rewards zero já decidiu o item; `None` quando ainda falta o
+    dado; senão, o sinal do líquido no pior caso.
+    """
+    if decidido_por_reward_zero:
+        return False
+    if liquido_pior is None:
+        return None
+    return liquido_pior > 0.0
+
+
+def _o_que_falta_pessimista(
+    faltando: bool, decidido_por_reward_zero: bool
+) -> list[str]:
+    """O único dado que falta para avaliar — lista vazia se já está avaliável."""
+    if (not faltando) or decidido_por_reward_zero:
+        return []
+    return [
+        (
+            "shares_executadas_por_recorte: quantas shares nossas teriam "
+            "sido varridas, por recorte. Sai de CONTAR varreduras de nivel "
+            "na gravacao — nao precisa da fila, precisa do livro no tempo. "
+            "E o unico dado que falta, e ele exige a gravacao de >=72h (4.1)."
+        )
+    ]
+
+
 def conta_pessimista_do_maker(
     *,
     rewards: dict[str, Any],
@@ -777,6 +866,7 @@ def conta_pessimista_do_maker(
     tabela_markout = markout.get("markout_centavos_por_share") or {}
     por_ordem = rewards.get("por_ordem") or {}
     faltando = shares_executadas_por_recorte is None
+    shares_por_recorte = shares_executadas_por_recorte or {}
 
     por_recorte: dict[str, dict[str, Any]] = {}
     total_rewards = 0.0
@@ -785,59 +875,51 @@ def conta_pessimista_do_maker(
 
     for nome_da_ordem, recortes in por_ordem.items():
         for recorte, dados in recortes.items():
-            horas = dados.get("horas_de_amostra") or 0.0
-            receita = dados.get("receita_usdc") or 0.0
-            dist = (tabela_markout.get(recorte) or {}).get(horizonte_markout) or {}
-            adverso_cent = dist.get(estatistica_adversa)
-            medio_cent = dist.get("media")
-            shares = (
-                (shares_executadas_por_recorte or {}).get(recorte)
-                if not faltando
-                else None
+            # shares ausente vira None (dict vazio quando `faltando`), e sem
+            # shares o custo sai None — o recorte não entra na soma dos custos.
+            chave, linha, receita, custo_pior, custo_medio = _linha_pessimista(
+                nome_da_ordem,
+                recorte,
+                dados,
+                tabela_markout,
+                horizonte_markout,
+                shares_por_recorte.get(recorte),
+                estatistica_adversa,
             )
-
-            # centavos por share -> USDC. `abs` porque markout negativo é
-            # CUSTO: somá-lo com o sinal viraria receita.
-            custo_pior = (
-                abs(adverso_cent) / 100.0 * shares
-                if (adverso_cent is not None and shares is not None)
-                else None
-            )
-            custo_medio = (
-                abs(medio_cent) / 100.0 * shares
-                if (medio_cent is not None and shares is not None)
-                else None
-            )
-
-            chave = f"{nome_da_ordem} | {recorte}"
-            por_recorte[chave] = {
-                "horas_de_amostra": horas,
-                "rewards_usdc": round(receita, 6),
-                "shares_executadas_no_pior_caso": shares,
-                "markout_adverso_centavos_por_share": adverso_cent,
-                "markout_medio_centavos_por_share": medio_cent,
-                "execucoes_no_markout": dist.get("n", 0),
-                "custo_no_pior_caso_usdc": (
-                    round(custo_pior, 6) if custo_pior is not None else None
-                ),
-                "liquido_no_pior_caso_usdc": (
-                    round(receita - custo_pior, 6) if custo_pior is not None else None
-                ),
-                "liquido_no_markout_medio_usdc": (
-                    round(receita - custo_medio, 6) if custo_medio is not None else None
-                ),
-            }
+            por_recorte[chave] = linha
             total_rewards += receita
-            if custo_pior is not None:
-                total_custo_pior += custo_pior
-            if custo_medio is not None:
-                total_custo_medio += custo_medio
+            total_custo_pior += custo_pior
+            total_custo_medio += custo_medio
 
     liquido_pior = None if faltando else round(total_rewards - total_custo_pior, 6)
     liquido_medio = None if faltando else round(total_rewards - total_custo_medio, 6)
 
+    # REWARDS ZERO DECIDE SOZINHO, e por isso este ramo existe.
+    #
+    # O limite e `liquido = rewards - custo`, e o custo NUNCA e negativo: ele
+    # sai de |markout| * shares, com os dois fatores >= 0. Entao rewards = 0
+    # implica liquido <= 0 qualquer que seja o numero de shares varridas — o
+    # dado que falta deixa de ser necessario, porque nao ha valor dele que
+    # mude o SINAL.
+    #
+    # Reconhecer isso nao e afrouxar a falha fechada: e o oposto. A falha
+    # fechada existe para nao inventar numero ausente; aqui nao se inventa
+    # nada, apenas se nota que a resposta nao depende dele. Continuar
+    # devolvendo `avaliavel: false` seria esconder um veredito que a medida
+    # JA sustenta — e um item que fica ⬜ quando podia ser ❌ e um item que
+    # ninguem sabe que foi decidido.
+    #
+    # `sem_recortes` separa "medi zero rewards em N janelas" de "nao medi
+    # nada": sem nenhum recorte, o total tambem e 0.0, e ai o zero e ausencia
+    # de medida, nao medida de ausencia.
+    sem_recortes = not por_recorte
+    decidido_por_reward_zero = (
+        faltando and not sem_recortes and total_rewards <= 0.0
+    )
+
     return {
-        "avaliavel": not faltando,
+        "avaliavel": (not faltando) or decidido_por_reward_zero,
+        "decidido_por_reward_zero": decidido_por_reward_zero,
         "por_ordem_e_recorte": dict(sorted(por_recorte.items())),
         "total_rewards_usdc": round(total_rewards, 6),
         "total_custo_no_pior_caso_usdc": (
@@ -847,8 +929,8 @@ def conta_pessimista_do_maker(
         "liquido_no_markout_medio_usdc": liquido_medio,
         # A resposta que o 4.1 pede, e só ela fecha o critério: positivo aqui
         # quer dizer positivo SEM depender de nenhuma hipótese de fila.
-        "fecha_no_pior_caso": (
-            None if liquido_pior is None else liquido_pior > 0.0
+        "fecha_no_pior_caso": _fecha_no_pior_caso(
+            decidido_por_reward_zero, liquido_pior
         ),
         "estatistica_adversa": estatistica_adversa,
         "formula": (
@@ -864,16 +946,7 @@ def conta_pessimista_do_maker(
             "de markout pior, e o custo usa a estatistica adversa da distribuicao "
             "em vez da media. O resultado real so pode ser melhor que este."
         ),
-        "o_que_falta_para_avaliar": (
-            []
-            if not faltando
-            else [
-                (
-                    "shares_executadas_por_recorte: quantas shares nossas teriam "
-                    "sido varridas, por recorte. Sai de CONTAR varreduras de nivel "
-                    "na gravacao — nao precisa da fila, precisa do livro no tempo. "
-                    "E o unico dado que falta, e ele exige a gravacao de >=72h (4.1)."
-                )
-            ]
+        "o_que_falta_para_avaliar": _o_que_falta_pessimista(
+            faltando, decidido_por_reward_zero
         ),
     }

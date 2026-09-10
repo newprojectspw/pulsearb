@@ -149,3 +149,60 @@ class TestFechaNoPiorCaso:
         assert "OMITIDO" in conta["formula"]
         # A propriedade do limite, dita em texto: o real só pode ser melhor.
         assert "so pode ser melhor" in conta["por_que_e_um_limite_inferior"]
+
+
+class TestRewardZeroDecideSozinho:
+    """Quando rewards é zero, o dado que falta deixa de ser necessário.
+
+    O limite é `líquido = rewards − custo`, e o custo nunca é negativo: sai de
+    `|markout| × shares`, com os dois fatores ≥ 0. Então rewards = 0 implica
+    líquido ≤ 0 qualquer que seja o número de shares varridas — nenhum valor
+    dele muda o SINAL.
+
+    Isto não afrouxa a falha fechada: ela existe para não inventar número
+    ausente, e aqui nada é inventado. Continuar devolvendo `avaliavel: false`
+    esconderia um veredito que a medida já sustenta.
+    """
+
+    def test_reward_zero_decide_MESMO_sem_o_dado_de_execucao(self):
+        conta = conta_pessimista_do_maker(
+            rewards=_rewards(receita=0.0),
+            markout=_markout(),
+            # sem `shares_executadas_por_recorte`
+        )
+
+        assert conta["avaliavel"] is True
+        assert conta["decidido_por_reward_zero"] is True
+        assert conta["fecha_no_pior_caso"] is False
+
+    def test_reward_POSITIVO_sem_o_dado_continua_NAO_avaliavel(self):
+        """O ramo novo vale só quando o sinal já está determinado. Com receita
+        positiva, o custo decide — e o custo depende do dado que falta."""
+        conta = conta_pessimista_do_maker(
+            rewards=_rewards(receita=10.0), markout=_markout()
+        )
+
+        assert conta["avaliavel"] is False
+        assert conta["decidido_por_reward_zero"] is False
+        assert conta["fecha_no_pior_caso"] is None
+
+    def test_SEM_RECORTE_NENHUM_nao_decide_nada(self):
+        """A distinção que impede o defeito do `cobertura_da_gravacao`: sem
+        nenhum recorte o total também é 0,0, mas aí o zero é AUSÊNCIA de
+        medida, não medida de ausência."""
+        conta = conta_pessimista_do_maker(rewards={"por_ordem": {}}, markout={})
+
+        assert conta["avaliavel"] is False
+        assert conta["decidido_por_reward_zero"] is False
+        assert conta["fecha_no_pior_caso"] is None
+
+    def test_com_o_dado_presente_o_ramo_novo_nao_interfere(self):
+        """Tendo shares, a conta normal roda e o ramo especial fica de fora."""
+        conta = conta_pessimista_do_maker(
+            rewards=_rewards(receita=10.0),
+            markout=_markout(minimo=-1.0),
+            shares_executadas_por_recorte={"btc | 5m": 100.0},
+        )
+
+        assert conta["decidido_por_reward_zero"] is False
+        assert conta["fecha_no_pior_caso"] is True
