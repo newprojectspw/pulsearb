@@ -59,6 +59,7 @@ import httpx
 
 from pulsearb.execution.auth import CredenciaisL2, assinar_l2
 from pulsearb.execution.cliente import (
+    MOTIVOS_DE_RECUSA,
     ClienteDeOrdens,
     EstadoDoEnvio,
     fazer_transporte,
@@ -225,11 +226,28 @@ async def _principal() -> int:
     print(f"detalhe: {resultado.detalhe}")
 
     if resultado.estado is EstadoDoEnvio.RECUSADA:
+        if resultado.motivo == MOTIVOS_DE_RECUSA.AUTH_RECUSADA:
+            # A distincao que a primeira versao errou: ela imprimia "desfecho
+            # esperado" e logo abaixo dizia "se o motivo nao for
+            # auth_recusada" — texto condicional impresso incondicionalmente.
+            # Recusa por AUTH nao fecha o 3.5: ela nao prova que o corpo
+            # estava bem formado, porque o servidor parou antes de olhar.
+            print(
+                "\nNAO fecha o 3.5. A recusa foi de AUTENTICACAO/PERMISSAO, "
+                "entao o servidor nao chegou a avaliar o corpo da ordem.\n\n"
+                "Se a leitura de saldo acima funcionou, a assinatura L2 esta "
+                "CERTA — ela usa o mesmo mecanismo. Um 403 aqui aponta para "
+                "permissao da CONTA para a acao (sem colateral, sem allowance, "
+                "ou conta nao habilitada), nao para a assinatura.\n"
+                "O corpo da resposta esta em `detalhe` acima.",
+                file=sys.stderr,
+            )
+            return 1
         print(
             "\nE O DESFECHO ESPERADO. Recusa e RESPOSTA: o servidor leu a "
-            "ordem assinada e disse nao. Se o motivo nao for `auth_recusada`, "
-            "a assinatura L2 foi ACEITA e o corpo estava bem formado — que e "
-            "exatamente o que o 3.5 pedia para ser provado."
+            "ordem assinada e disse nao, por motivo de NEGOCIO. Isso prova que "
+            "a assinatura L2 foi aceita e o corpo estava bem formado — que e "
+            "exatamente o que o 3.5 pedia."
         )
         return 0
     if resultado.estado is EstadoDoEnvio.ACEITA:
