@@ -424,3 +424,117 @@ class TestOTimestampNaoTemDefault:
 
         assert abs(medido - segundos * 1000) < 5000
         assert medido > 1_000_000_000_000
+
+
+class TestConstrutorDeOrdemLocal:
+    """3.5 — a peça que faltava: o corpo assinado de verdade.
+
+    O `cliente.py` declarava `ConstrutorDeOrdem` como Protocol e as únicas
+    implementações eram dublês de teste. O caminho inteiro estava coberto e
+    **não havia jeito de produzir uma ordem real**.
+    """
+
+    class _Assinador:
+        """Dublê do assinador. `vistos` é de INSTÂNCIA, não de classe: como
+        atributo de classe ele acumularia entre testes, e o caso do `neg_risk`
+        — que conta exatamente dois typed data — passaria ou falharia conforme
+        a ordem em que a suíte rodasse."""
+
+        endereco = "0xaAe999E43c9F01B5B73544ee1d478b1B31210C8C"
+
+        def __init__(self):
+            self.vistos: list = []
+
+        def assinar_typed_data(self, typed_data):
+            self.vistos.append(typed_data)
+            return "0xassinatura"
+
+    class _Creds:
+        api_key = "a-chave-de-api"
+
+    def _construtor(self, **kw):
+        from pulsearb.execution.ordem import ConstrutorDeOrdemLocal
+
+        return ConstrutorDeOrdemLocal(self._Assinador(), self._Creds(), **kw)
+
+    def _ordem(self, shares=5.0, preco=0.50):
+        from pulsearb.risk import OrdemPretendida
+
+        return OrdemPretendida(
+            slug="btc-updown-5m-1",
+            token_id="123456",
+            lado_up=True,
+            shares=shares,
+            preco_limite=preco,
+        )
+
+    def test_o_corpo_tem_a_forma_do_SDK(self):
+        """`[VERIFICADO]` `_build_send_order_payload`: deferExec, order, owner."""
+        corpo = self._construtor().corpo_da_ordem(self._ordem(), id_do_cliente="x")
+
+        assert set(corpo) == {"deferExec", "order", "owner"}
+        assert corpo["deferExec"] is False
+        assert set(corpo["order"]) == {
+            "builder", "expiration", "maker", "makerAmount", "metadata",
+            "salt", "side", "signature", "signatureType", "signer",
+            "takerAmount", "timestamp", "tokenId",
+        }
+
+    def test_owner_e_a_API_KEY_e_nao_o_endereco(self):
+        """A armadilha do corpo: pôr o endereço dá uma ordem bem formada que o
+        servidor recusa por dono desconhecido, sem apontar o campo."""
+        corpo = self._construtor().corpo_da_ordem(self._ordem(), id_do_cliente="x")
+
+        assert corpo["owner"] == "a-chave-de-api"
+        assert corpo["owner"] != self._Assinador.endereco
+
+    def test_os_montantes_saem_de_valores_da_ordem(self):
+        """Em COMPRA, makerAmount é dinheiro e takerAmount é quantidade —
+        trocar os dois produz ordem válida com preço invertido."""
+        from decimal import Decimal
+
+        from pulsearb.execution.ordem import valores_da_ordem
+
+        corpo = self._construtor().corpo_da_ordem(
+            self._ordem(shares=5.0, preco=0.50), id_do_cliente="x"
+        )
+        esperado = valores_da_ordem(
+            preco=Decimal("0.50"), tamanho=Decimal("5.0"), compra=True, tick="0.01"
+        )
+
+        assert (int(corpo["order"]["makerAmount"]), int(corpo["order"]["takerAmount"])) == esperado
+
+    def test_o_id_do_cliente_NAO_vai_no_fio(self):
+        """O corpo do CLOB não tem campo para ele, e enfiá-lo em `metadata`
+        mudaria o hash assinado — `metadata` está em `_ORDER_FIELDS`."""
+        corpo = self._construtor().corpo_da_ordem(
+            self._ordem(), id_do_cliente="id-secreto-do-cliente"
+        )
+
+        assert "id-secreto-do-cliente" not in str(corpo)
+
+    def test_neg_risk_troca_o_exchange_no_typed_data(self):
+        """O domínio EIP-712 assina o `verifyingContract`: exchange errado
+        produz assinatura que o servidor não reproduz."""
+        from pulsearb.execution.ordem import EXCHANGE_NEG_RISK, EXCHANGE_PADRAO
+
+        a = self._Assinador()
+        from pulsearb.execution.ordem import ConstrutorDeOrdemLocal
+
+        ConstrutorDeOrdemLocal(a, self._Creds()).corpo_da_ordem(
+            self._ordem(), id_do_cliente="x"
+        )
+        ConstrutorDeOrdemLocal(a, self._Creds(), neg_risk=True).corpo_da_ordem(
+            self._ordem(), id_do_cliente="x"
+        )
+
+        contratos = [td["domain"]["verifyingContract"] for td in a.vistos]
+        assert contratos == [EXCHANGE_PADRAO, EXCHANGE_NEG_RISK]
+
+    def test_tick_desconhecido_falha_em_vez_de_arredondar_por_adivinhacao(self):
+        from pulsearb.execution.ordem import ErroDeOrdem
+
+        with pytest.raises(ErroDeOrdem, match="fora da tabela verificada"):
+            self._construtor(tick_size="0.7").corpo_da_ordem(
+                self._ordem(), id_do_cliente="x"
+            )

@@ -688,7 +688,24 @@ Ordem dos passos:
    allowance nem se retira nada.
 5. **Setar as allowances** dos contratos do CLOB (passo 8.1.1 abaixo).
 6. **Derivar as credenciais de API** pelo L1 — é o único uso da chave privada
-   fora de assinar ordem (API_NOTES §3).
+   fora de assinar ordem (API_NOTES §3). Use `scripts/derivar_credenciais.py`,
+   que grava o arquivo `0600` e **nunca imprime o segredo**.
+
+   **MEDIDO em 2026-09-11: este passo NÃO precisa de carteira fundeada.** O
+   CLOB aceitou a assinatura L1 de uma carteira criada no dia anterior, sem
+   USDC, sem MATIC e sem allowance nenhuma. Ou seja, **6 e 7 podem ser feitos
+   ANTES de 3, 4 e 5** — e vale fazer, porque descobrem de graça se a
+   assinatura L1 é aceita. Travar no passo 6 depois de fundear seria dinheiro
+   parado numa carteira quente esperando um conserto.
+
+   O script exige que o arquivo de saída fique **dentro do diretório de
+   trabalho** — rode a partir de onde o arquivo deve nascer:
+
+   ```bash
+   cd /home/pulsearb && PULSEARB_CHAVE_PRIVADA="$(cat ~/.pulsearb-chave)" \
+     /opt/pulsearb/.venv/bin/python \
+     /opt/pulsearb/scripts/derivar_credenciais.py .env.credenciais
+   ```
 7. **Colocar no ambiente do serviço**, nunca no `config.yaml`, que é
    versionado:
 

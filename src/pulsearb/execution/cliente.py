@@ -502,7 +502,15 @@ class ClienteDeOrdens:
                 estado=EstadoDoEnvio.RECUSADA,
                 id_do_cliente=identificador,
                 motivo=MOTIVOS_DE_RECUSA.AUTH_RECUSADA,
-                detalhe={"status": status},
+                # O CORPO vai junto, e e onde a causa aparece. Guardar so o
+                # status aqui descartava a explicacao do servidor justamente no
+                # caso em que ela mais importa: 401 e 403 chegam pelo mesmo
+                # ramo e querem dizer coisas diferentes — assinatura recusada
+                # versus conta sem permissao para a acao —, e sem o corpo as
+                # duas sao indistinguiveis. Medido em 2026-09-11: um 403 real
+                # no `POST /order` com a MESMA credencial que acabara de ler
+                # `/balance-allowance` com 200.
+                detalhe={"status": status, "resposta": resposta},
             )
 
         if status >= 400 or not resposta or not resposta.get("success", True):

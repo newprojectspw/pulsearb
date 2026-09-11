@@ -40,6 +40,7 @@ QUADRO = RAIZ / "docs" / "ESTADO_PARA_LIVE.md"
 #: A falha deste teste é o lembrete de que o quadro ficou para trás.
 CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_portao_de_risco.py": (47, "3.1/3.6 — os 8 portões"),
+    "test_3_5_smoke_ordem.py": (9, "3.5 — travas do smoke de ordem"),
     # Estas duas sumiram do dicionario em mesclagem (#82 e #83) e ficaram
     # sem cobertura EM SILENCIO: entrada ausente nao falha teste nenhum,
     # ela so deixa de conferir. Mesma perda que ja levou as linhas 4.0 e
@@ -50,10 +51,10 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
     "test_4_0c_reward_ao_vivo.py": (10, "4.0(c) — reward ao vivo"),
     "test_4_0c_laco_maker.py": (12, "4.0(c) — o laço maker"),
-    "test_m4_cliente_de_ordens.py": (68, "3.5 — cliente de ordens"),
+    "test_m4_cliente_de_ordens.py": (71, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (15, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (42, "3.2 — auth do CLOB"),
-    "test_m4_struct_da_ordem.py": (35, "3.2 — struct EIP-712"),
+    "test_m4_struct_da_ordem.py": (41, "3.2 — struct EIP-712"),
     "test_m4_autorizacao_para_live.py": (22, "3.4 — trava tripla do LIVE"),
     "test_m4_shadow.py": (15, "3.3 — modo SHADOW"),
     "test_m4_sincronia_do_relogio.py": (14, "5.4 — NTP"),
