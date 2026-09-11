@@ -53,7 +53,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_cliente_de_ordens.py": (68, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (15, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (42, "3.2 — auth do CLOB"),
-    "test_m4_struct_da_ordem.py": (35, "3.2 — struct EIP-712"),
+    "test_m4_struct_da_ordem.py": (41, "3.2 — struct EIP-712"),
     "test_m4_autorizacao_para_live.py": (22, "3.4 — trava tripla do LIVE"),
     "test_m4_shadow.py": (15, "3.3 — modo SHADOW"),
     "test_m4_sincronia_do_relogio.py": (14, "5.4 — NTP"),
