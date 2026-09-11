@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
 MODULO = "scripts.smoke_ordem_assinada"
 
 
@@ -68,8 +70,12 @@ class TestTrava2Saldo:
         m = _mod()
 
         class _HttpQueFalha:
-            async def get(self, *a, **k):
-                raise RuntimeError("rede caiu")
+            async def request(self, *a, **k):
+                # `HTTPError` e o que o httpx levanta em falha de rede — e a
+                # UNICA familia que pode virar `None`.
+                import httpx
+
+                raise httpx.ConnectError("rede caiu")
 
         from pulsearb.execution.auth import CredenciaisL2
 
@@ -90,7 +96,7 @@ class TestTrava2Saldo:
                 return {"balance": "0"}
 
         class _Http:
-            async def get(self, *a, **k):
+            async def request(self, *a, **k):
                 return _Resp()
 
         from pulsearb.execution.auth import CredenciaisL2
@@ -114,7 +120,8 @@ class TestTrava2Saldo:
                 return {"balance": "0"}
 
         class _Http:
-            async def get(self, url, **k):
+            async def request(self, metodo, url, **k):
+                visto["metodo"] = metodo
                 visto["url"] = url
                 return _Resp()
 
@@ -128,6 +135,32 @@ class TestTrava2Saldo:
         assert "asset_type=COLLATERAL" in visto["url"]
         assert "signature_type=" in visto["url"]
 
+
+    async def test_erro_de_PROGRAMACAO_sobe_em_vez_de_virar_None(self):
+        """O defeito da primeira execução real, virado teste.
+
+        A versão original chamava `http.get(..., content=...)`, que o httpx não
+        aceita. O `TypeError` caía num `except Exception` largo e virava "não
+        consegui ler o saldo" — a leitura nunca tocou a rede, e o operador leu
+        falha de REDE onde havia código quebrado. Duas causas opostas com a
+        mesma mensagem, e a segunda fica invisível até alguém depurar na mão.
+
+        Só falha de rede pode virar `None`.
+        """
+        m = _mod()
+
+        class _HttpComBug:
+            async def request(self, *a, **k):
+                raise TypeError("assinatura de metodo errada")
+
+        from pulsearb.execution.auth import CredenciaisL2
+
+        creds = CredenciaisL2(
+            api_key="k", segredo="c2VncmVkbw==", passphrase="p", endereco="0xabc"
+        )
+
+        with pytest.raises(TypeError):
+            await m._saldo_de_colateral(_HttpComBug(), "https://x", creds)
 
 class TestTrava3OrdemQueNaoExecuta:
     def test_o_preco_nao_cruza(self):
