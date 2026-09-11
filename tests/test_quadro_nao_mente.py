@@ -40,6 +40,7 @@ QUADRO = RAIZ / "docs" / "ESTADO_PARA_LIVE.md"
 #: A falha deste teste é o lembrete de que o quadro ficou para trás.
 CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_portao_de_risco.py": (47, "3.1/3.6 — os 8 portões"),
+    "test_3_5_smoke_ordem.py": (8, "3.5 — travas do smoke de ordem"),
     # Estas duas sumiram do dicionario em mesclagem (#82 e #83) e ficaram
     # sem cobertura EM SILENCIO: entrada ausente nao falha teste nenhum,
     # ela so deixa de conferir. Mesma perda que ja levou as linhas 4.0 e
