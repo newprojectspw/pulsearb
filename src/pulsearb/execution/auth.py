@@ -353,3 +353,111 @@ def cabecalhos_l1(
         "POLY_TIMESTAMP": str(agora),
         "POLY_NONCE": str(nonce),
     }
+
+
+# ------------------------------------------------------------- derivação (3.5)
+#: `[VERIFICADO]` API_NOTES §3 — cria a credencial. Falha com 400 se ela já
+#: existe para o endereço, e aí o caminho é derivar.
+CAMINHO_CRIAR_API_KEY = "/auth/api-key"
+
+#: `[VERIFICADO]` API_NOTES §3 — devolve a credencial JÁ existente do endereço.
+CAMINHO_DERIVAR_API_KEY = "/auth/derive-api-key"
+
+
+class ErroDeDerivacao(ErroDeAuth):
+    """A credencial não pôde ser obtida, e o motivo importa mais que o texto.
+
+    Separada de `ErroDeAuth` porque o operador que roda a derivação está com a
+    chave privada na mão e precisa saber se o problema é dele (assinatura,
+    endereço) ou do servidor — e não confundir "recusou" com "não respondeu".
+    """
+
+
+def credenciais_da_resposta(
+    payload: Any, *, endereco: str
+) -> CredenciaisL2:
+    """A resposta do CLOB vira `CredenciaisL2`, ou levanta dizendo o que veio.
+
+    `[VERIFICADO]` `models/clob/api_key.py::ApiKeyCreds` do SDK 0.6.0: os
+    campos são **`apiKey`** (camelCase!), `secret` e `passphrase`.
+
+    O `apiKey` é a armadilha desta função. O nosso campo se chama `api_key` e o
+    do SDK se chama `key` — ler qualquer um dos dois do payload devolveria
+    `None` em silêncio, e a credencial sairia vazia. Uma credencial vazia não
+    falha aqui: falha depois, no primeiro envio, como `auth_recusada` — longe
+    da causa. É o mesmo modo de falha do `price_change` (§6.1b), e por isso
+    cada campo é conferido e nomeado.
+    """
+    if not isinstance(payload, dict):
+        raise ErroDeDerivacao(
+            f"resposta de credencial nao e objeto JSON: {type(payload).__name__}"
+        )
+    api_key = payload.get("apiKey")
+    segredo = payload.get("secret")
+    passphrase = payload.get("passphrase")
+
+    faltando = [
+        nome
+        for nome, valor in (
+            ("apiKey", api_key),
+            ("secret", segredo),
+            ("passphrase", passphrase),
+        )
+        if not isinstance(valor, str) or not valor
+    ]
+    if faltando:
+        # As chaves PRESENTES vão na mensagem, os VALORES não: uma delas é o
+        # segredo, e mensagem de erro vai para log.
+        raise ErroDeDerivacao(
+            f"resposta de credencial sem os campos {faltando} — "
+            f"chaves recebidas: {sorted(payload)}"
+        )
+    return CredenciaisL2(
+        api_key=api_key,
+        segredo=segredo,
+        passphrase=passphrase,
+        endereco=endereco,
+    )
+
+
+async def derivar_credenciais(
+    assinador: AssinadorL1,
+    *,
+    pedir: Any,
+    nonce: int = 0,
+    chain_id: int = CHAIN_ID_POLYGON,
+) -> CredenciaisL2:
+    """Passo 6 do RUNBOOK §8.1: obtém as credenciais L2 a partir da chave L1.
+
+    `[VERIFICADO]` SDK 0.6.0 (`_internal/actions/auth.py::create_or_derive_api_key`):
+    tenta **criar** (`POST /auth/api-key`) e, se o servidor recusar com **400**,
+    **deriva** (`GET /auth/derive-api-key`). O 400 ali não é erro: é o servidor
+    dizendo que a credencial daquele endereço já existe.
+
+    Fazer só o derive falharia na primeira vez (não há o que derivar); fazer só
+    o create falharia da segunda em diante. É por isso que são os dois, nesta
+    ordem.
+
+    `pedir(metodo, caminho, cabecalhos) -> (status, json)` é injetado: mantém
+    esta função sem rede e testável, e é o mesmo formato do `Transporte` do
+    `cliente.py`.
+
+    **Isto NÃO autoriza LIVE.** A trava tripla do 3.4 continua sendo a única
+    porta. Ter credencial é ter com que assinar, não permissão para enviar.
+    """
+    cabecalhos = cabecalhos_l1(assinador, nonce=nonce, chain_id=chain_id)
+
+    status, payload = await pedir("POST", CAMINHO_CRIAR_API_KEY, cabecalhos)
+    if status == 400:
+        # Já existe para este endereço — deriva a que existe.
+        status, payload = await pedir("GET", CAMINHO_DERIVAR_API_KEY, cabecalhos)
+
+    if status != 200:
+        # NÃO repete o payload inteiro: numa resposta de credencial ele pode
+        # trazer o segredo, e mensagem de erro vai para log.
+        raise ErroDeDerivacao(
+            f"o CLOB nao devolveu credencial: status={status}. "
+            "Confira endereco e assinatura (API_NOTES §3); se o status for 401, "
+            "a assinatura L1 nao foi aceita."
+        )
+    return credenciais_da_resposta(payload, endereco=assinador.endereco)
