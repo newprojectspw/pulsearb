@@ -800,3 +800,39 @@ class TestListarOrdensAbertas:
 
         with pytest.raises(ErroDeLeitura):
             await cliente.listar_ordens_abertas()
+
+
+class TestAuthRecusadaGuardaOCorpo:
+    """401 e 403 chegam pelo MESMO ramo e querem dizer coisas diferentes.
+
+    Medido em 2026-09-11: um `403` real no `POST /order` com a MESMA credencial
+    que acabara de ler `/balance-allowance` com `200`. Sem o corpo da resposta,
+    "assinatura recusada" e "conta sem permissão para a ação" são
+    indistinguíveis — e o operador procura no lugar errado.
+    """
+
+    async def test_403_guarda_a_explicacao_do_servidor(self):
+        cliente = _cliente((403, {"error": "not enough balance / allowance"}))
+
+        r = await cliente.enviar(_ordem(), janela="j1")
+
+        assert r.motivo == MOTIVOS_DE_RECUSA.AUTH_RECUSADA
+        assert r.detalhe["status"] == 403
+        assert r.detalhe["resposta"] == {"error": "not enough balance / allowance"}
+
+    async def test_401_tambem_guarda(self):
+        cliente = _cliente((401, {"error": "invalid signature"}))
+
+        r = await cliente.enviar(_ordem(), janela="j1")
+
+        assert r.detalhe["resposta"] == {"error": "invalid signature"}
+
+    async def test_corpo_ilegivel_nao_quebra_o_detalhe(self):
+        """Um 403 com HTML de proxy continua sendo recusa de auth, e o
+        `resposta: None` diz que não veio JSON."""
+        cliente = _cliente((403, None))
+
+        r = await cliente.enviar(_ordem(), janela="j1")
+
+        assert r.motivo == MOTIVOS_DE_RECUSA.AUTH_RECUSADA
+        assert r.detalhe["resposta"] is None
