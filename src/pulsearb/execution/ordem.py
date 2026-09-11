@@ -378,3 +378,106 @@ class AssinadorLocal:
         arquivo de log é a perda total do capital da carteira.
         """
         return f"AssinadorLocal(endereco={self.endereco})"
+
+
+# ------------------------------------------------- o construtor concreto (3.5)
+#: `[VERIFICADO]` SDK 0.6.0 `_internal/actions/orders/post.py::_build_send_order_payload`:
+#: o corpo do `POST /order` tem `deferExec`, `order` (os campos da struct como
+#: STRING), `orderType` e `owner`.
+#:
+#: `owner` é a **API KEY**, não o endereço — e é a armadilha deste corpo. Pôr o
+#: endereço ali produz uma ordem bem formada que o servidor recusa por dono
+#: desconhecido, e a mensagem não diz qual campo está errado.
+CAMPO_DONO = "owner"
+
+
+class ConstrutorDeOrdemLocal:
+    """Transforma uma `OrdemPretendida` no corpo assinado do `POST /order`.
+
+    É a implementação concreta do `ConstrutorDeOrdem` que o `cliente.py`
+    declara como Protocol. Sem ela o cliente tinha o caminho inteiro testado
+    contra dublês e **nenhum jeito de produzir uma ordem de verdade** — que é
+    exatamente o que faltava para fechar o 3.5.
+
+    ## O que ele junta, e por que cada peça já existia separada
+
+    `valores_da_ordem` (orientação maker/taker e arredondamento por tick),
+    `OrdemNaoAssinada` (os onze campos da struct, na ordem que o hash exige),
+    `typed_data_da_ordem` e o `AssinadorLocal`. Todas verificadas contra o SDK
+    e cobertas por 35 testes. O que faltava era a costura — e a costura tem
+    duas decisões próprias, abaixo.
+
+    ## `owner` é a API KEY, não o endereço
+
+    `[VERIFICADO]` §4.6. O campo se chama `owner` e recebe a chave de API. Pôr
+    o endereço ali dá uma ordem bem formada que o servidor recusa por dono
+    desconhecido, com mensagem que não aponta o campo.
+
+    ## O id do cliente NÃO vai no fio
+
+    O `cliente.py` passa `id_do_cliente` para dedupe do NOSSO lado, e o corpo
+    do CLOB não tem campo para ele (`_build_send_order_payload` não o inclui).
+    Enfiá-lo em `metadata` mudaria o hash assinado — `metadata` está em
+    `_ORDER_FIELDS` —, então a ordem que sai seria diferente da que foi
+    assinada. Ele é aceito e ignorado, de propósito.
+    """
+
+    def __init__(
+        self,
+        assinador: AssinadorLocal,
+        credenciais: Any,
+        *,
+        tick_size: str = "0.01",
+        neg_risk: bool = False,
+        expiracao: int = 0,
+    ) -> None:
+        self.assinador = assinador
+        self.credenciais = credenciais
+        self.tick_size = tick_size
+        self.neg_risk = neg_risk
+        self.expiracao = expiracao
+
+    def corpo_da_ordem(
+        self, ordem: Any, *, id_do_cliente: str
+    ) -> dict[str, Any]:
+        """O corpo pronto para o fio. `id_do_cliente` é aceito e ignorado."""
+        maker_amount, taker_amount = valores_da_ordem(
+            preco=Decimal(str(ordem.preco_limite)),
+            tamanho=Decimal(str(ordem.shares)),
+            compra=True,
+            tick=self.tick_size,
+        )
+        nao_assinada = OrdemNaoAssinada(
+            salt=novo_salt(),
+            maker=self.assinador.endereco,
+            signer=self.assinador.endereco,
+            token_id=ordem.token_id,
+            maker_amount=maker_amount,
+            taker_amount=taker_amount,
+            compra=True,
+            timestamp_ms=agora_em_ms(),
+            expiracao=self.expiracao,
+            neg_risk=self.neg_risk,
+        )
+        assinatura = self.assinador.assinar_typed_data(
+            typed_data_da_ordem(nao_assinada)
+        )
+        return {
+            "deferExec": False,
+            "order": {
+                "builder": nao_assinada.builder,
+                "expiration": str(nao_assinada.expiracao),
+                "maker": nao_assinada.maker,
+                "makerAmount": str(nao_assinada.maker_amount),
+                "metadata": nao_assinada.metadata,
+                "salt": nao_assinada.salt,
+                "side": nao_assinada.lado,
+                "signature": assinatura,
+                "signatureType": nao_assinada.signature_type,
+                "signer": nao_assinada.signer,
+                "takerAmount": str(nao_assinada.taker_amount),
+                "timestamp": str(nao_assinada.timestamp_ms),
+                "tokenId": nao_assinada.token_id,
+            },
+            CAMPO_DONO: self.credenciais.api_key,
+        }
