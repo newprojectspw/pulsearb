@@ -106,14 +106,30 @@ async def _saldo_de_colateral(
         f"{CAMINHO_SALDO}?asset_type=COLLATERAL"
         f"&signature_type={ASSINATURA_EOA_NO_SALDO}"
     )
-    cabecalhos, corpo = assinar_l2(
+    # O corpo assinado e descartado: no GET ele e `b""`, e o httpx nao manda
+    # corpo em GET. O que importa da assinatura sao os cabecalhos.
+    cabecalhos, _ = assinar_l2(
         credenciais, metodo="GET", caminho=CAMINHO_SALDO, corpo=None
     )
+    # `request` e nao `get`: o `get` do httpx NAO aceita `content=`, e a
+    # primeira versao deste script passava o corpo assinado para ele. O
+    # `TypeError` caia no `except` largo abaixo e virava "nao consegui ler o
+    # saldo" — a leitura nunca tocou a rede. Ver o commit que conserta isto.
+    #
+    # O corpo vai vazio de proposito: GET nao tem corpo, e `assinar_l2` ja
+    # devolve `b""` para corpo None. Mandar `b""` ou nao mandar nada da no
+    # mesmo no fio; nao mandar e o que o httpx espera.
     try:
-        resposta = await http.get(
-            base.rstrip("/") + caminho, headers=cabecalhos, content=corpo
+        resposta = await http.request(
+            "GET", base.rstrip("/") + caminho, headers=cabecalhos
         )
-    except Exception:
+    except httpx.HTTPError:
+        # SO falha de REDE vira "nao sei". Um erro de PROGRAMACAO (TypeError,
+        # AttributeError) tem de subir: engoli-lo aqui faz o script relatar
+        # "nao consegui ler o saldo" quando a verdade e "o codigo esta
+        # quebrado" — duas causas opostas com a mesma mensagem, e a segunda
+        # fica invisivel ate alguem depurar na mao. Foi exatamente o que
+        # aconteceu na primeira execucao real.
         return None
     if resposta.status_code != 200:
         return None
