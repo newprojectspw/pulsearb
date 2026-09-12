@@ -256,3 +256,73 @@ def test_a_linha_do_item_nao_sumiu_do_quadro(item, pista):
         "Se o item foi mesmo removido de proposito, tire-o de\n"
         "ITENS_COM_LINHA_OBRIGATORIA no MESMO commit."
     )
+
+
+#: Frases que só aparecem quando um item TEM veredito. Cada uma foi tirada de
+#: uma linha real do quadro, não inventada: são as formas que este projeto usa
+#: para dizer "está decidido".
+FRASES_DE_VEREDITO = (
+    "MEDIDO E REPROVADO",
+    "medido e reprovado",
+    "FECHADO EM",
+)
+
+
+def test_item_com_veredito_no_texto_nao_pode_ficar_com_marcador_aberto():
+    """O símbolo tem de concordar com a frase — senão o quadro mente no relance.
+
+    ## O defeito que este teste existe para impedir
+
+    Em 2026-09-12 o 4.1 foi fechado: o corpo da linha passou a dizer
+    **FECHADO EM 2026-09-12 — ❌, MEDIDO E REPROVADO**, com os números do
+    backtest de 72 h. Mas o marcador de status, logo depois do título, ficou
+    **⬜**. Por uma hora o quadro afirmou *em aberto* sobre um item decidido.
+
+    Nenhum dos outros testes daqui pegou, e não é por descuido deles: eles
+    conferem contagens, números citados e presença de linha — tudo sobre
+    texto que está lá e continua verdadeiro. Aqui **as duas metades da linha
+    estavam certas isoladamente** e erradas juntas.
+
+    ## Por que isso importa mais que uma inconsistência de formatação
+
+    Ninguém lê 1.400 caracteres de uma célula para saber se um item fechou.
+    Lê-se o símbolo. Um ⬜ sobre item reprovado é a mesma classe de dano que a
+    linha sumida do 4.0: **o quadro passa a afirmar o contrário do que foi
+    medido, e alguém decide LIVE a partir dele.**
+
+    ## O que ele NÃO trava
+
+    Não exige símbolo nenhum em particular — ❌, ✅ e 🟡 passam todos. Só
+    proíbe a combinação *veredito escrito no corpo* com *marcador de item
+    ainda aberto*, que é a única que se contradiz. Item sem veredito no texto
+    segue livre para ser ⬜, que é o estado honesto de quem não mediu.
+    """
+    linhas = QUADRO.read_text(encoding="utf-8").splitlines()
+
+    mentindo = []
+    for linha in linhas:
+        if not linha.startswith("| "):
+            continue
+        if not any(frase in linha for frase in FRASES_DE_VEREDITO):
+            continue
+        # O marcador é o primeiro símbolo de status da linha. Se o ⬜ vier
+        # ANTES de qualquer ✅/🟡/❌, é ele que o leitor vê como status.
+        posicoes = {
+            simbolo: linha.find(simbolo)
+            for simbolo in ("⬜", "❌", "✅", "🟡")
+            if simbolo in linha
+        }
+        if "⬜" not in posicoes:
+            continue
+        if posicoes["⬜"] == min(posicoes.values()):
+            item = linha.split("|")[1].strip()
+            mentindo.append(item)
+
+    assert not mentindo, (
+        f"\nItem(ns) com veredito escrito no texto mas marcador ⬜ na frente: {mentindo}\n\n"
+        "O corpo da linha diz que o item foi medido e decidido; o simbolo diz\n"
+        "que esta em aberto. Quem le o quadro le o SIMBOLO.\n\n"
+        "Troque o ⬜ pelo veredito (❌/✅/🟡) NO MESMO COMMIT em que o corpo\n"
+        "recebeu o resultado — e, se quiser preservar o estado antigo, escreva\n"
+        "'era ⬜' no historico da propria celula, como o 4.1 faz."
+    )
