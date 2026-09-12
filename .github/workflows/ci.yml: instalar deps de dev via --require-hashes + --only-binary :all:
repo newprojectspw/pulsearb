@@ -35,7 +35,9 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: instalar
-        run: pip install -e ".[dev]"
+        run: |
+          pip install --only-binary :all: --require-hashes -r requirements-dev.txt
+          pip install --only-binary :all: --no-deps -e .
       - name: ruff
         run: |
           ruff check src/ tests/ scripts/
