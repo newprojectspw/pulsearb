@@ -1,94 +1,99 @@
-"""5.2 — o job de build, guardado em `deploy/ci-job-docker.yml` até poder ir.
+"""5.2 — o job de build, agora DENTRO de `.github/workflows/ci.yml`.
 
-Um arquivo de workflow que espera para ser aplicado é exatamente o tipo de
-coisa que apodrece: ninguém o roda, então ninguém percebe quando ele passa a
-citar um caminho que mudou de nome ou um UID que mudou de valor.
+Ele morou em `deploy/ci-job-docker.yml` de 2026-09-06 a 2026-09-12, esperando
+um token com escopo `workflow` — sem esse escopo, um push que toque em
+`.github/workflows/` é recusado INTEIRO, não só o arquivo. Aplicado o escopo,
+a cópia de espera foi apagada: duas cópias do mesmo YAML divergem, e a que
+ninguém roda é sempre a que apodrece.
 
-Estes testes fazem o mínimo que mantém o arquivo aplicável: ele tem de ser
-YAML válido, tem de encaixar em `jobs:` do `ci.yml`, e o que ele afirma sobre
-o Dockerfile tem de continuar verdade.
+O teste de espera (`test_o_ci_ainda_nao_tem_o_job...`) cumpriu o papel e saiu:
+ele existia para falhar no dia da aplicação e lembrar de fazer esta limpeza.
+
+**O que sobrou, e por que não foi apagado junto.** A instrução daquele teste
+mandava apagar este arquivo inteiro. As outras asserções não são sobre a
+espera — são sobre o job CONTINUAR verdadeiro: que a action siga fixada por
+SHA, que o UID conferido seja o do Dockerfile, que o ponto de montagem seja o
+do `VOLUME`. Um job que confere `10001` depois de o Dockerfile passar a criar
+`10002` falha dizendo a coisa errada, e isso é pior que não conferir. Essas
+guardas passaram a ler o `ci.yml`.
 """
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 
 import yaml
 
 RAIZ = Path(__file__).resolve().parent.parent
-JOB = RAIZ / "deploy" / "ci-job-docker.yml"
 DOCKERFILE = RAIZ / "deploy" / "Dockerfile"
 CI = RAIZ / ".github" / "workflows" / "ci.yml"
 
 
-def _job_carregado() -> dict:
-    """O bloco, desindentado, como o YAML que ele vira dentro de `jobs:`."""
-    return yaml.safe_load(textwrap.dedent(JOB.read_text(encoding="utf-8")))
+def _ci() -> dict:
+    return yaml.safe_load(CI.read_text(encoding="utf-8"))
 
 
-class TestOJobEAplicavel:
-    def test_e_yaml_valido(self):
-        """Colar YAML quebrado no `ci.yml` derruba o CI inteiro, inclusive o
-        job `testes` que hoje funciona."""
-        assert _job_carregado() is not None
+class TestOJobEstaNoCI:
+    def test_o_ci_e_yaml_valido(self):
+        """YAML quebrado aqui derruba o CI inteiro, inclusive o job `testes`
+        que já funcionava. Foi o que aconteceu na primeira tentativa de
+        aplicar: o recorte do bloco casou com a prosa de um comentário em vez
+        da linha do job, e o arquivo saiu inválido."""
+        assert _ci() is not None
 
-    def test_define_um_job_chamado_docker(self):
-        carregado = _job_carregado()
+    def test_define_um_job_docker_em_linux(self):
+        """`ubuntu-latest` não é detalhe: o cenário de bind mount do RUNBOOK
+        NÃO reproduz no macOS com Colima, onde a camada de mount traduz a
+        escrita e um UID 10001 grava em diretório `root:root`. Só Linux real
+        responde se o `chown` do runbook é mesmo necessário."""
+        jobs = _ci()["jobs"]
 
-        assert "docker" in carregado
-        assert carregado["docker"]["runs-on"] == "ubuntu-latest"
+        assert "docker" in jobs
+        assert jobs["docker"]["runs-on"] == "ubuntu-latest"
 
-    def test_a_indentacao_encaixa_em_jobs_do_ci(self):
-        """O bloco é para colar dentro de `jobs:`, então cada linha de conteúdo
-        começa com dois espaços — o mesmo nível do job `testes`."""
-        linhas = [
-            linha
-            for linha in JOB.read_text(encoding="utf-8").splitlines()
-            if linha.strip() and not linha.lstrip().startswith("#")
+    def test_o_job_testes_sobreviveu_a_aplicacao(self):
+        """Colar o bloco no fim do arquivo é a forma mais fácil de comer o job
+        anterior por um erro de indentação."""
+        jobs = _ci()["jobs"]
+
+        assert "testes" in jobs
+        assert [p.get("name") for p in jobs["testes"]["steps"] if p.get("name")] == [
+            "instalar",
+            "ruff",
+            "pytest",
         ]
-
-        assert linhas[0] == "  docker:"
-        assert all(linha.startswith("  ") for linha in linhas)
 
     def test_fixa_a_action_por_SHA_como_o_resto_do_ci(self):
         """Tag pode ser movida por quem controla o repositório da action."""
-        texto = JOB.read_text(encoding="utf-8")
+        passos = _ci()["jobs"]["docker"]["steps"]
+        checkout = next(p for p in passos if "uses" in p)
 
-        assert "actions/checkout@11d5960a" in texto
-        assert "persist-credentials: false" in texto
+        assert checkout["uses"].startswith("actions/checkout@11d5960a")
+        assert checkout["with"]["persist-credentials"] is False
 
 
 class TestOQueOJobAFIRMASobreODockerfile:
     def test_o_UID_conferido_e_o_do_Dockerfile(self):
         """Se o Dockerfile trocar o UID e o job continuar conferindo 10001,
         ele falharia dizendo a coisa errada."""
+        texto = CI.read_text(encoding="utf-8")
+
         assert "--uid 10001" in DOCKERFILE.read_text(encoding="utf-8")
-        assert 'test "$uid" = "10001"' in JOB.read_text(encoding="utf-8")
+        assert 'test "$uid" = "10001"' in texto
 
     def test_o_caminho_do_dockerfile_existe(self):
-        texto = JOB.read_text(encoding="utf-8")
-
-        assert "-f deploy/Dockerfile" in texto
+        assert "-f deploy/Dockerfile" in CI.read_text(encoding="utf-8")
         assert DOCKERFILE.exists()
 
     def test_o_ponto_de_montagem_conferido_e_o_do_VOLUME(self):
         """O job escreve em `/data` porque é lá que o `VOLUME` aponta."""
         assert 'VOLUME ["/data"]' in DOCKERFILE.read_text(encoding="utf-8")
-        assert "/data/prova" in JOB.read_text(encoding="utf-8")
+        assert "/data/prova" in CI.read_text(encoding="utf-8")
 
-
-class TestAindaNaoFoiAplicado:
-    def test_o_ci_ainda_nao_tem_o_job_e_o_quadro_diz_isso(self):
-        """Quando alguém aplicar o job, ESTE teste falha — e é o lembrete de
-        apagar este arquivo de espera e atualizar a linha 5.2 do quadro, em vez
-        de deixar as duas cópias divergirem.
-        """
-        ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
-
-        assert "docker" not in ci["jobs"], (
-            "O job `docker` foi aplicado no ci.yml — otimo.\n"
-            "Agora: apague `deploy/ci-job-docker.yml` e este arquivo de teste,\n"
-            "e atualize a linha 5.2 do quadro com o resultado do build real,\n"
-            "no MESMO commit (Regra 1 do CLAUDE.md)."
+    def test_a_copia_de_espera_foi_apagada(self):
+        """Duas cópias do mesmo YAML divergem, e a que ninguém roda apodrece."""
+        assert not (RAIZ / "deploy" / "ci-job-docker.yml").exists(), (
+            "`deploy/ci-job-docker.yml` voltou a existir. Ele era a copia de\n"
+            "ESPERA, aplicada ao ci.yml em 2026-09-12. Se o job precisa mudar,\n"
+            "mude no `.github/workflows/ci.yml`, que e o que roda."
         )
