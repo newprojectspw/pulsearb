@@ -432,6 +432,44 @@ fixou antes de existir dado. Nenhuma duração passa.
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
 | 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
 
+### Duas rotas que não dependem do preditor — 1.11 e 1.12 (2026-09-13)
+
+Registradas em `VEREDITO_M2.md` §2e e §2f **antes** de rodar. As duas escapam
+inteiras dos critérios 1.1, 1.3 e 1.4, que reprovaram medindo qualidade de
+previsão — nenhuma delas prevê nada. Nenhuma escapa do **1.5**: capacidade
+continua sendo o que o livro comporta.
+
+| # | Critério | Exigido | Medido | |
+|---|---|---|---|---|
+| 1.11 | Arbitragem de soma-dos-lados tomável | ≥ 1 episódio que sobrevive a 300 ms de latência | **Medição sobre 1 h (2026-08-22 04:00 UTC) mata o achado bruto.** A rodada frouxa deu 156 + 151 episódios lucrativos; todos duram `p50 = p90 = max = 0,0 s` — aparecem num update de livro e somem no seguinte. E o outro lado estava VELHO: **zero** instantes com o livro do par mais fresco que 1 ms, **98 de 156 (63%)** com mais de 300 ms, que é mais velho que a latência do próprio bot. Os dois tokens são atualizados por mensagens **separadas**, então a soma comparava o preço de antes com o de agora. Exigindo 10 ms de simultaneidade: **156 → 6** e **151 → 4** — 96% evaporou. Daí o critério ser sobrevivência à latência e não contagem de instantes: contar instantes publicaria 307 "oportunidades"/hora que ninguém toma. Varredura das 116 h em `scripts/soma_dos_lados.py` (passada 2 em memória constante). | 🟡 rodando |
+| 1.12 | Existe recorte onde a rota maker se paga | persistência ≥ 50% das amostras **E** ≥ 10 USDC/h **E** markout DESTE regime | **NÃO AVALIÁVEL — falta o item 3, e é ele que decide.** Receita medida e promissora; custo ausente. Ver a correção de escala abaixo e as quatro ressalvas em `VEREDITO_M2.md` §2f. `scripts/markout_dos_pools.py` (2026-09-13) mede o markout no regime certo, chamando a **mesma** `medir_markout` que produziu os −0,2838 — coleta de 4 h em curso. | ⚠️ |
+
+**A correção de escala do programa de rewards.** O quadro dizia *"940 mercados
+com pool, 6.766 USDC/dia"*, de uma **amostra** de 2.500 mercados da Gamma. A
+lista autoritativa é do próprio CLOB (`GET /rewards/markets/current`, paginada
+até `LTE=`): **18.384 mercados, 185.520 USDC/dia**. Errado por **27×**. A
+conclusão qualitativa sobrevive — o programa vive fora das janelas curtas — a
+escala não.
+
+**Dois defeitos meus, achados medindo, e os dois escondiam dinheiro:**
+
+1. As cotações hipotéticas iam só até 500 shares, e `rewards_min_size` chega a
+   **1.000** em 98 mercados que carregam **39.287 USDC/dia — 21% do programa**.
+   A varredura publicava zero e parecia que os maiores pools não pagavam.
+2. `score_da_ordem` modela **entrar na fila** (N ticks para fora do topo). Em
+   mercado largo isso nunca pontua. **Não foi alterada** — é compartilhada com
+   o motor ao vivo, e mudá-la mudaria o comportamento do bot. A concessão é
+   medida ao lado.
+
+**O achado estrutural que isso destravou: pool sem dono não é pool de graça.**
+No `Spread: LAC (-9.5)` — 11.657 USDC/dia, `score_do_mercado` **zero** — o
+livro está 0,23 / 0,34 (spread de **11 centavos**) contra `max_spread` de
+**2,5**. Para pontuar é preciso cotar **dentro** do spread, num preço que
+ninguém oferece. O reward ali é pagamento por fornecer liquidez que o mercado
+recusa àquele preço. Daí `concessao_para_pontuar_c`: zero = basta entrar na
+fila; alto = paga-se markout imediato, à vista, por cada share.
+
+
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
 Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
