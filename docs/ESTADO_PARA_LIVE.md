@@ -215,7 +215,7 @@ Gravar mais horas antes disso só produz mais horas meio-cegas.
 | 0.5 | **O recorder rodava com o M2.7?** | ✅ **RESPONDIDO: sim, e a defesa NÃO funcionou** | log da VPS: 2.482 reassinaturas, uma a cada 5 s, sem recuperação |
 | 0.6 | **Escalada: derrubar o socket após N reassinaturas sem efeito** | ✅ **deployada** em 2026-08-23 01:31 | M2.11; ainda sem oportunidade de agir — 0 alarmes desde então |
 | 0.7 | **Cobertura > 95 % em todos os ativos** | ✅ **0,9994** | hora 23:00, 99,9 % nos 8 ativos, `silencios: 0` |
-| 0.8 | 72 h contínuas e limpas | ⏳ contador reiniciou 01:31 UTC | cada restart zera o `--duration 72h` |
+| 0.8 | 72 h contínuas e limpas | ⏳ **a gravação ACONTECEU — falta publicar o silêncio** | A linha dizia *'contador reiniciou 01:31 UTC'* desde 23/08, e isso ficou falso em 12/09: a gravação de **72 h correu de 09/09 02:19 a 12/09 02:19 UTC** e o 4.1 registra **72 arquivos, 287.745.263 registros, 0 linhas corrompidas, `arquivos_ilegiveis: []`, cobertura do stream 99,8% nos oito ativos**. Contínuas: sim, a janela é exatamente 72 h. Íntegras: sim, pelos números acima. **O que falta para virar ✅ é um número, não tempo:** a contagem de `silencios` da rodada. O 0.7 fechou citando `silencios: 0` explicitamente; aqui o 4.1 publica cobertura (99,8%, acima do teto de 95% do 0.7) mas **não publica a contagem**. Quem tem `relatorios/M2_72H_20260912_ok.json` fecha isto em uma linha — esta sessão não alcança o arquivo. Marcar ✅ sem ler seria exatamente o que a Regra 2 proíbe |
 
 ### 0.7 FECHOU — a hora das 23:00
 
@@ -1319,8 +1319,10 @@ aparecer. Fica o registro da hipótese nunca testada: supply-chain,
 
 ## Quando é OK avançar
 
-- **Para gravar 72 h:** basta o Bloco 0 fechar — hoje só o 0.8 falta, e ele é
-  contador de tempo, não trabalho.
+- **Para gravar 72 h:** ~~basta o Bloco 0 fechar~~ — **já foi gravado.** A
+  rodada de 09/09 a 12/09 produziu 287,7 M registros íntegros, e o backtest
+  sobre ela fechou o 4.1 (reprovando). O 0.8 segue ⏳ só por falta de publicar
+  a contagem de silêncios, não por falta de gravação.
 - **Para escrever o M4:** o Bloco 1 precisa dar veredito **positivo** para
   taker ou maker. Se der negativo, **o projeto para — e isso é sucesso**:
   custou 72 h de VPS em vez de meses de capital. (O M4 foi escrito assim mesmo,
