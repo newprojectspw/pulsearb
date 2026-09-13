@@ -247,6 +247,75 @@ def criterios_do_taker(relatorio: dict[str, Any]) -> list[Criterio]:
     ]
 
 
+CAMPO_DO_LIMITE = "rota_maker.limite_pessimista.fecha_no_pior_caso"
+
+
+def _pelo_limite_pessimista(
+    rota_maker: dict[str, Any], falta: list[Any], exigido: str, campo: str
+) -> Criterio:
+    """Quando a conta EXATA não fecha, quem responde é o LIMITE INFERIOR.
+
+    ## O defeito que esta função conserta
+
+    O `conta_pessimista_do_maker` passou a decidir o 1.6 sem os três termos
+    que dependem da fila — mas este resumo continuava lendo só
+    `o_que_falta_para_fechar` e imprimindo NAO AVALIAVEL. O veredito existia
+    no relatório e não chegava a quem lê: exatamente o modo de falha que o
+    docstring deste arquivo descreve, de novo, agora com o campo certo
+    presente e não consultado.
+
+    ## Por que ler o limite NÃO é afrouxar o critério
+
+    `liquido_no_pior_caso = rewards - |markout_adverso| * shares`, e o custo
+    nunca é negativo. Então o limite é INFERIOR: o resultado real só pode ser
+    melhor. Logo,
+
+        limite POSITIVO  -> a conta fecha, e fecha sem nenhuma hipótese de
+                            fila. É mais forte que a conta exata, não mais
+                            fraco.
+        limite NEGATIVO  -> a medida não sustenta "positiva", que é o que o
+                            1.6 exige. REPROVA.
+        limite None      -> continua NAO AVALIAVEL, com os termos nomeados.
+
+    A tri-estado é a do próprio relatório (`True`/`False`/`None`), então
+    `_julgar` já a traduz sem nenhuma regra nova aqui.
+
+    ## A ressalva que vai impressa junto
+
+    O limite OMITE o rebate de propósito — é parcela positiva que depende do
+    mesmo volume desconhecido, e omitir positivo preserva o limite inferior.
+    Numa gravação em que o rebate supera o markout, um REPROVA aqui quer
+    dizer "não demonstrado", não "demonstrado negativo". Por isso o bloco
+    `_imprimir_limite_pessimista` imprime o saldo rebate−markout ao lado: sem
+    ele, o leitor não tem como saber de que tamanho é a ressalva.
+    """
+    limite = rota_maker.get("limite_pessimista") or {}
+    fecha = limite.get("fecha_no_pior_caso")
+    if fecha is None:
+        termos = ", ".join(str(t).split(":", 1)[0] for t in falta)
+        return Criterio(
+            "1.6", NOME_DA_CONTA_FECHADA, exigido,
+            f"conta NAO fechada: faltam {len(falta)} termos ({termos})",
+            NAO_AVALIAVEL, campo,
+        )
+    if limite.get("decidido_por_reward_zero"):
+        medido = (
+            "limite inferior decide SEM o termo que falta: rewards medidos = "
+            f"{_numero(limite.get('total_rewards_usdc'), SUFIXO_USDC)}, e o "
+            "custo nunca e negativo -> liquido <= 0 para qualquer execucao"
+        )
+    else:
+        medido = (
+            "limite inferior = "
+            f"{_numero(limite.get('liquido_no_pior_caso_usdc'), SUFIXO_USDC)} "
+            f"(rewards {_numero(limite.get('total_rewards_usdc'), SUFIXO_USDC)}"
+            " - custo no pior caso "
+            f"{_numero(limite.get('total_custo_no_pior_caso_usdc'), SUFIXO_USDC)})"
+        )
+    return Criterio("1.6", NOME_DA_CONTA_FECHADA, exigido, medido,
+                    _julgar(fecha), CAMPO_DO_LIMITE)
+
+
 def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
     """1.6 — e o motivo de ele quase nunca poder ser respondido.
 
@@ -264,12 +333,7 @@ def _criterio_da_conta_fechada(rota_maker: dict[str, Any]) -> Criterio:
         return Criterio("1.6", NOME_DA_CONTA_FECHADA, exigido,
                         "bloco ausente no relatorio", NAO_AVALIAVEL, campo)
     if falta:
-        termos = ", ".join(str(t).split(":", 1)[0] for t in falta)
-        return Criterio(
-            "1.6", NOME_DA_CONTA_FECHADA, exigido,
-            f"conta NAO fechada: faltam {len(falta)} termos ({termos})",
-            NAO_AVALIAVEL, campo,
-        )
+        return _pelo_limite_pessimista(rota_maker, falta, exigido, campo)
     por_ordem = (rota_maker.get("rewards") or {}).get("por_ordem") or {}
     receitas = [
         recortes.get("total", {}).get("receita_usdc") or 0.0
@@ -1114,6 +1178,81 @@ def _imprimir_cabecalho_da_variante(relatorio: dict[str, Any]) -> None:
     print()
 
 
+def _imprimir_limite_pessimista(relatorio: dict[str, Any]) -> None:
+    """O tamanho da ressalva do 1.6, logo abaixo do veredito dele.
+
+    Um REPROVA vindo do limite inferior e um REPROVA vindo da conta exata
+    pedem trabalhos diferentes, e a linha do critério não tem largura para
+    dizer qual é qual. Aqui cabem os dois números que decidem a leitura:
+
+    `rewards` — se for zero E houver janelas MEDIDAS sem pool, a rota não tem
+    de onde tirar receita naqueles mercados, e nenhum ajuste de execução
+    muda isso. É achado sobre o programa de rewards, não sobre o nosso código.
+
+    `saldo rebate − markout` — a parcela que o limite OMITE. Se o saldo for
+    positivo, o REPROVA quer dizer "não demonstrado positivo", e não
+    "demonstrado negativo": sobra uma rota que depende do rebate e da fila.
+    Se for negativo, some até essa sobra. Imprimir o veredito sem este número
+    deixaria o leitor sem como distinguir os dois casos.
+    """
+    rota_maker = relatorio.get("rota_maker") or {}
+    conta = rota_maker.get("conta_fechada") or {}
+    limite = rota_maker.get("limite_pessimista") or {}
+    if not limite:
+        return
+    print()
+    print("=" * 74)
+    print("O LIMITE INFERIOR DO MAKER  (de onde saiu o veredito do 1.6)")
+    print("=" * 74)
+    print(f"  avaliavel                {limite.get('avaliavel')}")
+    print(f"  fecha_no_pior_caso       {limite.get('fecha_no_pior_caso')}")
+    print(
+        "  rewards medidos          "
+        f"{_numero(limite.get('total_rewards_usdc'), SUFIXO_USDC)}"
+    )
+    if limite.get("decidido_por_reward_zero"):
+        sem_pool = _fundo(
+            relatorio, "rota_maker", "rewards", "janelas_sem_pool_de_reward"
+        ) or {}
+        total = sem_pool.get("total")
+        motivos = ", ".join(
+            f"{k}={v}" for k, v in (sem_pool.get("por_motivo") or {}).items()
+        )
+        print(f"  janelas MEDIDAS sem pool {total}  ({motivos})")
+        print()
+        print("  >> DECIDIDO POR REWARD ZERO: o limite e `rewards - custo` e o")
+        print("     custo nunca e negativo, entao rewards = 0 implica liquido <= 0")
+        print("     para QUALQUER numero de shares. O termo que falta deixou de")
+        print("     ser necessario — nao porque foi estimado, mas porque nao ha")
+        print("     valor dele que mude o SINAL.")
+
+    rebate = conta.get("rebate_vs_markout") or {}
+    saldo = rebate.get("saldo_centavos_por_share")
+    if saldo is not None:
+        print()
+        print("  A RESSALVA — o rebate fica FORA do limite, de proposito:")
+        print(
+            "    rebate  "
+            f"{_numero(rebate.get('rebate_centavos_por_share'))} c/share"
+            "   (TETO: so existe quando alguem nos executa, e em p=0,50)"
+        )
+        print(
+            "    markout "
+            f"{_numero(rebate.get('markout_centavos_por_share'))} c/share"
+            f"   (MEDIDO sobre {rebate.get('execucoes_medidas')} execucoes)"
+        )
+        print(f"    saldo   {_numero(saldo)} c/share")
+        if saldo > 0:
+            print()
+            print("    Saldo POSITIVO: o REPROVA do 1.6 quer dizer NAO DEMONSTRADO")
+            print("    positivo, e nao demonstrado negativo. O que sobra depende de")
+            print("    um teto de receita contra um custo observado — e da fila, que")
+            print("    este backtest nao modela.")
+        else:
+            print()
+            print("    Saldo NEGATIVO: nem a parcela omitida salva a conta.")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Imprime o resumo do relatório nomeado no argumento."""
     argumentos = list(sys.argv[1:] if argv is None else argv)
@@ -1175,6 +1314,7 @@ def main(argv: list[str] | None = None) -> None:
         criterios_do_maker(relatorio),
         "SO MAKER VIAVEL exige as CINCO",
     )
+    _imprimir_limite_pessimista(relatorio)
     print((relatorio.get("rota_maker") or {}).get("aviso", ""))
 
 

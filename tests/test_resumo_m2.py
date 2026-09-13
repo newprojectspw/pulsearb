@@ -136,6 +136,177 @@ class TestNaoAvaliavelNaoEReprova:
         assert criterio.veredito == NAO_AVALIAVEL
 
 
+class TestOLimiteInferiorDecideO16:
+    """O veredito que existia no relatório e não chegava a quem lê.
+
+    O `conta_pessimista_do_maker` passou a decidir o 1.6 sem os três termos
+    de fila (#96). O resumo continuou lendo só `o_que_falta_para_fechar` e
+    imprimindo NAO AVALIAVEL — um item que ficava ⬜ podendo ser ❌.
+    """
+
+    @staticmethod
+    def _com_limite(**limite):
+        relatorio = _relatorio()
+        relatorio["rota_maker"]["conta_fechada"]["o_que_falta_para_fechar"] = [
+            "volume_taker_usdc: exige simular a fila",
+        ]
+        base = {
+            "avaliavel": True,
+            "decidido_por_reward_zero": False,
+            "total_rewards_usdc": 0.0,
+            "total_custo_no_pior_caso_usdc": 0.0,
+            "liquido_no_pior_caso_usdc": 0.0,
+            "fecha_no_pior_caso": None,
+        }
+        relatorio["rota_maker"]["limite_pessimista"] = base | limite
+        return relatorio
+
+    def test_limite_POSITIVO_fecha_mesmo_com_a_conta_exata_aberta(self):
+        """Positivo aqui é MAIS forte que a conta exata, não mais fraco.
+
+        O limite é inferior: o resultado real só pode ser melhor. Se ele já
+        clareia o zero, a conta fecha sem NENHUMA hipótese sobre fila — e
+        continuar exigindo os três termos seria pedir precisão que não muda
+        a resposta.
+        """
+        criterio = _por_numero(
+            resumo_m2.criterios_do_maker(
+                self._com_limite(
+                    fecha_no_pior_caso=True,
+                    liquido_no_pior_caso_usdc=12.5,
+                    total_rewards_usdc=20.0,
+                )
+            )
+        )["1.6"]
+
+        assert criterio.veredito == PASSA
+        assert "12.5" in criterio.medido
+
+    def test_limite_NEGATIVO_reprova_em_vez_de_ficar_sem_conta(self):
+        criterio = _por_numero(
+            resumo_m2.criterios_do_maker(
+                self._com_limite(
+                    fecha_no_pior_caso=False, liquido_no_pior_caso_usdc=-3.0
+                )
+            )
+        )["1.6"]
+
+        assert criterio.veredito == REPROVA
+        assert criterio.veredito != NAO_AVALIAVEL
+
+    def test_reward_zero_diz_POR_QUE_o_termo_que_falta_nao_importa(self):
+        """A frase é o conteúdo do veredito, não enfeite.
+
+        "Reprovou" sem o porquê manda instrumentar o que falta. Com o porquê
+        — o custo nunca é negativo, então rewards zero fixa o sinal — manda
+        parar de instrumentar. São trabalhos opostos.
+        """
+        criterio = _por_numero(
+            resumo_m2.criterios_do_maker(
+                self._com_limite(
+                    fecha_no_pior_caso=False,
+                    decidido_por_reward_zero=True,
+                    liquido_no_pior_caso_usdc=None,
+                )
+            )
+        )["1.6"]
+
+        assert criterio.veredito == REPROVA
+        assert "rewards medidos = 0" in criterio.medido
+        # Sem os termos de fila na frase: eles deixaram de ser o assunto.
+        assert "volume_taker_usdc" not in criterio.medido
+
+    def test_limite_NONE_continua_NAO_AVALIAVEL_com_os_termos_nomeados(self):
+        # A tri-estado do relatório é a do resumo. `None` nunca vira REPROVA.
+        criterio = _por_numero(
+            resumo_m2.criterios_do_maker(self._com_limite(fecha_no_pior_caso=None))
+        )["1.6"]
+
+        assert criterio.veredito == NAO_AVALIAVEL
+        assert "volume_taker_usdc" in criterio.medido
+
+    def test_relatorio_SEM_o_bloco_novo_nao_quebra(self):
+        # Relatório antigo não tem `limite_pessimista`. Ler um desses não pode
+        # estourar nem inventar veredito.
+        relatorio = _relatorio()
+        relatorio["rota_maker"]["conta_fechada"]["o_que_falta_para_fechar"] = ["x: y"]
+        criterio = _por_numero(resumo_m2.criterios_do_maker(relatorio))["1.6"]
+
+        assert criterio.veredito == NAO_AVALIAVEL
+
+    def test_o_campo_impresso_e_o_que_foi_LIDO(self):
+        # A defesa do arquivo inteiro: quem confere não precisa abrir o JSON.
+        criterio = _por_numero(
+            resumo_m2.criterios_do_maker(
+                self._com_limite(fecha_no_pior_caso=False)
+            )
+        )["1.6"]
+
+        assert criterio.campo == resumo_m2.CAMPO_DO_LIMITE
+        assert "limite_pessimista" in criterio.campo
+
+
+class TestARessalvaDoRebateSaiImpressa:
+    """REPROVA por limite inferior e REPROVA por conta fechada não são o mesmo.
+
+    O limite OMITE o rebate de propósito. Numa gravação em que o rebate supera
+    o markout, o REPROVA quer dizer "não demonstrado positivo". Sem o saldo
+    impresso ao lado, o leitor não tem como saber de que tamanho é a ressalva
+    — e "rota morta" e "rota não demonstrada" levam a decisões opostas.
+    """
+
+    @staticmethod
+    def _relatorio_com_saldo(saldo):
+        relatorio = _relatorio()
+        relatorio["rota_maker"]["limite_pessimista"] = {
+            "avaliavel": True,
+            "decidido_por_reward_zero": True,
+            "total_rewards_usdc": 0.0,
+            "fecha_no_pior_caso": False,
+        }
+        relatorio["rota_maker"]["rewards"]["janelas_sem_pool_de_reward"] = {
+            "total": 69,
+            "por_motivo": {"sem_taxa_diaria": 69},
+        }
+        relatorio["rota_maker"]["conta_fechada"]["rebate_vs_markout"] = {
+            "rebate_centavos_por_share": 0.35,
+            "markout_centavos_por_share": -0.3011,
+            "execucoes_medidas": 13332,
+            "saldo_centavos_por_share": saldo,
+        }
+        return relatorio
+
+    def test_saldo_positivo_diz_NAO_DEMONSTRADO_e_nao_demonstrado_negativo(
+        self, capsys
+    ):
+        resumo_m2._imprimir_limite_pessimista(self._relatorio_com_saldo(0.0489))
+        saida = capsys.readouterr().out
+
+        assert "NAO DEMONSTRADO" in saida
+        assert "0.0489" in saida
+
+    def test_saldo_negativo_diz_que_nem_a_parcela_omitida_salva(self, capsys):
+        resumo_m2._imprimir_limite_pessimista(self._relatorio_com_saldo(-0.2))
+        saida = capsys.readouterr().out
+
+        assert "nem a parcela omitida salva" in saida
+        assert "NAO DEMONSTRADO" not in saida
+
+    def test_as_janelas_MEDIDAS_sem_pool_saem_com_o_motivo(self, capsys):
+        # "medi 69 janelas e nenhuma tinha pool" é a evidência que sustenta o
+        # veredito. Sem o número, o zero poderia ser ausência de medida.
+        resumo_m2._imprimir_limite_pessimista(self._relatorio_com_saldo(0.0489))
+        saida = capsys.readouterr().out
+
+        assert "69" in saida
+        assert "sem_taxa_diaria" in saida
+
+    def test_relatorio_antigo_nao_imprime_bloco_nenhum(self, capsys):
+        resumo_m2._imprimir_limite_pessimista(_relatorio())
+
+        assert capsys.readouterr().out == ""
+
+
 class TestOsLimiares:
     def test_pnl_negativo_reprova(self):
         relatorio = _relatorio()

@@ -321,6 +321,56 @@ def test_cli_completo(gravacao, tmp_path, capsys, monkeypatch):
         assert medicao in relatorio["medicoes"]
 
 
+def test_o_campo_que_o_resumo_le_EXISTE_no_relatorio(gravacao, tmp_path, monkeypatch):
+    """Produtor e leitor combinam o caminho — medido, não acreditado.
+
+    ## O defeito que este teste existe para impedir
+
+    Em 2026-09-11 o `resumo_m2.py` passou a ler o limite pessimista em
+    `rota_maker.conta_fechada.limite_pessimista`. O relatório escreve o bloco
+    em `rota_maker.limite_pessimista` — IRMÃO de `conta_fechada`, não filho.
+    O `.get()` devolveu `{}`, `fecha_no_pior_caso` virou `None`, e o resumo
+    imprimiu "NAO AVALIAVEL" com o texto antigo, idêntico ao de antes da
+    mudança. Nenhum erro, nenhum traceback: o veredito simplesmente não
+    apareceu, e a única razão de eu ter percebido foi rodar o resumo sobre um
+    relatório real e comparar com o JSON.
+
+    É o modo de falha mais caro deste projeto — leitura silenciosa do campo
+    errado — e é exatamente contra ele que cada linha do resumo imprime o
+    `campo` que leu. Mas imprimir o caminho só ajuda quem confere à mão. Aqui
+    o caminho é PERCORRIDO no relatório que o próprio backtest acabou de
+    gerar, então um rename de qualquer lado quebra o teste em vez de virar um
+    veredito ausente.
+
+    Vale para todos os `campo` que são caminho de verdade — não só o do 1.6 —
+    porque o próximo rename não avisa qual deles vai quebrar.
+    """
+    import importlib.util
+
+    monkeypatch.setenv("PULSEARB_BACKTEST_OUTPUT_ROOT", str(tmp_path))
+    assert main([str(gravacao), "--json", "relatorio.json"]) == 0
+    relatorio = json.loads((tmp_path / "relatorio.json").read_text())
+
+    caminho_do_script = Path(__file__).resolve().parents[1] / "scripts" / "resumo_m2.py"
+    spec = importlib.util.spec_from_file_location("resumo_m2", caminho_do_script)
+    resumo_m2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(resumo_m2)
+
+    atual = relatorio
+    percorrido = []
+    for chave in resumo_m2.CAMPO_DO_LIMITE.split("."):
+        assert isinstance(atual, dict), (
+            f"{'.'.join(percorrido)} nao e objeto no relatorio"
+        )
+        assert chave in atual, (
+            f"o resumo le `{resumo_m2.CAMPO_DO_LIMITE}`, mas o relatorio nao tem "
+            f"`{chave}` em `{'.'.join(percorrido) or '(raiz)'}` — "
+            f"presentes: {sorted(atual)}"
+        )
+        percorrido.append(chave)
+        atual = atual[chave]
+
+
 def _gravacao_de_books(tmp_path, tokens, fim_epoch, declarados=None):
     """Gravação mínima: um snapshot de descoberta + books dos tokens dele.
 
