@@ -342,3 +342,100 @@ class TestAAtravessadaLimitadaPeloPrint:
         r = _resultado(i, e)
         assert r["q_up"] == 20.0
         assert r["atravessadas"] == 2
+
+
+class TestAsPecasDosBotsQueLucram:
+    """Lote pequeno, viés de inventário e microprice — as três que faltavam.
+
+    São as peças que o estudo dos bots públicos apontou e que este projeto
+    ainda não tinha testado: o lote descartável do `poly-maker`, o
+    `r = fv − γ·σ·u` de inventário, e cotar a partir do MICROPRICE em vez de
+    juntar ao topo. Nenhuma delas pode melhorar o topo do livro.
+    """
+
+    def test_o_lote_da_estrategia_manda_no_tamanho_da_perna(self) -> None:
+        pequeno = _estrategia(tamanho=5.0)
+        grande = _estrategia(tamanho=100.0)
+        i = _indice(pequeno, grande, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _print(UP, 0.55, 500)))
+        assert _resultado(i, pequeno)["q_up"] == 5.0
+        assert _resultado(i, grande)["q_up"] == 100.0
+
+    def test_o_viés_de_inventario_desce_o_bid_do_lado_comprado(self) -> None:
+        e = _estrategia(skew_ticks=2)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        # Executa METADE do lote: o skew entra proporcional (2 × 0,5 = 1 tick).
+        i._on_poly_book(_rec(t + S, _print(UP, 0.60, 110)))
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        perna = i.janelas_cotadas[SLUG].pernas[(e, UP)]
+        assert perna.executado == 10.0
+        assert perna.ordem is not None
+        assert abs(perna.ordem.preco - 0.59) < 1e-9
+
+    def test_sem_viés_a_ordem_volta_ao_topo(self) -> None:
+        e = _estrategia(skew_ticks=0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _print(UP, 0.60, 110)))
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and abs(ordem.preco - 0.60) < 1e-9
+
+    def test_o_microprice_puxa_o_alvo_para_baixo_mas_nunca_melhora_o_topo(self) -> None:
+        e = _estrategia(delta_do_microprice=1)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        # Bid grande, ask pequeno: o microprice fica perto do ASK (0,655), e
+        # 1 tick abaixo dele ainda está ACIMA do topo — o alvo continua sendo
+        # o topo, porque melhorar o topo é proibido.
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 900)], [(0.66, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and abs(ordem.preco - 0.60) < 1e-9
+        # Agora o inverso: bid pequeno, ask grande → microprice perto do BID,
+        # e o alvo desce abaixo do topo.
+        i._on_poly_book(_rec(t + S, _book(UP, [(0.60, 100)], [(0.66, 900)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and ordem.preco < 0.60 - 1e-9
+
+    def test_sem_ask_o_microprice_nao_inventa_alvo(self) -> None:
+        e = _estrategia(delta_do_microprice=1)
+        i = _indice(e, tamanho=20.0)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.60, 100)], [])))
+        assert i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem is None
+
+
+class TestCotarAPartirDoMeio:
+    """Como o maker ao vivo cota nos pools: N ticks do MEIO, não no topo."""
+
+    def test_a_ordem_pode_ficar_acima_do_melhor_bid_e_nunca_cruza(self) -> None:
+        e = _estrategia(distancia_ticks_do_meio=1)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        # Livro largo: meio 0,50, um tick abaixo = 0,49 — acima do bid 0,40.
+        i._on_poly_book(_rec(t, _book(UP, [(0.40, 100)], [(0.60, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None
+        assert abs(ordem.preco - 0.49) < 1e-9
+        # E sozinha no nível: ninguém à frente.
+        assert ordem.fila_a_frente == 0.0
+
+    def test_nao_cruza_o_ask_quando_a_distancia_e_pequena(self) -> None:
+        e = _estrategia(distancia_ticks_do_meio=0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        # Meio 0,505 com ask em 0,51: cotar no meio cruzaria depois do piso.
+        i._on_poly_book(_rec(t, _book(UP, [(0.50, 100)], [(0.51, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None
+        assert ordem.preco <= 0.50 + 1e-9
+
+    def test_sem_meio_nao_cota(self) -> None:
+        e = _estrategia(distancia_ticks_do_meio=1)
+        i = _indice(e, tamanho=20.0)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.40, 100)], [])))
+        assert i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem is None

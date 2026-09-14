@@ -757,13 +757,161 @@ mais o rebate.
 
 Essa é a conta que o 4.2 nunca fez: ele mede cada perna pelo markout de 5 s,
 que é negativo por construção para um maker. `scripts/maker_de_pares.py`
+(22 testes em `tests/test_maker_de_pares.py`) faz a conta do PAR sobre a
 gravação real, com o MESMO modelo de execução do `CaixaDoMaker` (prints
 `last_trade_price` do lado SELL a preço ≤ o nosso bid; atravessada = a perna
 inteira, no nível = pro-rata com a fila que o livro mostra à frente) e a
 resolução da própria gravação para a perna que ficou sozinha.
+
+**O DIA INTEIRO, medido (2026-09-13 UTC, 27 arquivos, 1.000 janelas Up/Down
+— 692 de 5 min, 230 de 15 min, 58 de 1 h, 20 de 4 h —, lote de 20 shares por
+perna, `relatorios/PARES_20260913.json`):**
+
+**(1) Ficar parado com o livro andando contra é 98% da perda.** A cotação que
+descansa e não recolhe perde **−4.227,56 USDC no dia**. A MESMA cotação, que
+recolhe a ordem 100 ms depois de o melhor bid cair abaixo dela, fecha o termo
+determinístico em **−79,76**. É a maior diferença que este projeto já mediu
+entre duas regras de cotação, e a regra é a que o `poly-maker` já usa (o
+regime EVENT do `poly-maker`, documentado em `docs/OUTROS_BOTS.md` §2).
+
+**(2) O que sobra é pequeno e ainda negativo.** Com o recolher ligado e o
+gatilho de salto do spot a 3 bps (cooloff de 5 s), o termo que NÃO depende de
+sorte — par travado + rebate teto — fecha em **−80,21 + 45,53 = −34,68 USDC
+no dia**, sobre 16.969 shares executadas e 8.474 USDC de capital. A soma
+`pUp + pDown` paga nos pares caiu de 1,23 (sem recolher) para **1,015**: o
+recolher tira quase toda a seleção adversa, mas não a inverte.
+
+**(3) O +165 que aparece na coluna do total é CARA-OU-COROA, e está marcado
+como tal no relatório.** Ele vem de `residual_das_pernas_soltas` = +199,95,
+que é o resultado de 346 pernas que ficaram sozinhas e foram à resolução:
+52,3% ganharam, a 0,491 de preço médio. O desvio-padrão desse termo é
+**186 USDC** (`incerteza.sigma_da_perna_solta_usdc`), então `z = 0,89` — não
+se distingue de zero. Quem ler essa coluna como lucro está lendo ruído; por
+isso o relatório publica `sem_a_aposta_travado_mais_rebate` ao lado, e a
+tabela imprime o `z`.
+
+**(4) Quanto maior a janela, melhor** — e isto sim tem sinal: +143,96 ¢ por
+janela de 1 h (40 janelas), +56,29 ¢ por janela de 15 min (175), **+0,63 ¢**
+por janela de 5 min (381). As janelas de 5 min de cripto, que são as do
+taker, são o pior lugar para esta estrutura.
+
+**A hipótese que mais infla o fill está isolada e medível.** Um print que
+passa ABAIXO do nosso preço conta a perna INTEIRA — é o que o `CaixaDoMaker`
+faz (§4.2), e são 451 das 1.205 execuções do dia. Um print de 3 shares não
+pode ter comprado 20. O eixo `atravessada` liga o teto de verdade
+(`tamanho_do_print`). Como a hipótese gera MAIS fill, ela puxa o resultado
+para BAIXO: o negativo acima é, nessa direção, pessimista.
+
+**As peças dos bots que lucram, medidas no mesmo dia (`--grade focada`,
+`relatorios/PARES_FOCADA_20260913.json`) — e uma delas VIRA O SINAL.**
+
+A coluna que importa é o termo determinístico (par travado + rebate; a perna
+solta é aposta e vai à parte):
+
+| cotação | lote 5 | lote 20 | lote 100 |
+|---|---|---|---|
+| juntar ao topo (o que o projeto fazia) | −5,57 | **−34,67** | −170,95 |
+| **1 tick abaixo do MICROPRICE** | **+6,60** | **+30,68** | **+137,84** |
+| 1 tick abaixo do microprice + viés de inventário (2 ticks) | +7,37 | **+36,09** | +125,21 |
+| 3 ticks abaixo do microprice | −3,25 | −3,32 | −53,88 |
+
+**Cotar a partir do microprice, e não do melhor bid, é o que faz o par valer
+a pena.** A soma `pUp + pDown` que pagamos cai de **1,015 para 0,989–0,995**:
+o par passa a ser comprado por MENOS de 1,00, que é exatamente a economia dos
+makers de leaderboard. O preço disso é fill: 108 pares em vez de 334 (e
+8.278 shares em vez de 16.969 no lote 20) — **menos execuções, e melhores**.
+
+O viés de inventário ajuda no lote pequeno (+30,68 → +36,09) e atrapalha no
+grande (+137,84 → +125,21): descer o bid do lado comprado evita o par, e com
+lote grande o par é onde está o dinheiro. Ficar 3 ticks abaixo do microprice
+mata o fill (33 pares) e junto o resultado.
+
+**O que este número NÃO é:** não é lucro do dia. (a) A perna solta continua
+sendo a maior linha do P&L e é aposta — no lote 100 ela vale −98,11 com
+sigma **587**; (b) a hipótese de execução atravessada (perna inteira por
+print abaixo do nosso preço) infla o fill, e portanto é PESSIMISTA aqui;
+(c) o recolher foi medido a **100 ms**, e esta máquina tem p50 de 245 ms.
+O capital empregado SOMADO no dia foi 3.905 USDC no lote 20 e 17.565 no lote
+100 — não é exposição simultânea, e por isso não vira "% ao dia" nenhum.
+
+**A mesma conta no regime que PAGA tem instrumento, coleta e as duas
+parcelas.** Os pools do 1.12 são outro mercado — markout 4,7× menor, reward
+por estar no livro, resolução em dias. `scripts/markout_dos_pools.py
+--gravar` passou a guardar os eventos crus no formato do recorder (com um
+registro `pools_snapshot` que diz quais dois tokens formam cada par, mais
+`rewards_max_spread` e `rewards_min_size` do instante da coleta — eles mudam
+ao vivo), e `scripts/maker_de_pares_nos_pools.py` (13 testes) roda o MESMO
+motor sobre essa gravação, com três diferenças que não podiam ser
+escondidas:
+
+- **a perna solta é marcada a preço de saída** (melhor bid do fim, menos o
+  fee de taker): marcar a resultado num mercado que não resolveu seria
+  inventar o resultado. Sem bid no fim, a janela sai do P&L;
+- **a cotação é a do bot ao vivo** — a N ticks do MEIO, que é onde o §15.3
+  pontua, e não juntando ao melhor bid: num livro largo (o `LAC` tem 11
+  centavos de spread) juntar ao topo é ficar fora da banda e não pontuar. O
+  motor ganhou guarda para nunca cruzar o ask, que seria virar taker;
+- **o reward entra, pela MESMA função que o `laco_maker` chama**
+  (`estimar_retorno`), integrada no tempo em que as DUAS pernas repousam,
+  truncando intervalo acima de 60 s para que queda de feed não vire receita.
+  Reward e custo ficam separados no JSON: um é estimativa com hipótese de
+  fila, o outro é medido nos prints.
+
+Coleta de 6 h em curso desde 2026-09-14 15:37 UTC (60 mercados), com a
+varredura de persistência de 2 h ao lado (300 pools) para refazer o 1.12 com
+dado do mesmo dia.
+
+**A latência que este Mac tem NÃO é a que a medida usou, e isso importa.**
+`scripts/benchmark_latency.py --label mac-casa`
+(`relatorios/LATENCIA_MAC_20260914.json`, 2026-09-14 18:05 UTC, 100
+requisições em conexão quente): REST do CLOB **p50 = 244,9 ms, p90 = 260,0,
+p99 = 349,7, máx 609,6**; conexão fria 161,7 ms até o TLS e 256,9 até o
+primeiro byte; WS do CLOB 471,3 ms para conectar; WS do RTDS 694,1 ms, com a
+primeira mensagem 208,4 ms depois de assinar. O PING/PONG do WS não
+respondeu sem assinatura ativa — fica anotado que a melhor aproximação de
+decisão→ack ainda é o REST quente.
+
+Ou seja: **cancelar leva ~245 ms no p50 e ~350 ms no p99 daqui**, não os
+100 ms que a rodada do dia usou. A grade de 4 h mediu os três: −31,87 (100
+ms), −53,07 (300 ms), −56,55 (1000 ms) contra −583,54 parado — o recolher
+continua valendo a 300 ms, mas o número do dia inteiro tem de ser refeito na
+latência real, e é isso que falta. Uma VPS perto do CLOB muda esse número;
+a decisão de onde hospedar passa a ter um efeito medido em USDC, não só em
+milissegundos.
+
+⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
+sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
+1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
 conta. Enquanto isso não existir, isto NÃO reprova a rota maker: reprova a
 ideia de copiar o formato "compra os dois lados e espera" para as janelas de
 cripto de 5 min.
+
+
+### O lado da RECEITA do 1.12 se reproduziu num segundo dia (2026-09-14)
+
+A varredura de persistência rodou de novo, mesma forma (300 maiores pools,
+12 amostras em 2 h): `relatorios/POOLS_PERSIST_20260914.json`.
+
+| | 2026-09-13 | 2026-09-14 |
+|---|---|---|
+| mercados com pool (universo do CLOB) | 18.384 | **17.008** |
+| pool diário somado | 185.520 USDC | **130.239 USDC** |
+| medidos | 300 | 300 |
+| pontuam em ≥ 50% das amostras | 185 | **261** |
+| pontuam em 12/12 | 185 | **226** |
+| receita somada **pelo mínimo** | 174,08 USDC/h | **207,14 USDC/h** |
+
+Dois dias, dois números da mesma ordem, com a mesma propriedade: quem
+pontua, pontua sempre, e com **concessão zero** (250 dos que pontuam) — basta
+entrar na fila, sem apertar o spread. O critério (a) e o (b) do 1.12 não
+foram sorte de um dia.
+
+O que isto NÃO diz: que a rota lucra. É **receita**, e o custo continua sendo
+o markout mais o custo de SAÍDA da perna unilateral, que é o termo aberto do
+1.12 (ver a nota do custo de saída acima). A coleta de 6 h de 2026-09-14
+existe para fechá-lo, e `scripts/conta_do_maker_nos_pools.py` já aplica o
+critério: o 1.12 passa de novo se `receita − execuções/h × max(markout 30
+min, spread/2)` continuar positivo.
 
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
