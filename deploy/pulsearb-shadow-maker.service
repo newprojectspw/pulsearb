@@ -1,0 +1,60 @@
+# PULSEARB SHADOW da rota MAKER nos pools de reward — o relógio do 4.2.
+#
+#   sudo cp deploy/pulsearb-shadow-maker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pulsearb-shadow-maker
+#
+# O que esta unit faz, e o que ela NÃO faz: decide e anota; não envia ordem.
+# MODE=SHADOW troca o cliente de ordens pelo sombra (`ClienteSombraDeOrdens`,
+# todo id com prefixo `sombra-`), e a trava tripla do LIVE (risk/autorizacao.py)
+# continua fechada — não há PULSEARB_CONFIRM_LIVE aqui, e não deve haver.
+#
+# PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true é o opt-in que liga a descoberta de
+# pools (a cada 300 s) e põe o LacoMaker a cotar os mercados de horizonte
+# longo — os ~120 maiores pools (top_de_pools_de_reward). Sem ela a rodada é a
+# do taker, que está medida e reprovada.
+#
+# Restart=always pelo mesmo motivo do recorder: duas semanas não podem
+# terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
+# --diario), então um restart continua a mesma rodada em vez de abrir outra.
+
+[Unit]
+Description=PULSEARB SHADOW maker (4.2) — cota nos pools, nao envia
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pulsearb
+Group=pulsearb
+WorkingDirectory=/opt/pulsearb
+
+# Mesma razão do recorder: ProtectSystem=strict exige a pasta existente ANTES
+# de o Python subir (226/NAMESPACE se não existir).
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios
+ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
+
+Environment=PULSEARB_MODE=SHADOW
+Environment=PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true
+
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-4-2.jsonl
+
+# Opcional. Se um dia houver segredo aqui, ele vem de arquivo 0600, nunca da
+# unit (que é legível por todos).
+EnvironmentFile=-/opt/pulsearb/.env
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/opt/pulsearb/data
+
+[Install]
+WantedBy=multi-user.target

@@ -773,3 +773,52 @@ carteira vier a receber depois.
 - [ ] `du -sh` bate com a ordem de grandeza da §6 (~470 MB na primeira hora)
 - [ ] o plano de disco da §6 está decidido: 80 GB, ou 50 GB **com** descarga agendada
 - [ ] `descartadas` está em 0
+
+## 10. SHADOW da rota maker nos pools — o relógio do 4.2
+
+O 4.2 pede **duas semanas de SHADOW com edge líquido medido**, e o relógio
+dele nunca começou: até 31/08 o motor errava o preço pago, e depois disso a
+única rota viva mudou — deixou de ser o taker nos updown e passou a ser o
+maker nos pools de horizonte longo (1.12). Este passo liga essa rota em
+SHADOW na VPS. **Não envia ordem.** O cliente é o sombra, a trava tripla do
+LIVE fica fechada, e nada aqui pede `PULSEARB_CONFIRM_LIVE`.
+
+**Por que na VPS e não no Mac:** o SHADOW não grava o stream — grava um diário
+de intenções — então os 18,4 GB livres que não comportam 72 h de recorder
+comportam isto. E a máquina que grava não pode rodar análise pesada (§7): o
+SHADOW é leve, mas o Mac dorme, e `time.monotonic()` congela com ele
+(item 3.14).
+
+```bash
+cd /opt/pulsearb && git pull --ff-only
+sudo cp deploy/pulsearb-shadow-maker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pulsearb-shadow-maker
+journalctl -u pulsearb-shadow-maker -f
+```
+
+A unit já traz `PULSEARB_MODE=SHADOW` e `PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`
+(o opt-in — sem ele a rodada é a do taker, que está medida e reprovada), e
+anexa ao diário `data/diarios/shadow-maker-4-2.jsonl`: um restart continua a
+mesma rodada.
+
+### 10.1. O que o relato de 60 s tem de mostrar — na primeira hora
+
+| campo | esperado | se não |
+|---|---|---|
+| `pools_descobertos` | > 0 em até 5 min (o ciclo é de 300 s) | 0 depois de 10 min: a descoberta não achou pool — conferir se `GET /rewards/markets/current` responde da VPS (§16 do API_NOTES) |
+| `maker.motivos` | `repousada` / `manter` aparecendo; **`sem_pool_de_reward` NÃO pode ser o motivo único** | motivo único `sem_pool_de_reward` = o opt-in não pegou (variável ausente na unit) |
+| `desde_o_relato` | andando a cada 60 s | congelado = 3.14 |
+| id das ordens no diário | todo id com prefixo `sombra-` | qualquer id sem `sombra-` é **PARAR AGORA**: `systemctl stop` e abrir issue — significaria ordem real |
+
+### 10.2. O que ainda NÃO está medido, e o que este passo mede
+
+- **Disco do diário:** não medido. Meça na primeira hora
+  (`ls -l data/diarios/`) e extrapole para 14 dias antes de deixar rodando.
+- **O custo de saída** (quadro, 1.12): o SHADOW anota as intenções, não as
+  execuções. O número que decide o 1.12 sai do `markout_dos_pools.py` com os
+  horizontes longos, no Mac — este passo não substitui aquele.
+- **O que este passo mede:** que a rota roda 24 h × 14 sem derrubar o
+  processo, quantas cotações repousam e por quanto tempo, e qual fração das
+  janelas com pool o portão deixa cotar. É o dado que o 4.2 exige, e é o que
+  não existe hoje.
