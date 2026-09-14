@@ -194,3 +194,117 @@ def test_a_grade_dos_pools_nao_tem_eixo_de_salto() -> None:
     grade = mpp.estrategias_dos_pools()
     assert grade and all(e.salto_bps is None for e in grade)
     assert len({e.nome for e in grade}) == len(grade)
+
+
+class TestORewardEntraPeloCaminhoDoBotVivo:
+    """A receita é integrada por `estimar_retorno`, a função do `laco_maker`.
+
+    O que estes testes prendem não é o VALOR do reward (esse é da função
+    compartilhada, e tem testes próprios), e sim quando ele conta: só com as
+    duas pernas repousando, só uma vez por mercado, e nunca através de uma
+    lacuna de feed.
+    """
+
+    def _params(self):
+        from pulsearb.analysis.rewards import ParametrosDeReward
+
+        return {
+            "vai-chover": ParametrosDeReward(
+                daily_rate=1000.0, min_size=5.0, max_spread=0.05, tick_size=0.01
+            )
+        }
+
+    def _indice_com_reward(self, records: list[ReplayRecord]):
+        e = _estrategia(distancia_ticks_do_meio=1)
+        indice = mpp.MakerDeParesNosPools(
+            LeitorFalso(records),
+            tamanho=20.0,
+            reprice_ticks=2,
+            estrategias=(e,),
+            params_por_slug=self._params(),
+        )
+        indice.progresso = SimpleNamespace(
+            passada=lambda *a, **k: None,
+            talvez=lambda *a, **k: None,
+            terminou=lambda *a, **k: None,
+        )
+        indice.build()
+        return indice, e
+
+    def _livro(self, token: str, ts_ns: int) -> ReplayRecord:
+        return _rec(
+            ts_ns,
+            {
+                "event_type": "book",
+                "asset_id": token,
+                "bids": [{"price": "0.40", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+                "timestamp": "0",
+            },
+        )
+
+    def test_com_as_duas_pernas_repousando_o_reward_acumula(self) -> None:
+        records = [_catalogo()]
+        for i in range(1, 5):
+            records.append(self._livro(YES, T0 + i * S))
+            records.append(self._livro(NO, T0 + i * S))
+        indice, e = self._indice_com_reward(records)
+        assert indice.reward_usdc[(e, "vai-chover")] > 0
+        # 2 s, e não 3: o último evento da gravação é o FIM da janela, e ali
+        # a cotação é cancelada antes de render — o mesmo que o bot faz ao
+        # recolher as ordens no fechamento.
+        assert abs(indice.cotacao_segundos[(e, "vai-chover")] - 2.0) < 1e-9
+
+    def test_uma_perna_so_nao_rende(self) -> None:
+        records = [_catalogo()] + [self._livro(YES, T0 + i * S) for i in range(1, 5)]
+        indice, e = self._indice_com_reward(records)
+        assert indice.reward_usdc[(e, "vai-chover")] == 0.0
+
+    def test_lacuna_maior_que_60s_e_truncada(self) -> None:
+        records = [
+            _catalogo(),
+            self._livro(YES, T0 + S),
+            self._livro(NO, T0 + S),
+            self._livro(YES, T0 + 200 * S),
+            self._livro(NO, T0 + 200 * S),
+        ]
+        indice, e = self._indice_com_reward(records)
+        assert indice.cotacao_segundos[(e, "vai-chover")] == 0.0
+        assert indice.reward_usdc[(e, "vai-chover")] == 0.0
+
+    def test_sem_parametros_do_mercado_o_reward_nao_e_inventado(self) -> None:
+        records = [_catalogo()]
+        for i in range(1, 4):
+            records.append(self._livro(YES, T0 + i * S))
+            records.append(self._livro(NO, T0 + i * S))
+        e = _estrategia(distancia_ticks_do_meio=1)
+        indice = mpp.MakerDeParesNosPools(
+            LeitorFalso(records), tamanho=20.0, reprice_ticks=2, estrategias=(e,)
+        )
+        indice.progresso = SimpleNamespace(
+            passada=lambda *a, **k: None,
+            talvez=lambda *a, **k: None,
+            terminou=lambda *a, **k: None,
+        )
+        indice.build()
+        assert indice.reward_usdc == {}
+
+
+class TestOsParametrosDeRewardDaGravacao:
+    """Gravação nova traz `rewards_max_spread`; e ele vem em CENTAVOS."""
+
+    def test_o_catalogo_novo_dispensa_o_params_e_converte_a_unidade(self) -> None:
+        registro = _catalogo()
+        registro.payload["mercados"][CID]["rewards_max_spread"] = 3.0
+        registro.payload["mercados"][CID]["rewards_min_size"] = 50.0
+        indice, _ = _indice([registro])
+        params = indice.params_por_slug["vai-chover"]
+        assert params.daily_rate == 1234.0
+        assert params.min_size == 50.0
+        # 3 centavos → 0,03 de fração. Sem a conversão, a banda sairia 100×
+        # maior e TUDO pontuaria.
+        assert abs(params.max_spread - 0.03) < 1e-12
+
+    def test_catalogo_antigo_sem_a_banda_nao_inventa_parametro(self) -> None:
+        indice, _ = _indice([_catalogo()])
+        assert indice.params_por_slug == {}
