@@ -254,6 +254,7 @@ async def _colocar(
             desde_epoch=agora_epoch,
             id_do_cliente=resultado.id_do_cliente or "",
             order_id=resultado.order_id or "",
+            preco_up=ordem.preco_limite,
         )
         if ordem_do_lado_down is not None:
             return await _colocar_lado_down(
@@ -284,6 +285,7 @@ async def _colocar(
                 cotacao=nova,
                 desde_epoch=agora_epoch,
                 id_do_cliente=resultado.id_do_cliente or "",
+                preco_up=ordem.preco_limite,
             ),
             detalhe={"id_do_cliente": resultado.id_do_cliente},
         )
@@ -310,7 +312,8 @@ async def _colocar_lado_down(
     ganho: float,
 ) -> Efeito:
     """A segunda perna, com o Up já ACEITO. Tudo ou nada — ver o cabeçalho."""
-    resultado = await cliente.enviar(ordem_do_lado_down(nova), janela=janela)
+    ordem = ordem_do_lado_down(nova)
+    resultado = await cliente.enviar(ordem, janela=janela)
 
     if resultado.estado is EstadoDoEnvio.ACEITA:
         aberta = CotacaoAberta(
@@ -320,6 +323,8 @@ async def _colocar_lado_down(
             order_id=com_up.order_id,
             id_do_cliente_down=resultado.id_do_cliente or "",
             order_id_down=resultado.order_id or "",
+            preco_up=com_up.preco_up,
+            preco_down=ordem.preco_limite,
         )
         return Efeito(
             ResultadoDaAcao.REPOSICIONADA if tinha_anterior else ResultadoDaAcao.COLOCADA,
@@ -345,6 +350,8 @@ async def _colocar_lado_down(
                 id_do_cliente=com_up.id_do_cliente,
                 order_id=com_up.order_id,
                 id_do_cliente_down=resultado.id_do_cliente or "",
+                preco_up=com_up.preco_up,
+                preco_down=ordem.preco_limite,
             ),
             detalhe={"perna": "down", "id_do_cliente": resultado.id_do_cliente},
         )

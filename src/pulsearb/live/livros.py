@@ -26,12 +26,14 @@ chegar.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook
 from pulsearb.feeds.poly_ws import (
     EVENT_BOOK,
+    EVENT_LAST_TRADE,
     EVENT_PRICE_CHANGE,
     iter_mudancas,
 )
@@ -44,6 +46,26 @@ log = get_logger(__name__)
 #: por token o critério é mais apertado, porque um token mudo no meio de um
 #: feed vivo não levanta nenhum outro alarme.
 SILENCIO_DO_TOKEN_S = 10.0
+
+#: Quantos prints de negócio ficam guardados por token, à espera de quem os
+#: lê (a caixa-sombra do maker, a cada 15 s). Teto, não fila infinita: token
+#: que ninguém lê não pode crescer sem parar numa rodada de 24 h.
+PRINTS_GUARDADOS_POR_TOKEN = 256
+
+
+@dataclass(frozen=True, slots=True)
+class Negocio:
+    """Um `last_trade_price` (§6.1a): alguém atravessou o livro deste token.
+
+    `lado` é o do TAKER — `BUY` comprou dos asks, `SELL` vendeu nos bids —,
+    a mesma convenção que `medir_markout` lê da gravação. O carimbo é o de
+    chegada, o mesmo eixo do livro.
+    """
+
+    ts_ns: int
+    preco: float
+    tamanho: float
+    lado: str
 
 
 @dataclass
@@ -79,9 +101,18 @@ class LivrosAoVivo:
     #: medida de quanto do fio o bot ainda não consegue usar.
     deltas_orfaos: int = 0
     eventos_ignorados: int = 0
+    #: Prints de negócio por token, para a caixa-sombra do maker conferir se
+    #: uma cotação repousando TERIA executado (`live/caixa_maker.py`). Só de
+    #: tokens com livro: print de token que ninguém acompanha é ruído.
+    negocios: dict[str, deque[Negocio]] = field(default_factory=dict)
+    negocios_recebidos: int = 0
 
     def aplicar(self, evento: dict[str, Any], *, ts_ns: int) -> None:
         tipo = evento.get("event_type")
+
+        if tipo == EVENT_LAST_TRADE:
+            self._guardar_negocio(evento, ts_ns=ts_ns)
+            return
 
         if tipo == EVENT_PRICE_CHANGE:
             # Achado P1 do Codex no #52, e procede — era o defeito mais caro
@@ -158,7 +189,32 @@ class LivrosAoVivo:
             atual.livro.apply_price_change(evento)
             atual.ultimo_evento_ns = ts_ns
 
+    def _guardar_negocio(self, evento: dict[str, Any], *, ts_ns: int) -> None:
+        token_id = evento.get("asset_id")
+        if not isinstance(token_id, str) or token_id not in self.por_token:
+            self.eventos_ignorados += 1
+            return
+        try:
+            preco = float(evento.get("price"))  # type: ignore[arg-type]
+            tamanho = float(evento.get("size") or 0.0)
+        except (TypeError, ValueError):
+            self.eventos_ignorados += 1
+            return
+        lado = str(evento.get("side", "")).upper()
+        fila = self.negocios.get(token_id)
+        if fila is None:
+            fila = self.negocios[token_id] = deque(maxlen=PRINTS_GUARDADOS_POR_TOKEN)
+        fila.append(Negocio(ts_ns=ts_ns, preco=preco, tamanho=tamanho, lado=lado))
+        self.negocios_recebidos += 1
+
     # ────────────────────────────────────────────────────────────── consulta
+    def negocios_desde(self, token_id: str, *, ts_ns: int) -> list[Negocio]:
+        """Os prints deste token com carimbo DEPOIS de `ts_ns`, em ordem."""
+        fila = self.negocios.get(token_id)
+        if not fila:
+            return []
+        return [n for n in fila if n.ts_ns > ts_ns]
+
     def esquecer(self, token_id: str) -> bool:
         """Solta o livro de um token que não interessa mais.
 
@@ -168,6 +224,7 @@ class LivrosAoVivo:
 
         Quem chama é quem sabe que a janela acabou: o processo, ao desassinar.
         """
+        self.negocios.pop(token_id, None)
         return self.por_token.pop(token_id, None) is not None
 
     def confiavel(self, token_id: str, *, agora_ns: int) -> bool:
@@ -214,6 +271,7 @@ class LivrosAoVivo:
             "mudos": mudos,
             "deltas_orfaos": self.deltas_orfaos,
             "eventos_ignorados": self.eventos_ignorados,
+            "negocios_recebidos": self.negocios_recebidos,
             "silencio_do_token_s": self.silencio_do_token_s,
             "nota": (
                 "`mudos` e o numero que nenhum outro alarme daria: o feed do "

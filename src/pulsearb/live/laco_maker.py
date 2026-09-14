@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pulsearb.analysis.rewards import ParametrosDeReward
+from pulsearb.live.caixa_maker import CaixaDoMaker
 from pulsearb.live.cotacao import (
     Cotacao,
     escolher_cotacao,
@@ -136,6 +137,10 @@ class LacoMaker:
     #: Contadores para o relato de 60 s. Mesma disciplina do resto: o que o bot
     #: NÃO fez tem de ser tão legível quanto o que ele fez.
     motivos: dict[str, int] = field(default_factory=dict)
+    #: O relógio do 4.2: o que as cotações repousando teriam rendido e quantas
+    #: vezes teriam executado. Ver `caixa_maker`.
+    caixa: CaixaDoMaker = field(default_factory=CaixaDoMaker)
+    _negocios_desde: Any = field(default=None, repr=False)
 
     async def passo(
         self,
@@ -145,13 +150,20 @@ class LacoMaker:
         agora_epoch: float,
         agora_ns: int,
         feeds_saudaveis: bool = True,
+        negocios_desde=None,
     ) -> list[Efeito]:
         """Uma passada por todas as janelas abertas. Devolve o que mudou.
 
         `livro_de(token_id, agora_ns)` vem de fora — é o `LivrosAoVivo.livro`,
-        injetado para este módulo poder ser testado sem feed.
+        injetado para este módulo poder ser testado sem feed. `negocios_desde`
+        (`LivrosAoVivo.negocios_desde`) idem, para a caixa conferir os prints;
+        sem ele a caixa soma rewards e não conta execuções.
         """
         efeitos: list[Efeito] = []
+        self._negocios_desde = negocios_desde
+        # Fecha o markout das execuções possíveis cujo horizonte já passou,
+        # ANTES de olhar prints novos — o livro é o deste instante.
+        self.caixa.medir_markout(livro_de, agora_ns=agora_ns)
 
         # 1) Janela que fechou leva a cotação junto. ANTES de avaliar as
         #    abertas: se uma fechou e outra abriu no mesmo passo, sair da
@@ -191,6 +203,19 @@ class LacoMaker:
                 return await self._sair(janela.slug, motivo="pool_sumiu")
             return None
 
+        aberta = self.abertas.get(janela.slug)
+        if aberta is not None and self._negocios_desde is not None:
+            # Prints desde a última passada, antes de qualquer decisão: o que
+            # nos pegaria já pegou, com ou sem livro para decidir agora.
+            self.caixa.conferir_prints(
+                janela.slug,
+                aberta,
+                token_up=janela.token_up,
+                token_down=janela.token_down,
+                negocios_desde=self._negocios_desde,
+                agora_ns=agora_ns,
+            )
+
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
         if livro is None:
             # Livro que não serve para decidir é o mesmo caso do portão: quem
@@ -218,12 +243,18 @@ class LacoMaker:
         ]
         melhor = escolher_cotacao(candidatas, livro, params, horas=horas)
 
-        aberta = self.abertas.get(janela.slug)
         atual = (
             estimar_retorno(aberta.cotacao, livro, params, horas=horas)
             if aberta is not None
             else None
         )
+        if aberta is not None:
+            # O relógio do 4.2: o que ESTA cotação rendeu desde a última
+            # passada, pela mesma conta que a colocou. Antes da decisão, porque
+            # o tempo já correu — sair agora não apaga o que repousou.
+            self.caixa.acertar(
+                janela.slug, aberta, livro, params, agora_epoch=agora_epoch
+            )
 
         decisao = decidir(aberta, melhor, atual, agora_epoch=agora_epoch)
         self._contar(decisao.motivo)
@@ -344,6 +375,7 @@ class LacoMaker:
         """
         if efeito.aberta is None:
             self.abertas.pop(slug, None)
+            self.caixa.esquecer(slug)
         else:
             self.abertas[slug] = efeito.aberta
         if efeito.resultado is ResultadoDaAcao.RECONCILIAR:
@@ -408,6 +440,7 @@ class LacoMaker:
             "cotacoes_repousando": len(self.abertas),
             "por_janela": sorted(self.abertas),
             "motivos": dict(sorted(self.motivos.items())),
+            "caixa": self.caixa.resumo(),
             "nota": (
                 "`motivos` acumula desde o inicio e responde a pergunta que "
                 "importa quando o bot nao cota: ele nao achou onde cotar, ou "
