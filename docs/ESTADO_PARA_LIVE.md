@@ -843,6 +843,32 @@ ideia de copiar o formato "compra os dois lados e espera" para as janelas de
 cripto de 5 min.
 
 
+### O lado da RECEITA do 1.12 se reproduziu num segundo dia (2026-09-14)
+
+A varredura de persistência rodou de novo, mesma forma (300 maiores pools,
+12 amostras em 2 h): `relatorios/POOLS_PERSIST_20260914.json`.
+
+| | 2026-09-13 | 2026-09-14 |
+|---|---|---|
+| mercados com pool (universo do CLOB) | 18.384 | **17.008** |
+| pool diário somado | 185.520 USDC | **130.239 USDC** |
+| medidos | 300 | 300 |
+| pontuam em ≥ 50% das amostras | 185 | **261** |
+| pontuam em 12/12 | 185 | **226** |
+| receita somada **pelo mínimo** | 174,08 USDC/h | **207,14 USDC/h** |
+
+Dois dias, dois números da mesma ordem, com a mesma propriedade: quem
+pontua, pontua sempre, e com **concessão zero** (250 dos que pontuam) — basta
+entrar na fila, sem apertar o spread. O critério (a) e o (b) do 1.12 não
+foram sorte de um dia.
+
+O que isto NÃO diz: que a rota lucra. É **receita**, e o custo continua sendo
+o markout mais o custo de SAÍDA da perna unilateral, que é o termo aberto do
+1.12 (ver a nota do custo de saída acima). A coleta de 6 h de 2026-09-14
+existe para fechá-lo, e `scripts/conta_do_maker_nos_pools.py` já aplica o
+critério: o 1.12 passa de novo se `receita − execuções/h × max(markout 30
+min, spread/2)` continuar positivo.
+
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
 Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
