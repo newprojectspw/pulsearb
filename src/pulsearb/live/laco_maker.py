@@ -157,6 +157,15 @@ class LacoMaker:
     #: Os tokens de cada janela com cotação, para o recolher entre passadas
     #: (ele não recebe as janelas — só o livro).
     _tokens: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
+    #: A referência de cada perna para o recolher: `min(preço, melhor bid do
+    #: mercado na primeira observação)`, por slug e por `desde_epoch`. Uma
+    #: cotação que já MELHORA o topo ao nascer (livro largo: bid 0,40, meio
+    #: 0,50, nós a 0,49) veria `best_bid < preço` no primeiro segundo e
+    #: cancelaria sem o mercado ter andado (revisão do Codex, #126). O que
+    #: recolhe é o mercado cair ABAIXO de onde estava quando entramos.
+    _referencia_do_recolher: dict[tuple[str, int], tuple[float, float]] = field(
+        default_factory=dict, repr=False
+    )
 
     async def passo(
         self,
@@ -375,16 +384,23 @@ class LacoMaker:
     async def recolher_se_o_livro_andou(self, livro_de, *, agora_ns: int) -> list[Efeito]:
         """Entre passadas: tira do livro a cotação que o mercado deixou exposta.
 
-        Quando o melhor bid cai ABAIXO do nosso preço, o fluxo que vem a
-        seguir nos executa primeiro — e é seleção adversa quase pura: o
-        `maker_de_pares` mediu −583,54 USDC em 4 h ficando, contra −31,87
-        recolhendo com 100 ms. Aqui a latência é a do sono de 1 s do
-        processo, e o que se mede em SHADOW é se 1 s basta.
+        Quando o melhor bid cai ABAIXO de onde estava quando entramos (e
+        abaixo do nosso preço), o fluxo que vem a seguir nos executa
+        primeiro — e é seleção adversa quase pura: o `maker_de_pares` mediu
+        −583,54 USDC em 4 h ficando, contra −31,87 recolhendo com 100 ms.
+        Aqui a latência é a do sono de 1 s do processo, e o que se mede em
+        SHADOW é se 1 s basta.
 
-        Livro indisponível NÃO recolhe — sair por falta de dado nosso perde
-        a fila de graça, a mesma regra do `_passo_da_janela`. Só a perna cujo
-        livro mostra o movimento decide; basta uma para sair, porque as
-        pernas entram e saem juntas.
+        Três regras, cada uma por um motivo:
+        - **livro indisponível NÃO recolhe** — sair por falta de dado nosso
+          perde a fila de graça (mesma regra do `_passo_da_janela`);
+        - **lado de bids VAZIO recolhe** — é o caso mais forte de o mercado
+          ter ido embora, e é o que a simulação medida faz;
+        - **antes de sair, confere os prints do intervalo** — senão a saída
+          apaga o cursor da caixa e uma execução entre a passada e o
+          recolher some, subcontando justamente a métrica que esta regra
+          quer melhorar.
+        Basta uma perna para sair, porque as pernas entram e saem juntas.
         """
         if not self.recolhe_quando_o_livro_anda:
             return []
@@ -393,16 +409,33 @@ class LacoMaker:
             tokens = self._tokens.get(slug)
             if tokens is None:
                 continue
-            pernas = ((tokens[0], aberta.preco_up), (tokens[1], aberta.preco_down))
-            for token_id, preco in pernas:
-                if preco <= 0.0:
+            chave = (slug, int(aberta.desde_epoch * 1e6))
+            pernas = ((0, tokens[0], aberta.preco_up), (1, tokens[1], aberta.preco_down))
+            livros = [livro_de(token_id, agora_ns=agora_ns) for _, token_id, _ in pernas]
+            if chave not in self._referencia_do_recolher:
+                # Primeira observação desta cotação: a referência é o menor
+                # entre o nosso preço e o melhor bid do mercado agora. Não
+                # decide nada — só marca de onde o mercado pode cair.
+                self._referencia_do_recolher[chave] = tuple(
+                    _referencia(livros[i], preco) for i, _, preco in pernas
+                )
+                continue
+            referencias = self._referencia_do_recolher[chave]
+            for i, _, preco in pernas:
+                if preco <= 0.0 or livros[i] is None:
                     continue
-                livro = livro_de(token_id, agora_ns=agora_ns)
-                if livro is not None and _o_livro_andou_contra(
-                    livro, preco, aberta.cotacao.tamanho,
+                if _o_livro_andou_contra(
+                    livros[i], referencias[i], aberta.cotacao.tamanho,
                     nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
                 ):
+                    if self._negocios_desde is not None:
+                        self.caixa.conferir_prints(
+                            slug, aberta, token_up=tokens[0], token_down=tokens[1],
+                            negocios_desde=self._negocios_desde, agora_ns=agora_ns,
+                            livro_de=livro_de,
+                        )
                     efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
+                    self._referencia_do_recolher.pop(chave, None)
                     break
         return efeitos
 
@@ -517,22 +550,31 @@ def _nunca_chamado(_: Cotacao) -> OrdemPretendida:
 _EPS_PRECO = 1e-9
 
 
-def _o_livro_andou_contra(
-    livro: OrderBook, preco: float, tamanho: float, *, nossa_ordem_no_livro: bool
-) -> bool:
-    """O melhor bid do MERCADO caiu abaixo do nosso preço?
+def _referencia(livro: OrderBook | None, preco: float) -> float:
+    """De onde o mercado pode cair: o nosso preço, ou o melhor bid de agora se
+    ele já está abaixo (cotação que melhora o topo). Sem livro, o preço."""
+    if livro is None or livro.best_bid is None:
+        return preco
+    return min(preco, livro.best_bid)
 
-    Sem a nossa ordem no livro (SHADOW): `best_bid < preço`. Com ela (LIVE),
-    o melhor bid nunca cai abaixo do nosso enquanto ele repousa — ele VIRA o
-    melhor bid; o sinal é estar sozinho no topo: melhor bid no nosso preço e
-    tamanho do nível não maior que o nosso.
+
+def _o_livro_andou_contra(
+    livro: OrderBook, referencia: float, tamanho: float, *, nossa_ordem_no_livro: bool
+) -> bool:
+    """O melhor bid do MERCADO caiu abaixo da referência?
+
+    Lado de bids vazio é o caso mais forte de "caiu" — o mercado foi embora.
+    Sem a nossa ordem no livro (SHADOW): `best_bid < referência`. Com ela
+    (LIVE), o melhor bid nunca cai abaixo do nosso enquanto ele repousa —
+    ele VIRA o melhor bid; o sinal é estar sozinho no topo: melhor bid na
+    referência e tamanho do nível não maior que o nosso.
     """
     melhor = livro.best_bid
     if melhor is None:
-        return False
-    if melhor < preco - _EPS_PRECO:
         return True
-    if nossa_ordem_no_livro and abs(melhor - preco) <= _EPS_PRECO:
+    if melhor < referencia - _EPS_PRECO:
+        return True
+    if nossa_ordem_no_livro and abs(melhor - referencia) <= _EPS_PRECO:
         no_nivel = sum(q for p, q in livro.bids if abs(p - melhor) <= _EPS_PRECO)
         return no_nivel <= tamanho + _EPS_PRECO
     return False
