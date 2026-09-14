@@ -465,13 +465,23 @@ class LacoMaker:
                     # foi recolhida contribuiria zero — o experimento
                     # compara reward com execução, e recolher muito
                     # empurraria o reward para baixo por construção.
+                    # A caixa conta no livro do Up. Se foi o Down que
+                    # disparou e o do Up não está à mão, o do Down serve:
+                    # o Up é o seu espelho (bid = 1 − ask), e é o mesmo
+                    # espelho que a colocação e o portão usam. Sem nenhum
+                    # dos dois não há como disparar — o laço acima só chega
+                    # aqui com o livro da perna que andou.
                     params = self._params.get(slug)
-                    if params is not None and livros[0] is not None:
+                    livro_up = (
+                        livros[0]
+                        if livros[0] is not None
+                        else _espelho_do_livro(livros[1], asset_id=tokens[0])
+                    )
+                    if params is not None:
                         self.caixa.acertar(
-                            slug, aberta, livros[0], params, agora_epoch=agora_ns / 1e9
+                            slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
                         )
                     efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
-                    self._referencia_do_recolher.pop(chave, None)
                     break
         return efeitos
 
@@ -497,11 +507,26 @@ class LacoMaker:
         cotação transformaria "não sei" em "não tenho" — que é a suposição que
         cria órfã. É a mesma regra do INCERTA do cliente.
         """
+        anterior = self.abertas.get(slug)
         if efeito.aberta is None:
             self.abertas.pop(slug, None)
             self.caixa.esquecer(slug)
         else:
             self.abertas[slug] = efeito.aberta
+        # A referência do recolher é da cotação, não da janela: cotação que
+        # saiu ou foi trocada (novo `desde_epoch`) leva a sua embora. Só o
+        # caminho do recolher a apagava, e cada `janela_fechou`, `pool_sumiu`
+        # ou recotação deixava uma chave morta para sempre (revisão do
+        # Codex, #126).
+        if anterior is not None and (
+            efeito.aberta is None or efeito.aberta.desde_epoch != anterior.desde_epoch
+        ):
+            self._referencia_do_recolher.pop(
+                (slug, int(anterior.desde_epoch * 1e6)), None
+            )
+        if efeito.aberta is None:
+            self._tokens.pop(slug, None)
+            self._params.pop(slug, None)
         if efeito.resultado is ResultadoDaAcao.RECONCILIAR:
             log.warning(
                 "cotacao maker em estado desconhecido: reconciliar",
@@ -592,6 +617,18 @@ def _referencia(livro: OrderBook | None, preco: float) -> float:
     if livro is None or livro.best_bid is None:
         return preco
     return min(preco, livro.best_bid)
+
+
+def _espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
+    """O livro do Up visto pelo do Down: bid do Up = 1 − ask do Down, ask do
+    Up = 1 − bid do Down. Os asks do Down sobem, logo os bids do espelho
+    descem — a ordem que `OrderBook` exige sai de graça."""
+    return OrderBook(
+        asset_id=asset_id,
+        bids=[(1.0 - preco, tamanho) for preco, tamanho in livro.asks],
+        asks=[(1.0 - preco, tamanho) for preco, tamanho in livro.bids],
+        ts_ns=livro.ts_ns,
+    )
 
 
 def _o_livro_andou_contra(

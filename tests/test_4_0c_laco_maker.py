@@ -494,6 +494,52 @@ class TestRecolherQuandoOLivroAnda:
         assert laco.caixa.segundos_repousando == pytest.approx(5.0)
         assert laco.caixa.acertos == 1
 
+    async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
+        """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
+        perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —
+        a caixa acerta no ESPELHO do livro do Down (bid = 1 − ask), o mesmo
+        espelho da colocação. Sem isto, `_sair` apagava o intervalo inteiro
+        (revisão do Codex, #126)."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        down_caiu = OrderBook(
+            asset_id="tok-down", bids=[(0.47, 500.0)], asks=[(0.51, 500.0), (0.52, 500.0)]
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return down_caiu if token_id == "tok-down" else None
+
+        efeitos = await laco.recolher_se_o_livro_andou(livro_de, agora_ns=int(1005e9))
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["livro_andou_contra"] == 1
+        assert laco.caixa.acertos == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+
+    async def test_referencia_e_tokens_saem_com_a_cotacao_por_qualquer_caminho(self, tmp_path):
+        """Só o recolher apagava a sua referência; `janela_fechou`, `pool_sumiu`
+        e a recotação deixavam a chave morta para sempre (revisão do Codex,
+        #126). A referência é da COTAÇÃO: sai com ela, por qualquer porta."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert len(laco._referencia_do_recolher) == 1
+        # a janela fechou: a cotação sai por `janela_fechou`
+        await laco.passo([], livro_de=_livro_de(_livro(0.50)), agora_epoch=1001.0, agora_ns=2)
+        assert laco.abertas == {}
+        assert laco.motivos["janela_fechou"] == 1
+        assert laco._referencia_do_recolher == {}
+        assert laco._tokens == {} and laco._params == {}
+        # de novo, agora trocada por recotação: fica só a chave da NOVA cotação
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1002.0, agora_ns=3
+        )
+        antiga = laco.abertas["btc-updown-4h-1"]
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.70)), agora_epoch=1003.0, agora_ns=4
+        )
+        nova = laco.abertas["btc-updown-4h-1"]
+        assert nova.desde_epoch != antiga.desde_epoch
+        assert set(laco._referencia_do_recolher) == {
+            ("btc-updown-4h-1", int(nova.desde_epoch * 1e6))
+        }
+
     async def test_lado_de_bids_vazio_recolhe(self, tmp_path):
         laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
         await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2)
