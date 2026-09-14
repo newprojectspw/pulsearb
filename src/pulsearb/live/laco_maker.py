@@ -166,6 +166,10 @@ class LacoMaker:
     _referencia_do_recolher: dict[tuple[str, int], tuple[float, float]] = field(
         default_factory=dict, repr=False
     )
+    #: Os parâmetros de reward de cada janela com cotação, para a caixa
+    #: acertar o último intervalo ANTES de recolher (o recolher não recebe a
+    #: janela — só o livro).
+    _params: dict[str, ParametrosDeReward] = field(default_factory=dict, repr=False)
 
     async def passo(
         self,
@@ -222,6 +226,8 @@ class LacoMaker:
     ) -> Efeito | None:
         self._tokens[janela.slug] = (janela.token_up, janela.token_down)
         params = self._parametros(janela)
+        if params is not None:
+            self._params[janela.slug] = params
         if params is None:
             self._contar("sem_pool_de_reward")
             # Se havia cotação e o pool sumiu, sai: ficar seria risco por zero.
@@ -453,6 +459,16 @@ class LacoMaker:
                             slug, aberta, token_up=tokens[0], token_down=tokens[1],
                             negocios_desde=self._negocios_desde, agora_ns=agora_ns,
                             livro_de=livro_de,
+                        )
+                    # O último intervalo de reward, ANTES de sair: `_sair`
+                    # apaga o relógio da cotação, e uma que repousou 14 s e
+                    # foi recolhida contribuiria zero — o experimento
+                    # compara reward com execução, e recolher muito
+                    # empurraria o reward para baixo por construção.
+                    params = self._params.get(slug)
+                    if params is not None and livros[0] is not None:
+                        self.caixa.acertar(
+                            slug, aberta, livros[0], params, agora_epoch=agora_ns / 1e9
                         )
                     efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
                     self._referencia_do_recolher.pop(chave, None)

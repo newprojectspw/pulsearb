@@ -481,6 +481,19 @@ class TestRecolherQuandoOLivroAnda:
         )
         assert len(efeitos) == 1 and laco.abertas == {}
 
+    async def test_acerta_o_ultimo_intervalo_de_reward_antes_de_sair(self, tmp_path):
+        """Colocada em t=1000 e recolhida em t=1005: os 5 s repousando contam,
+        com o livro e os parâmetros da janela — `_sair` apaga o relógio, e sem
+        isto recolher muito empurraria o reward para baixo por construção."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert laco.caixa.segundos_repousando == 0.0
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1005e9)
+        )
+        assert len(efeitos) == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+        assert laco.caixa.acertos == 1
+
     async def test_lado_de_bids_vazio_recolhe(self, tmp_path):
         laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
         await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2)
