@@ -62,10 +62,13 @@ mesmo que o `estimar_retorno` usa; sem meio, não se cota (`livro_sem_meio`).
 E a estimativa contava DOIS lados (`Cotacao.dois_lados=True`) enquanto o
 `montar` colocava UM — o bid do Up. O §15.3 paga o lado único a um terço
 dentro de [0,10, 0,90] e a ZERO fora; contar dois e colocar um inflava o
-score três vezes (ou infinitamente) e ainda pontuava fora da faixa. As
-candidatas são `dois_lados=False`: a conta descreve a ordem que existe.
-Cotar os dois lados (bid no Up e bid no Down) é o passo seguinte e está no
-quadro como falta — exige duas ordens por janela no `execucao_maker`.
+score três vezes (ou infinitamente) e ainda pontuava fora da faixa. Agora a
+cotação tem as DUAS pernas que a conta descreve: bid no Up a `meio − d` e
+bid no Down a `(1 − meio) − d` — que no livro do Up é o ask a `meio + d`,
+exatamente o preço que `estimar_retorno` pontua do lado ask. As duas passam
+pelo portão, entram juntas e saem juntas (`execucao_maker`). Se as duas
+preenchem, o par Up+Down custou `1 − 2d` e paga 1: não é a hipótese de
+lucro — é só o motivo de as duas pernas não serem posição direcional.
 
 ## Sem pool, não cota
 
@@ -208,11 +211,9 @@ class LacoMaker:
             self._contar("livro_sem_meio")
             return None
 
-        # Um lado só, porque é UM lado que o `montar` coloca. Ver o cabeçalho.
+        # Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
         candidatas = [
-            Cotacao(
-                distancia_ticks=t, tamanho=self.tamanho_da_cotacao, dois_lados=False
-            )
+            Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
             for t in self.grade_de_ticks
         ]
         melhor = escolher_cotacao(candidatas, livro, params, horas=horas)
@@ -282,14 +283,22 @@ class LacoMaker:
             # Falha fechada: sem portão não se cota. Um laço que cotasse
             # "porque ninguém passou trava" seria o oposto do que a trava serve.
             return "sem_portao"
-        ordem = self._ordem_da_cotacao(janela, meio=meio)(nova)
-        decisao = self.portao.avaliar_risco(
-            ordem,
-            feeds_saudaveis=feeds_saudaveis,
-            melhor_bid=livro.best_bid,
-            melhor_ask=livro.best_ask,
-        )
-        return None if decisao.pode else (decisao.motivo or "recusado_sem_motivo")
+        # As duas pernas, cada uma como a ordem que vai para o fio. O portão
+        # vê o livro do Up; o do Down é o espelho (bid = 1 − ask), com o mesmo
+        # spread — que é a única coisa que o portão lê dele.
+        pernas = [self._ordem_da_cotacao(janela, meio=meio)(nova)]
+        if nova.dois_lados:
+            pernas.append(self._ordem_da_cotacao(janela, meio=meio, lado_up=False)(nova))
+        for ordem in pernas:
+            decisao = self.portao.avaliar_risco(
+                ordem,
+                feeds_saudaveis=feeds_saudaveis,
+                melhor_bid=livro.best_bid,
+                melhor_ask=livro.best_ask,
+            )
+            if not decisao.pode:
+                return decisao.motivo or "recusado_sem_motivo"
+        return None
 
     async def _executar(
         self,
@@ -304,6 +313,7 @@ class LacoMaker:
             self.abertas.get(janela.slug),
             cliente=self.cliente,
             ordem_da_cotacao=self._ordem_da_cotacao(janela, meio=meio),
+            ordem_do_lado_down=self._ordem_da_cotacao(janela, meio=meio, lado_up=False),
             janela=janela.slug,
             agora_epoch=agora_epoch,
         )
@@ -362,22 +372,27 @@ class LacoMaker:
         )
 
     def _ordem_da_cotacao(
-        self, janela: JanelaAoVivo, *, meio: float
+        self, janela: JanelaAoVivo, *, meio: float, lado_up: bool = True
     ) -> OrdemDaCotacao:
-        """Como esta janela vira ordem. Fecha sobre a janela e sobre o meio
-        DO LIVRO desta passada: o preço depende do tick dela e de onde o
-        mercado está agora — não de 0,5. Ver o cabeçalho."""
+        """Como esta janela vira ordem — uma perna. Fecha sobre a janela e
+        sobre o meio DO LIVRO (do Up) desta passada: o preço depende do tick
+        dela e de onde o mercado está agora — não de 0,5. Ver o cabeçalho.
+
+        As duas pernas são BIDS: a do Up no livro do Up, a do Down no livro
+        do Down, cujo meio é `1 − meio`. É assim que se fica dos dois lados
+        sem vender o que não se tem — o ask do Up é o bid do Down.
+        """
 
         def montar(cotacao: Cotacao) -> OrdemPretendida:
-            # Cotamos do lado Up, no bid: a rota maker ganha por repousar, e
-            # repousar do lado comprado é o que o `cotacao.py` mede.
             preco = cotacao.preco(
-                meio=meio, tick_size=janela.tick_size, do_lado_bid=True
+                meio=meio if lado_up else 1.0 - meio,
+                tick_size=janela.tick_size,
+                do_lado_bid=True,
             )
             return OrdemPretendida(
                 slug=janela.slug,
-                token_id=janela.token_up,
-                lado_up=True,
+                token_id=janela.token_up if lado_up else janela.token_down,
+                lado_up=lado_up,
                 shares=cotacao.tamanho,
                 preco_limite=preco,
             )
