@@ -664,6 +664,44 @@ class TestRecolherQuandoOLivroAnda:
         no_comeco = await rodar(tmp_path / "b", 1000.5)
         assert no_meio > no_comeco > 0.0
 
+    async def test_prints_das_duas_pernas_entram_em_ordem_de_tempo(self, tmp_path):
+        """Down executa em t=1002 e Up em t=1005: perna a perna, o print do Up
+        seria visto primeiro, o relógio iria a 1005 com as duas pernas ainda
+        abertas, e o do Down (1002) seria descartado como tempo para trás —
+        dois lados até 1005 em vez de um lado a partir de 1002 (revisão do
+        Codex, #126). Em ordem de tempo há um acerto POR PRINT, em qualquer
+        ordem de pernas — perna a perna, o segundo print era descartado."""
+
+        async def rodar(pasta, ts_down_s, ts_up_s):
+            pasta.mkdir()
+            laco = await self._com_cotacao(pasta, recolhe_quando_o_livro_anda=True)
+            prints = {
+                "tok-down": SimpleNamespace(
+                    ts_ns=int(ts_down_s * 1e9), preco=0.47, tamanho=10.0,
+                    lado="SELL", token="tok-down",
+                ),
+                "tok-up": SimpleNamespace(
+                    ts_ns=int(ts_up_s * 1e9), preco=0.47, tamanho=10.0,
+                    lado="SELL", token="tok-up",
+                ),
+            }
+            laco._negocios_desde = lambda token_id, *, ts_ns: (
+                [prints[token_id]] if prints[token_id].ts_ns > ts_ns else []
+            )
+            efeitos = await laco.recolher_se_o_livro_andou(
+                _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1010e9)
+            )
+            assert len(efeitos) == 1
+            assert laco.caixa.execucoes_atravessadas == 2
+            # um acerto por print; o do recolher acha as duas pernas consumidas
+            assert laco.caixa.acertos == 2
+            assert laco.caixa.acertos_apos_execucao == 1
+            assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+            assert laco.caixa.rewards_com_captura_usdc > 0.0
+
+        await rodar(tmp_path / "a", 1002.0, 1005.0)  # Down primeiro
+        await rodar(tmp_path / "b", 1005.0, 1002.0)  # Up primeiro
+
     async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
         """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
         perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —

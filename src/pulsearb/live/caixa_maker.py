@@ -276,62 +276,73 @@ class CaixaDoMaker:
             (1, token_down, False, aberta.preco_down),
         )
         novas = 0
-        for indice, token_id, lado_up, preco_nosso in pernas:
-            if preco_nosso <= 0.0:
+        # As DUAS pernas juntas, em ordem de tempo: perna a perna, um print
+        # do Down anterior ao do Up seria visto DEPOIS dele, o relógio do
+        # acerto já teria avançado, e o Down pareceria aberto até o print do
+        # Up (revisão do Codex, #126). A ordem estável preserva a ordem de
+        # chegada entre prints do mesmo instante.
+        prints = sorted(
+            (
+                (negocio, indice, token_id, lado_up, preco_nosso)
+                for indice, token_id, lado_up, preco_nosso in pernas
+                if preco_nosso > 0.0
+                for negocio in negocios_desde(token_id, ts_ns=desde_ns)
+            ),
+            key=lambda item: item[0].ts_ns,
+        )
+        for negocio, indice, token_id, lado_up, preco_nosso in prints:
+            self.prints_vistos += 1
+            if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
                 continue
-            for negocio in negocios_desde(token_id, ts_ns=desde_ns):
-                self.prints_vistos += 1
-                if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
-                    continue
-                if restante[indice] <= 0.0:
-                    self.prints_em_perna_consumida += 1
-                    continue
-                if negocio.preco < preco_nosso - EPS:
-                    tipo = "atravessada"
-                    shares = restante[indice]
-                    self.execucoes_atravessadas += 1
-                    self.shares_atravessadas += shares
-                else:
-                    tipo = "no_nivel"
-                    shares = min(negocio.tamanho, restante[indice])
-                    self.execucoes_no_nivel += 1
-                    self.shares_no_nivel += shares
-                if params is not None and livro_de is not None:
-                    self._acertar_no_print(
-                        slug, aberta, params,
-                        token_up=token_up, token_down=token_down,
-                        livro_de=livro_de, agora_ns=agora_ns, ts_ns=negocio.ts_ns,
-                    )
-                restante[indice] -= shares
-                meio_no_fill = None
-                if livro_de is not None:
-                    livro_do_fill = livro_de(token_id, agora_ns=agora_ns)
-                    meio_no_fill = livro_do_fill.mid if livro_do_fill is not None else None
-                self._pendentes.append(
-                    ExecucaoPossivel(
-                        slug=slug,
-                        token_id=token_id,
-                        lado_up=lado_up,
-                        preco_nosso=preco_nosso,
-                        preco_do_print=negocio.preco,
-                        shares=shares,
-                        tipo=tipo,
-                        ts_ns=negocio.ts_ns,
-                        meio_no_fill=meio_no_fill,
-                    )
+            if restante[indice] <= 0.0:
+                self.prints_em_perna_consumida += 1
+                continue
+            if negocio.preco < preco_nosso - EPS:
+                tipo = "atravessada"
+                shares = restante[indice]
+                self.execucoes_atravessadas += 1
+                self.shares_atravessadas += shares
+            else:
+                tipo = "no_nivel"
+                shares = min(negocio.tamanho, restante[indice])
+                self.execucoes_no_nivel += 1
+                self.shares_no_nivel += shares
+            if params is not None and livro_de is not None:
+                self._acertar_no_print(
+                    slug, aberta, params,
+                    token_up=token_up, token_down=token_down,
+                    livro_de=livro_de, agora_ns=agora_ns, ts_ns=negocio.ts_ns,
                 )
-                novas += 1
-                log.info(
-                    "cotacao sombra teria executado",
+            restante[indice] -= shares
+            meio_no_fill = None
+            if livro_de is not None:
+                livro_do_fill = livro_de(token_id, agora_ns=agora_ns)
+                meio_no_fill = livro_do_fill.mid if livro_do_fill is not None else None
+            self._pendentes.append(
+                ExecucaoPossivel(
                     slug=slug,
-                    lado="up" if lado_up else "down",
-                    tipo=tipo,
+                    token_id=token_id,
+                    lado_up=lado_up,
                     preco_nosso=preco_nosso,
                     preco_do_print=negocio.preco,
                     shares=shares,
-                    ts_servidor_ms=getattr(negocio, "ts_servidor_ms", None),
-                    atraso_s=_atraso_do_print_s(negocio, agora_ns),
+                    tipo=tipo,
+                    ts_ns=negocio.ts_ns,
+                    meio_no_fill=meio_no_fill,
                 )
+            )
+            novas += 1
+            log.info(
+                "cotacao sombra teria executado",
+                slug=slug,
+                lado="up" if lado_up else "down",
+                tipo=tipo,
+                preco_nosso=preco_nosso,
+                preco_do_print=negocio.preco,
+                shares=shares,
+                ts_servidor_ms=getattr(negocio, "ts_servidor_ms", None),
+                atraso_s=_atraso_do_print_s(negocio, agora_ns),
+            )
         return novas
 
     def medir_markout(self, livro_de: Callable[..., OrderBook | None], *, agora_ns: int) -> int:
