@@ -55,6 +55,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_execucao_maker.py": (22, "4.0(c) — execução maker"),
     "test_4_2_caixa_maker.py": (20, "4.2 — o relógio do SHADOW maker"),
     "test_maker_de_pares.py": (17, "1.6 — o maker de pares"),
+    "test_maker_de_pares_nos_pools.py": (7, "1.12 — o maker de pares nos pools"),
     "test_m4_auth_clob.py": (42, "3.2 — auth do CLOB"),
     "test_m4_struct_da_ordem.py": (41, "3.2 — struct EIP-712"),
     "test_m4_autorizacao_para_live.py": (22, "3.4 — trava tripla do LIVE"),

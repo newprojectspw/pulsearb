@@ -201,6 +201,13 @@ class Perna:
 
 @dataclass
 class Janela:
+    """Um mercado binário com os dois tokens complementares.
+
+    `token_up`/`token_down` são os nomes do caso que nasceu primeiro (as
+    janelas Up/Down de cripto). Num mercado de pool é YES/NO — a aritmética
+    do par é a mesma: os dois somam 1,00 na liquidação.
+    """
+
     slug: str
     asset: str
     token_up: str
@@ -488,6 +495,31 @@ class MakerDePares(RecordingIndex):
             perna.ordem = None
 
     # ------------------------------------------------------------ relatório
+    def _marcar_perna_solta(
+        self, janela: Janela, *, sobra_up: float, sobra_down: float, p_up: float, p_down: float
+    ) -> tuple[float | None, bool | None]:
+        """Quanto vale a perna que ficou sozinha, e se ela ganhou.
+
+        No caso Up/Down a gravação contém a RESOLUÇÃO: a perna solta vale 1
+        se o lado venceu e 0 se perdeu, e não há o que estimar. Quem herda
+        para um regime que resolve em dias (os pools do 1.12) sobrescreve —
+        lá a perna solta tem de ser marcada a preço de saída, não a resultado.
+        """
+        resolucao = self.resolucoes_por_token.get(
+            janela.token_up
+        ) or self.resolucoes_por_token.get(janela.token_down)
+        venceu_up = (
+            resolucao.venceu_up(janela.token_up, janela.token_down)
+            if resolucao is not None
+            else None
+        )
+        if venceu_up is None:
+            return None, None
+        residual = sobra_up * ((1.0 - p_up) if venceu_up else -p_up) + sobra_down * (
+            (1.0 - p_down) if not venceu_up else -p_down
+        )
+        return residual, venceu_up
+
     def _resultado_da_janela(self, janela: Janela, estrategia: Estrategia) -> dict[str, Any]:
         up = janela.pernas.get((estrategia, janela.token_up), Perna())
         down = janela.pernas.get((estrategia, janela.token_down), Perna())
@@ -495,23 +527,16 @@ class MakerDePares(RecordingIndex):
         travado = pares * (1.0 - up.preco_medio - down.preco_medio) if pares > 0 else 0.0
         sobra_up = up.executado - pares
         sobra_down = down.executado - pares
-        resolucao = self.resolucoes_por_token.get(janela.token_up) or self.resolucoes_por_token.get(
-            janela.token_down
-        )
-        venceu_up = (
-            resolucao.venceu_up(janela.token_up, janela.token_down)
-            if resolucao is not None
-            else None
-        )
         residual: float | None = 0.0
+        venceu_up: bool | None = None
         if sobra_up > EPS or sobra_down > EPS:
-            if venceu_up is None:
-                residual = None
-            else:
-                residual = (
-                    sobra_up * ((1.0 - up.preco_medio) if venceu_up else -up.preco_medio)
-                    + sobra_down * ((1.0 - down.preco_medio) if not venceu_up else -down.preco_medio)
-                )
+            residual, venceu_up = self._marcar_perna_solta(
+                janela,
+                sobra_up=sobra_up,
+                sobra_down=sobra_down,
+                p_up=up.preco_medio,
+                p_down=down.preco_medio,
+            )
         capital = up.custo + down.custo
         return {
             "slug": janela.slug,

@@ -797,9 +797,22 @@ de verdade (`tamanho_do_print`), e a diferença entre os dois dirá quanto do
 veredito é mercado e quanto é hipótese. Como a hipótese gera MAIS fill, ela
 puxa o resultado para BAIXO: o negativo acima é, nessa direção, pessimista.
 
+**A mesma conta no regime que PAGA já tem instrumento e coleta.** Os pools
+do 1.12 são outro mercado — markout 4,7× menor, reward por estar no livro, e
+resolução em dias em vez de minutos. `scripts/markout_dos_pools.py --gravar`
+passou a guardar os eventos crus no formato do recorder (com um registro
+`pools_snapshot` que diz quais dois tokens formam cada par), e
+`scripts/maker_de_pares_nos_pools.py` (7 testes) roda o MESMO motor sobre
+essa gravação, com uma diferença que não podia ser escondida: **a perna
+solta é marcada a preço de saída** (melhor bid do fim, menos o fee de
+taker), porque marcar a resultado num mercado que não resolveu seria
+inventar o resultado. O reward NÃO entra nesse relatório — ele tem número
+próprio no 1.12, e somar os dois no mesmo lugar deixaria um esconder o
+outro. Coleta de 6 h em curso desde 2026-09-14 15:37 UTC (60 mercados).
+
 ⬜ **falta**: a rodada do dia inteiro (24 h de 2026-09-13) para tirar a
-variância das pernas soltas, a sensibilidade do eixo `atravessada`, e a
-mesma conta sobre os POOLS de reward do 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
+variância das pernas soltas, a sensibilidade do eixo `atravessada`, e o
+resultado da conta nos POOLS do 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
 conta. Enquanto isso não existir, isto NÃO reprova a rota maker: reprova a
 ideia de copiar o formato "compra os dois lados e espera" para as janelas de
 cripto de 5 min.
