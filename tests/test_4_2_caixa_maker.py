@@ -131,11 +131,11 @@ class TestRewardsIntegradosNoTempo:
         assert caixa.segundos_repousando == pytest.approx(25.0)
 
 
-def _n(ts_s, preco, tamanho, lado, token="tok-up"):
+def _n(ts_s, preco, tamanho, lado, perna="tok-up"):
     """Um print com o token junto, para o dublê de `negocios_desde` filtrar
     (o `LivrosAoVivo` de verdade guarda por token; aqui a lista é uma só)."""
     return SimpleNamespace(
-        ts_ns=int(ts_s * 1e9), preco=preco, tamanho=tamanho, lado=lado, token=token
+        ts_ns=int(ts_s * 1e9), preco=preco, tamanho=tamanho, lado=lado, token=perna
     )
 
 
@@ -183,8 +183,8 @@ class TestExecucoesPossiveis:
         novas = self._conferir(
             caixa,
             _aberta(preco_up=0.79, preco_down=0.19),
-            _n(1010, 0.18, 10.0, "SELL", token="tok-down"),
-            _n(1011, 0.18, 10.0, "SELL", token="tok-up"),  # no Up, 0,18 < 0,79: pega
+            _n(1010, 0.18, 10.0, "SELL", perna="tok-down"),
+            _n(1011, 0.18, 10.0, "SELL", perna="tok-up"),  # no Up, 0,18 < 0,79: pega
         )
         assert novas == 2
         assert {p.lado_up for p in caixa._pendentes} == {True, False}
@@ -319,7 +319,7 @@ class TestOLacoLigaACaixa:
         assert aberta.preco_down == pytest.approx(0.49)
 
         # Segunda passada, 15 s depois, com um print SELL abaixo do nosso bid.
-        prints = [_n(1005, 0.47, 10.0, "SELL", token="tok-up")]
+        prints = [_n(1005, 0.47, 10.0, "SELL", perna="tok-up")]
         await laco.passo(
             [_janela()],
             livro_de=_livro_de(livro),
