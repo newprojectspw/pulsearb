@@ -276,19 +276,9 @@ class LacoMaker:
         self._params[janela.slug] = params
 
         aberta = self.abertas.get(janela.slug)
-        if aberta is not None and self._negocios_desde is not None:
-            # Prints desde a última passada, antes de qualquer decisão: o que
-            # nos pegaria já pegou, com ou sem livro para decidir agora.
-            self.caixa.conferir_prints(
-                janela.slug,
-                aberta,
-                token_up=janela.token_up,
-                token_down=janela.token_down,
-                negocios_desde=self._negocios_desde,
-                agora_ns=agora_ns,
-                livro_de=livro_de,
-                params=params,
-            )
+        self._conferir_prints(
+            janela, aberta, livro_de=livro_de, agora_ns=agora_ns, params=params
+        )
 
         dados, recusa = self._dados_da_passada(
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
@@ -302,6 +292,12 @@ class LacoMaker:
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
         melhor = self._melhor_candidata(dados, params)
+        if dados.sem_microprice and aberta is None:
+            # Nada a decidir: sem candidata e sem cotação no livro. Seguir
+            # daria `sem_candidata_que_pontue` por falta de dado NOSSO, e esse
+            # contador responde 'o bot não achou onde cotar' — inflá-lo aqui
+            # apagaria a diferença entre travado e sem trade (revisão adversa).
+            return None
 
         atual = None
         if aberta is not None:
@@ -364,6 +360,30 @@ class LacoMaker:
             livro=livro,
             livro_down=livro_down,
             ancora=ancora,
+        )
+
+    def _conferir_prints(
+        self,
+        janela: JanelaAoVivo,
+        aberta: CotacaoAberta | None,
+        *,
+        livro_de,
+        agora_ns: int,
+        params: ParametrosDeReward,
+    ) -> None:
+        """Os prints desde a última passada, antes de qualquer decisão: o que
+        nos pegaria já pegou, com ou sem livro para decidir agora."""
+        if aberta is None or self._negocios_desde is None:
+            return
+        self.caixa.conferir_prints(
+            janela.slug,
+            aberta,
+            token_up=janela.token_up,
+            token_down=janela.token_down,
+            negocios_desde=self._negocios_desde,
+            agora_ns=agora_ns,
+            livro_de=livro_de,
+            params=params,
         )
 
     def _melhor_candidata(
@@ -448,19 +468,18 @@ class LacoMaker:
 
         Os preços saem da MESMA função que monta a ordem, para o número que o
         repouso compara ser o número que iria para o fio. A perna Down é um
-        bid no livro dela, então teto e preço vêm da âncora espelhada.
+        bid no livro dela, então o microprice dela e o preço vêm da âncora
+        espelhada.
 
-        O TETO sai mesmo sem candidata: livro que alarga tira toda a grade
-        ancorada da faixa de reward, e é aí que a que repousa mais precisa do
-        teto — ela ainda pontua, e sem ele ficaria acima dele para sempre
-        (revisão do Codex, #127).
+        O LIMITE DURO sai mesmo sem candidata: livro que alarga tira toda a
+        grade ancorada da faixa de reward, e é aí que a que repousa mais
+        precisa dele — ela ainda pontua, e sem ele ficaria acima do microprice
+        para sempre (revisão do Codex, #127).
         """
         if ancora is None:
             return None
         espelhada = ancora.no_livro_do_down()
-        teto_up = ancora.limite(janela.tick_size, do_lado_bid=True)
-        teto_down = espelhada.limite(janela.tick_size, do_lado_bid=True)
-        if teto_up is None or teto_down is None:
+        if ancora.bid is None or espelhada.bid is None:
             return None
         precos = None
         if melhor is not None:
@@ -472,7 +491,9 @@ class LacoMaker:
                     melhor.cotacao
                 ).preco_limite,
             )
-        return AncoraEmVigor(teto=(teto_up, teto_down), precos=precos)
+        return AncoraEmVigor(
+            microprice=(ancora.bid, espelhada.bid), precos=precos
+        )
 
     def _ancora_do_microprice(
         self, livro: OrderBook, livro_down: OrderBook | None
@@ -840,6 +861,15 @@ class LacoMaker:
         return {
             "cotacoes_repousando": len(self.abertas),
             "por_janela": sorted(self.abertas),
+            # As regras EXPERIMENTAIS ligadas nesta rodada, no relato de 60 s.
+            # As duas juntas não se distinguem — uma muda QUANDO a ordem sai, a
+            # outra muda o PREÇO dela —, e uma rodada de 14 dias confundida não
+            # mede nenhuma das duas. Sai aqui para a confusão se denunciar na
+            # primeira hora, e não no fim.
+            "regras": {
+                "recolhe_quando_o_livro_anda": self.recolhe_quando_o_livro_anda,
+                "ticks_abaixo_do_microprice": self.ticks_abaixo_do_microprice,
+            },
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),
             "nota": (

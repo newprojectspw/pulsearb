@@ -508,30 +508,70 @@ class TestAncoraDoMicroprice:
         )
         assert 1.0 - aberta.preco_down == pytest.approx(avaliado)
 
-    async def test_a_ordem_que_ficou_acima_do_teto_e_reposicionada(self, tmp_path):
-        """O microprice anda quando o TAMANHO no topo muda — sem o meio se
-        mexer e sem a distância mudar. A ordem que repousa fica acima do teto
-        novo, CONTINUA pontuando (então `atual_nao_pontua_mais` não a pega) e
-        a candidata ancorada pontua MENOS que ela, então o piso de ganho
-        jamais aprovaria a troca. Sem trava própria a âncora valeria só na
-        colocação (revisão do Codex, #127)."""
-        # entra com o microprice ACIMA do meio: a âncora não aperta, o bid
-        # nasce a 1 tick do meio
-        entrando, _ = self._livros(tamanho_do_bid=900.0, tamanho_do_ask=100.0)
+    async def test_perder_folga_NAO_e_emergencia(self, tmp_path):
+        """A ordem continua ABAIXO do microprice, só com menos folga do que se
+        pediu. Isso não pode furar a histerese.
+
+        Foi o meu defeito: tratar a folga de `ticks` como se fosse o limite
+        duro punha a ordem acima do 'teto' a cada passo de 1 tick do meio, e
+        como a trava vence a histerese, o maker trocava a cotação em 39 de 40
+        passadas — todas antes do repouso mínimo, contra 2,05 com a regra
+        desligada. Reposicionar custa a fila, e nem a simulação do
+        `maker_de_pares` nem o SHADOW enxergam esse custo."""
         laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
-        await laco.passo([_janela()], livro_de=entrando, agora_epoch=1000.0, agora_ns=1)
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(500.0, 500.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
         assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
 
-        # o topo vira: microprice 0,492, teto 0,482 — a ordem a 0,49 ficou acima
-        virou, up = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
-        assert up.mid == pytest.approx(0.50)  # o MEIO não andou
+        # topo vira para 100/900: microprice 0,492 — a ordem a 0,49 perdeu
+        # folga (o teto virou 0,482), mas segue ABAIXO do microprice
         efeitos = await laco.passo(
-            [_janela()], livro_de=virou, agora_epoch=1100.0, agora_ns=2
+            [_janela()], livro_de=self._com_topos(100.0, 900.0),
+            agora_epoch=1010.0, agora_ns=2,
         )
 
-        assert len(efeitos) == 1
-        assert laco.motivos["acima_do_teto_do_microprice"] == 1
-        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.48)
+        assert efeitos == []
+        assert laco.motivos.get("acima_do_microprice", 0) == 0
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    async def test_nenhuma_troca_antes_do_repouso_minimo_num_passeio_do_meio(
+        self, tmp_path
+    ):
+        """A regressão de churn, travada: o meio passeando 1 tick a cada
+        passada de 15 s não pode produzir NENHUMA troca antes dos 30 s de
+        repouso mínimo. Com a folga tratada como limite duro eram 39 em 40."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        meio, trocas_cedo = 0.50, 0
+        for i in range(40):
+            up = OrderBook(
+                asset_id="tok-up",
+                bids=[(round(meio - 0.01, 4), 500.0)],
+                asks=[(round(meio + 0.01, 4), 500.0)],
+            )
+            down = OrderBook(
+                asset_id="tok-down",
+                bids=[(round(1 - meio - 0.01, 4), 500.0)],
+                asks=[(round(1 - meio + 0.01, 4), 500.0)],
+            )
+            antes = laco.abertas.get("btc-updown-4h-1")
+            agora = 1000.0 + i * 15.0
+            await laco.passo(
+                [_janela(fechamento=100_000.0)],
+                livro_de=lambda t, *, agora_ns, u=up, d=down: d if t == "tok-down" else u,
+                agora_epoch=agora,
+                agora_ns=i + 1,
+            )
+            depois = laco.abertas.get("btc-updown-4h-1")
+            trocou = antes is not None and (
+                depois is None or depois.desde_epoch != antes.desde_epoch
+            )
+            if trocou and agora - antes.desde_epoch < 30.0:
+                trocas_cedo += 1
+            meio = round(0.50 + 0.01 * ((i % 4) - 1), 4)
+
+        assert trocas_cedo == 0
 
     async def test_sem_ancora_a_mesma_troca_de_topo_nao_mexe_na_ordem(self, tmp_path):
         """A linha de base não muda: sem a âncora, `Cotacao` igual é preço
@@ -649,7 +689,7 @@ class TestAncoraDoMicroprice:
             [_janela()], livro_de=livro_de, agora_epoch=1200.0, agora_ns=2
         )
 
-        assert laco.motivos["acima_do_teto_do_microprice"] == 1
+        assert laco.motivos["acima_do_microprice"] == 1
         assert len(efeitos) == 1
         assert laco.abertas == {}
 
