@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 from pulsearb.analysis.rewards import (
     ParametrosDeReward,
@@ -144,12 +145,100 @@ def estimar_retorno(
         return None
 
     lados = 2 if cotacao.dois_lados else 1
-    por_lado = [0.0, 0.0]
+    precos = [0.0, 0.0]
+    tamanhos = [0.0, 0.0]
     for i, do_lado_bid in enumerate((True, False)[:lados]):
-        preco = cotacao.preco(meio, params.tick_size, do_lado_bid=do_lado_bid)
-        por_lado[i] = score_de_nivel(
-            preco, cotacao.tamanho, meio=meio, params=params
-        )
+        precos[i] = cotacao.preco(meio, params.tick_size, do_lado_bid=do_lado_bid)
+        tamanhos[i] = cotacao.tamanho
+    return _retorno_a_precos(
+        cotacao,
+        livro,
+        params,
+        preco_bid=precos[0],
+        preco_ask=precos[1],
+        tamanho_bid=tamanhos[0],
+        tamanho_ask=tamanhos[1],
+        horas=horas,
+        fator_de_captura=fator_de_captura,
+        markout_centavos=markout_centavos,
+    )
+
+
+def estimar_retorno_repousando(
+    aberta: Any,
+    livro: OrderBook,
+    params: ParametrosDeReward,
+    *,
+    horas: float,
+    fator_de_captura: float = FATOR_DE_CAPTURA_PADRAO,
+    markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
+    restante_up: float | None = None,
+    restante_down: float | None = None,
+) -> RetornoEstimado | None:
+    """O que a cotação JÁ COLOCADA rende AGORA — no preço em que ela repousa.
+
+    `estimar_retorno` avalia uma candidata: reposiciona a cotação a
+    `distancia_ticks` do meio DESTE livro. Uma ordem já enviada não anda com
+    o meio — ela fica em `aberta.preco_up` (bid no Up) e `aberta.preco_down`
+    (bid no Down, que no livro do Up é o ask a `1 − preco_down`). Avaliar a
+    ordem repousando com a conta da candidata pagava reward a uma ordem que o
+    meio já tinha deixado fora da faixa, e nunca a via "não pontuar mais"
+    (revisão do #118). Aqui o score sai dos preços ENVIADOS contra o meio de
+    agora — mesma `score_de_nivel`, mesmo `combinar_lados`, mesmo denominador.
+
+    `restante_*` é quanto de cada perna ainda está no livro na conta-sombra
+    (a `CaixaDoMaker` consome as pernas pelos prints); `None` = a perna
+    inteira. Perna sem preço (0) ou sem restante não pontua.
+    """
+    meio = livro.mid
+    if meio is None:
+        return None
+    cotacao = aberta.cotacao
+    tamanho_up = cotacao.tamanho if restante_up is None else max(0.0, restante_up)
+    tamanho_down = cotacao.tamanho if restante_down is None else max(0.0, restante_down)
+    preco_bid = float(aberta.preco_up or 0.0)
+    preco_ask = 1.0 - float(aberta.preco_down) if aberta.preco_down else 0.0
+    if not cotacao.dois_lados:
+        preco_ask, tamanho_down = 0.0, 0.0
+    return _retorno_a_precos(
+        cotacao,
+        livro,
+        params,
+        preco_bid=preco_bid,
+        preco_ask=preco_ask,
+        tamanho_bid=tamanho_up if preco_bid > 0.0 else 0.0,
+        tamanho_ask=tamanho_down if preco_ask > 0.0 else 0.0,
+        horas=horas,
+        fator_de_captura=fator_de_captura,
+        markout_centavos=markout_centavos,
+    )
+
+
+def _retorno_a_precos(
+    cotacao: Cotacao,
+    livro: OrderBook,
+    params: ParametrosDeReward,
+    *,
+    preco_bid: float,
+    preco_ask: float,
+    tamanho_bid: float,
+    tamanho_ask: float,
+    horas: float,
+    fator_de_captura: float,
+    markout_centavos: float,
+) -> RetornoEstimado | None:
+    """A conta de `estimar_retorno` a partir dos PREÇOS e TAMANHOS de cada
+    lado. É o único lugar onde a fórmula mora: a candidata e a ordem que já
+    repousa passam por aqui — mesmo caminho."""
+    meio = livro.mid
+    if meio is None:
+        return None
+    por_lado = [0.0, 0.0]
+    if tamanho_bid > 0:
+        por_lado[0] = score_de_nivel(preco_bid, tamanho_bid, meio=meio, params=params)
+    if tamanho_ask > 0:
+        por_lado[1] = score_de_nivel(preco_ask, tamanho_ask, meio=meio, params=params)
+    lados = sum(1 for tam in (tamanho_bid, tamanho_ask) if tam > 0)
     # Os dois lados NÃO se somam: §15.3 combina por `Q_min`, e cotação de um
     # lado só vale um terço dentro da faixa e ZERO fora dela. Somar era pagar
     # a cotação de um lado como se fossem dois.
@@ -170,7 +259,8 @@ def estimar_retorno(
     # deixamos exposto. É grosseiro e está declarado como tal — sem posição na
     # fila não há como fazer melhor, e um número mais elaborado aqui daria
     # falsa precisão a uma hipótese.
-    shares_executadas = cotacao.tamanho * lados * fracao * fator_de_captura
+    shares_executadas = (tamanho_bid + tamanho_ask) * fracao * fator_de_captura
+    del lados  # contado só para deixar explícito que é por perna com tamanho
     custo = -markout_centavos / 100.0 * shares_executadas
 
     return RetornoEstimado(
