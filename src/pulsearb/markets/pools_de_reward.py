@@ -203,3 +203,67 @@ def _fechamento(mercado: dict[str, Any], agora: float) -> float:
         if agora < epoch < agora + 365 * 86400:
             return epoch
     return agora + HORIZONTE_SINTETICO_S
+
+
+# ─────────────────────────────────────────────────────── o lado com rede ──
+class DescobertaDePools:
+    """Enumera os mercados do programa e devolve `JanelaAoVivo` prontas.
+
+    O cliente HTTP é **injetado**, como em `MarketDiscovery` — é a regra
+    offline-first do M1: os testes passam um dublê, produção passa httpx. Sem
+    isso, testar esta classe exigiria rede, e teste que exige rede não roda
+    no CI e por isso não roda nunca.
+    """
+
+    def __init__(
+        self,
+        http_get_json: Any,
+        *,
+        base_clob: str,
+        top: int = TOP_PADRAO,
+    ) -> None:
+        self._get = http_get_json
+        self._base = base_clob.rstrip("/")
+        self.top = top
+        #: Contadores de recusa, por motivo. O diário quer o motivo — "0
+        #: janelas" sem causa nomeada é o tipo de silêncio que este projeto
+        #: já pagou para não ter.
+        self.descartes: dict[str, int] = {}
+
+    def _descartar(self, motivo: str) -> None:
+        self.descartes[motivo] = self.descartes.get(motivo, 0) + 1
+
+    async def listar(self) -> list[MercadoComPool]:
+        """Todos os mercados com pool, do maior para o menor, cortados no topo."""
+        todos: list[MercadoComPool] = []
+        cursor = ""
+        # Teto de páginas: o cursor vem do FIO, e um servidor que devolvesse
+        # sempre o mesmo cursor faria este laço rodar para sempre dentro de um
+        # processo de 24 h. Falhar por teto é diagnosticável; travar não é.
+        for _ in range(200):
+            params: dict[str, Any] = {"sponsored": "false"}
+            if cursor:
+                params["next_cursor"] = cursor
+            pagina = await self._get(f"{self._base}/rewards/markets/current", params)
+            mercados, cursor = ler_pagina_de_pools(pagina)
+            todos.extend(mercados)
+            if not cursor or not mercados:
+                break
+        todos.sort(key=lambda m: m.daily_rate, reverse=True)
+        return todos[: self.top]
+
+    async def descobrir(self, *, agora_epoch: float | None = None) -> list[JanelaAoVivo]:
+        """As janelas cotáveis, já montadas."""
+        self.descartes.clear()
+        janelas: list[JanelaAoVivo] = []
+        for pool in await self.listar():
+            mercado = await self._get(f"{self._base}/markets/{pool.condition_id}", None)
+            if not isinstance(mercado, dict):
+                self._descartar("sem_resposta_do_mercado")
+                continue
+            janela = janela_do_mercado(pool, mercado, agora_epoch=agora_epoch)
+            if janela is None:
+                self._descartar("nao_cotavel")
+                continue
+            janelas.append(janela)
+        return janelas
