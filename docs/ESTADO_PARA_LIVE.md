@@ -742,6 +742,61 @@ recusa àquele preço. Daí `concessao_para_pontuar_c`: zero = basta entrar na
 fila; alto = paga-se markout imediato, à vista, por cada share.
 
 
+### O maker de PARES — o que os outros bots fazem, medido aqui (2026-09-14)
+
+`docs/OUTROS_BOTS.md` guarda o estudo do código de três bots públicos de
+Polymarket (`warproxxx/poly-maker` `4f32103`, `terrytrl100/polymarket-automated-mm`
+`849cda4`, `RuneDn/polymarket-liquidity-bot` `0cfcd36`) e o que se vê dos
+lucrativos, que não publicam código. **Nenhum bot público é lucrativo:** o
+único com resultado real publicado fechou a sessão em **−$15,51**
+(`poly-maker/TIPS.md:74-77`), com a maior perda num único fill adverso em
+livro fino. O que se repete em quem aparece nos leaderboards dos binários de
+cripto é ESTRUTURA, não previsão: compra dos DOIS lados em lote pequeno,
+nunca vende, e deixa o par liquidar em 1,00 — ganhando `1 − (pUp + pDown)`
+mais o rebate.
+
+Essa é a conta que o 4.2 nunca fez: ele mede cada perna pelo markout de 5 s,
+que é negativo por construção para um maker. `scripts/maker_de_pares.py`
+(15 testes em `tests/test_maker_de_pares.py`) faz a conta do PAR sobre a
+gravação real, com o MESMO modelo de execução do `CaixaDoMaker` (prints
+`last_trade_price` do lado SELL a preço ≤ o nosso bid; atravessada = a perna
+inteira, no nível = pro-rata com a fila que o livro mostra à frente) e a
+resolução da própria gravação para a perna que ficou sozinha.
+
+**O resultado da primeira medida (4 h de 2026-09-13, 11:00–15:00 UTC, 160
+janelas Up/Down, lote de 20 shares por perna) é NEGATIVO, e o motivo é
+estrutural:** quando o par de fato executa dos dois lados, a soma
+`pUp + pDown` que pagamos fica em **1,05 a 1,25 em média** — compramos o par
+por MAIS de 1,00. Não é taxa nem fila: é que só se executa nos dois lados
+quando o livro está largo ou andando, e aí os dois bids ficam caros em
+relação ao par. A forma que funciona nos leaderboards **não aparece nestas
+janelas de 5 min** ao preço em que somos executados.
+
+Três números que o instrumento produziu e que valem por si:
+
+1. **Ficar parado com o livro andando contra é quase toda a perda.** Deixar
+   a ordem descansando quando o melhor bid cai abaixo dela: **−583,54 USDC**
+   em 4 h. Recolher a ordem nesse instante, com 100 ms de latência de ida e
+   volta: **−31,87**. Mesmo lote, mesma gravação: a seleção adversa some
+   **95 %** com uma regra que o `poly-maker` já usa (o regime EVENT) e que
+   cabe no `_dormir_medindo_markout`, que já acorda a cada segundo.
+2. **A trava do par PIORA.** Limitar a segunda perna a `≤ 1 − p − 0,01`
+   depois da primeira executar derruba os pares fechados (111 → 64) sem
+   melhorar o líquido: a perna que sobra é a cara.
+3. **O colchão do RuneDn (só descansar com ≥ 10× o nosso tamanho à frente)
+   dá número POSITIVO, e ele não é edge:** +37,59 USDC, mas com **6 pares
+   em 160 janelas** — o positivo vem de 25 pernas soltas que a resolução
+   pagou 19 vezes. É cara ou coroa com 25 lançamentos, não estratégia. Fica
+   registrado como o que é: amostra insuficiente.
+
+⬜ **falta**: a rodada do dia inteiro (24 h de 2026-09-13) para tirar a
+variância das pernas soltas, e a mesma conta sobre os POOLS de reward do
+1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
+conta. Enquanto isso não existir, isto NÃO reprova a rota maker: reprova a
+ideia de copiar o formato "compra os dois lados e espera" para as janelas de
+cripto de 5 min.
+
+
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
 Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
