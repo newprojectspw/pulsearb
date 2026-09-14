@@ -69,6 +69,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import product
+from math import floor, sqrt
 from typing import Any
 
 from pulsearb.backtest.__main__ import RecordingIndex, caminho_de_leitura
@@ -114,6 +115,20 @@ COLCHOES: tuple[float, ...] = (0.0, 10.0)
 #: se pode comprar mais shares do que foram negociadas. A diferença entre os
 #: dois é o quanto do veredito vem da hipótese, e não do mercado.
 ATRAVESSADAS = ("perna_inteira", "tamanho_do_print")
+#: Lote por perna. Os bots que aparecem nos leaderboards operam lotes de
+#: US$ 3–5; o `poly-maker` aprendeu o mesmo pelo prejuízo ("um fill deve ser
+#: pequeno e descartável"). Aqui o lote é um EIXO: 5, 20 e 100 shares.
+TAMANHOS: tuple[float, ...] = (5.0, 20.0, 100.0)
+#: Viés de inventário (`poly-maker`: `r = fv − γ·σ·u`). Com a perna comprada,
+#: o bid DAQUELE lado desce `skew_ticks × (executado/lote)` ticks. Nunca
+#: melhora o topo do outro lado: melhorar o topo é o que os três bots
+#: públicos evitam, porque paga o spread para entrar na fila.
+SKEWS: tuple[int, ...] = (0, 2)
+#: Meio-spread do `poly-maker` (`δ = delta_min_ticks · tick + …`), aplicado
+#: sobre o MICROPRICE em vez do melhor bid. `None` = juntar ao topo, que é o
+#: que este projeto fazia. O alvo final é sempre o MENOR dos dois: nunca
+#: melhorar o topo continua valendo.
+DELTAS_DO_MICROPRICE: tuple[int | None, ...] = (None, 1, 3)
 
 
 def _numero(valor: Any) -> float | None:
@@ -127,6 +142,21 @@ def _numero(valor: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _microprice(book: OrderBook) -> float | None:
+    """Microprice de um nível: o meio ponderado pelo tamanho do OUTRO lado.
+
+    É o estimador de valor justo do `poly-maker` (`strategy/quoting.py`)
+    reduzido ao topo do livro: com bid grande e ask pequeno, o preço justo
+    está perto do ask, e é para lá que o livro anda.
+    """
+    if not book.bids or not book.asks:
+        return None
+    (pb, sb), (pa, sa) = book.bids[0], book.asks[0]
+    if sb + sa <= 0:
+        return None
+    return (pb * sa + pa * sb) / (sb + sa)
 
 
 def _tamanho_no_nivel(book: OrderBook, preco: float) -> float:
@@ -151,6 +181,10 @@ class Estrategia:
     salto_bps: float | None = None
     colchao_x: float = 0.0
     atravessada: str = "perna_inteira"
+    #: Lote por perna. `None` = o `--tamanho` da linha de comando.
+    tamanho: float | None = None
+    skew_ticks: int = 0
+    delta_do_microprice: int | None = None
 
     @property
     def nome(self) -> str:
@@ -160,7 +194,8 @@ class Estrategia:
         return (
             f"junta-{self.melhorar_ticks}t_{self.modo}_para-{self.parar_antes_s}s_"
             f"{recolhe}_{trava}_{salto}_colchao-{self.colchao_x:g}x_"
-            f"atrav-{self.atravessada}"
+            f"atrav-{self.atravessada}_lote-{self.tamanho or 0:g}_"
+            f"skew-{self.skew_ticks}_micro-{self.delta_do_microprice}"
         )
 
 
@@ -357,7 +392,8 @@ class MakerDePares(RecordingIndex):
                     perna.ordem = None
                     perna.cancelada_no_fim = True
                 continue
-            if perna.executado >= self.tamanho - EPS:
+            lote = estrategia.tamanho or self.tamanho
+            if perna.executado >= lote - EPS:
                 continue
             ordem = perna.ordem
             if ordem is not None and ordem.cancela_em_ns is not None and ts_ns >= ordem.cancela_em_ns:
@@ -380,13 +416,29 @@ class MakerDePares(RecordingIndex):
                 continue
             melhor, tamanho_no_topo = book.bids[0]
             alvo = melhor - estrategia.melhorar_ticks * janela.tick
+            if estrategia.delta_do_microprice is not None:
+                micro = _microprice(book)
+                if micro is None:
+                    continue
+                # Nunca MELHORA o topo: o alvo é o menor dos dois.
+                alvo = min(alvo, micro - estrategia.delta_do_microprice * janela.tick)
+            if estrategia.skew_ticks and perna.executado > EPS:
+                # Já estamos comprados deste lado: desce o bid na proporção
+                # do lote que já foi.
+                alvo -= (
+                    estrategia.skew_ticks * janela.tick * (perna.executado / lote)
+                )
             teto = 1.0
             if estrategia.trava_do_par:
                 outra = janela.pernas.get((estrategia, outro_token))
                 if outra is not None and outra.executado > EPS:
                     teto = 1.0 - outra.preco_medio - MARGEM_DO_PAR
                     alvo = min(alvo, teto)
-            alvo = round(alvo / janela.tick) * janela.tick
+            # PISO no tick, não arredondamento: arredondar para cima devolveria
+            # a ordem ao topo do livro depois de o microprice, o viés ou a
+            # trava terem mandado descer — e melhorar o topo é justamente o
+            # que os três bots públicos evitam.
+            alvo = floor(alvo / janela.tick + EPS) * janela.tick
             if ordem is not None:
                 if ordem.cancela_em_ns is not None:
                     continue
@@ -394,17 +446,24 @@ class MakerDePares(RecordingIndex):
                     # Melhor bid subiu demais: cancela e junta de novo (perde a fila).
                     perna.recolocacoes += 1
                     perna.ordem = ordem = None
-                elif ordem.preco > teto + EPS:
+                elif melhor < ordem.preco - EPS:
+                    # O livro andou CONTRA: o nível à frente sumiu e a ordem
+                    # virou o topo, sozinha. Este ramo vem antes do ajuste de
+                    # alvo de propósito — aqui o alvo também caiu, mas a
+                    # resposta é recolher, não reposicionar mais fundo (que
+                    # seria perseguir o preço para baixo).
+                    if estrategia.recolher_ms is not None:
+                        ordem.cancela_em_ns = ts_ns + int(estrategia.recolher_ms * 1e6)
+                        perna.recolhidas += 1
+                        continue
+                elif ordem.preco > teto + EPS or ordem.preco > alvo + EPS:
+                    # O alvo desceu SEM o topo cair: trava do par, viés de
+                    # inventário ou microprice. A ordem no livro ficou cara.
                     perna.recolocacoes += 1
                     perna.ordem = ordem = None
-                elif melhor < ordem.preco - EPS and estrategia.recolher_ms is not None:
-                    # O nível à frente sumiu: a ordem é o novo topo, sozinha.
-                    ordem.cancela_em_ns = ts_ns + int(estrategia.recolher_ms * 1e6)
-                    perna.recolhidas += 1
-                    continue
                 elif (
                     estrategia.colchao_x > 0
-                    and _tamanho_no_nivel(book, ordem.preco) < estrategia.colchao_x * self.tamanho
+                    and _tamanho_no_nivel(book, ordem.preco) < estrategia.colchao_x * lote
                 ):
                     ordem.cancela_em_ns = ts_ns + int((estrategia.recolher_ms or 0.0) * 1e6)
                     perna.recolhidas += 1
@@ -422,12 +481,12 @@ class MakerDePares(RecordingIndex):
                     if abs(alvo - melhor) < EPS
                     else _tamanho_no_nivel(book, alvo)
                 )
-                if fila < estrategia.colchao_x * self.tamanho:
+                if fila < estrategia.colchao_x * lote:
                     continue
                 envio_ns = 0 if estrategia.recolher_ms is None else int(estrategia.recolher_ms * 1e6)
                 perna.ordem = Ordem(
                     preco=alvo,
-                    restante=self.tamanho - perna.executado,
+                    restante=lote - perna.executado,
                     fila_a_frente=fila,
                     colocada_ns=ts_ns,
                     ativa_desde_ns=ts_ns + envio_ns,
@@ -574,6 +633,17 @@ class MakerDePares(RecordingIndex):
 
         travado = sum(r["travado"] for r in contadas)
         residual = sum(r["residual"] for r in contadas)
+        # O termo da perna solta é uma APOSTA: paga 1 ou 0 na resolução. A
+        # variância dele é q²·p(1−p) por perna, e sem ela um total positivo
+        # de algumas centenas de USDC não se distingue de cara-ou-coroa —
+        # que é exatamente o erro que a primeira leitura desta medida quase
+        # cometeu (4 h, +37 USDC com 6 pares).
+        variancia = 0.0
+        for r in contadas:
+            for sobra, preco in ((r["sobra_up"], r["p_up"]), (r["sobra_down"], r["p_down"])):
+                if sobra > EPS and 0.0 < preco < 1.0:
+                    variancia += (sobra**2) * preco * (1.0 - preco)
+        sigma = sqrt(variancia)
         rebate = sum(r["rebate"] for r in contadas)
         capital = sum(r["capital"] for r in contadas)
         pares = sum(r["pares"] for r in contadas)
@@ -599,6 +669,9 @@ class MakerDePares(RecordingIndex):
                 "salto_bps": estrategia.salto_bps,
                 "colchao_x": estrategia.colchao_x,
                 "atravessada": estrategia.atravessada,
+                "lote": estrategia.tamanho or self.tamanho,
+                "skew_ticks": estrategia.skew_ticks,
+                "delta_do_microprice": estrategia.delta_do_microprice,
             },
             "janelas": {
                 "cotadas": len(linhas),
@@ -617,6 +690,19 @@ class MakerDePares(RecordingIndex):
                 "rebate_teto": round(rebate, 4),
                 "total_sem_rebate": round(travado + residual, 4),
                 "total_com_rebate": round(travado + residual + rebate, 4),
+                # Determinístico dado o fill: preço pago × shares. É o termo
+                # que decide se a estrutura se paga.
+                "sem_a_aposta_travado_mais_rebate": round(travado + rebate, 4),
+            },
+            "incerteza": {
+                "sigma_da_perna_solta_usdc": round(sigma, 4),
+                "z_do_total": round((travado + residual + rebate) / sigma, 3)
+                if sigma > 0
+                else None,
+                "leitura": (
+                    "|z| < 2 = o total NÃO se distingue de cara-ou-coroa; o que "
+                    "se distingue é `sem_a_aposta_travado_mais_rebate`"
+                ),
             },
             "por_janela_contada_cents": round(
                 100 * (travado + residual + rebate) / max(1, len(contadas)), 3
@@ -709,6 +795,34 @@ def _quebra(linhas: list[dict[str, Any]], chave: str) -> dict[str, Any]:
     return saida
 
 
+def estrategias_focadas() -> tuple[Estrategia, ...]:
+    """A melhor configuração da grade ampla × as peças dos bots que lucram.
+
+    A grade ampla respondeu o que RECOLHER faz (é quase tudo). A focada
+    responde o resto: lote descartável, viés de inventário e microprice —
+    as três peças que o estudo dos bots públicos apontou e que ainda não
+    tinham número aqui.
+    """
+    base = dict(melhorar_ticks=0, modo="pessimista", parar_antes_s=180, colchao_x=0.0)
+    grade = [
+        # Referência: parada, como o projeto cotava antes de medir.
+        Estrategia(**base, recolher_ms=None, trava_do_par=False, salto_bps=None),
+    ]
+    grade += [
+        Estrategia(
+            **base,
+            recolher_ms=100.0,
+            trava_do_par=False,
+            salto_bps=3.0,
+            tamanho=lote,
+            skew_ticks=skew,
+            delta_do_microprice=micro,
+        )
+        for lote, skew, micro in product(TAMANHOS, SKEWS, DELTAS_DO_MICROPRICE)
+    ]
+    return tuple(grade)
+
+
 def estrategias_padrao() -> tuple[Estrategia, ...]:
     base = [
         Estrategia(
@@ -754,6 +868,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tamanho", type=float, default=TAMANHO_PADRAO)
     parser.add_argument("--reprice-ticks", type=int, default=REPRICE_TICKS_PADRAO)
     parser.add_argument("--detalhe", action="store_true")
+    parser.add_argument(
+        "--grade",
+        choices=("ampla", "focada"),
+        default="ampla",
+        help="ampla: recolher/trava/salto/colchão. focada: lote, viés e microprice.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -769,7 +889,9 @@ def main(argv: list[str] | None = None) -> int:
         reader,
         tamanho=args.tamanho,
         reprice_ticks=args.reprice_ticks,
-        estrategias=estrategias_padrao(),
+        estrategias=(
+            estrategias_focadas() if args.grade == "focada" else estrategias_padrao()
+        ),
     )
     index.build()
 
@@ -786,25 +908,28 @@ def main(argv: list[str] | None = None) -> int:
         print(texto)
 
     print(
-        "\nestratégia                                       janelas  par 1perna"
-        "  pnl s/reb  pnl c/reb   ¢/jan  soma_par  soltas ganharam/pago"
+        "\nestratégia                                                      janelas"
+        "  par 1perna  travado+reb   total    z  soma_par"
     )
     for e in relatorio["estrategias"]:
-        j, p, s = e["janelas"], e["pnl_usdc"], e["pernas_soltas"]
+        j, p = e["janelas"], e["pnl_usdc"]
         est = e["estrategia"]
         recolhe = "fica" if est["recolher_ms"] is None else f"rec-{int(est['recolher_ms'])}ms"
         salto = "salto-off" if est["salto_bps"] is None else f"salto-{est['salto_bps']:g}"
         nome = (
             f"para-{est['parar_antes_do_fim_s']}s {recolhe:<9} "
             f"{'trava' if est['trava_do_par'] else 'livre'} {salto:<9} "
-            f"colc-{est['colchao_x']:g} {est['atravessada'][:5]}"
+            f"colc-{est['colchao_x']:g} lote-{est['lote']:g} "
+            f"skew-{est['skew_ticks']} micro-{est['delta_do_microprice']}"
         )
         soma = e["soma_pup_pdown_nos_pares"]["media"]
+        z = e["incerteza"]["z_do_total"]
         print(
-            f"{nome:<48} {j['cotadas']:>6} {j['com_par']:>4} {j['so_uma_perna']:>6} "
-            f"{p['total_sem_rebate']:>10.2f} {p['total_com_rebate']:>10.2f} "
-            f"{e['por_janela_contada_cents']:>7.2f}  {soma if soma is not None else float('nan'):>7.3f}"
-            f"  {s['fracao_que_ganhou']:.3f}/{s['preco_medio_pago']:.3f}"
+            f"{nome:<62} {j['cotadas']:>6} {j['com_par']:>4} {j['so_uma_perna']:>6} "
+            f"{p['sem_a_aposta_travado_mais_rebate']:>12.2f} "
+            f"{p['total_com_rebate']:>8.2f} "
+            f"{(z if z is not None else float('nan')):>5.2f} "
+            f"{(soma if soma is not None else float('nan')):>8.3f}"
         )
     return 0
 

@@ -757,62 +757,60 @@ mais o rebate.
 
 Essa é a conta que o 4.2 nunca fez: ele mede cada perna pelo markout de 5 s,
 que é negativo por construção para um maker. `scripts/maker_de_pares.py`
-(15 testes em `tests/test_maker_de_pares.py`) faz a conta do PAR sobre a
+(22 testes em `tests/test_maker_de_pares.py`) faz a conta do PAR sobre a
 gravação real, com o MESMO modelo de execução do `CaixaDoMaker` (prints
 `last_trade_price` do lado SELL a preço ≤ o nosso bid; atravessada = a perna
 inteira, no nível = pro-rata com a fila que o livro mostra à frente) e a
 resolução da própria gravação para a perna que ficou sozinha.
 
-**O resultado da primeira medida (4 h de 2026-09-13, 11:00–15:00 UTC, 160
-janelas Up/Down, lote de 20 shares por perna) é NEGATIVO, e o motivo é
-estrutural:** quando o par de fato executa dos dois lados, a soma
-`pUp + pDown` que pagamos fica em **1,05 a 1,25 em média** — compramos o par
-por MAIS de 1,00. Não é taxa nem fila: é que só se executa nos dois lados
-quando o livro está largo ou andando, e aí os dois bids ficam caros em
-relação ao par. A forma que funciona nos leaderboards **não aparece nestas
-janelas de 5 min** ao preço em que somos executados.
+**O DIA INTEIRO, medido (2026-09-13 UTC, 27 arquivos, 1.000 janelas Up/Down
+— 692 de 5 min, 230 de 15 min, 58 de 1 h, 20 de 4 h —, lote de 20 shares por
+perna, `relatorios/PARES_20260913.json`):**
 
-Três números que o instrumento produziu e que valem por si:
+**(1) Ficar parado com o livro andando contra é 98% da perda.** A cotação que
+descansa e não recolhe perde **−4.227,56 USDC no dia**. A MESMA cotação, que
+recolhe a ordem 100 ms depois de o melhor bid cair abaixo dela, fecha o termo
+determinístico em **−79,76**. É a maior diferença que este projeto já mediu
+entre duas regras de cotação, e a regra é a que o `poly-maker` já usa (o
+regime EVENT do `strategy/regime.py`).
 
-1. **Ficar parado com o livro andando contra é quase toda a perda.** Deixar
-   a ordem descansando quando o melhor bid cai abaixo dela: **−583,54 USDC**
-   em 4 h. Recolher a ordem nesse instante, com 100 ms de latência de ida e
-   volta: **−31,87**. Mesmo lote, mesma gravação: a seleção adversa some
-   **95 %** com uma regra que o `poly-maker` já usa (o regime EVENT) e que
-   cabe no `_dormir_medindo_markout`, que já acorda a cada segundo.
-2. **A trava do par PIORA.** Limitar a segunda perna a `≤ 1 − p − 0,01`
-   depois da primeira executar derruba os pares fechados (111 → 64) sem
-   melhorar o líquido: a perna que sobra é a cara.
-3. **O colchão do RuneDn (só descansar com ≥ 10× o nosso tamanho à frente)
-   dá número POSITIVO, e ele não é edge:** +37,59 USDC, mas com **6 pares
-   em 160 janelas** — o positivo vem de 25 pernas soltas que a resolução
-   pagou 19 vezes. É cara ou coroa com 25 lançamentos, não estratégia. Fica
-   registrado como o que é: amostra insuficiente.
+**(2) O que sobra é pequeno e ainda negativo.** Com o recolher ligado e o
+gatilho de salto do spot a 3 bps (cooloff de 5 s), o termo que NÃO depende de
+sorte — par travado + rebate teto — fecha em **−80,21 + 45,53 = −34,68 USDC
+no dia**, sobre 16.969 shares executadas e 8.474 USDC de capital. A soma
+`pUp + pDown` paga nos pares caiu de 1,23 (sem recolher) para **1,015**: o
+recolher tira quase toda a seleção adversa, mas não a inverte.
+
+**(3) O +165 que aparece na coluna do total é CARA-OU-COROA, e está marcado
+como tal no relatório.** Ele vem de `residual_das_pernas_soltas` = +199,95,
+que é o resultado de 346 pernas que ficaram sozinhas e foram à resolução:
+52,3% ganharam, a 0,491 de preço médio. O desvio-padrão desse termo é
+**186 USDC** (`incerteza.sigma_da_perna_solta_usdc`), então `z = 0,89` — não
+se distingue de zero. Quem ler essa coluna como lucro está lendo ruído; por
+isso o relatório publica `sem_a_aposta_travado_mais_rebate` ao lado, e a
+tabela imprime o `z`.
+
+**(4) Quanto maior a janela, melhor** — e isto sim tem sinal: +143,96 ¢ por
+janela de 1 h (40 janelas), +56,29 ¢ por janela de 15 min (175), **+0,63 ¢**
+por janela de 5 min (381). As janelas de 5 min de cripto, que são as do
+taker, são o pior lugar para esta estrutura.
 
 **A hipótese que mais infla o fill está isolada e medível.** Um print que
 passa ABAIXO do nosso preço conta a perna INTEIRA — é o que o `CaixaDoMaker`
-faz (§4.2), e é por onde vêm 221 das 251 execuções da rodada de 4 h. Um
-print de 3 shares não pode ter comprado 20. O eixo `atravessada` liga o teto
-de verdade (`tamanho_do_print`), e a diferença entre os dois dirá quanto do
-veredito é mercado e quanto é hipótese. Como a hipótese gera MAIS fill, ela
-puxa o resultado para BAIXO: o negativo acima é, nessa direção, pessimista.
+faz (§4.2), e são 451 das 1.205 execuções do dia. Um print de 3 shares não
+pode ter comprado 20. O eixo `atravessada` liga o teto de verdade
+(`tamanho_do_print`). Como a hipótese gera MAIS fill, ela puxa o resultado
+para BAIXO: o negativo acima é, nessa direção, pessimista.
 
-**A mesma conta no regime que PAGA já tem instrumento e coleta.** Os pools
-do 1.12 são outro mercado — markout 4,7× menor, reward por estar no livro, e
-resolução em dias em vez de minutos. `scripts/markout_dos_pools.py --gravar`
-passou a guardar os eventos crus no formato do recorder (com um registro
-`pools_snapshot` que diz quais dois tokens formam cada par), e
-`scripts/maker_de_pares_nos_pools.py` (7 testes) roda o MESMO motor sobre
-essa gravação, com uma diferença que não podia ser escondida: **a perna
-solta é marcada a preço de saída** (melhor bid do fim, menos o fee de
-taker), porque marcar a resultado num mercado que não resolveu seria
-inventar o resultado. O reward NÃO entra nesse relatório — ele tem número
-próprio no 1.12, e somar os dois no mesmo lugar deixaria um esconder o
-outro. Coleta de 6 h em curso desde 2026-09-14 15:37 UTC (60 mercados).
+**As peças dos bots que lucram que ainda não têm número** (rodada `--grade
+focada` em curso, mesmo dia): lote descartável (5 × 20 × 100 shares), viés de
+inventário (`r = fv − γσu`, o bid do lado comprado desce com o inventário) e
+cotação por **microprice** em vez de juntar ao topo. Nenhuma delas melhora o
+topo do livro — essa é a regra que os três bots públicos compartilham.
 
-⬜ **falta**: a rodada do dia inteiro (24 h de 2026-09-13) para tirar a
-variância das pernas soltas, a sensibilidade do eixo `atravessada`, e o
-resultado da conta nos POOLS do 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
+⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
+sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
+1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
 conta. Enquanto isso não existir, isto NÃO reprova a rota maker: reprova a
 ideia de copiar o formato "compra os dois lados e espera" para as janelas de
 cripto de 5 min.
