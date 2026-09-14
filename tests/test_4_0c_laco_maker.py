@@ -494,6 +494,51 @@ class TestRecolherQuandoOLivroAnda:
         assert laco.caixa.segundos_repousando == pytest.approx(5.0)
         assert laco.caixa.acertos == 1
 
+    async def test_em_live_cotacao_que_melhora_o_topo_compara_o_bid_externo(self, tmp_path):
+        """Livro largo (bid externo 0,40) e a nossa ordem NO livro, acima
+        dele: o melhor bid do livro é a nossa própria ordem, e comparar o
+        topo com a referência (0,40) nunca dispararia (revisão do Codex,
+        #126). O que se compara é o melhor bid EXTERNO — o livro sem o
+        nosso nível: 0,40 segura, 0,38 recolhe, e só nós no lado recolhe."""
+        largo = _livro_com_bids((0.40, 500.0), asks=((0.60, 500.0),))
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True)
+        await laco.passo([_janela()], livro_de=_livro_de(largo), agora_epoch=1000.0, agora_ns=1)
+        nosso = laco.abertas["btc-updown-4h-1"].preco_up
+        assert 0.40 < nosso < 0.50
+        com_a_nossa = _livro_com_bids((nosso, 50.0), (0.40, 500.0), asks=((0.60, 500.0),))
+        assert await laco.recolher_se_o_livro_andou(_livro_de(com_a_nossa), agora_ns=2) == []
+        assert len(laco.abertas) == 1
+        caiu = _livro_com_bids((nosso, 50.0), (0.38, 500.0), asks=((0.60, 500.0),))
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(caiu), agora_ns=3)) == 1
+        assert laco.abertas == {}
+        # só a nossa no lado dos bids: o mercado foi embora
+        await laco.passo([_janela()], livro_de=_livro_de(largo), agora_epoch=1010.0, agora_ns=4)
+        sozinha = _livro_com_bids((nosso, 50.0), asks=((0.60, 500.0),))
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(sozinha), agora_ns=5)) == 1
+
+    async def test_em_live_a_referencia_da_recotacao_desconta_a_nossa_ordem_anterior(
+        self, tmp_path
+    ):
+        """Na recotação em LIVE, o livro que coloca a cotação nova ainda tem a
+        ANTERIOR: sem descontá-la a referência seria a nossa própria ordem."""
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1
+        )
+        antiga = laco.abertas["btc-updown-4h-1"]
+        assert antiga.preco_up == 0.49
+        # os asks subiram (meio 0,60): o livro mostra a NOSSA 0,49 no topo dos
+        # bids e o bid externo 0,48 atrás dela
+        com_a_antiga = _livro_com_bids((0.49, 50.0), (0.48, 500.0), asks=((0.71, 500.0),))
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(com_a_antiga), agora_epoch=1100.0, agora_ns=2
+        )
+        nova = laco.abertas["btc-updown-4h-1"]
+        assert nova.desde_epoch != antiga.desde_epoch and nova.preco_up > 0.49
+        chave = ("btc-updown-4h-1", int(nova.desde_epoch * 1e6))
+        # 0,48 (externo), não 0,49 (a nossa antiga)
+        assert laco._referencia_do_recolher[chave][0] == pytest.approx(0.48)
+
     async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
         """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
         perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —

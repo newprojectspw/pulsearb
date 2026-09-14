@@ -376,9 +376,10 @@ class LacoMaker:
         agora_epoch: float,
         livro: OrderBook | None = None,
     ) -> Efeito:
+        anterior = self.abertas.get(janela.slug)
         efeito = await aplicar_decisao(
             decisao,
-            self.abertas.get(janela.slug),
+            anterior,
             cliente=self.cliente,
             ordem_da_cotacao=self._ordem_da_cotacao(janela, meio=meio),
             ordem_do_lado_down=self._ordem_da_cotacao(janela, meio=meio, lado_up=False),
@@ -395,12 +396,22 @@ class LacoMaker:
             # bid do Down é `1 − melhor ask do Up`.
             chave = (janela.slug, int(aberta.desde_epoch * 1e6))
             if chave not in self._referencia_do_recolher:
-                melhor_bid_down = (
-                    1.0 - livro.best_ask if livro.best_ask is not None else None
-                )
+                # Em LIVE o livro que colocou a cotação NOVA ainda pode ter
+                # a ANTERIOR (recotação): o melhor bid externo desconta o
+                # nosso nível, senão a referência seria a nossa própria ordem.
+                bids, asks = livro.bids, livro.asks
+                if self.nossa_ordem_esta_no_livro and anterior is not None:
+                    bids = _sem_o_nosso_nivel(
+                        bids, anterior.preco_up, anterior.cotacao.tamanho
+                    )
+                    asks = _sem_o_nosso_nivel(
+                        asks, 1.0 - anterior.preco_down, anterior.cotacao.tamanho
+                    )
+                melhor_bid_up = bids[0][0] if bids else None
+                melhor_bid_down = 1.0 - asks[0][0] if asks else None
                 self._referencia_do_recolher[chave] = (
-                    min(aberta.preco_up, livro.best_bid)
-                    if livro.best_bid is not None
+                    min(aberta.preco_up, melhor_bid_up)
+                    if melhor_bid_up is not None
                     else aberta.preco_up,
                     min(aberta.preco_down, melhor_bid_down)
                     if melhor_bid_down is not None
@@ -451,7 +462,8 @@ class LacoMaker:
                 if preco <= 0.0 or livros[i] is None:
                     continue
                 if _o_livro_andou_contra(
-                    livros[i], referencias[i], aberta.cotacao.tamanho,
+                    livros[i], referencias[i],
+                    preco_nosso=preco, tamanho=aberta.cotacao.tamanho,
                     nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
                 ):
                     if self._negocios_desde is not None:
@@ -631,23 +643,43 @@ def _espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
     )
 
 
+def _sem_o_nosso_nivel(
+    niveis: list[tuple[float, float]], preco_nosso: float, tamanho: float
+) -> list[tuple[float, float]]:
+    """Os níveis do livro sem a NOSSA ordem: no nosso preço desconta o nosso
+    tamanho, e o nível some se não sobra ninguém nele."""
+    externos: list[tuple[float, float]] = []
+    for preco, quantidade in niveis:
+        if abs(preco - preco_nosso) <= _EPS_PRECO:
+            quantidade -= tamanho
+            if quantidade <= _EPS_PRECO:
+                continue
+        externos.append((preco, quantidade))
+    return externos
+
+
 def _o_livro_andou_contra(
-    livro: OrderBook, referencia: float, tamanho: float, *, nossa_ordem_no_livro: bool
+    livro: OrderBook,
+    referencia: float,
+    *,
+    preco_nosso: float,
+    tamanho: float,
+    nossa_ordem_no_livro: bool,
 ) -> bool:
     """O melhor bid do MERCADO caiu abaixo da referência?
 
     Lado de bids vazio é o caso mais forte de "caiu" — o mercado foi embora.
-    Sem a nossa ordem no livro (SHADOW): `best_bid < referência`. Com ela
-    (LIVE), o melhor bid nunca cai abaixo do nosso enquanto ele repousa —
-    ele VIRA o melhor bid; o sinal é estar sozinho no topo: melhor bid na
-    referência e tamanho do nível não maior que o nosso.
+    Sem a nossa ordem no livro (SHADOW), o melhor bid do livro É o do
+    mercado. Com ela (LIVE), o melhor bid do livro pode ser a NOSSA ordem —
+    e quando a cotação melhora o topo (livro largo: os pools) ela é o topo
+    desde que nasce, e comparar o topo com a referência nunca dispararia
+    (revisão do Codex, #126). O que se compara é o melhor bid EXTERNO: o
+    livro sem o nosso nível. "Sozinho no topo" é o caso particular em que
+    ele fica abaixo do nosso preço.
     """
-    melhor = livro.best_bid
-    if melhor is None:
+    bids = livro.bids
+    if nossa_ordem_no_livro:
+        bids = _sem_o_nosso_nivel(bids, preco_nosso, tamanho)
+    if not bids:
         return True
-    if melhor < referencia - _EPS_PRECO:
-        return True
-    if nossa_ordem_no_livro and abs(melhor - referencia) <= _EPS_PRECO:
-        no_nivel = sum(q for p, q in livro.bids if abs(p - melhor) <= _EPS_PRECO)
-        return no_nivel <= tamanho + _EPS_PRECO
-    return False
+    return bids[0][0] < referencia - _EPS_PRECO
