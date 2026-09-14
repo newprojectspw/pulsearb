@@ -213,6 +213,12 @@ class Settings(BaseSettings):
     #: 1.000. O default repete os 5,0 para a rodada do taker não mudar; a
     #: rota de pools se liga com o tamanho que o 1.12 mediu (1.000).
     tamanho_da_cotacao_maker_shares: float = 5.0
+    #: Recolher a cotação quando o melhor bid cai abaixo dela — a regra dos
+    #: makers dos leaderboards (`docs/OUTROS_BOTS.md`, regime EVENT do
+    #: `poly-maker`), medida na gravação pelo `maker_de_pares` em 2026-09-14:
+    #: ficar custou −583,54 USDC em 4 h, recolher −31,87. Desligada por
+    #: padrão para as rodadas em curso não mudarem; a rota de pools liga.
+    maker_recolhe_quando_o_livro_anda: bool = False
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"

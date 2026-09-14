@@ -392,3 +392,66 @@ class TestOPrecoSegueOMeioDoLivro:
 
         assert laco.cliente.repousadas == {}
         assert laco.abertas == {}
+
+
+# ═══════════════ recolher quando o livro anda contra — a regra dos leaderboards
+
+
+def _livro_com_bids(*bids, asks=((0.51, 500.0), (0.52, 500.0))):
+    return OrderBook(asset_id="tok-up", bids=list(bids), asks=list(asks))
+
+
+class TestRecolherQuandoOLivroAnda:
+    async def _com_cotacao(self, tmp_path, **kw):
+        laco = _laco(tmp_path, **kw)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == 0.49
+        return laco
+
+    async def test_melhor_bid_abaixo_da_cotacao_recolhe_com_nome(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        # o mercado andou: melhor bid a 0,47, abaixo do nosso 0,49
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=2
+        )
+        assert len(efeitos) == 1
+        assert laco.abertas == {}
+        assert not laco.cliente.repousadas  # as DUAS pernas saíram
+        assert laco.motivos["livro_andou_contra"] == 1
+
+    async def test_livro_parado_nao_recolhe(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2) == []
+        assert len(laco.abertas) == 1
+
+    async def test_desligada_por_padrao_nao_recolhe_mesmo_com_o_livro_andando(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path)
+        assert laco.recolhe_quando_o_livro_anda is False
+        assert await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=2
+        ) == []
+        assert len(laco.abertas) == 1
+
+    async def test_livro_indisponivel_nao_recolhe(self, tmp_path):
+        """Sair por falta de dado nosso perde a fila de graça — mesma regra
+        do passo."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert await laco.recolher_se_o_livro_andou(_livro_de(None), agora_ns=2) == []
+        assert len(laco.abertas) == 1
+
+    async def test_em_live_o_gatilho_e_estar_sozinho_no_topo(self, tmp_path):
+        """Com a nossa ordem no livro, o melhor bid nunca cai abaixo dela —
+        ela VIRA o topo. Sozinha no nível (tamanho ≤ o nosso) = o mercado
+        foi embora; acompanhada (500 no nível) = ainda há mercado ali."""
+        laco = await self._com_cotacao(
+            tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True
+        )
+        sozinhos = _livro_com_bids((0.49, 50.0), (0.47, 500.0))  # 50 = só a nossa
+        acompanhados = _livro_com_bids((0.49, 550.0), (0.48, 500.0))
+        assert await laco.recolher_se_o_livro_andou(_livro_de(acompanhados), agora_ns=2) == []
+        assert len(laco.abertas) == 1
+        efeitos = await laco.recolher_se_o_livro_andou(_livro_de(sozinhos), agora_ns=3)
+        assert len(efeitos) == 1 and laco.abertas == {}

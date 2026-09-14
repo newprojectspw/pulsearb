@@ -284,6 +284,8 @@ class ProcessoShadow:
                     caminho_do_diario=diario, modo=settings.mode
                 ),
                 tamanho_da_cotacao=settings.tamanho_da_cotacao_maker_shares,
+                recolhe_quando_o_livro_anda=settings.maker_recolhe_quando_o_livro_anda,
+                nossa_ordem_esta_no_livro=settings.mode is Mode.LIVE,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o
                 # cabeçalho do `laco_maker`.
@@ -550,10 +552,21 @@ class ProcessoShadow:
             if restante <= 0:
                 return
             await asyncio.sleep(min(1.0, restante))
-            if self.laco_maker is not None and self.laco_maker.caixa._pendentes:
+            if self.laco_maker is None:
+                continue
+            if self.laco_maker.caixa._pendentes:
                 self.laco_maker.caixa.medir_markout(
                     self._livro_para_o_maker, agora_ns=time.time_ns()
                 )
+            # A regra dos makers dos leaderboards, a cada segundo: o melhor
+            # bid caiu abaixo da nossa cotação → recolher. Ver `LacoMaker`.
+            if getattr(self.laco_maker, "recolhe_quando_o_livro_anda", False):
+                try:
+                    await self.laco_maker.recolher_se_o_livro_andou(
+                        self._livro_para_o_maker, agora_ns=time.time_ns()
+                    )
+                except Exception:
+                    log.exception("recolher entre passadas falhou")
 
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None

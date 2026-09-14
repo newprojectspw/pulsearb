@@ -822,6 +822,7 @@ nenhum destes números serve sem decisão nova, com capital real conferido.
 | `pools_descobertos` | > 0 em até 5 min (o ciclo é de 300 s) | 0 depois de 10 min: a descoberta não achou pool — conferir se `GET /rewards/markets/current` responde da VPS (§16 do API_NOTES) |
 | `maker.motivos` | `repousada` / `manter` aparecendo; **`sem_pool_de_reward` NÃO pode ser o motivo único** | motivo único `sem_pool_de_reward` = o opt-in não pegou (variável ausente na unit) |
 | `desde_o_relato` | andando a cada 60 s | congelado = 3.14 |
+| `maker.motivos.livro_andou_contra` | > 0 ao longo da primeira hora (o livro anda; a regra recolhe) | 0 com o livro andando = a variável `MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA` não pegou |
 | id das ordens no diário | todo id com prefixo `sombra-` | qualquer id sem `sombra-` é **PARAR AGORA**: `systemctl stop` e abrir issue — significaria ordem real |
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede

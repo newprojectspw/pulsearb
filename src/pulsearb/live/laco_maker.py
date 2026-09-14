@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pulsearb.analysis.rewards import ParametrosDeReward
+from pulsearb.backtest.book import OrderBook
 from pulsearb.live.caixa_maker import CaixaDoMaker
 from pulsearb.live.cotacao import (
     Cotacao,
@@ -140,7 +141,22 @@ class LacoMaker:
     #: O relógio do 4.2: o que as cotações repousando teriam rendido e quantas
     #: vezes teriam executado. Ver `caixa_maker`.
     caixa: CaixaDoMaker = field(default_factory=CaixaDoMaker)
+    #: A regra que os makers dos leaderboards usam e que o `maker_de_pares`
+    #: mediu na gravação (2026-09-14): ficar parado com o livro andando contra
+    #: era quase toda a perda — −583,54 USDC em 4 h deixando a ordem
+    #: descansar, −31,87 recolhendo-a quando o melhor bid cai abaixo dela.
+    #: Desligada por padrão para as rodadas em curso não mudarem de
+    #: comportamento; a rota de pools liga por `Settings`.
+    recolhe_quando_o_livro_anda: bool = False
+    #: Em SHADOW a nossa ordem NÃO está no livro, então `best_bid < preço` é
+    #: o gatilho exato. Em LIVE ela está — e quando o mercado anda para
+    #: baixo, ela VIRA o melhor bid: o gatilho passa a ser "somos o topo e
+    #: estamos sozinhos nele" (tamanho no nível ≤ o nosso).
+    nossa_ordem_esta_no_livro: bool = False
     _negocios_desde: Any = field(default=None, repr=False)
+    #: Os tokens de cada janela com cotação, para o recolher entre passadas
+    #: (ele não recebe as janelas — só o livro).
+    _tokens: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
 
     async def passo(
         self,
@@ -195,6 +211,7 @@ class LacoMaker:
         agora_ns: int,
         feeds_saudaveis: bool,
     ) -> Efeito | None:
+        self._tokens[janela.slug] = (janela.token_up, janela.token_down)
         params = self._parametros(janela)
         if params is None:
             self._contar("sem_pool_de_reward")
@@ -355,6 +372,40 @@ class LacoMaker:
         self._guardar(janela.slug, efeito)
         return efeito
 
+    async def recolher_se_o_livro_andou(self, livro_de, *, agora_ns: int) -> list[Efeito]:
+        """Entre passadas: tira do livro a cotação que o mercado deixou exposta.
+
+        Quando o melhor bid cai ABAIXO do nosso preço, o fluxo que vem a
+        seguir nos executa primeiro — e é seleção adversa quase pura: o
+        `maker_de_pares` mediu −583,54 USDC em 4 h ficando, contra −31,87
+        recolhendo com 100 ms. Aqui a latência é a do sono de 1 s do
+        processo, e o que se mede em SHADOW é se 1 s basta.
+
+        Livro indisponível NÃO recolhe — sair por falta de dado nosso perde
+        a fila de graça, a mesma regra do `_passo_da_janela`. Só a perna cujo
+        livro mostra o movimento decide; basta uma para sair, porque as
+        pernas entram e saem juntas.
+        """
+        if not self.recolhe_quando_o_livro_anda:
+            return []
+        efeitos: list[Efeito] = []
+        for slug, aberta in list(self.abertas.items()):
+            tokens = self._tokens.get(slug)
+            if tokens is None:
+                continue
+            pernas = ((tokens[0], aberta.preco_up), (tokens[1], aberta.preco_down))
+            for token_id, preco in pernas:
+                if preco <= 0.0:
+                    continue
+                livro = livro_de(token_id, agora_ns=agora_ns)
+                if livro is not None and _o_livro_andou_contra(
+                    livro, preco, aberta.cotacao.tamanho,
+                    nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
+                ):
+                    efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
+                    break
+        return efeitos
+
     async def _sair(self, slug: str, *, motivo: str) -> Efeito:
         aberta = self.abertas.get(slug)
         efeito = await aplicar_decisao(
@@ -459,3 +510,29 @@ def _nunca_chamado(_: Cotacao) -> OrdemPretendida:
     raise AssertionError(
         "ordem_da_cotacao chamado num CANCELAR — o `execucao_maker` nao deveria"
     )
+
+
+#: Tolerância de preço na comparação com o livro (o CLOB manda decimal como
+#: string; o nosso preço vem da grade do tick).
+_EPS_PRECO = 1e-9
+
+
+def _o_livro_andou_contra(
+    livro: OrderBook, preco: float, tamanho: float, *, nossa_ordem_no_livro: bool
+) -> bool:
+    """O melhor bid do MERCADO caiu abaixo do nosso preço?
+
+    Sem a nossa ordem no livro (SHADOW): `best_bid < preço`. Com ela (LIVE),
+    o melhor bid nunca cai abaixo do nosso enquanto ele repousa — ele VIRA o
+    melhor bid; o sinal é estar sozinho no topo: melhor bid no nosso preço e
+    tamanho do nível não maior que o nosso.
+    """
+    melhor = livro.best_bid
+    if melhor is None:
+        return False
+    if melhor < preco - _EPS_PRECO:
+        return True
+    if nossa_ordem_no_livro and abs(melhor - preco) <= _EPS_PRECO:
+        no_nivel = sum(q for p, q in livro.bids if abs(p - melhor) <= _EPS_PRECO)
+        return no_nivel <= tamanho + _EPS_PRECO
+    return False
