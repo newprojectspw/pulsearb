@@ -36,6 +36,16 @@ a duração do mercado: o recorte `duracao=` da tabela existe para agrupar
 regimes comparáveis, e um mercado de eleição com `duracao_s` de 10 milhões de
 segundos criaria um recorte por mercado — tabela com n=1 em toda linha.
 
+## `--gravar`: a mesma coleta, guardada para replay
+
+Sem gravar, cada pergunta nova sobre o regime dos pools exige coletar de
+novo — horas de espera por pergunta, e nunca a MESMA amostra em duas
+perguntas diferentes. Com `--gravar DIR` os eventos crus vão para
+`DIR/pools-YYYYmmdd-HH.jsonl.gz` no MESMO formato do recorder (`fonte`
+`poly_ws`), precedidos de um registro `pools_snapshot` com o catálogo de
+mercados (tokens, tick, pool diário). `scripts/maker_de_pares_nos_pools.py`
+lê exatamente isso.
+
 ## O que ele NÃO faz
 
 Não envia ordem. Não assina nada. Não recebe credencial. É leitura de socket
@@ -65,6 +75,7 @@ from pulsearb.feeds.poly_ws import (
     PolyMarketWsFeed,
     eventos_do_payload,
 )
+from pulsearb.recorder.writer import CANAL_BOOK, JsonlGzipWriter, RecordEnvelope
 from pulsearb.settings import Settings
 
 CLOB = "https://clob.polymarket.com"
@@ -76,6 +87,11 @@ LIMITE_SNAPSHOTS = 40_000
 #: `duracao_s` sintética. Ver docstring: agrupa todos num recorte só, em vez
 #: de criar um recorte por mercado.
 DURACAO_SINTETICA_S = 3600
+
+#: `fonte` do registro de catálogo na gravação de pools. Não é `poly_ws`
+#: porque não veio do fio: é o que ESTE processo escolheu assinar, e quem lê
+#: a gravação precisa saber quais tokens formam par.
+FONTE_CATALOGO = "pools_snapshot"
 
 
 @dataclass
@@ -98,8 +114,14 @@ class JanelaColetada:
 class Coletor:
     """Assina os tokens dos mercados com pool e guarda livro + execuções."""
 
-    def __init__(self, tokens_por_mercado: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        tokens_por_mercado: dict[str, dict[str, Any]],
+        *,
+        writer: JsonlGzipWriter | None = None,
+    ) -> None:
         self.mercados = tokens_por_mercado
+        self.writer = writer
         self.dono: dict[str, str] = {}
         for cid, meta in tokens_por_mercado.items():
             for token in meta["tokens"]:
@@ -129,6 +151,18 @@ class Coletor:
         payload = getattr(feed_event, "parsed", None)
         if payload is None:
             return
+        if self.writer is not None:
+            # O CRU, antes de qualquer filtro nosso: o que se grava é o que o
+            # servidor disse, não o que este processo entendeu.
+            self.writer.submit(
+                RecordEnvelope(
+                    ts_mono_ns=int(getattr(feed_event, "ts_mono_ns", 0)) or agora,
+                    ts_wall_ns=agora,
+                    fonte="poly_ws",
+                    raw=getattr(feed_event, "raw", b"") or b"",
+                ),
+                canal=CANAL_BOOK,
+            )
         for evento in eventos_do_payload(payload):
             tipo = evento.get("event_type")
             asset_id = evento.get("asset_id")
@@ -242,7 +276,37 @@ def escolher_mercados(top: int) -> dict[str, dict[str, Any]]:
     return saida
 
 
-async def coletar(coletor: Coletor, settings: Settings, duracao_s: float) -> None:
+def _envelope_do_catalogo(mercados: dict[str, dict[str, Any]]) -> RecordEnvelope:
+    agora = time.time_ns()
+    return RecordEnvelope(
+        ts_mono_ns=time.monotonic_ns(),
+        ts_wall_ns=agora,
+        fonte=FONTE_CATALOGO,
+        raw=json.dumps(
+            {
+                "gerado_em_ns": agora,
+                "mercados": {
+                    cid: {
+                        "tokens": meta["tokens"],
+                        "slug": meta.get("slug"),
+                        "pergunta": meta.get("pergunta"),
+                        "tick_size": meta.get("tick_size"),
+                        "daily_rate": meta.get("daily_rate"),
+                    }
+                    for cid, meta in mercados.items()
+                },
+            }
+        ).encode(),
+    )
+
+
+async def coletar(
+    coletor: Coletor,
+    settings: Settings,
+    duracao_s: float,
+    *,
+    writer: JsonlGzipWriter | None = None,
+) -> None:
     tokens = sorted(coletor.dono)
     feed = PolyMarketWsFeed(
         url=settings.endpoints.clob_market_ws,
@@ -250,6 +314,11 @@ async def coletar(coletor: Coletor, settings: Settings, duracao_s: float) -> Non
         token_ids=tokens,
         on_event=coletor.on_event,
     )
+    if writer is not None:
+        await writer.start()
+        # O catálogo ANTES do primeiro evento: quem lê a gravação precisa do
+        # par YES/NO para o primeiro book que chegar.
+        writer.submit(_envelope_do_catalogo(coletor.mercados))
     await feed.start()
     fim = time.monotonic() + duracao_s
     try:
@@ -263,6 +332,8 @@ async def coletar(coletor: Coletor, settings: Settings, duracao_s: float) -> Non
             )
     finally:
         await feed.stop()
+        if writer is not None:
+            await writer.stop()
 
 
 def parse_horizontes(bruto: str) -> tuple[float, ...]:
@@ -298,6 +369,14 @@ def main(argv: list[str] | None = None) -> int:
     # até conseguir SAIR de um inventário unilateral num mercado que resolve
     # em dias. É o termo que o 1.12 não media (quadro, 2026-09-14).
     parser.add_argument("--horizontes", default="1,5,30,300,1800")
+    parser.add_argument(
+        "--gravar",
+        default=None,
+        help=(
+            "diretório onde gravar os eventos crus (formato do recorder), "
+            "para replay posterior por scripts/maker_de_pares_nos_pools.py"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -319,7 +398,12 @@ def main(argv: list[str] | None = None) -> int:
         print("nenhum mercado com pool aceitando ordens", file=sys.stderr)
         return 1
 
-    coletor = Coletor(mercados)
+    writer = (
+        JsonlGzipWriter(output_dir=args.gravar, prefix="pools")
+        if args.gravar
+        else None
+    )
+    coletor = Coletor(mercados, writer=writer)
     pool_total = sum(m["daily_rate"] for m in mercados.values())
     print(
         f"{len(mercados)} mercados, {len(coletor.dono)} tokens, "
@@ -328,7 +412,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     duracao_s = parse_duracao(args.duracao)
-    asyncio.run(coletar(coletor, settings, duracao_s))
+    asyncio.run(coletar(coletor, settings, duracao_s, writer=writer))
+    if writer is not None:
+        print(
+            f"gravação: {writer.written:,} registros em {args.gravar} "
+            f"({writer.dropped:,} descartados)",
+            file=sys.stderr,
+        )
 
     janelas = coletor.janelas()
     # Recorte por mercado LIGADO: aqui a janela é o mercado, e a conta do
