@@ -207,6 +207,12 @@ class Settings(BaseSettings):
     #: receita mínima (a eleição sueca negocia 54.014 shares/h e paga 1,86
     #: USDC/h). 120 dá folga para os que fecharem no meio da rodada.
     top_de_pools_de_reward: int = 120
+    #: Tamanho da cotação do laço maker, em SHARES por lado. Era
+    #: `risk.stake_max_por_trade_usdc` (5,0) reaproveitado como shares — e
+    #: 5 shares não pontuam em pool nenhum: `rewards_min_size` vai de 50 a
+    #: 1.000. O default repete os 5,0 para a rodada do taker não mudar; a
+    #: rota de pools se liga com o tamanho que o 1.12 mediu (1.000).
+    tamanho_da_cotacao_maker_shares: float = 5.0
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"

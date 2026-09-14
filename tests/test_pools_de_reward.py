@@ -211,6 +211,8 @@ class _HttpFake:
     def __init__(self, paginas: list[dict], mercados: dict[str, dict]) -> None:
         self.paginas = paginas
         self.mercados = mercados
+        #: `token_id -> payload de /book`. Sem entrada, `/book` devolve None.
+        self.livros: dict[str, dict] = {}
         self.pedidos: list[str] = []
 
     async def __call__(self, url: str, params):
@@ -218,6 +220,8 @@ class _HttpFake:
         if url.endswith("/rewards/markets/current"):
             n = sum(1 for p in self.pedidos if p.endswith("current")) - 1
             return self.paginas[min(n, len(self.paginas) - 1)]
+        if url.endswith("/book"):
+            return self.livros.get((params or {}).get("token_id"))
         cid = url.rsplit("/", 1)[-1]
         return self.mercados.get(cid)
 
@@ -426,7 +430,11 @@ def test_um_ciclo_de_pools_absorve_assina_e_CONTA() -> None:
     processo.ciclo = type("C", (), {"motor": type("M", (), {
         "rastreador": RastreadorDeJanelas()
     })()})()
+    # Os pools vão pela conexão PRÓPRIA (`poly_pools`); a dos Up/Down não
+    # pode receber token nenhum aqui — é a queda dela (1013) que a
+    # separação existe para isolar.
     processo.poly = _PolyFake()
+    processo.poly_pools = _PolyFake()
     processo.tokens_assinados = set()
     processo.desassinar_apos = {}
     processo.pools_descobertos = 0
@@ -438,9 +446,79 @@ def test_um_ciclo_de_pools_absorve_assina_e_CONTA() -> None:
 
     assert processo.pools_descobertos == 2
     assert len(processo.ciclo.motor.rastreador.janelas) == 2
-    assert set(processo.poly.assinados) == {"111", "222", "333", "444"}
+    assert set(processo.poly_pools.assinados) == {"111", "222", "333", "444"}
+    assert processo.poly.assinados == []
     # Segundo ciclo não reassina o que já está assinado: reassinar custa um
     # snapshot de livro por token e não compra nada.
-    processo.poly.assinados.clear()
+    processo.poly_pools.assinados.clear()
     asyncio.run(processo._um_ciclo_de_pools(descoberta))
-    assert processo.poly.assinados == []
+    assert processo.poly_pools.assinados == []
+
+
+# ---------------------------------------------------------- filtro de livro
+
+
+def _livro(bid: float, ask: float, tamanho: float = 500.0) -> dict:
+    # Mesma forma do `GET /book` do CLOB, que traz `asset_id` — sem ele o
+    # `OrderBook.from_event` recusa, e recusar é `sem_livro`.
+    return {
+        "asset_id": "111",
+        "bids": [{"price": str(bid), "size": str(tamanho)}],
+        "asks": [{"price": str(ask), "size": str(tamanho)}],
+    }
+
+
+def test_sem_tamanho_a_descoberta_NAO_consulta_o_livro() -> None:
+    import asyncio
+
+    fake = _HttpFake(paginas=[_pagina(["0x1"], "LTE=")], mercados={"0x1": _mercado()})
+    _d, janelas = asyncio.run(_descobrir(fake))
+    assert len(janelas) == 1
+    assert not any(p.endswith("/book") for p in fake.pedidos)
+
+
+def test_com_tamanho_so_fica_o_mercado_onde_a_cotacao_PONTUA() -> None:
+    """Spread de 2 c contra max_spread de 4,5 c: a 1 tick do topo pontua.
+    Spread de 20 c: a 1 tick do topo fica a 11 c do meio, fora da faixa —
+    o mesmo caso do `Spread: LAC (-9.5)` da §2f."""
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import DESCARTE_NAO_PONTUA
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={
+            "0x1": _mercado(tokens=[{"token_id": "111"}, {"token_id": "222"}]),
+            "0x2": _mercado(tokens=[{"token_id": "333"}, {"token_id": "444"}]),
+        },
+    )
+    fake.livros = {"111": _livro(0.49, 0.51), "333": _livro(0.40, 0.60)}
+    d, janelas = asyncio.run(_descobrir(fake, tamanho_da_cotacao=100.0))
+    assert [j.condition_id for j in janelas] == ["0x1"]
+    assert d.descartes == {DESCARTE_NAO_PONTUA: 1}
+
+
+def test_tamanho_abaixo_do_min_size_NAO_pontua() -> None:
+    """`rewards_min_size` = 20 na página; 5 shares (o default antigo, que era
+    o stake do taker) não pontuam em lugar nenhum. É o defeito que a primeira
+    rodada SHADOW mediu como `sem_candidata_que_pontue` em 100 % dos passos."""
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import DESCARTE_NAO_PONTUA
+
+    fake = _HttpFake(paginas=[_pagina(["0x1"], "LTE=")], mercados={"0x1": _mercado()})
+    fake.livros = {"111": _livro(0.49, 0.51)}
+    d, janelas = asyncio.run(_descobrir(fake, tamanho_da_cotacao=5.0))
+    assert janelas == []
+    assert d.descartes == {DESCARTE_NAO_PONTUA: 1}
+
+
+def test_livro_ausente_sai_COM_MOTIVO_e_nao_derruba() -> None:
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import DESCARTE_SEM_LIVRO
+
+    fake = _HttpFake(paginas=[_pagina(["0x1"], "LTE=")], mercados={"0x1": _mercado()})
+    d, janelas = asyncio.run(_descobrir(fake, tamanho_da_cotacao=100.0))
+    assert janelas == []
+    assert d.descartes == {DESCARTE_SEM_LIVRO: 1}

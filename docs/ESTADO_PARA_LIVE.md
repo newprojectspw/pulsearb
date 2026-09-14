@@ -275,6 +275,40 @@ Daí o item 0.6: reassinar cobre assinatura caducada; não cobre o servidor que
 parou de publicar aquele tópico para aquela conexão. A resposta que sobra é
 derrubar e reconectar, refazendo a assinatura do zero.
 
+### As quedas do CLOB WS — dois códigos, duas causas (medido em 2026-09-14)
+
+O SHADOW via a conexão do CLOB cair e voltar o tempo todo. O log com
+`close_code` (M2.11) separou dois fenômenos, e `scripts/sonda_clob_ws.py`
+(sondas `1008`, `custo` e `rajada`) mede cada um:
+
+**`1008 invalid subscription payload`, sempre 10,2 s depois do PRIMEIRO
+connect.** O CLOB lê qualquer texto anterior à primeira assinatura como
+payload de assinatura, e o `PING` de aplicação não é um. O SHADOW conecta
+com o conjunto vazio e só assina depois da descoberta; o PING chegava antes.
+Sonda: conexão vazia + PING = 1008 aos 10,2 s; conexão vazia + `subscribe`
+dinâmico antes do PING = viva; com o conserto (`_heartbeat` não manda PING
+enquanto `token_ids` está vazio), a conexão vazia vive os 15 s e fecha com
+1000. Teste `test_sem_assinatura_NAO_manda_ping`. ✅
+
+**`1013 slow consumer: send buffer full` — e NÃO é o nosso consumidor.**
+Três medidas fecham isso: (a) consumidor VAZIO (callback que só conta) com
+os 152 tokens Up/Down cai igual — 3 quedas em 240 s, 6 em 420 s; (b) três
+processos paralelos com custo artificial de 0, 150 e 400 µs por mensagem
+caíram **no mesmo instante** (142,4/142,5 s; 162–164 s; 216–217 s); (c)
+`max_queue=None` e um `sleep(0)` por mensagem não mudaram nada (os dois foram
+testados e REVERTIDOS). O que derruba é a rajada do lado do servidor: dois
+mercados de 5 min são **54 % dos bytes** (409 msg/s de `price_change` em UM
+mercado), pior segundo medido 4,09 MB. Repartir os 152 tokens em 4 conexões
+de 38 (round-robin) não resolve — a fatia com os dois mercados pesados
+(94 % do tráfego) caiu 3 vezes enquanto as outras três não caíram nenhuma.
+**Os tokens dos pools (50–120 msg/s) nunca caíram.** O que o código faz com
+isso: a rota de pools ganhou **conexão própria** (`ProcessoShadow.
+poly_pools`, rótulo `clob[pools]`), para a queda dos Up/Down — cerca de uma
+por minuto nos períodos ruins, 1–2 s sem livro cada — não apagar o livro que
+o maker cota. A conexão dos Up/Down continua caindo; para o taker isso já
+era assim em toda rodada anterior, e a rota dele está medida e reprovada. 🟡
+falta: medir em rodada longa quantas quedas a `clob[pools]` tem sozinha.
+
 ---
 
 ## Bloco 1 — Veredito M2: existe edge líquido?
@@ -537,8 +571,30 @@ descobrir_pools_de_reward` (padrão `False`; env
 mesmo caminho das janelas Up/Down. O taker continua recusando essas janelas
 (`jogo="reward"` ∉ `jogos_operados` → `PULOU_JOGO_NAO_OPERADO`, coberto por
 teste com executor hostil). 17 testes em `tests/test_pools_de_reward.py`; o
-relato de 60 s ganha `pools_descobertos`. **Ainda não rodou em SHADOW ao vivo**
-— esse é o próximo passo, e o quadro só marca quando houver relato.
+relato de 60 s ganha `pools_descobertos`.
+
+**Rodou em SHADOW ao vivo em 2026-09-14 (duas rodadas curtas), e as duas
+ensinaram algo.** Rodada 1: 57 janelas descobertas, e o maker recusou 100 %
+com `sem_candidata_que_pontue`. Causa: o `LacoMaker` cotava com
+`risk.stake_max_por_trade_usdc` (5,0 USDC do taker) lido como **5 shares** —
+e 5 shares não pontuam em pool nenhum (`rewards_min_size` vai de 50 a
+1.000). Conserto: `Settings.tamanho_da_cotacao_maker_shares` (padrão 5,0
+para a rodada do taker não mudar; a rota de pools liga com 1.000, o tamanho
+que o 1.12 mediu). No mesmo commit a descoberta ganhou o filtro pelo livro:
+`DescobertaDePools(tamanho_da_cotacao=…)` consulta `GET /book` e descarta,
+COM MOTIVO (`nao_pontua_com_este_tamanho`, `sem_livro`), a janela onde
+`score_da_ordem` — a mesma função do 1.12 — dá zero para esse tamanho. Sem
+o filtro o processo assinava 272 tokens e o WS derrubava com `1013 slow
+consumer`; com ele, 2–3 janelas saem por rodada. 21 testes. Rodada 2 (1.000
+shares): `livro/60 s = 136.473` em 266 tokens, e o maker chegou a **querer
+cotar 145 vezes** (`ganho_justifica_perder_a_fila: 145`) — e foi barrado
+145 vezes por `portao:disjuntor_armado`: o registro SHADOW
+(`data/risco/registro_do_dia.shadow.json`) está com o disjuntor armado
+desde 2026-09-08 pela perda sintética do taker (−26,59 USDC, teto 25), e o
+disjuntor gruda por desenho. **Não foi desarmado por esta sessão**: desarmar
+é ato humano. O ensaio da rota de pools roda com registro próprio
+(`PULSEARB_RISK__CAMINHO_DO_REGISTRO`), e o quadro só marca cotação-sombra
+repousando quando houver relato com `cotacoes_repousando > 0`.
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
