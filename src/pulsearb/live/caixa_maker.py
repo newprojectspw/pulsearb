@@ -106,6 +106,20 @@ class ExecucaoPossivel:
     ts_ns: int
 
 
+def _atraso_do_print_s(negocio: Any, agora_ns: int) -> float | None:
+    """Quanto tempo depois do carimbo DO SERVIDOR o print foi lido aqui.
+
+    Um print com atraso de minutos numa conexão viva é reenvio de
+    reassinatura, não negócio de agora — e a caixa o teria contado como
+    execução. Fica no log para a leitura do diário separar os dois; não
+    filtra, porque o quanto de atraso é "antigo" ainda não foi medido.
+    """
+    servidor_ms = getattr(negocio, "ts_servidor_ms", None)
+    if servidor_ms is None:
+        return None
+    return round(agora_ns / 1e9 - servidor_ms / 1e3, 3)
+
+
 @dataclass
 class CaixaDoMaker:
     """As somas do 4.2, por rodada. Sem I/O: quem tem o livro injeta."""
@@ -233,6 +247,8 @@ class CaixaDoMaker:
                     preco_nosso=preco_nosso,
                     preco_do_print=negocio.preco,
                     shares=shares,
+                    ts_servidor_ms=getattr(negocio, "ts_servidor_ms", None),
+                    atraso_s=_atraso_do_print_s(negocio, agora_ns),
                 )
         return novas
 

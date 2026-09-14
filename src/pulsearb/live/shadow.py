@@ -67,6 +67,17 @@ from pulsearb.risk import PortaoDeRisco
 from pulsearb.settings import Mode, Settings
 from pulsearb.tempo import RESOLUTION_GRACE_SECONDS, parse_duration
 
+#: Silêncio por token que o MAKER tolera no livro de um pool. Os 10 s do
+#: `LivrosAoVivo` são para o Up/Down de 5 min, que muda a cada segundo; um
+#: mercado de horizonte longo fica minutos sem evento porque nada mudou, e o
+#: WS só manda delta quando muda. Medido na r7 (2026-09-14): com 10 s, 55–60%
+#: dos tokens de pool estavam "mudos" a qualquer instante e o maker viu
+#: `livro_indisponivel` em 38% das passadas — o relógio do 4.2 parava em
+#: livro que estava certo. O que vigia o livro passa a ser a CONEXÃO
+#: (`_livro_para_o_maker`); este teto só existe para uma assinatura que
+#: morresse em silêncio dentro de uma conexão viva não virar livro eterno.
+SILENCIO_DO_LIVRO_DE_POOL_S = 900.0
+
 log = get_logger(__name__)
 
 #: De quanto em quanto tempo o ciclo decide. Ver o módulo.
@@ -500,6 +511,28 @@ class ProcessoShadow:
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
 
+    def _livro_para_o_maker(self, token_id: str, *, agora_ns: int):
+        """O livro de um token para o maker cotar — vigiado pela CONEXÃO.
+
+        Um token de pool mudo há 40 s é um mercado parado, não um livro
+        velho; o sinal de que o livro deixou de descrever o presente é a
+        conexão dos pools ter parado de falar. O heartbeat manda PING a cada
+        10 s e derruba a conexão com 30 s sem PONG (`pong_stale_seconds`),
+        então "última mensagem há mais que isso" é conexão que o próprio feed
+        já considera morta — e livro nenhum dela serve. Sem a rota de pools
+        ligada, vale a regra de sempre (10 s por token): não há conexão de
+        pools para vigiar.
+        """
+        livros = self.ciclo.motor.livros
+        if not self.settings.descobrir_pools_de_reward:
+            return livros.livro(token_id, agora_ns=agora_ns)
+        feed = self.poly_pools
+        if not feed.connected or feed.last_message_age_seconds > feed.pong_stale_seconds:
+            return None
+        return livros.livro(
+            token_id, agora_ns=agora_ns, silencio_s=SILENCIO_DO_LIVRO_DE_POOL_S
+        )
+
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None
     ) -> None:
@@ -522,7 +555,7 @@ class ProcessoShadow:
                 agora_ns = time.time_ns()
                 await self.laco_maker.passo(
                     list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
-                    livro_de=self.ciclo.motor.livros.livro,
+                    livro_de=self._livro_para_o_maker,
                     agora_epoch=agora,
                     agora_ns=agora_ns,
                     feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
