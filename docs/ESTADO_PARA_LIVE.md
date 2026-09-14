@@ -668,10 +668,12 @@ MESMO portão, tirou todas as cotações (`_sair`). Uma rota medida morta
 (taker Up/Down) pausando a rota que sobrou é o comportamento do portão,
 não defeito dele — a pausa é o sinal de que o *modelo do taker* parou de
 acertar, e o maker não tem modelo. **Decisão, sem afrouxar código:** o
-ensaio do 4.2 roda com `PULSEARB_RISK__PERDAS_SEGUIDAS_PARA_PAUSA` alto
-por env e o registro `.shadow.json` apagado antes de subir, e o quadro diz
-isso aqui; se a pausa deve ou não valer para a rota maker é decisão de
-política que fica escrita como pergunta, não respondida por conveniência.
+ensaio do 4.2 sobe com o registro `.shadow.json` apagado (r7 em diante), e
+o quadro diz isso aqui; se a pausa voltar a disparar dentro de uma rodada,
+o operador sobe `PULSEARB_RISK__PERDAS_SEGUIDAS_PARA_PAUSA` por env, de
+propósito e por escrito — o bot não sobe sozinho. Se a pausa deve ou não
+valer para a rota maker é decisão de política que fica escrita como
+pergunta, não respondida por conveniência.
 Motivos finais da r6: `estavel 2581, ganho_abaixo_do_piso 5,
 ganho_justifica_perder_a_fila 668, livro_indisponivel 1121, livro_sem_meio
 16, portao:pausa_por_sequencia 506, portao:preco_fora_da_faixa 198,
