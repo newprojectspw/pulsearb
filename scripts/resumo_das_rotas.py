@@ -33,8 +33,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
+
+from pulsearb.caminhos import caminho_de_relatorio_lido
 
 # ── os caminhos que este arquivo lê, nomeados ────────────────────────────
 CAMPO_SOMA_VENDER = "cunhar_e_vender.episodios_que_sobrevivem_a_latencia"
@@ -286,11 +287,16 @@ def criterio_1_12(
 def _carregar(caminho: str | None) -> dict[str, Any] | None:
     if not caminho:
         return None
-    p = Path(caminho)
-    if not p.exists():
-        print(f"aviso: {caminho} não existe", file=sys.stderr)
+    # O caminho vem de fora do programa (--soma/--pools/--markout/--conta) e
+    # vai direto ao sistema de arquivos; contê-lo aqui é o que fecha a
+    # travessia de caminho (S2083). Ausente ou inválido segue como veredito
+    # NÃO AVALIÁVEL, que é o comportamento antigo — nunca aborta.
+    try:
+        destino = caminho_de_relatorio_lido(caminho)
+    except ValueError as erro:
+        print(f"aviso: {erro}", file=sys.stderr)
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(destino.read_text(encoding="utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:

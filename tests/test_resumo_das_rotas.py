@@ -227,3 +227,26 @@ def test_a_receita_consolidada_usa_o_MINIMO_e_nao_a_media() -> None:
     assert mercado["receita_usdc_por_hora_maxima"] == 20.0
     assert mercado["amostras_que_pontuam"] == 2
     assert mercado["fracao_que_pontua"] == 1.0
+
+
+# ── `_carregar` contém o caminho (S2083) e segue NÃO AVALIÁVEL ────────────
+
+
+def test_carregar_recusa_caminho_hostil_e_devolve_none(tmp_path, monkeypatch, capsys):
+    """Ausente ou inválido é veredito NÃO AVALIÁVEL — nunca aborto, nunca
+    leitura fora da raiz. E a mensagem nomeia a variável de LEITURA."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PULSEARB_RELATORIOS_INPUT_ROOT", raising=False)
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    for hostil in ("/etc/passwd", "../fora.json", "nao-existe.json"):
+        assert rotas._carregar(hostil) is None
+    assert "PULSEARB_RELATORIOS_INPUT_ROOT" in capsys.readouterr().err
+    assert rotas._carregar(None) is None
+
+
+def test_carregar_le_relatorio_dentro_da_raiz(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PULSEARB_RELATORIOS_INPUT_ROOT", raising=False)
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    (tmp_path / "soma.json").write_text('{"ok": true}', encoding="utf-8")
+    assert rotas._carregar("soma.json") == {"ok": True}

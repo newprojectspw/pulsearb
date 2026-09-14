@@ -52,7 +52,6 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -135,12 +134,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
 
-    pools = json.loads(Path(args.pools).read_text(encoding="utf-8"))
-    markout = (
-        json.loads(Path(args.markout).read_text(encoding="utf-8"))
-        if args.markout and Path(args.markout).exists()
-        else None
-    )
+    # `--pools` e `--markout` vêm de fora do programa e vão direto ao sistema
+    # de arquivos; entregá-los ao `read_text` do jeito que chegam é travessia
+    # de caminho (S2083). A contenção é a mesma do `--json` de escrita, no
+    # espelho de leitura já usado pelo backtest e pelo SHADOW.
+    from pulsearb.caminhos import caminho_de_relatorio_lido
+
+    try:
+        entrada_pools = caminho_de_relatorio_lido(args.pools)
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return 2
+    pools = json.loads(entrada_pools.read_text(encoding="utf-8"))
+
+    markout = None
+    if args.markout:
+        # O markout é opcional de propósito — o 1.6 ficou NÃO AVALIÁVEL por
+        # semanas justamente por faltar este dado. Ausente ou inválido avisa e
+        # segue sem custo, em vez de abortar a conta.
+        try:
+            entrada_markout = caminho_de_relatorio_lido(args.markout)
+        except ValueError as erro:
+            print(f"aviso: {erro}", file=sys.stderr)
+        else:
+            markout = json.loads(entrada_markout.read_text(encoding="utf-8"))
     custo_c, n_exec = _markout_adverso(markout)
 
     persistentes = [

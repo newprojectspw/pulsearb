@@ -128,3 +128,46 @@ def test_mercado_sem_trade_nao_vira_custo_infinito() -> None:
         "usdc_por_hora": 0.0,
         "span_h": 0.0,
     }
+
+
+# ── o caminho de entrada é contido (S2083) — e os testes vão por `main()` ──
+#
+# Os testes acima chamam funções puras; nenhum passava por `main()`, então a
+# contenção dos caminhos de `--pools`/`--markout` não tinha teste que a
+# provasse. "A suíte passa" era verdade e não era evidência.
+
+
+def _raiz_de_leitura(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PULSEARB_RELATORIOS_INPUT_ROOT", raising=False)
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    (tmp_path / "pools.json").write_text('{"mercados": []}', encoding="utf-8")
+
+
+def test_pools_absoluto_sai_com_2_e_diz_por_que(tmp_path, monkeypatch, capsys) -> None:
+    """Caminho absoluto funcionava antes da contenção e agora recusa — é a
+    contenção fazendo o trabalho dela, e a mensagem diz qual variável abre."""
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    codigo = conta.main(["--pools", str(tmp_path / "pools.json")])
+    assert codigo == 2
+    erro = capsys.readouterr().err
+    assert "inválido" in erro
+    assert "PULSEARB_RELATORIOS_INPUT_ROOT" in erro
+
+
+def test_pools_inexistente_sai_com_2(tmp_path, monkeypatch, capsys) -> None:
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    assert conta.main(["--pools", "nao-existe.json"]) == 2
+    assert "não existe" in capsys.readouterr().err
+
+
+def test_markout_invalido_avisa_e_a_conta_ainda_recusa(tmp_path, monkeypatch, capsys) -> None:
+    """O markout é opcional de propósito: inválido vira aviso, não aborto. Mas
+    ausente a conta NÃO fecha — sai com 1 e diz MARKOUT AUSENTE, em vez de
+    publicar receita sem custo."""
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    codigo = conta.main(["--pools", "pools.json", "--markout", "/etc/hosts.json"])
+    saida = capsys.readouterr()
+    assert "aviso:" in saida.err
+    assert "MARKOUT AUSENTE" in saida.err
+    assert codigo == 1

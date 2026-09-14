@@ -104,6 +104,7 @@ import httpx
 from pulsearb.analysis.rewards import (
     OrdemHipotetica,
     ParametrosDeReward,
+    denominador_pessimista,
     fatia_do_pool,
     score_da_ordem,
     score_do_livro,
@@ -275,9 +276,14 @@ async def medir(
     espelho = score_do_livro(livros[1][1], params) if len(livros) > 1 else None
 
     por_ordem: dict[str, Any] = {}
+    # `score_da_ordem` devolve o Q_min da nossa cotação (§15.3); o denominador
+    # tem de ser o teto de Σ Q_min dos outros makers, não a soma crua dos
+    # dois lados — senão a fatia sai 2× a 4× menor que qualquer denominador
+    # real. `score_mercado` continua publicado cru, como medida do livro.
+    denominador = denominador_pessimista(referencia, params)
     for ordem in ORDENS:
         nosso = score_da_ordem(ordem, referencia, params)
-        fatia = fatia_do_pool(nosso, score_mercado)
+        fatia = fatia_do_pool(nosso, denominador)
         por_ordem[ordem.nome] = {
             "nosso_score": round(nosso, 3),
             "fatia_do_pool": round(fatia, 6),
