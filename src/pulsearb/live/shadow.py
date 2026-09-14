@@ -67,6 +67,17 @@ from pulsearb.risk import PortaoDeRisco
 from pulsearb.settings import Mode, Settings
 from pulsearb.tempo import RESOLUTION_GRACE_SECONDS, parse_duration
 
+#: Silêncio por token que o MAKER tolera no livro de um pool. Os 10 s do
+#: `LivrosAoVivo` são para o Up/Down de 5 min, que muda a cada segundo; um
+#: mercado de horizonte longo fica minutos sem evento porque nada mudou, e o
+#: WS só manda delta quando muda. Medido na r7 (2026-09-14): com 10 s, 55–60%
+#: dos tokens de pool estavam "mudos" a qualquer instante e o maker viu
+#: `livro_indisponivel` em 38% das passadas — o relógio do 4.2 parava em
+#: livro que estava certo. O que vigia o livro passa a ser a CONEXÃO
+#: (`_livro_para_o_maker`); este teto só existe para uma assinatura que
+#: morresse em silêncio dentro de uma conexão viva não virar livro eterno.
+SILENCIO_DO_LIVRO_DE_POOL_S = 900.0
+
 log = get_logger(__name__)
 
 #: De quanto em quanto tempo o ciclo decide. Ver o módulo.
@@ -272,7 +283,7 @@ class ProcessoShadow:
                 cliente=ClienteSombraDeOrdens(
                     caminho_do_diario=diario, modo=settings.mode
                 ),
-                tamanho_da_cotacao=settings.risk.stake_max_por_trade_usdc,
+                tamanho_da_cotacao=settings.tamanho_da_cotacao_maker_shares,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o
                 # cabeçalho do `laco_maker`.
@@ -319,7 +330,20 @@ class ProcessoShadow:
             )
             for indice in range(max(1, settings.feeds.rtds_conexoes))
         ]
-        self.poly = PolyMarketWsFeed(
+        self.poly = self._nova_conexao_clob("clob[updown]")
+        # A rota de pools tem CONEXÃO PRÓPRIA, medido em 2026-09-14: os
+        # tokens Up/Down derrubam a conexão com `1013 slow consumer: send
+        # buffer full` até 6 vezes em 7 min (dois mercados de 5 min são 54 %
+        # do tráfego, rajadas de 4 MB/s), e a queda é do LADO DO SERVIDOR —
+        # acontece igual com consumidor vazio, e no mesmo instante em 3
+        # processos paralelos. Os tokens dos pools são 50–120 msg/s e nunca
+        # caíram. Na mesma conexão, cada queda dos Up/Down levava 1–2 s de
+        # livro dos pools junto — e é o livro dos pools que o maker cota.
+        self.poly_pools = self._nova_conexao_clob("clob[pools]")
+
+    def _nova_conexao_clob(self, rotulo: str) -> PolyMarketWsFeed:
+        settings = self.settings
+        return PolyMarketWsFeed(
             url=settings.endpoints.clob_market_ws,
             user_agent=settings.user_agent,
             custom_feature_enabled=True,
@@ -329,6 +353,7 @@ class ProcessoShadow:
             stale_after_seconds=settings.feeds.stale_after_seconds_book,
             reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
             reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+            rotulo=rotulo,
         )
 
     # ────────────────────────────────────────────────────────────── ingestão
@@ -434,7 +459,7 @@ class ProcessoShadow:
                 if token not in self.tokens_assinados:
                     novos.add(token)
         if novos:
-            await self.poly.subscribe(sorted(novos))
+            await self.poly_pools.subscribe(sorted(novos))
             self.tokens_assinados |= novos
         log.info(
             "descoberta de pools",
@@ -475,13 +500,38 @@ class ProcessoShadow:
             if agora >= self.desassinar_apos.get(token, 0.0)
         }
         if encerrados:
+            # `tokens_assinados` é um conjunto só; cada conexão ignora o que
+            # não é dela (`unsubscribe` filtra pelo próprio `token_ids`).
             await self.poly.unsubscribe(sorted(encerrados))
+            await self.poly_pools.unsubscribe(sorted(encerrados))
             self.tokens_assinados -= encerrados
             for token in encerrados:
                 self.desassinar_apos.pop(token, None)
                 # O livro também sai: `LivrosAoVivo` não expira sozinho, e
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
+
+    def _livro_para_o_maker(self, token_id: str, *, agora_ns: int):
+        """O livro de um token para o maker cotar — vigiado pela CONEXÃO.
+
+        Um token de pool mudo há 40 s é um mercado parado, não um livro
+        velho; o sinal de que o livro deixou de descrever o presente é a
+        conexão dos pools ter parado de falar. O heartbeat manda PING a cada
+        10 s e derruba a conexão com 30 s sem PONG (`pong_stale_seconds`),
+        então "última mensagem há mais que isso" é conexão que o próprio feed
+        já considera morta — e livro nenhum dela serve. Sem a rota de pools
+        ligada, vale a regra de sempre (10 s por token): não há conexão de
+        pools para vigiar.
+        """
+        livros = self.ciclo.motor.livros
+        if not self.settings.descobrir_pools_de_reward:
+            return livros.livro(token_id, agora_ns=agora_ns)
+        feed = self.poly_pools
+        if not feed.connected or feed.last_message_age_seconds > feed.pong_stale_seconds:
+            return None
+        return livros.livro(
+            token_id, agora_ns=agora_ns, silencio_s=SILENCIO_DO_LIVRO_DE_POOL_S
+        )
 
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None
@@ -505,10 +555,11 @@ class ProcessoShadow:
                 agora_ns = time.time_ns()
                 await self.laco_maker.passo(
                     list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
-                    livro_de=self.ciclo.motor.livros.livro,
+                    livro_de=self._livro_para_o_maker,
                     agora_epoch=agora,
                     agora_ns=agora_ns,
                     feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
+                    negocios_desde=self.ciclo.motor.livros.negocios_desde,
                 )
             except OSError as erro:
                 # Mesma leitura que o laço de decisão faz: I/O do diário não é
@@ -670,6 +721,8 @@ class ProcessoShadow:
             for feed in self.rtds_feeds:
                 await feed.start()
             await self.poly.start()
+            if self.settings.descobrir_pools_de_reward:
+                await self.poly_pools.start()
             tarefas = [
                 asyncio.create_task(
                     self.laco_de_descoberta(
@@ -699,6 +752,9 @@ class ProcessoShadow:
                                 ),
                                 base_clob=self.settings.endpoints.clob,
                                 top=self.settings.top_de_pools_de_reward,
+                                tamanho_da_cotacao=(
+                                    self.settings.tamanho_da_cotacao_maker_shares
+                                ),
                             ),
                             deadline,
                             deadline_de_parede,
@@ -736,6 +792,7 @@ class ProcessoShadow:
                 for feed in self.rtds_feeds:
                     await feed.stop()
                 await self.poly.stop()
+                await self.poly_pools.stop()
         return self.estado()
 
 

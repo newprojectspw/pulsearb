@@ -46,12 +46,22 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from pulsearb.analysis.rewards import (
+    OrdemHipotetica,
+    ParametrosDeReward,
+    score_da_ordem,
+)
+from pulsearb.backtest.book import OrderBook
 from pulsearb.live.rastreador import JanelaAoVivo
 
 #: O `jogo` destas janelas. Valor próprio, e não `twap`, porque é ele que o
 #: `jogos_operados` do taker usa para recusar. Reaproveitar `twap` aqui faria
 #: o taker aceitar apostar direção em mercado sem âncora.
 JOGO_REWARD = "reward"
+
+#: Motivos de descarte do filtro de livro. Contadores, como os do rastreador.
+DESCARTE_SEM_LIVRO = "sem_livro"
+DESCARTE_NAO_PONTUA = "nao_pontua_com_este_tamanho"
 
 #: Quantos mercados considerar, do maior pool para o menor. O 1.12 mediu o
 #: ótimo em 95 mercados — acima disso o líquido CAI, porque entram os de
@@ -221,10 +231,22 @@ class DescobertaDePools:
         *,
         base_clob: str,
         top: int = TOP_PADRAO,
+        tamanho_da_cotacao: float | None = None,
     ) -> None:
         self._get = http_get_json
         self._base = base_clob.rstrip("/")
         self.top = top
+        #: Com tamanho, a descoberta só devolve mercado onde a NOSSA cotação
+        #: pontua hoje — medido com o mesmo `score_da_ordem` que a varredura
+        #: do 1.12 usou, sobre o livro REST de agora. Sem tamanho, devolve
+        #: todos (é o que os testes de montagem exercitam).
+        #:
+        #: O filtro existe por uma medição, não por gosto: a primeira rodada
+        #: SHADOW com os 60 maiores pools assinou 272 tokens, e o CLOB
+        #: derrubou a conexão a cada 3 s com `1013 slow consumer` — os pools
+        #: grandes são jogos ao vivo com spread de 11 c, que nunca pontuam
+        #: (§2f) e inundam o fio. Assinar só quem pontua corta os dois.
+        self.tamanho_da_cotacao = tamanho_da_cotacao
         #: Contadores de recusa, por motivo. O diário quer o motivo — "0
         #: janelas" sem causa nomeada é o tipo de silêncio que este projeto
         #: já pagou para não ter.
@@ -265,5 +287,34 @@ class DescobertaDePools:
             if janela is None:
                 self._descartar("nao_cotavel")
                 continue
+            if self.tamanho_da_cotacao is not None and not await self._pontua(
+                janela, pool
+            ):
+                continue
             janelas.append(janela)
         return janelas
+
+    async def _pontua(self, janela: JanelaAoVivo, pool: MercadoComPool) -> bool:
+        """A nossa cotação a 1 tick do topo, nos dois lados, pontua neste
+        livro? Mesma pergunta e mesma função (`score_da_ordem`) da varredura
+        que fechou o 1.12 — nunca uma segunda leitura da fórmula."""
+        bruto = await self._get(
+            f"{self._base}/book", {"token_id": janela.token_up}
+        )
+        livro = OrderBook.from_event(bruto) if isinstance(bruto, dict) else None
+        if livro is None:
+            self._descartar(DESCARTE_SEM_LIVRO)
+            return False
+        params = ParametrosDeReward(
+            daily_rate=pool.daily_rate,
+            min_size=pool.min_size,
+            max_spread=pool.max_spread_fracao,
+            tick_size=janela.tick_size,
+        )
+        ordem = OrdemHipotetica(
+            tamanho=self.tamanho_da_cotacao or 0.0, distancia_ticks=1, dois_lados=True
+        )
+        if score_da_ordem(ordem, livro, params) <= 0.0:
+            self._descartar(DESCARTE_NAO_PONTUA)
+            return False
+        return True

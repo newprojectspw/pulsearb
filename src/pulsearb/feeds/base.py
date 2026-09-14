@@ -188,7 +188,7 @@ class ReconnectingFeed:
                 ) as ws:
                     self._ws = ws
                     self._connected = True
-                    self.log.info("conectado", url=self.url)
+                    self.log.info("conectado", url=self.url, conexao=self.rotulo)
                     await self._on_connected(ws)
                     backoff = self.reconnect_initial_seconds  # conexão boa zera o backoff
                     reassinatura = asyncio.create_task(
@@ -207,6 +207,7 @@ class ReconnectingFeed:
                 motivo = self._registrar_queda(exc)
                 self.log.warning(
                     "conexão caiu",
+                    conexao=self.rotulo,
                     backoff_s=round(backoff, 2),
                     **motivo,
                 )

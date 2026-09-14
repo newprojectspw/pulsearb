@@ -18,6 +18,19 @@ Por isso o reposicionamento **para no cancelamento incerto** e devolve o
 controle para a reconciliação, em vez de completar às cegas. É a mesma
 disciplina do envio (`INCERTA` é terminal), aplicada à sequência de dois passos.
 
+DUAS PERNAS, UMA COTAÇÃO (2026-09-14)
+──────────────────────────────────────
+O §15.3 paga a cotação de um lado só a um terço dentro de [0,10, 0,90] e a
+ZERO fora. Por isso a cotação maker tem DUAS pernas: o bid no Up e o bid no
+Down — que no livro do Up é o ask. As duas são uma cotação: entram juntas,
+saem juntas, e o `CotacaoAberta` guarda os dois ids.
+
+A regra do cancelamento incerto vale perna a perna: qualquer INCERTA para a
+sequência e devolve RECONCILIAR. E a colocação é **tudo ou nada**: se a
+segunda perna é RECUSADA, a primeira é cancelada — ficar de um lado só seria
+repousar uma cotação que a estimativa não avaliou (ela avaliou dois lados),
+e fora da faixa isso é risco de execução por zero reward.
+
 O QUE ESTE MÓDULO NÃO FAZ
 ──────────────────────────
 Não decide (isso é o `repouso`), não sabe montar a ordem a partir de uma
@@ -49,7 +62,8 @@ log = get_logger(__name__)
 
 #: Como virar uma `Cotacao` (distância em ticks, tamanho) numa `OrdemPretendida`
 #: concreta. Mora fora deste módulo pela razão do cabeçalho: precisa do contexto
-#: de mercado. Recebe a cotação, devolve a ordem pronta para `enviar`.
+#: de mercado. Recebe a cotação, devolve a ordem pronta para `enviar`. Há um
+#: por perna: o do Up (obrigatório) e o do Down (só na cotação de dois lados).
 OrdemDaCotacao = Callable[[Cotacao], OrdemPretendida]
 
 
@@ -99,11 +113,19 @@ async def aplicar_decisao(
     ordem_da_cotacao: OrdemDaCotacao,
     janela: str,
     agora_epoch: float,
+    ordem_do_lado_down: OrdemDaCotacao | None = None,
 ) -> Efeito:
     """Executa a `Decisao` do `repouso` no livro, via `cliente`.
 
     Devolve o `Efeito` — o desfecho real e o novo `CotacaoAberta` —, que quem
     chama guarda para a próxima rodada de decisão e para o diário.
+
+    `ordem_do_lado_down` presente = cotação de DUAS pernas (ver o cabeçalho).
+    Ausente, coloca só o bid do Up — e aí a `Cotacao` tem de ser
+    `dois_lados=False`, senão a estimativa descreve uma ordem que não existe.
+    Quem garante a coerência é quem chama (o `laco_maker`); aqui, mandar a
+    segunda perna sem saber montá-la é impossível, e a incoerência é recusada
+    com nome em vez de virar cotação de um lado contada como dois.
     """
     if decisao.acao is AcaoNaCotacao.MANTER:
         return Efeito(ResultadoDaAcao.MANTIDA, decisao.motivo, aberta=aberta)
@@ -119,6 +141,16 @@ async def aplicar_decisao(
             "reposicionar_sem_cotacao_nova",
             aberta=aberta,
             detalhe={"aviso": "decisao REPOSICIONAR sem `nova`; nada enviado"},
+        )
+    if decisao.nova.dois_lados and ordem_do_lado_down is None:
+        # Falha fechada: a estimativa contou dois lados e só há como montar
+        # um. Colocar o Up sozinho seria a cotação de um lado contada como
+        # dois — o defeito achado na rodada r4 de 2026-09-14.
+        return Efeito(
+            ResultadoDaAcao.MANTIDA,
+            "dois_lados_sem_ordem_do_lado_down",
+            aberta=aberta,
+            detalhe={"aviso": "Cotacao.dois_lados sem `ordem_do_lado_down`"},
         )
 
     # 1) Tira a antiga do livro ANTES de pôr a nova. Um cancelamento incerto
@@ -136,6 +168,7 @@ async def aplicar_decisao(
         decisao.nova,
         cliente=cliente,
         ordem_da_cotacao=ordem_da_cotacao,
+        ordem_do_lado_down=ordem_do_lado_down if decisao.nova.dois_lados else None,
         janela=janela,
         agora_epoch=agora_epoch,
         motivo=decisao.motivo,
@@ -154,40 +187,50 @@ async def _cancelar(
         # Nada a cancelar: a decisão de sair já está satisfeita.
         return Efeito(ResultadoDaAcao.CANCELADA, motivo, aberta=None)
 
-    if not aberta.order_id:
-        # Sem id do servidor não há como cancelar por id (§4.4). Isso NÃO é
-        # "nada a fazer": a ordem pode estar no livro sob um id que nunca
-        # capturamos — é exatamente o que a reconciliação existe para achar.
-        log.warning(
-            "cotacao aberta sem order_id: reconciliar em vez de cancelar as cegas",
-            id_do_cliente=aberta.id_do_cliente,
-        )
-        return Efeito(
-            ResultadoDaAcao.RECONCILIAR,
-            "aberta_sem_order_id",
-            aberta=aberta,
-            detalhe={"id_do_cliente": aberta.id_do_cliente},
-        )
-
-    resultado = await cliente.cancelar(aberta.order_id)
-    if resultado.estado is EstadoDoCancelamento.INCERTA:
-        # Não sabemos se saiu do livro. Manter `aberta` para a reconciliação
-        # ter o que procurar; NÃO a damos por fechada.
-        return Efeito(
-            ResultadoDaAcao.RECONCILIAR,
-            "cancelamento_incerto",
-            aberta=aberta,
-            detalhe={"order_id": aberta.order_id},
-        )
+    # Perna a perna, Up e depois Down. Uma perna com id do cliente e sem id do
+    # servidor está em estado desconhecido; um cancelamento INCERTA também. Os
+    # dois param aqui: NÃO se dá a cotação por fechada com uma perna no escuro.
+    pernas = (
+        ("up", aberta.id_do_cliente, aberta.order_id),
+        ("down", aberta.id_do_cliente_down, aberta.order_id_down),
+    )
+    estados: dict[str, str] = {}
+    for perna, id_do_cliente, order_id in pernas:
+        if not id_do_cliente and not order_id:
+            continue  # perna que nunca existiu (cotação de um lado só)
+        if not order_id:
+            # Sem id do servidor não há como cancelar por id (§4.4). Isso NÃO
+            # é "nada a fazer": a ordem pode estar no livro sob um id que nunca
+            # capturamos — é exatamente o que a reconciliação existe para achar.
+            log.warning(
+                "cotacao aberta sem order_id: reconciliar em vez de cancelar as cegas",
+                perna=perna,
+                id_do_cliente=id_do_cliente,
+            )
+            return Efeito(
+                ResultadoDaAcao.RECONCILIAR,
+                "aberta_sem_order_id",
+                aberta=aberta,
+                detalhe={"perna": perna, "id_do_cliente": id_do_cliente},
+            )
+        resultado = await cliente.cancelar(order_id)
+        if resultado.estado is EstadoDoCancelamento.INCERTA:
+            # Não sabemos se saiu do livro. Manter `aberta` para a
+            # reconciliação ter o que procurar; NÃO a damos por fechada.
+            return Efeito(
+                ResultadoDaAcao.RECONCILIAR,
+                "cancelamento_incerto",
+                aberta=aberta,
+                detalhe={"perna": perna, "order_id": order_id},
+            )
+        estados[perna] = str(resultado.estado)
     # CANCELADA ou NAO_CANCELADA: nos dois, a ordem não repousa mais do nosso
     # ponto de vista. NAO_CANCELADA inclui "já tinha sumido" (§4.4), que para o
     # objetivo — não ter esta ordem no livro — é tão bom quanto cancelada.
-    return Efeito(
-        ResultadoDaAcao.CANCELADA,
-        motivo,
-        aberta=None,
-        detalhe={"estado_do_cancelamento": str(resultado.estado)},
-    )
+    detalhe: dict[str, Any] = {"estado_do_cancelamento": estados.get("up", "")}
+    if "down" in estados:
+        detalhe["estado_do_cancelamento_down"] = estados["down"]
+    return Efeito(ResultadoDaAcao.CANCELADA, motivo, aberta=None, detalhe=detalhe)
 
 
 async def _colocar(
@@ -195,6 +238,7 @@ async def _colocar(
     *,
     cliente: ClienteDeOrdens,
     ordem_da_cotacao: OrdemDaCotacao,
+    ordem_do_lado_down: OrdemDaCotacao | None,
     janela: str,
     agora_epoch: float,
     motivo: str,
@@ -210,7 +254,19 @@ async def _colocar(
             desde_epoch=agora_epoch,
             id_do_cliente=resultado.id_do_cliente or "",
             order_id=resultado.order_id or "",
+            preco_up=ordem.preco_limite,
         )
+        if ordem_do_lado_down is not None:
+            return await _colocar_lado_down(
+                nova,
+                aberta_nova,
+                cliente=cliente,
+                ordem_do_lado_down=ordem_do_lado_down,
+                janela=janela,
+                motivo=motivo,
+                tinha_anterior=tinha_anterior,
+                ganho=ganho,
+            )
         return Efeito(
             ResultadoDaAcao.REPOSICIONADA if tinha_anterior else ResultadoDaAcao.COLOCADA,
             motivo,
@@ -229,6 +285,7 @@ async def _colocar(
                 cotacao=nova,
                 desde_epoch=agora_epoch,
                 id_do_cliente=resultado.id_do_cliente or "",
+                preco_up=ordem.preco_limite,
             ),
             detalhe={"id_do_cliente": resultado.id_do_cliente},
         )
@@ -240,6 +297,74 @@ async def _colocar(
         "envio_recusado",
         aberta=None,
         detalhe={"motivo_da_recusa": resultado.motivo},
+    )
+
+
+async def _colocar_lado_down(
+    nova: Cotacao,
+    com_up: CotacaoAberta,
+    *,
+    cliente: ClienteDeOrdens,
+    ordem_do_lado_down: OrdemDaCotacao,
+    janela: str,
+    motivo: str,
+    tinha_anterior: bool,
+    ganho: float,
+) -> Efeito:
+    """A segunda perna, com o Up já ACEITO. Tudo ou nada — ver o cabeçalho."""
+    ordem = ordem_do_lado_down(nova)
+    resultado = await cliente.enviar(ordem, janela=janela)
+
+    if resultado.estado is EstadoDoEnvio.ACEITA:
+        aberta = CotacaoAberta(
+            cotacao=nova,
+            desde_epoch=com_up.desde_epoch,
+            id_do_cliente=com_up.id_do_cliente,
+            order_id=com_up.order_id,
+            id_do_cliente_down=resultado.id_do_cliente or "",
+            order_id_down=resultado.order_id or "",
+            preco_up=com_up.preco_up,
+            preco_down=ordem.preco_limite,
+        )
+        return Efeito(
+            ResultadoDaAcao.REPOSICIONADA if tinha_anterior else ResultadoDaAcao.COLOCADA,
+            motivo,
+            aberta=aberta,
+            detalhe={
+                "order_id": aberta.order_id,
+                "order_id_down": aberta.order_id_down,
+                "ganho_estimado_usdc": ganho,
+            },
+        )
+
+    if resultado.estado is EstadoDoEnvio.INCERTA:
+        # O Up repousa; o Down PODE ter entrado. Só a reconciliação resolve, e
+        # ela precisa dos dois: o id do Up para cancelar e o id do cliente do
+        # Down para procurar.
+        return Efeito(
+            ResultadoDaAcao.RECONCILIAR,
+            "envio_incerto",
+            aberta=CotacaoAberta(
+                cotacao=nova,
+                desde_epoch=com_up.desde_epoch,
+                id_do_cliente=com_up.id_do_cliente,
+                order_id=com_up.order_id,
+                id_do_cliente_down=resultado.id_do_cliente or "",
+                preco_up=com_up.preco_up,
+                preco_down=ordem.preco_limite,
+            ),
+            detalhe={"perna": "down", "id_do_cliente": resultado.id_do_cliente},
+        )
+
+    # RECUSADA: o Up entrou sozinho, e sozinho não é a cotação avaliada. Sai.
+    desfeito = await _cancelar(com_up, cliente=cliente, motivo="lado_down_recusado")
+    if desfeito.precisa_reconciliar:
+        return desfeito
+    return Efeito(
+        ResultadoDaAcao.CANCELADA if tinha_anterior else ResultadoDaAcao.MANTIDA,
+        "envio_recusado",
+        aberta=None,
+        detalhe={"perna": "down", "motivo_da_recusa": resultado.motivo},
     )
 
 
@@ -278,7 +403,8 @@ async def reconciliar(
     """Casa as ordens abertas no servidor com as que o nosso lado espera.
 
     `esperadas` é indexado pelo `order_id` do servidor — o mesmo por que se
-    cancela. A leitura é fail-closed: se `listar_ordens_abertas` levantar
+    cancela. Uma cotação de duas pernas entra DUAS vezes, uma por
+    `CotacaoAberta.order_ids`. A leitura é fail-closed: se `listar_ordens_abertas` levantar
     `ErroDeLeitura`, ele SOBE. Engolir e devolver "nada aberto" faria a
     reconciliação declarar o livro limpo sem ter olhado — e o arranque
     seguiria como se não houvesse órfã, que é o pior desfecho possível aqui.

@@ -118,6 +118,28 @@ class TestSilencioPorToken:
         assert resumo["deltas_orfaos"] == 1
         assert "topico mudo com a conexao viva" in resumo["nota"]
 
+    def test_o_limite_por_consulta_vale_so_para_aquela_consulta(self):
+        # O maker dos pools consulta com silêncio maior (mercado de horizonte
+        # longo fica minutos sem evento porque nada mudou); o limite do
+        # objeto — o do Up/Down — não muda, e o resumo segue contando pelos
+        # 10 s.
+        livros = LivrosAoVivo(silencio_do_token_s=10.0)
+        livros.aplicar(_snapshot(), ts_ns=SEGUNDO)
+        agora = SEGUNDO + 40 * SEGUNDO
+
+        assert livros.livro("tok", agora_ns=agora) is None
+        assert livros.livro("tok", agora_ns=agora, silencio_s=900.0) is not None
+        assert livros.livro("tok", agora_ns=agora, silencio_s=30.0) is None
+        assert livros.livro("tok", agora_ns=agora) is None
+        assert livros.resumo(agora_ns=agora)["mudos"] == 1
+
+    def test_o_limite_por_consulta_nao_dispensa_o_snapshot(self):
+        # Silêncio maior relaxa a IDADE, nunca a completude: um delta sem
+        # snapshot continua sendo livro que não existe.
+        livros = LivrosAoVivo(silencio_do_token_s=10.0)
+        livros.aplicar(_delta("orfao"), ts_ns=SEGUNDO)
+        assert livros.livro("orfao", agora_ns=2 * SEGUNDO, silencio_s=900.0) is None
+
 
 class TestEventosQueNaoMovemOLivro:
     @pytest.mark.parametrize(

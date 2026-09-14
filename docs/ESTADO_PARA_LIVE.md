@@ -275,6 +275,42 @@ Daí o item 0.6: reassinar cobre assinatura caducada; não cobre o servidor que
 parou de publicar aquele tópico para aquela conexão. A resposta que sobra é
 derrubar e reconectar, refazendo a assinatura do zero.
 
+### As quedas do CLOB WS — dois códigos, duas causas (medido em 2026-09-14)
+
+O SHADOW via a conexão do CLOB cair e voltar o tempo todo. O log com
+`close_code` (M2.11) separou dois fenômenos, e `scripts/sonda_clob_ws.py`
+(sondas `1008`, `custo` e `rajada`) mede cada um:
+
+**`1008 invalid subscription payload`, sempre 10,2 s depois do PRIMEIRO
+connect.** O CLOB lê qualquer texto anterior à primeira assinatura como
+payload de assinatura, e o `PING` de aplicação não é um. O SHADOW conecta
+com o conjunto vazio e só assina depois da descoberta; o PING chegava antes.
+Sonda: conexão vazia + PING = 1008 aos 10,2 s; conexão vazia + `subscribe`
+dinâmico antes do PING = viva; com o conserto (`_heartbeat` não manda PING
+enquanto `token_ids` está vazio), a conexão vazia vive os 15 s e fecha com
+1000. Teste `test_sem_assinatura_NAO_manda_ping`. ✅
+
+**`1013 slow consumer: send buffer full` — e NÃO é o nosso consumidor.**
+Três medidas fecham isso: (a) consumidor VAZIO (callback que só conta) com
+os 152 tokens Up/Down cai igual — 3 quedas em 240 s, 6 em 420 s; (b) três
+processos paralelos com custo artificial de 0, 150 e 400 µs por mensagem
+caíram **no mesmo instante** (142,4/142,5 s; 162–164 s; 216–217 s); (c)
+`max_queue=None` e um `sleep(0)` por mensagem não mudaram nada (os dois foram
+testados e REVERTIDOS). O que derruba é a rajada do lado do servidor: dois
+mercados de 5 min são **54 % dos bytes** (409 msg/s de `price_change` em UM
+mercado), pior segundo medido 4,09 MB. Repartir os 152 tokens em 4 conexões
+de 38 (round-robin) não resolve — a fatia com os dois mercados pesados
+(94 % do tráfego) caiu 3 vezes enquanto as outras três não caíram nenhuma.
+**Os tokens dos pools (50–120 msg/s) nunca caíram.** O que o código faz com
+isso: a rota de pools ganhou **conexão própria** (`ProcessoShadow.
+poly_pools`, rótulo `clob[pools]`), para a queda dos Up/Down — cerca de uma
+por minuto nos períodos ruins, 1–2 s sem livro cada — não apagar o livro que
+o maker cota. A conexão dos Up/Down continua caindo; para o taker isso já
+era assim em toda rodada anterior, e a rota dele está medida e reprovada.
+Rodada 4 (20 min): 24 quedas na `clob[updown]`, **1** na `clob[pools]`. 🟡
+falta: medir em rodada longa (horas) quantas quedas a `clob[pools]` tem
+sozinha.
+
 ---
 
 ## Bloco 1 — Veredito M2: existe edge líquido?
@@ -538,8 +574,142 @@ descobrir_pools_de_reward` (padrão `False`; env
 mesmo caminho das janelas Up/Down. O taker continua recusando essas janelas
 (`jogo="reward"` ∉ `jogos_operados` → `PULOU_JOGO_NAO_OPERADO`, coberto por
 teste com executor hostil). 17 testes em `tests/test_pools_de_reward.py`; o
-relato de 60 s ganha `pools_descobertos`. **Ainda não rodou em SHADOW ao vivo**
-— esse é o próximo passo, e o quadro só marca quando houver relato.
+relato de 60 s ganha `pools_descobertos`.
+
+**Rodou em SHADOW ao vivo em 2026-09-14 (duas rodadas curtas), e as duas
+ensinaram algo.** Rodada 1: 57 janelas descobertas, e o maker recusou 100 %
+com `sem_candidata_que_pontue`. Causa: o `LacoMaker` cotava com
+`risk.stake_max_por_trade_usdc` (5,0 USDC do taker) lido como **5 shares** —
+e 5 shares não pontuam em pool nenhum (`rewards_min_size` vai de 50 a
+1.000). Conserto: `Settings.tamanho_da_cotacao_maker_shares` (padrão 5,0
+para a rodada do taker não mudar; a rota de pools liga com 1.000, o tamanho
+que o 1.12 mediu). No mesmo commit a descoberta ganhou o filtro pelo livro:
+`DescobertaDePools(tamanho_da_cotacao=…)` consulta `GET /book` e descarta,
+COM MOTIVO (`nao_pontua_com_este_tamanho`, `sem_livro`), a janela onde
+`score_da_ordem` — a mesma função do 1.12 — dá zero para esse tamanho. Sem
+o filtro o processo assinava 272 tokens e o WS derrubava com `1013 slow
+consumer`; com ele, 2–3 janelas saem por rodada. 21 testes. Rodada 2 (1.000
+shares): `livro/60 s = 136.473` em 266 tokens, e o maker chegou a **querer
+cotar 145 vezes** (`ganho_justifica_perder_a_fila: 145`) — e foi barrado
+145 vezes por `portao:disjuntor_armado`: o registro SHADOW
+(`data/risco/registro_do_dia.shadow.json`) está com o disjuntor armado
+desde 2026-09-08 pela perda sintética do taker (−26,59 USDC, teto 25), e o
+disjuntor gruda por desenho. **Não foi desarmado por esta sessão**: desarmar
+é ato humano. O ensaio da rota de pools roda com registro próprio
+(`PULSEARB_RISK__CAMINHO_DO_REGISTRO`), e o quadro só marca cotação-sombra
+repousando quando houver relato com `cotacoes_repousando > 0`.
+
+**Rodada 4 (2026-09-14, 20 min, registro próprio, `TOP_DE_POOLS=60`,
+1.000 shares, tetos do taker elevados por env só para o ensaio:
+`PULSEARB_RISK__STAKE_MAX_POR_TRADE_USDC=1000`,
+`STAKE_MAX_POR_JANELA_USDC=2000`, `EXPOSICAO_MAX_USDC=120000`,
+`POSICOES_MAX_ABERTAS=120`, `SPREAD_MAXIMO=0.06`): houve cotação-sombra
+repousando.** Relato final: `cotacoes_repousando: 59`, `estavel: 2850`,
+`ganho_justifica_perder_a_fila: 196`, `portao:spread_anomalo: 142`,
+`livro_indisponivel: 1148` (diário `data/shadow/diario-20260914-045201-*`).
+Das 25 quedas de WS, 24 foram na `clob[updown]` e **1** na `clob[pools]`
+(sem close frame, origem cliente) — o livro dos pools ficou de pé enquanto
+os Up/Down caíam. **E o diário mostrou o defeito que estas rodadas
+existem para achar:** as 69 cotações saíram todas entre 0,46 e 0,499 em
+mercados cujo meio ia de 0,03 a 0,97 — o `LacoMaker._ordem_da_cotacao`
+fechava sobre `meio=0.5` fixo, e não sobre o `livro.mid`. Num mercado a
+0,90 isso é bid 40 ¢ abaixo do meio (não pontua); num a 0,10, bid 39 ¢
+ACIMA do ask, que em LIVE executaria na hora como taker. Segundo defeito
+no mesmo lugar: a estimativa contava dois lados (`dois_lados=True`) e o
+`montar` colocava um (bid do Up) — três vezes o score dentro de
+[0,10, 0,90] e score positivo fora, onde o §15.3 paga zero. Conserto no
+mesmo commit deste parágrafo (#116): o preço sai do `livro.mid` da passada
+(sem meio, `livro_sem_meio` e não cota) e `Cotacao.preco` arredonda para a
+grade do tick (bid para baixo, ask para cima — o estimado e o colocado
+olham o mesmo preço). **E no commit seguinte a cotação ganhou as DUAS
+pernas que a conta descreve:** bid no Up a `meio − d` e bid no Down a
+`(1 − meio) − d` — que no livro do Up é o ask a `meio + d`, o preço que
+`estimar_retorno` já pontuava do lado ask. `CotacaoAberta` guarda os dois
+ids (`order_id`, `order_id_down`); as pernas passam as duas pelo portão,
+entram juntas e saem juntas (`execucao_maker`): Down RECUSADO cancela o Up
+(o Up sozinho não é a cotação avaliada), qualquer INCERTA — envio ou
+cancelamento, de qualquer perna — para e devolve RECONCILIAR, e uma
+`Cotacao` de dois lados sem como montar o Down é recusada com nome
+(`dois_lados_sem_ordem_do_lado_down`) em vez de virar o defeito da r4 de
+novo. Fora de [0,10, 0,90] só a cotação de dois lados pontua, e lá o
+portão de preço (`preco_minimo` 0,05 / `preco_maximo` 0,95) barra a perna
+que cair fora da faixa, com nome. 19 testes em
+`tests/test_4_0c_laco_maker.py` (`TestOPrecoSegueOMeioDoLivro`), 22 em
+`tests/test_m4_execucao_maker.py` (`TestDuasPernas`) e
+`tests/test_m4_cotacao_maker.py` (`TestOPrecoCaiNaGradeDoTick`). ✅ (b)
+**conferido em duas rodadas no mesmo dia.** **Rodada 5** (20 min, código
+de #116, uma perna, mesmo env da r4; diário
+`data/shadow/diario-20260914-052154-*`): os preços passaram a ir de 0,10 a
+0,88 acompanhando o meio de CADA mercado. `scripts/confere_diario_maker.py`
+(busca `GET /book` do token cotado e mede `preco_limite` contra o meio de
+agora, em ticks) sobre as 53 colocações com livro: **33 a 1,5 ticks abaixo
+do meio**, as demais entre 1,0 e 7,5, as de tick 0,001 a 0,1–0,2, e UMA a
+−8 (mercado de temperatura em Xangai cujo meio andou de 0,27 para 0,18
+entre a colocação e a conferência — as colocações seguintes já saíram a
+0,14). Relato final: `cotacoes_repousando: 38`; motivos `estavel 2296,
+ganho_justifica_perder_a_fila 164, livro_indisponivel 1213,
+portao:spread_anomalo 146, sem_candidata_que_pontue 774, sem_pool_de_reward
+604`; quedas 23 `clob[updown]` / 1 `clob[pools]` / 3 `rtds`. O
+`sem_candidata_que_pontue 774` é a perna única fora de [0,10, 0,90], onde o
+§15.3 paga zero. **Rodada 6** (20 min, código de #117, duas pernas, mesmo
+env; diário `data/shadow/diario-20260914-054431-*`): 116 `cotacao_colocada`
+= **58 Up + 58 Down**, 55 janelas e **todas com as duas pernas**; nos 59
+pares Up/Down, `preco_up + preco_down` = 0,97 (39), 0,98 (7), 0,997 (6),
+0,998 (7) — o Down espelha o Up a `d` de cada lado do meio, como a conta
+descreve. `sem_candidata_que_pontue` foi de 774 a **0**; apareceu
+`portao:preco_fora_da_faixa: 198`, a perna que cai fora de
+[0,05, 0,95] barrada com nome, como previsto. Repousando subiu a 53–55 e
+aos ~17 min caiu a 4 → 1 → 0. **Achado da r6, que não é da rota maker:**
+`portao:pausa_por_sequencia: 506`. O registro de risco é sufixado pelo modo
+(`registro_do_dia.shadow.json`, não `registro_do_dia.json`), e ele
+carregava as perdas SINTÉTICAS do taker em SHADOW das rodadas anteriores
+(pnl −8,47, 4 perdas seguidas): o portão compartilhado pausou por 1 h
+(`pausado_ate_epoch 1789369314`) e o maker, que por desenho entra pelo
+MESMO portão, tirou todas as cotações (`_sair`). Uma rota medida morta
+(taker Up/Down) pausando a rota que sobrou é o comportamento do portão,
+não defeito dele — a pausa é o sinal de que o *modelo do taker* parou de
+acertar, e o maker não tem modelo. **Decisão, sem afrouxar código:** o
+ensaio do 4.2 sobe com o registro `.shadow.json` apagado (r7 em diante), e
+o quadro diz isso aqui; se a pausa voltar a disparar dentro de uma rodada,
+o operador sobe `PULSEARB_RISK__PERDAS_SEGUIDAS_PARA_PAUSA` por env, de
+propósito e por escrito — o bot não sobe sozinho. Se a pausa deve ou não
+valer para a rota maker é decisão de política que fica escrita como
+pergunta, não respondida por conveniência.
+Motivos finais da r6: `estavel 2581, ganho_abaixo_do_piso 5,
+ganho_justifica_perder_a_fila 668, livro_indisponivel 1121, livro_sem_meio
+16, portao:pausa_por_sequencia 506, portao:preco_fora_da_faixa 198,
+portao:spread_anomalo 32, sem_pool_de_reward 592`; quedas 14
+`clob[updown]` / 1 `clob[pools]` / 3 `rtds`. **Rodada 7** (20 min, #118,
+a caixa do 4.2 ligada, registro `.shadow.json` apagado antes; diário
+`data/shadow/diario-20260914-061217-*`): **os primeiros números de
+dinheiro da rota** — ver a linha 4.2. E a rodada achou o defeito de
+medida que o relógio existe para achar: `livro_indisponivel: 2151` em
+~5.600 avaliações (38%), com o resumo dos livros mostrando **55–60% dos
+tokens de pool "mudos" a qualquer instante** (`mudos 112–174 de 152–288`).
+Não eram livros velhos: eram mercados de horizonte longo parados, e o WS
+só manda delta quando algo muda — os 10 s de `SILENCIO_DO_TOKEN_S`, certos
+para o Up/Down de 5 min, chamavam de mudo um livro que estava certo, e o
+relógio parava nele (rewards subcontados, cotação sem reposicionar).
+Conserto no mesmo commit deste parágrafo: `LivrosAoVivo.livro` aceita
+`silencio_s` por consulta, e o maker lê por `_livro_para_o_maker`, que
+vigia a **CONEXÃO** dos pools (conectada e com mensagem — PONG conta — há
+menos que `pong_stale_seconds`, 30 s) em vez do token, com teto de 900 s
+por token só para uma assinatura que morresse em silêncio não virar livro
+eterno; sem a rota de pools ligada vale a regra de sempre. 4 testes em
+`tests/test_m4_shadow_processo.py` (`TestOLivroDoMakerEhVigiadoPelaConexao`)
+e 2 em `tests/test_m4_livros.py`. A r7 também pegou uma **queda de rede
+local de ~5 min** (1789367066–1789367372: rtds ×2, `clob[pools]` e
+`clob[updown]` com `timed out during opening handshake` ao mesmo tempo):
+`portao:feed_parado 195` e `portao:relogio_nao_monitorado 133`, o maker
+tirou 42 das 60 cotações e manteve 18 (as de livro indisponível — sair por
+falta de dado nosso perde a fila, por desenho), o relógio ficou parado em
+24,44 USDC os 5 min inteiros (nada acumulou sem passada), e ao voltar
+repôs 50 → 56. 🟡 falta: (c) os tetos do
+taker (`stake_max_por_trade_usdc` 5, `spread_maximo` 0,04) barram qualquer
+cotação de 1.000 shares — o operador que quiser a rota maker tem de subir
+os tetos de propósito (`PULSEARB_RISK__*`), com o capital que os pools
+exigem (`rewards_min_size` 50–1.000 shares × preço); o bot não os sobe
+sozinho.
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
@@ -1426,8 +1596,8 @@ Definidas na seção 8 do prompt do projeto. Sem atalho.
 | # | Condição | Estado |
 |---|---|---|
 | 4.1 | Recorder ≥ 72 h + backtest líquido positivo com latência realista | ❌ **MEDIDO E REPROVADO em 2026-09-12** — o marcador ficou ⬜ por uma hora depois de o item fechar, porque eu escrevi o veredito no corpo da linha e não troquei o símbolo; quem batesse o olho no quadro leria 'em aberto' sobre um item decidido. É a Regra 1 aplicada ao próprio quadro. Histórico: **era ⬜ — e a estratégia que o backtest teria de aprovar não existe em código.** O taker está medido e reprovado (1.1/1.4/1.5); a rota que resta é a maker, e o motor dela **não começou** — ver 4.0 abaixo. **O critério ganhou forma avaliável em 2026-09-06:** o relatório passou a trazer `rota_maker.limite_pessimista` ao lado da conta aberta, com `fecha_no_pior_caso` — positivo ali fecha o líquido **sem depender de posição na fila**, que é o que travava o 1.6. **Bloqueio de dado LEVANTADO em 2026-09-08:** `colima` + `docker` instalados, imagem construída (5.2 ✅) e a **gravação de 72 h em curso** — container `pulsearb-rec-72h`, `--restart unless-stopped`, gravando em `~/pulsearb-gravacao`, prevista para 12/09. ⚠️ **O que ela vai medir já é sabido, e é preciso dizer:** ela grava os mercados updown, e as 24 h de SHADOW de 08/09 mostraram que eles não têm pool de reward. O critério do 4.1 pede backtest *líquido positivo*, e com rewards zero o líquido é negativo por construção. A gravação fecha o critério com a evidência que ele exige — mas o veredito provável é **reprovação da rota maker nestes mercados**, não aprovação. A decisão que isso abre (aceitar o fim da rota, ou adaptar a estratégia a mercados de horizonte longo, onde o pool está) é de direção do projeto, e fica em aberto até a gravação fechar. **FECHADO EM 2026-09-12 — ❌, MEDIDO E REPROVADO.** A gravação rodou de 09/09 02:19 a 12/09 02:19 UTC e o backtest completo saiu em `relatorios/M2_72H_20260912_ok.json`. **A METADE DO CRITÉRIO QUE ERA NOSSA PASSOU:** 72 arquivos, **287.745.263 registros, 0 linhas corrompidas, `arquivos_ilegiveis: []`**, cobertura do stream **99,8% nos oito ativos**, 2.536 janelas conhecidas e 2.460 com resolução. O recorder de ≥72 h existe e é íntegro — isso é fato, não promessa. **A OUTRA METADE REPROVOU:** líquido **−195,2525 USDC a 300 ms** e **−199,1752 a 600 ms**, com latência realista. Positivo era a exigência; saiu negativo nos dois cenários. **GANHO COLATERAL QUE VALE MAIS QUE O VEREDITO: a âncora ficou provada em escala.** τ=0 explica **0,9996 de 2.310 janelas elegíveis**, com **1 discordante**, e `concentrada: False` — as janelas se espalham pelos quatro quartis da gravação. Antes eram 88 janelas de uma fatia; agora são 2.310 cobrindo três dias. Isso deixou de ser indício e virou fato estabelecido, e é o alicerce de todo o resto. **O QUE NÃO SE FECHA COM MAIS GRAVAÇÃO:** o **1.5**. Nenhuma das quatro durações chega aos 200 USDC de profundidade (192,7 / 106,1 / 52,8 / 28,0), agora medido sobre as 24 horas do dia. É teto de CAPACIDADE — estratégia nenhuma o levanta. **O QUE SOBRA COMO PISTA, e só como pista:** a banda **240-120s** deu **+12,6942 USDC em 1.943 trades com acerto 0,6897**. Ver 1.1 para as três ressalvas que impedem de tratar isso como resultado — a margem de 0,196%, a escolha in-sample da banda, e o `<30s` que é ruído com cara de lucro. **DEFEITO NOVO, ACHADO DE GRAÇA:** `deriva.veredito` acusa **p50 do offset variando 7.195,5 ms entre as horas**, com p99 de 1.862 ms e três horas acima de 3,5 s — *MEDIANA MOVENDO: suspeita de DERIVA de relógio (NTP ausente ou quebrado)* na máquina de gravação. Não contamina o que está acima, porque a âncora usa carimbo do SERVIDOR. **CORRIGIDO NA MESMA SESSÃO, e a correção é minha:** li o veredito automático e ignorei a ressalva ao lado dele, que diz por escrito que o offset *inclui latência de rede, então é TETO do erro de relógio, não o erro em si*. **NÃO é deriva de relógio.** A mediana das 72 horas é **110,4 ms** e apenas **6 horas de 72** passam de 1 s; `sntp time.apple.com` mede o relógio local a **143 ms**, coerente com a mediana. NTP quebrado produz deriva MONOTÔNICA em todas as horas — aqui são 66 horas limpas e 6 picos. **E os picos têm dono:** 11/09 22:00 UTC (=18:00 local) é o meu ensaio de 3 h; 12/09 01:00 UTC (=21:00 local) é o backtest de 72 h morto às 21:14 e relançado às 21:15; 11/09 20:00 e 21:00 UTC são a suíte completa, a mutação e o ruff. `chegada_local` é carimbado quando o evento é PROCESSADO, então máquina sob carga atrasa o carimbo. **O conserto não é NTP — é não rodar análise pesada na máquina que grava**, e isso já está no RUNBOOK como motivo de a VPS existir. Item ENCERRADO, não aberto **A PISTA FOI TESTADA EM 7 DIAS INDEPENDENTES E REPROVOU (2026-09-13).** A banda `240-120s` tinha dado **+12,6942 USDC em 1.943 trades** nas 72 h, e eu a publiquei com a ressalva de que fora escolhida DEPOIS de ver o resultado. Critério registrado ANTES do teste: *5 ou mais dias com edge → sobrevive; 3 ou 4 → moeda; 2 ou menos → era ruído*. **Resultado: 2 de 7, e a soma dá −2,65 USDC.** O +12,69 era ruído in-sample. **NÃO adotei a `120-60s`**, que deu 4/7 e +72,01 — pelo critério pré-registrado 4/7 é moeda, ela não era a banda sob teste (nas 72 h deu −18,54, marcada `nao`), e adotá-la agora seria repetir o erro in-sample um nível mais fundo. **O ACHADO QUE VALE MAIS QUE O VEREDITO: a variância é do DIA, não da banda.** Em 23/08 o preditor ganha em quase toda faixa (+143,92 / +91,02 / +40,67); em 21/08 perde em quase toda (−207,31 / −68,90 / +4,38). Os +72 da `120-60s` são dois dias bons carregando cinco medianos. As bandas não separam sinal — os dias separam, e isso é o oposto de um edge explorável: não há como saber de antemão em que dia se está. **Desenho da medição:** um dia por vez, sete relatórios (`relatorios/DIA_*.json`). A corrida única sobre os 73 GB **não cabia** — a passada 2 crescia 0,026 GiB por milhão de registros e projetava ~20 GiB numa máquina de 8 GB; por dia o pico ficou em **2,35 GiB**. E sete tabelas respondem *em quantos dias a banda foi positiva*, que é replicação; um agregado só responderia *a soma foi positiva*, que não distingue sinal de um dia bom. **DEFEITO DE GRAVAÇÃO ACHADO DE GRAÇA:** o dia 18/08 saiu com **732 janelas conhecidas e ZERO com resolução** — `pulsearb-20260818-0000.jsonl.gz` e `-0700` estão corrompidos (*invalid literal/length/distance code*, *invalid block type*). Não muda o veredito, que se apoia em 6 dias, mas parte daquela gravação está perdida e ninguém sabia |
-| **4.0** | **Motor MAKER — a rota que sobrou** | 🟡 **duas peças de quatro, em 2026-08-31.** ✅ **(a) onde cotar:** `live/cotacao.py` escolhe `distancia_ticks` e tamanho pelo líquido `rewards − markout`, usando a **mesma** `score_de_nivel` do backtest; publica as parcelas separadas porque uma é estimativa com hipótese de fila e a outra é medida (1.7); 20 testes. ✅ **(b) `orderType` configurável:** `ClienteDeOrdens(tipo_de_ordem="GTC")`, com tipo desconhecido falhando na **construção** e não no envio (`[VERIFICADO]` §4.1); default segue FOK. 🟡 **(c) repousar:** `live/repouso.py` decide *mexer ou deixar* com **histerese dupla** — piso de ganho (0,50 USDC) e tempo mínimo repousada (30 s) —, porque reposicionar custa a fila e o livro pisca; cotação que **deixa de pontuar** vence as duas travas, já que ficar seria pagar risco de execução por zero reward. Toda decisão sai com **motivo nomeado**, como no `risk/gates.py`. 17 testes. **O I/O chegou em 2026-09-06** (#81): `execution/cliente.py` ganhou `cancelar` (`DELETE /order`, §4.4) e `listar_ordens_abertas` (`GET /data/orders`, §4.5, leitura **fail-closed** — erro ao ler levanta, nunca vira livro limpo), e `live/execucao_maker.py` (15 testes) traduz a `Decisao` em chamadas do cliente. A trava que dá nome ao módulo: reposicionar é cancelar E DEPOIS enviar, e **cancelamento incerto PARA a sequência** — mandar a nova por cima da antiga que talvez repouse seria posição dupla entre dois makers (verificado por mutação). `reconciliar` separa **órfãs** (no servidor, não esperadas — o envio que ficou INCERTA e afinal entrou) de **fantasmas**. **Dois pré-requisitos do laço fechados:** (1) `execution/cliente_sombra.py` (`ClienteSombraDeOrdens`, 10 testes, 2026-09-07) — sem ele o laço mandaria ordem DE VERDADE em SHADOW, violando a invariante do topo do `live/shadow.py`; não abre socket, não assina, não recebe credencial, e todo id sai com prefixo `sombra-`. `aplicar_decisao` e `reconciliar` rodam contra ele SEM alteração — a prova do mesmo caminho. Não simula preenchimento de propósito: fingir exigiria a fila do 1.6. (2) Os **parâmetros de reward chegam ao caminho ao vivo** (10 testes, 2026-09-07): a leitura saiu de dentro do `recorder` para `markets/rewards_da_gamma.py` e os DOIS lados usam as MESMAS funções — a leitura é ambígua de propósito (três nomes para a lista, seis para a taxa), e duas cópias divergiriam na primeira grafia nova, aparecendo como *'o SHADOW achou pool onde o backtest não achou'*. `JanelaAoVivo` ganhou `reward_daily_rate`, `reward_min_size` e `reward_max_spread` (em FRAÇÃO, convertido no leitor compartilhado). Os três andam juntos ou nenhum; sem pool saem `None`, não zero. ✅ **O LAÇO fechou em 2026-09-07** — `live/laco_maker.py` (7 testes) chama cotação → repouso → execução por janela aberta, e o `ProcessoShadow` roda `laco_de_cotacao` como tarefa própria. **Cadência de 15 s, não 1 s**: a pergunta do maker é *vale trocar?*, e a histerese do repouso já tem piso de 30 s repousada — consultar a cada segundo só produziria `repousada_ha_pouco_tempo` em série. Três travas que só aparecem na composição, verificadas por mutação: **janela que fecha leva a cotação com ela** (senão 24 h viram dezenas de órfãs num mercado que ninguém acompanha); **livro indisponível NÃO cancela** (sair por falta de dado NOSSO perderia a fila de graça, e o livro volta no passo seguinte); e **MANTER não custa ida à rede** (senão a histerese não economizaria nada). Janela sem pool não recebe cotação. O cliente é o **sombra, sempre** — trocá-lo pelo real é o que faria a rota cotar de verdade, e é decisão de LIVE que a autorização recusa. O laço **não derruba a rodada**: defeito nele sai no log e o taker, que é o caminho medido, segue. `maker` sai no relato de 60 s com `motivos` nomeados. **4.0(c) COMPLETO.** ✅ **O portão entrou em 2026-09-07**, no mesmo dia em que o buraco foi achado: toda cotação passa por `avaliar_risco` — os MESMOS portões do taker, sem o de modo (que faria tudo sair como `modo_nao_opera` e o diário perderia qual trava seguraria em LIVE, como no `ExecutorSombra`). Três propriedades, verificadas por mutação: **sem portão NÃO cota** (`sem_portao`, falha fechada — cotar 'porque ninguém passou trava' é o oposto do que a trava serve); **o portão barra ENTRAR, nunca SAIR** (um kill switch que impedisse cancelar prenderia a cotação no livro exatamente quando alguém puxou a chave para tirá-la); e vale para a **exposição que já existe**, não só para a nova — checar só no REPOSICIONAR deixava uma cotação repousando nunca ser reavaliada, e um disjuntor que armasse no meio da rodada não a tirava do livro. Esse último buraco foi achado por um teste que eu escrevi esperando que passasse. 12 testes. ⬜ **(d) posição na fila:** o WS agregado não mostra, e é dela que dependiam os 3 termos que travavam o 1.6. **Deixou de ser o bloqueio em 2026-09-06** (#82): `conta_pessimista_do_maker` troca *estimar a fila* por **limitar por baixo** — rewards não dependem dela (§15.3), então só o custo depende, e ele entra no máximo. **E em 2026-09-08 a fila deixou de importar por outra razão, mais dura:** a rodada de 24 h (ciclo 1,0, zero sono) fez **44.430 avaliações maker** e nenhuma cotação repousou — motivo ÚNICO `sem_pool_de_reward`, em todas as janelas, o dia inteiro. Sem pool, `líquido = rewards − markout` fica negativo por construção, e nenhuma hipótese de fila muda isso. **A varredura do mesmo dia mostra que o programa NÃO acabou** — mas todos os mercados com pool são de horizonte longo (eleições 2026/2028, "antes de 2027", campeonatos), e **nenhum** de janela curta. ⚠️ **O número publicado aqui em 08/09 — "940 (37,6%), 6.766 USDC/dia" — estava errado por 27× e foi corrigido em 2026-09-13:** aquilo era amostra de 2.500 mercados da Gamma; a lista autoritativa do CLOB (`GET /rewards/markets/current`, paginada) traz **18.384 mercados com pool, 185.520 USDC/dia**. A conclusão qualitativa sobrevive, a escala não. O reward existe; ele não está onde este bot opera. Descartadas as duas alternativas antes de concluir: o leitor acha pool em 6 de 20 mercados quaisquer (não é chave errada), e `/markets/slug/` e `keyset` concordam que `clobRewards` não vem nesses mercados (não é rota de busca) |
-| 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | ⬜ — e o relógio **não começou**: até 2026-08-31 o motor gravava `preco_pago = best_ask` em vez de atravessar o livro, então todo PnL de shadow anterior a esse conserto sai **enviesado para cima**. As 2 semanas contam a partir de um ensaio com o motor corrigido. **O relógio pode começar em 2026-09-14 — e na VPS:** a rota que o 4.2 tem de medir agora é a maker nos pools (1.12), que está ligada no `ProcessoShadow` como opt-in desde 13/09 mas **nunca rodou ao vivo**. `deploy/pulsearb-shadow-maker.service` + RUNBOOK §10 ligam isso: `PULSEARB_MODE=SHADOW`, `PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`, `--duration 14d`, diário anexado (`data/diarios/shadow-maker-4-2.jsonl`), cliente sombra, trava tripla fechada. Cabe nos 18,4 GB da VPS porque o SHADOW não grava o stream. **O que o relato da primeira hora tem de mostrar** está na tabela do §10.1 — `pools_descobertos > 0`, `sem_pool_de_reward` NÃO como motivo único, todo id `sombra-`. **Ainda ⬜ porque não rodou**: vira 🟡 no primeiro relato de 24 h publicado aqui, e ✅ só com 14 dias e o custo de saída medido (1.12). Disco do diário: não medido — medir na primeira hora. |
+| **4.0** | **Motor MAKER — a rota que sobrou** | 🟡 **duas peças de quatro, em 2026-08-31.** ✅ **(a) onde cotar:** `live/cotacao.py` escolhe `distancia_ticks` e tamanho pelo líquido `rewards − markout`, usando a **mesma** `score_de_nivel` do backtest; publica as parcelas separadas porque uma é estimativa com hipótese de fila e a outra é medida (1.7); 20 testes. ✅ **(b) `orderType` configurável:** `ClienteDeOrdens(tipo_de_ordem="GTC")`, com tipo desconhecido falhando na **construção** e não no envio (`[VERIFICADO]` §4.1); default segue FOK. 🟡 **(c) repousar:** `live/repouso.py` decide *mexer ou deixar* com **histerese dupla** — piso de ganho (0,50 USDC) e tempo mínimo repousada (30 s) —, porque reposicionar custa a fila e o livro pisca; cotação que **deixa de pontuar** vence as duas travas, já que ficar seria pagar risco de execução por zero reward. Toda decisão sai com **motivo nomeado**, como no `risk/gates.py`. 17 testes. **O I/O chegou em 2026-09-06** (#81): `execution/cliente.py` ganhou `cancelar` (`DELETE /order`, §4.4) e `listar_ordens_abertas` (`GET /data/orders`, §4.5, leitura **fail-closed** — erro ao ler levanta, nunca vira livro limpo), e `live/execucao_maker.py` (15 testes; 22 desde 2026-09-14, com as duas pernas) traduz a `Decisao` em chamadas do cliente. A trava que dá nome ao módulo: reposicionar é cancelar E DEPOIS enviar, e **cancelamento incerto PARA a sequência** — mandar a nova por cima da antiga que talvez repouse seria posição dupla entre dois makers (verificado por mutação). `reconciliar` separa **órfãs** (no servidor, não esperadas — o envio que ficou INCERTA e afinal entrou) de **fantasmas**. **Dois pré-requisitos do laço fechados:** (1) `execution/cliente_sombra.py` (`ClienteSombraDeOrdens`, 10 testes, 2026-09-07) — sem ele o laço mandaria ordem DE VERDADE em SHADOW, violando a invariante do topo do `live/shadow.py`; não abre socket, não assina, não recebe credencial, e todo id sai com prefixo `sombra-`. `aplicar_decisao` e `reconciliar` rodam contra ele SEM alteração — a prova do mesmo caminho. Não simula preenchimento de propósito: fingir exigiria a fila do 1.6. (2) Os **parâmetros de reward chegam ao caminho ao vivo** (10 testes, 2026-09-07): a leitura saiu de dentro do `recorder` para `markets/rewards_da_gamma.py` e os DOIS lados usam as MESMAS funções — a leitura é ambígua de propósito (três nomes para a lista, seis para a taxa), e duas cópias divergiriam na primeira grafia nova, aparecendo como *'o SHADOW achou pool onde o backtest não achou'*. `JanelaAoVivo` ganhou `reward_daily_rate`, `reward_min_size` e `reward_max_spread` (em FRAÇÃO, convertido no leitor compartilhado). Os três andam juntos ou nenhum; sem pool saem `None`, não zero. ✅ **O LAÇO fechou em 2026-09-07** — `live/laco_maker.py` (7 testes) chama cotação → repouso → execução por janela aberta, e o `ProcessoShadow` roda `laco_de_cotacao` como tarefa própria. **Cadência de 15 s, não 1 s**: a pergunta do maker é *vale trocar?*, e a histerese do repouso já tem piso de 30 s repousada — consultar a cada segundo só produziria `repousada_ha_pouco_tempo` em série. Três travas que só aparecem na composição, verificadas por mutação: **janela que fecha leva a cotação com ela** (senão 24 h viram dezenas de órfãs num mercado que ninguém acompanha); **livro indisponível NÃO cancela** (sair por falta de dado NOSSO perderia a fila de graça, e o livro volta no passo seguinte); e **MANTER não custa ida à rede** (senão a histerese não economizaria nada). Janela sem pool não recebe cotação. O cliente é o **sombra, sempre** — trocá-lo pelo real é o que faria a rota cotar de verdade, e é decisão de LIVE que a autorização recusa. O laço **não derruba a rodada**: defeito nele sai no log e o taker, que é o caminho medido, segue. `maker` sai no relato de 60 s com `motivos` nomeados. **4.0(c) COMPLETO.** ✅ **O portão entrou em 2026-09-07**, no mesmo dia em que o buraco foi achado: toda cotação passa por `avaliar_risco` — os MESMOS portões do taker, sem o de modo (que faria tudo sair como `modo_nao_opera` e o diário perderia qual trava seguraria em LIVE, como no `ExecutorSombra`). Três propriedades, verificadas por mutação: **sem portão NÃO cota** (`sem_portao`, falha fechada — cotar 'porque ninguém passou trava' é o oposto do que a trava serve); **o portão barra ENTRAR, nunca SAIR** (um kill switch que impedisse cancelar prenderia a cotação no livro exatamente quando alguém puxou a chave para tirá-la); e vale para a **exposição que já existe**, não só para a nova — checar só no REPOSICIONAR deixava uma cotação repousando nunca ser reavaliada, e um disjuntor que armasse no meio da rodada não a tirava do livro. Esse último buraco foi achado por um teste que eu escrevi esperando que passasse. 12 testes — **19 desde 2026-09-14**, quando a rodada r4 mostrou o `montar` cotando de `meio=0.5` fixo em vez do `livro.mid` e contando dois lados enquanto colocava um; a cotação passou a ter as duas pernas, bid no Up e bid no Down (ver a nota da rodada 4 no 1.12; `execucao_maker` foi a 22 testes). ⬜ **(d) posição na fila:** o WS agregado não mostra, e é dela que dependiam os 3 termos que travavam o 1.6. **Deixou de ser o bloqueio em 2026-09-06** (#82): `conta_pessimista_do_maker` troca *estimar a fila* por **limitar por baixo** — rewards não dependem dela (§15.3), então só o custo depende, e ele entra no máximo. **E em 2026-09-08 a fila deixou de importar por outra razão, mais dura:** a rodada de 24 h (ciclo 1,0, zero sono) fez **44.430 avaliações maker** e nenhuma cotação repousou — motivo ÚNICO `sem_pool_de_reward`, em todas as janelas, o dia inteiro. Sem pool, `líquido = rewards − markout` fica negativo por construção, e nenhuma hipótese de fila muda isso. **A varredura do mesmo dia mostra que o programa NÃO acabou** — mas todos os mercados com pool são de horizonte longo (eleições 2026/2028, "antes de 2027", campeonatos), e **nenhum** de janela curta. ⚠️ **O número publicado aqui em 08/09 — "940 (37,6%), 6.766 USDC/dia" — estava errado por 27× e foi corrigido em 2026-09-13:** aquilo era amostra de 2.500 mercados da Gamma; a lista autoritativa do CLOB (`GET /rewards/markets/current`, paginada) traz **18.384 mercados com pool, 185.520 USDC/dia**. A conclusão qualitativa sobrevive, a escala não. O reward existe; ele não está onde este bot opera. Descartadas as duas alternativas antes de concluir: o leitor acha pool em 6 de 20 mercados quaisquer (não é chave errada), e `/markets/slug/` e `keyset` concordam que `clobRewards` não vem nesses mercados (não é rota de busca) |
+| 4.2 | **SHADOW ≥ 2 semanas** com edge líquido *medido* | 🟡 **o relógio EXISTE desde 2026-09-14, e ainda não rodou.** Até então o SHADOW do maker contava `cotacoes_repousando` e nada mais — nenhum número de dinheiro, então as 2 semanas não tinham o que medir. `live/caixa_maker.py` (`CaixaDoMaker`, 20 testes em `tests/test_4_2_caixa_maker.py`) fecha a conta a cada passada do laço com as MESMAS funções da análise: **(1) rewards integrados no tempo** — a cada passada, `estimar_retorno` da cotação aberta sobre o livro de agora, por `horas = dt/3600`, somando `rewards_pro_rata` (sem hipótese de fila) e `rewards_com_captura` (× 0,3); intervalo sem passada maior que 60 s é TRUNCADO e contado (`intervalos_truncados`), para uma queda de feed não virar reward; **(2) execuções possíveis** — os prints `last_trade_price` do WS (§6.1a; `LivrosAoVivo.negocios_desde`, 256 por token) contra o preço da NOSSA perna: `SELL` a preço ≤ o nosso é execução-sombra, **atravessada** (o tamanho inteiro) se abaixo ou **no nível** (o tamanho do print, pro-rata) se igual; **(3) markout medido, não transportado** — cada execução-sombra vira uma medida a 5 s (`meio_5s − preco_nosso`, em ¢/share), sem meio depois de 120 s vai a `sem_referencia`; e o `liquido_pro_rata_usdc = rewards − custo_de_markout` sai no relato de 60 s em `maker.caixa`. **A conta é PESSIMISTA** no que não se observa (fila) e HONESTA no que se observa (prints, meio): print que bate o nosso nível executa contra nós na conta, mesmo que na fila real fosse de outro maker. **Primeiros números, r7 (2026-09-14, 20 min, 60 pools, 1.000 shares por perna, diário `data/shadow/diario-20260914-061217-*`):** 56–60 cotações repousando, **40.594 cotação-segundos** (11,3 cotação-horas, já descontados os 5 min de queda de rede); **rewards pro-rata 29,94 USDC** = **2,66 USDC/h por cotação** → ~150–160 USDC/h com 60 no livro, do tamanho do mínimo de 174 USDC/h do 1.12(a); com captura 0,3: 8,98. **Execuções possíveis: 12** — 10 `no_nivel` (1.097,6 shares, fila decide) e **2 `atravessadas` (2 × 1.000 shares, a perna inteira)**, nos 146 prints vistos; **markout −0,7376 ¢/share sobre 3.097,6 shares = −22,85 USDC** — as duas atravessadas (mrbeast 0,92 → print 0,89; NYC temperatura 0,18 → 0,17) dominam. **Líquido pro-rata +7,09; líquido com captura 0,3 = −13,87 USDC em 20 min.** Duas ressalvas escritas: (1) o horizonte medido foi **23,4 s, não 5 s** — o markout fecha na passada seguinte do laço, a cada 15 s; os −0,0606 ¢ do 1.12(c) são a 5 s, então os dois números NÃO são o mesmo instrumento ainda; (2) as duas atravessadas caíram na MESMA passada (1789366908, 1,4 ms entre elas, mercados diferentes), e a caixa carimbava o print pela chegada — reenvio de reassinatura pareceria negócio de agora. Desde este commit `Negocio` guarda o `timestamp` do servidor (§6.1a) e o log da execução-sombra sai com `atraso_s`; a r8 dirá. A r7 subcontou o relógio por `livro_indisponivel` em 38% das passadas (defeito de medida consertado no mesmo commit, ver a nota da r7 no 1.12) — os números acima são PISO do reward e não são o markout do regime. 🟡 falta: rodar de novo com o livro vigiado pela conexão e o carimbo do servidor; medir o markout a 5 s de verdade; e então as 2 semanas, com o registro `.shadow.json` limpo e a pausa do taker fora do caminho (ver a nota da r6 no 1.12). **Para as 2 semanas correrem sem o Mac dormir:** `deploy/pulsearb-shadow-maker.service` + RUNBOOK §10 ligam a mesma rota na VPS (`PULSEARB_MODE=SHADOW`, `PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`, `--duration 14d`, diário anexado, cliente sombra, trava tripla fechada; cabe nos 18,4 GB porque o SHADOW não grava o stream) — o §10.1 diz o que o relato da primeira hora tem de mostrar. O PnL do TAKER em shadow anterior a 2026-08-31 segue **enviesado para cima** (`preco_pago = best_ask`) e não conta |
 | 4.3 | LIVE começa no stake mínimo; aumentar só após 100 trades com expectativa positiva | ⬜ |
 
 **Piso de tempo:** mesmo que a captação seja consertada hoje e o veredito venha

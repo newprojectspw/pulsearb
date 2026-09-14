@@ -417,9 +417,23 @@ class PolyMarketWsFeed(ReconnectingFeed):
                 self._heartbeat_task = None
 
     async def _heartbeat(self, ws: websockets.ClientConnection) -> None:
-        """PING a cada 10s; 30s sem PONG = conexão morta, força reconexão."""
+        """PING a cada 10s; 30s sem PONG = conexão morta, força reconexão.
+
+        **Sem assinatura, sem PING.** O CLOB trata QUALQUER texto recebido
+        antes da primeira assinatura como payload de assinatura — e "PING"
+        não é um: ele fecha com `1008 invalid subscription payload`
+        exatamente 10 s depois do connect (medido em 2026-09-14 com a sonda
+        `sonda_1008.py`: conexão vazia + PING = 1008 aos 10,2 s; conexão
+        vazia + `subscribe` dinâmico antes do PING = viva). É o que o SHADOW
+        via na primeira conexão: ele conecta com o conjunto vazio e só
+        assina depois da descoberta. Enquanto não há token assinado não há
+        nada para manter vivo, e o relógio do PONG segue parado no connect.
+        """
         while True:
             await asyncio.sleep(self.ping_interval_seconds)
+            if not self.token_ids:
+                self._last_pong_mono = time.monotonic()
+                continue
             if time.monotonic() - self._last_pong_mono > self.pong_stale_seconds:
                 self.log.warning(
                     "heartbeat morto: sem PONG", limite_s=self.pong_stale_seconds

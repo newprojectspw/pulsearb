@@ -76,6 +76,23 @@ class CotacaoAberta:
     #: sem este id não pode ser cancelada por id, e a `execucao_maker` trata
     #: isso explicitamente em vez de mandar um cancelamento vazio para o fio.
     order_id: str = ""
+    #: A segunda perna, quando a cotação é de DOIS lados (§15.3): o bid no
+    #: token Down, que no livro do Up aparece como o ask. Vazios numa cotação
+    #: de um lado só. Mesma regra do `order_id`: perna com `id_do_cliente` e
+    #: sem `order_id` é perna em estado desconhecido, não perna inexistente.
+    id_do_cliente_down: str = ""
+    order_id_down: str = ""
+    #: O preço a que cada perna foi ENVIADA (o `preco_limite` da ordem), e não
+    #: recalculado do meio: é contra ele que a caixa-sombra (`caixa_maker`)
+    #: confere os prints de negócio — um print no nosso preço ou através dele
+    #: é execução que teria acontecido. Zero numa cotação sem a perna.
+    preco_up: float = 0.0
+    preco_down: float = 0.0
+
+    @property
+    def order_ids(self) -> tuple[str, ...]:
+        """Os ids que repousam no servidor — por eles se cancela e reconcilia."""
+        return tuple(i for i in (self.order_id, self.order_id_down) if i)
 
 
 @dataclass(frozen=True, slots=True)

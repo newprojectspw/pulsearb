@@ -44,7 +44,9 @@ def _decisao_de_colocar(dist=2):
     return Decisao(
         AcaoNaCotacao.REPOSICIONAR,
         "ganho_justifica_perder_a_fila",
-        nova=Cotacao(distancia_ticks=dist, tamanho=5.0),
+        # Uma perna só: aqui o que se prova é o MESMO CAMINHO do cliente,
+        # não a mecânica das duas pernas (que mora em `test_m4_execucao_maker`).
+        nova=Cotacao(distancia_ticks=dist, tamanho=5.0, dois_lados=False),
     )
 
 

@@ -90,7 +90,8 @@ class TestColocarECotar:
         assert efeitos
         assert efeitos[0].resultado is ResultadoDaAcao.COLOCADA
         assert len(laco.abertas) == 1
-        assert len(laco.cliente.repousadas) == 1
+        # Duas pernas por janela: bid no Up e bid no Down (§15.3).
+        assert len(laco.cliente.repousadas) == 2
 
     async def test_janela_SEM_pool_nao_recebe_cotacao(self, tmp_path):
         """Cotar sem pool é pagar risco de execução por zero reward."""
@@ -131,7 +132,8 @@ class TestJanelaQueFecha:
         await laco.passo(
             [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
         )
-        assert len(laco.cliente.repousadas) == 1
+        # Duas pernas por janela: bid no Up e bid no Down (§15.3).
+        assert len(laco.cliente.repousadas) == 2
 
         # Passo seguinte sem a janela: ela fechou.
         efeitos = await laco.passo(
@@ -212,7 +214,10 @@ class TestOPortao:
             [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
         )
 
-        assert len(portao.consultas) == 1
+        # As DUAS pernas passam pelo portão, cada uma como a ordem que vai
+        # para o fio — a do Down inclusive.
+        assert len(portao.consultas) == 2
+        assert {o.lado_up for o in portao.consultas} == {True, False}
         assert len(laco.abertas) == 1
 
     async def test_portao_que_recusa_impede_a_cotacao(self, tmp_path):
@@ -282,3 +287,108 @@ class TestOPortao:
         assert laco.cliente.repousadas == {}
         # Nenhuma consulta nova: sair não pede autorização.
         assert len(portao.consultas) == consultas_antes
+
+
+class TestOPrecoSegueOMeioDoLivro:
+    """O achado da rodada r4 de 2026-09-14: 69 cotações entre 0,46 e 0,499 em
+    mercados cujo meio ia de 0,03 a 0,97. O `montar` fechava sobre `meio=0.5`
+    fixo. Num mercado a 0,90 o bid ficava 40 ¢ abaixo do meio (não pontua,
+    não executa); num a 0,10, 39 ¢ ACIMA do ask (executa na hora, como taker).
+    """
+
+    async def _pernas(self, tmp_path, mid):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=mid)), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.cliente.repousadas) == 2, laco.motivos
+        por_lado = {r.ordem.lado_up: r.ordem for r in laco.cliente.repousadas.values()}
+        return por_lado[True], por_lado[False]
+
+    async def test_o_bid_do_Up_fica_ABAIXO_do_meio_de_cada_mercado(self, tmp_path):
+        up_alto, _ = await self._pernas(tmp_path, mid=0.80)
+        up_baixo, _ = await self._pernas(tmp_path, mid=0.30)
+
+        # Abaixo do meio e dentro da grade avaliada (1 a 5 ticks).
+        assert 0.75 <= up_alto.preco_limite < 0.80
+        assert 0.25 <= up_baixo.preco_limite < 0.30
+        assert up_alto.token_id == "tok-up" and up_alto.lado_up
+
+    async def test_o_bid_do_Down_e_o_espelho_do_ask_do_Up(self, tmp_path):
+        """Bid no Down a `(1 − meio) − d` = ask no Up a `meio + d`: é o preço
+        que `estimar_retorno` pontua do lado ask, e as duas pernas ficam à
+        MESMA distância do meio."""
+        up, down = await self._pernas(tmp_path, mid=0.80)
+
+        assert down.token_id == "tok-down" and not down.lado_up
+        assert down.preco_limite < 0.20
+        distancia_up = round(0.80 - up.preco_limite, 6)
+        distancia_down = round(0.20 - down.preco_limite, 6)
+        assert distancia_up == distancia_down > 0
+
+    async def test_o_portao_ve_os_MESMOS_precos_que_vao_para_o_livro(self, tmp_path):
+        portao = _PortaoDuble(pode=True)
+        laco = _laco(tmp_path, portao=portao)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=0.80)), agora_epoch=1000.0, agora_ns=1
+        )
+
+        vistos = {(o.token_id, o.preco_limite) for o in portao.consultas}
+        colocados = {
+            (r.ordem.token_id, r.ordem.preco_limite)
+            for r in laco.cliente.repousadas.values()
+        }
+        assert vistos == colocados
+        assert all(p < 0.80 for _, p in vistos)
+
+    async def test_fora_da_faixa_de_lado_unico_cota_dos_DOIS_lados(self, tmp_path):
+        """§15.3: fora de [0,10, 0,90] um lado só vale ZERO — só a cotação de
+        dois lados pontua ali. A 0,95 o bid do Down fica perto de zero e
+        continua sendo uma ordem válida."""
+        up, down = await self._pernas(tmp_path, mid=0.95)
+
+        assert 0.90 <= up.preco_limite < 0.95
+        assert 0.0 < down.preco_limite <= 0.05
+
+    async def test_livro_sem_meio_NAO_cota_e_NAO_cancela(self, tmp_path):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+
+        so_bids = OrderBook(asset_id="tok-up", bids=[(0.49, 500.0)], asks=[])
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(so_bids), agora_epoch=1100.0, agora_ns=2
+        )
+
+        assert len(laco.abertas) == 1
+        assert laco.motivos.get("livro_sem_meio") == 1
+
+    async def test_o_portao_que_recusa_a_perna_do_Down_barra_a_cotacao_inteira(self, tmp_path):
+        class _SoUp(_PortaoDuble):
+            def avaliar_risco(self, ordem, **kw):
+                self.consultas.append(ordem)
+                if ordem.lado_up:
+                    return SimpleNamespace(pode=True, motivo=None)
+                return SimpleNamespace(pode=False, motivo="preco_fora_da_faixa")
+
+        laco = _laco(tmp_path, portao=_SoUp())
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=0.80)), agora_epoch=1000.0, agora_ns=1
+        )
+
+        assert laco.cliente.repousadas == {}
+        assert laco.motivos.get("portao:preco_fora_da_faixa") == 1
+
+    async def test_janela_que_fecha_cancela_as_DUAS_pernas(self, tmp_path):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.cliente.repousadas) == 2
+
+        await laco.passo([], livro_de=_livro_de(_livro()), agora_epoch=2000.0, agora_ns=2)
+
+        assert laco.cliente.repousadas == {}
+        assert laco.abertas == {}
