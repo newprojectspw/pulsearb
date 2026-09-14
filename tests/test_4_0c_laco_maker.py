@@ -555,6 +555,61 @@ class TestRecolherQuandoOLivroAnda:
         await laco.passo([], livro_de=_livro_de(_livro(0.50)), agora_epoch=1001.0, agora_ns=2)
         assert laco._tokens == {} and laco._params == {}
 
+    async def test_a_referencia_do_down_vem_do_livro_do_down_nao_do_espelho_do_up(
+        self, tmp_path
+    ):
+        """Up 0,49/0,51 e Down com bid 0,35 parado: o espelho do Up diria
+        referência 0,49 para o Down e o primeiro poll recolheria um par que
+        não andou (revisão do Codex, #126). Cada perna lê o SEU livro: a
+        referência do Down é 0,35, o par parado fica, e cair para 0,33 recolhe."""
+        up = _livro(0.50)
+        down = OrderBook(asset_id="tok-down", bids=[(0.35, 500.0)], asks=[(0.51, 500.0)])
+
+        def livro_de(token_id, *, agora_ns, _down=down):
+            return _down if token_id == "tok-down" else up
+
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        aberta = laco.abertas["btc-updown-4h-1"]
+        chave = ("btc-updown-4h-1", int(aberta.desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave] == (pytest.approx(0.49), pytest.approx(0.35))
+        for n in (2, 3):
+            assert await laco.recolher_se_o_livro_andou(livro_de, agora_ns=n) == []
+        assert len(laco.abertas) == 1
+        caiu = OrderBook(asset_id="tok-down", bids=[(0.33, 500.0)], asks=[(0.51, 500.0)])
+
+        def livro_de_caiu(token_id, *, agora_ns):
+            return caiu if token_id == "tok-down" else up
+
+        assert len(await laco.recolher_se_o_livro_andou(livro_de_caiu, agora_ns=4)) == 1
+        assert laco.motivos["livro_andou_contra"] == 1
+
+    async def test_perna_sem_livro_na_colocacao_marca_a_referencia_na_primeira_observacao(
+        self, tmp_path
+    ):
+        """Down sem livro ao colocar: a perna fica SEM referência (não com a
+        do espelho), o primeiro poll com livro do Down marca do livro dele e
+        não decide; só o mercado cair dali recolhe."""
+        up = _livro(0.50)
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.passo(
+            [_janela()],
+            livro_de=lambda token_id, *, agora_ns: up if token_id == "tok-up" else None,
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        aberta = laco.abertas["btc-updown-4h-1"]
+        chave = ("btc-updown-4h-1", int(aberta.desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave] == (pytest.approx(0.49), None)
+
+        def com_down(bid):
+            down = OrderBook(asset_id="tok-down", bids=[(bid, 500.0)], asks=[(0.51, 500.0)])
+            return lambda token_id, *, agora_ns: down if token_id == "tok-down" else up
+
+        assert await laco.recolher_se_o_livro_andou(com_down(0.35), agora_ns=2) == []
+        assert laco._referencia_do_recolher[chave][1] == pytest.approx(0.35)
+        assert await laco.recolher_se_o_livro_andou(com_down(0.35), agora_ns=3) == []
+        assert len(await laco.recolher_se_o_livro_andou(com_down(0.33), agora_ns=4)) == 1
+
     async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
         """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
         perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —

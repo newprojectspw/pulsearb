@@ -163,8 +163,8 @@ class LacoMaker:
     #: 0,50, nós a 0,49) veria `best_bid < preço` no primeiro segundo e
     #: cancelaria sem o mercado ter andado (revisão do Codex, #126). O que
     #: recolhe é o mercado cair ABAIXO de onde estava quando entramos.
-    _referencia_do_recolher: dict[tuple[str, int], tuple[float, float]] = field(
-        default_factory=dict, repr=False
+    _referencia_do_recolher: dict[tuple[str, int], tuple[float | None, float | None]] = (
+        field(default_factory=dict, repr=False)
     )
     #: Os parâmetros de reward de cada janela com cotação, para a caixa
     #: acertar o último intervalo ANTES de recolher (o recolher não recebe a
@@ -333,7 +333,12 @@ class LacoMaker:
             return None
 
         return await self._executar(
-            decisao, janela, meio=meio, agora_epoch=agora_epoch, livro=livro
+            decisao,
+            janela,
+            meio=meio,
+            agora_epoch=agora_epoch,
+            livro=livro,
+            livro_down=livro_de(janela.token_down, agora_ns=agora_ns),
         )
 
     def _portao_recusa(
@@ -382,6 +387,7 @@ class LacoMaker:
         meio: float,
         agora_epoch: float,
         livro: OrderBook | None = None,
+        livro_down: OrderBook | None = None,
     ) -> Efeito:
         anterior = self.abertas.get(janela.slug)
         efeito = await aplicar_decisao(
@@ -395,34 +401,35 @@ class LacoMaker:
         )
         self._guardar(janela.slug, efeito)
         aberta = self.abertas.get(janela.slug)
-        if aberta is not None and livro is not None:
+        if aberta is not None:
             # A referência do recolher nasce AQUI, do livro que colocou a
             # cotação — não na primeira observação do sono, que perderia um
             # mercado que andou dentro do primeiro segundo (revisão do Codex,
-            # #126). A perna Down é lida no espelho do livro do Up: o melhor
-            # bid do Down é `1 − melhor ask do Up`.
+            # #126). Cada perna lê o SEU livro: o do Down não é o espelho do
+            # Up, e uma referência sintética (1 − ask do Up) contra o livro
+            # real do Down recolheria pares parados. Perna sem livro agora
+            # fica sem referência, e o poll a marca na primeira observação.
+            # Em LIVE o livro que colocou a cotação NOVA ainda pode ter a
+            # ANTERIOR (recotação): o melhor bid externo desconta o nosso
+            # nível, senão a referência seria a nossa própria ordem.
             chave = (janela.slug, int(aberta.desde_epoch * 1e6))
             if chave not in self._referencia_do_recolher:
-                # Em LIVE o livro que colocou a cotação NOVA ainda pode ter
-                # a ANTERIOR (recotação): o melhor bid externo desconta o
-                # nosso nível, senão a referência seria a nossa própria ordem.
-                bids, asks = livro.bids, livro.asks
-                if self.nossa_ordem_esta_no_livro and anterior is not None:
-                    bids = _sem_o_nosso_nivel(
-                        bids, anterior.preco_up, anterior.cotacao.tamanho
-                    )
-                    asks = _sem_o_nosso_nivel(
-                        asks, 1.0 - anterior.preco_down, anterior.cotacao.tamanho
-                    )
-                melhor_bid_up = bids[0][0] if bids else None
-                melhor_bid_down = 1.0 - asks[0][0] if asks else None
+                excluir = self.nossa_ordem_esta_no_livro and anterior is not None
                 self._referencia_do_recolher[chave] = (
-                    min(aberta.preco_up, melhor_bid_up)
-                    if melhor_bid_up is not None
-                    else aberta.preco_up,
-                    min(aberta.preco_down, melhor_bid_down)
-                    if melhor_bid_down is not None
-                    else aberta.preco_down,
+                    _referencia(
+                        livro,
+                        aberta.preco_up,
+                        excluir=(anterior.preco_up, anterior.cotacao.tamanho)
+                        if excluir
+                        else None,
+                    ),
+                    _referencia(
+                        livro_down,
+                        aberta.preco_down,
+                        excluir=(anterior.preco_down, anterior.cotacao.tamanho)
+                        if excluir
+                        else None,
+                    ),
                 )
         return efeito
 
@@ -457,16 +464,22 @@ class LacoMaker:
             chave = (slug, int(aberta.desde_epoch * 1e6))
             pernas = ((0, tokens[0], aberta.preco_up), (1, tokens[1], aberta.preco_down))
             livros = [livro_de(token_id, agora_ns=agora_ns) for _, token_id, _ in pernas]
-            if chave not in self._referencia_do_recolher:
-                # Cotação sem referência (colocada sem livro à mão): marca
-                # agora e não decide. O caminho normal a marca na colocação.
-                self._referencia_do_recolher[chave] = tuple(
-                    _referencia(livros[i], preco) for i, _, preco in pernas
-                )
-                continue
-            referencias = self._referencia_do_recolher[chave]
+            referencias = list(self._referencia_do_recolher.get(chave, (None, None)))
             for i, _, preco in pernas:
                 if preco <= 0.0 or livros[i] is None:
+                    continue
+                if referencias[i] is None:
+                    # Perna sem referência (o livro dela não estava à mão na
+                    # colocação): marca agora, do livro DELA, e não decide.
+                    # Em LIVE a nossa ordem já está nele — sai da conta.
+                    referencias[i] = _referencia(
+                        livros[i],
+                        preco,
+                        excluir=(preco, aberta.cotacao.tamanho)
+                        if self.nossa_ordem_esta_no_livro
+                        else None,
+                    )
+                    self._referencia_do_recolher[chave] = (referencias[0], referencias[1])
                     continue
                 if _o_livro_andou_contra(
                     livros[i], referencias[i],
@@ -630,12 +643,24 @@ def _nunca_chamado(_: Cotacao) -> OrdemPretendida:
 _EPS_PRECO = 1e-9
 
 
-def _referencia(livro: OrderBook | None, preco: float) -> float:
-    """De onde o mercado pode cair: o nosso preço, ou o melhor bid de agora se
-    ele já está abaixo (cotação que melhora o topo). Sem livro, o preço."""
-    if livro is None or livro.best_bid is None:
+def _referencia(
+    livro: OrderBook | None,
+    preco: float,
+    *,
+    excluir: tuple[float, float] | None = None,
+) -> float | None:
+    """De onde o mercado pode cair: o nosso preço, ou o melhor bid EXTERNO de
+    agora se ele já está abaixo (cotação que melhora o topo). `excluir` é a
+    nossa ordem que está neste livro (LIVE), `(preço, tamanho)`, e sai da
+    conta. Sem livro não há referência — `None`, e quem chama marca depois."""
+    if livro is None:
+        return None
+    bids = livro.bids
+    if excluir is not None:
+        bids = _sem_o_nosso_nivel(bids, excluir[0], excluir[1])
+    if not bids:
         return preco
-    return min(preco, livro.best_bid)
+    return min(preco, bids[0][0])
 
 
 def _espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
