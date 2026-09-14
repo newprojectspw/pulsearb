@@ -813,6 +813,29 @@ def _quebra(linhas: list[dict[str, Any]], chave: str) -> dict[str, Any]:
     return saida
 
 
+def estrategias_de_latencia() -> tuple[Estrategia, ...]:
+    """A melhor configuração × a latência que a máquina de fato tem.
+
+    `benchmark_latency.py` mediu daqui: REST quente do CLOB p50 = 244,9 ms e
+    p99 = 349,7 ms. A rodada do dia usou 100 ms, que é hipótese — e a
+    diferença entre hipótese e medida é o que este eixo existe para mostrar.
+    """
+    base = dict(
+        melhorar_ticks=0,
+        modo="pessimista",
+        parar_antes_s=180,
+        trava_do_par=False,
+        colchao_x=0.0,
+    )
+    return (
+        Estrategia(**base, recolher_ms=None, salto_bps=None),
+        *(
+            Estrategia(**base, recolher_ms=ms, salto_bps=3.0)
+            for ms in (100.0, 245.0, 350.0, 600.0, 1000.0)
+        ),
+    )
+
+
 def estrategias_focadas() -> tuple[Estrategia, ...]:
     """A melhor configuração da grade ampla × as peças dos bots que lucram.
 
@@ -888,9 +911,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--detalhe", action="store_true")
     parser.add_argument(
         "--grade",
-        choices=("ampla", "focada"),
+        choices=("ampla", "focada", "latencia"),
         default="ampla",
-        help="ampla: recolher/trava/salto/colchão. focada: lote, viés e microprice.",
+        help=(
+            "ampla: recolher/trava/salto/colchão. focada: lote, viés e "
+            "microprice. latencia: a melhor configuracao de 100 a 1000 ms."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -907,9 +933,11 @@ def main(argv: list[str] | None = None) -> int:
         reader,
         tamanho=args.tamanho,
         reprice_ticks=args.reprice_ticks,
-        estrategias=(
-            estrategias_focadas() if args.grade == "focada" else estrategias_padrao()
-        ),
+        estrategias={
+            "focada": estrategias_focadas,
+            "latencia": estrategias_de_latencia,
+            "ampla": estrategias_padrao,
+        }[args.grade](),
     )
     index.build()
 
