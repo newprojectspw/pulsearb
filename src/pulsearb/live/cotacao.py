@@ -41,6 +41,7 @@ quiser, como o `live/motor.py`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from pulsearb.analysis.rewards import (
@@ -71,9 +72,24 @@ class Cotacao:
     dois_lados: bool = True
 
     def preco(self, meio: float, tick_size: float, *, do_lado_bid: bool) -> float:
-        """O preço da cotação. Bid fica ABAIXO do meio; ask, acima."""
+        """O preço da cotação, JÁ na grade do tick. Bid fica ABAIXO do meio;
+        ask, acima.
+
+        O meio do livro pode cair entre dois ticks (bid 0,45 / ask 0,46 →
+        meio 0,455), e o CLOB só aceita preço na grade (§4). Um bid a
+        `meio − recuo` fora da grade não existe como ordem — então o bid
+        arredonda para BAIXO e o ask para CIMA, o lado conservador nos dois:
+        a ordem fica a pelo menos `distancia_ticks` do meio, nunca mais perto.
+        É aqui, e não em quem envia, para que o score estimado
+        (`estimar_retorno`) e a ordem colocada olhem o MESMO preço.
+        """
         recuo = self.distancia_ticks * tick_size
-        return meio - recuo if do_lado_bid else meio + recuo
+        bruto = meio - recuo if do_lado_bid else meio + recuo
+        # O epsilon segura o erro binário (0,50 − 0,01 = 0,48999…) que faria o
+        # `floor` descer um tick a mais do que o pedido.
+        passos = bruto / tick_size
+        na_grade = math.floor(passos + 1e-9) if do_lado_bid else math.ceil(passos - 1e-9)
+        return round(na_grade * tick_size, 6)
 
 
 @dataclass(frozen=True, slots=True)

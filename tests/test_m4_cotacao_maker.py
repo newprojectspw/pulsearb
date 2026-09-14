@@ -253,3 +253,22 @@ class TestOHorizonteEscala:
         assert oito.custo_de_markout_usdc == pytest.approx(
             quatro.custo_de_markout_usdc
         )
+
+
+class TestOPrecoCaiNaGradeDoTick:
+    """O meio do livro pode ficar entre dois ticks (bid 0,45 / ask 0,46 →
+    0,455). Ordem fora da grade não existe no CLOB (§4): o bid arredonda
+    para baixo e o ask para cima — o lado que fica MAIS longe do meio, nunca
+    mais perto do que `distancia_ticks` pediu."""
+
+    def test_meio_entre_ticks(self):
+        c = Cotacao(distancia_ticks=1, tamanho=50.0)
+        assert c.preco(0.455, 0.01, do_lado_bid=True) == 0.44
+        assert c.preco(0.455, 0.01, do_lado_bid=False) == 0.47
+
+    def test_meio_na_grade_nao_desce_um_tick_por_erro_binario(self):
+        c = Cotacao(distancia_ticks=1, tamanho=50.0)
+        # 0,50 − 0,01 = 0,48999… em binário; o floor ingênuo daria 0,48.
+        assert c.preco(0.50, 0.01, do_lado_bid=True) == 0.49
+        assert c.preco(0.50, 0.01, do_lado_bid=False) == 0.51
+        assert Cotacao(3, 50.0).preco(0.07, 0.01, do_lado_bid=True) == 0.04
