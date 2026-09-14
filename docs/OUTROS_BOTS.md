@@ -118,23 +118,6 @@ depende de latência. Cabe como filtro do 4.2: só descansar onde há colchão
 chave privada em `.env`. Sem código de estratégia para ler. **Padrão de
 drenagem de carteira; nunca rodar**, nem em carteira vazia.
 
-## 6. O que cabe portar para cá, e em que ordem
-
-Depende do que `maker_de_pares.py` medir — nada aqui é ✅ até a medida
-existir. Candidatos, do mais barato ao mais caro:
-
-1. **recolher a cotação quando o livro anda contra** (EVENT do
-   `poly-maker`): o `_dormir_medindo_markout` já acorda a cada segundo; o
-   gatilho é `best_bid < preço da ordem`. A medida diz se 100–300 ms bastam;
-2. **trava do par**: com uma perna executada a `p`, a outra só descansa a
-   `≤ 1 − p − margem`;
-3. **juntar, nunca melhorar** o topo — já é o que a cotação sintética faz;
-4. **`rewards_min_size` como tamanho** em pool fino, refrescado do Gamma;
-5. viés de inventário (`r = fv − γσu`) e corte de tamanho em tendência;
-6. fusão YES+NO via CTF — só vale com posição real, isto é, depois do LIVE;
-7. filtro do RuneDn (colchão ≥ 1,5 × à frente) como *variante* de 4.2 para
-   reward sem fill.
-
 ## 7. Fontes
 
 - `poly-maker`: <https://github.com/warproxxx/poly-maker> (`TIPS.md`, `README.md`, `src/polymaker/strategy/`, `execution/reconciler.py`, `merge.py`)

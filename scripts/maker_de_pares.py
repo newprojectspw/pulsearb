@@ -128,7 +128,6 @@ def _numero(valor: Any) -> float | None:
             return None
     return None
 
-
 def _tamanho_no_nivel(book: OrderBook, preco: float) -> float:
     for p, s in book.bids:
         if abs(p - preco) < EPS:
@@ -160,7 +159,6 @@ class Estrategia:
         return (
             f"junta-{self.melhorar_ticks}t_{self.modo}_para-{self.parar_antes_s}s_"
             f"{recolhe}_{trava}_{salto}_colchao-{self.colchao_x:g}x_"
-            f"atrav-{self.atravessada}"
         )
 
 
@@ -357,7 +355,6 @@ class MakerDePares(RecordingIndex):
                     perna.ordem = None
                     perna.cancelada_no_fim = True
                 continue
-            if perna.executado >= self.tamanho - EPS:
                 continue
             ordem = perna.ordem
             if ordem is not None and ordem.cancela_em_ns is not None and ts_ns >= ordem.cancela_em_ns:
@@ -386,7 +383,6 @@ class MakerDePares(RecordingIndex):
                 if outra is not None and outra.executado > EPS:
                     teto = 1.0 - outra.preco_medio - MARGEM_DO_PAR
                     alvo = min(alvo, teto)
-            alvo = round(alvo / janela.tick) * janela.tick
             if ordem is not None:
                 if ordem.cancela_em_ns is not None:
                     continue
@@ -394,17 +390,6 @@ class MakerDePares(RecordingIndex):
                     # Melhor bid subiu demais: cancela e junta de novo (perde a fila).
                     perna.recolocacoes += 1
                     perna.ordem = ordem = None
-                elif ordem.preco > teto + EPS:
-                    perna.recolocacoes += 1
-                    perna.ordem = ordem = None
-                elif melhor < ordem.preco - EPS and estrategia.recolher_ms is not None:
-                    # O nível à frente sumiu: a ordem é o novo topo, sozinha.
-                    ordem.cancela_em_ns = ts_ns + int(estrategia.recolher_ms * 1e6)
-                    perna.recolhidas += 1
-                    continue
-                elif (
-                    estrategia.colchao_x > 0
-                    and _tamanho_no_nivel(book, ordem.preco) < estrategia.colchao_x * self.tamanho
                 ):
                     ordem.cancela_em_ns = ts_ns + int((estrategia.recolher_ms or 0.0) * 1e6)
                     perna.recolhidas += 1
@@ -422,12 +407,10 @@ class MakerDePares(RecordingIndex):
                     if abs(alvo - melhor) < EPS
                     else _tamanho_no_nivel(book, alvo)
                 )
-                if fila < estrategia.colchao_x * self.tamanho:
                     continue
                 envio_ns = 0 if estrategia.recolher_ms is None else int(estrategia.recolher_ms * 1e6)
                 perna.ordem = Ordem(
                     preco=alvo,
-                    restante=self.tamanho - perna.executado,
                     fila_a_frente=fila,
                     colocada_ns=ts_ns,
                     ativa_desde_ns=ts_ns + envio_ns,
@@ -707,8 +690,6 @@ def _quebra(linhas: list[dict[str, Any]], chave: str) -> dict[str, Any]:
             "por_janela_cents": round(100 * total / len(grupo), 3),
         }
     return saida
-
-
 def estrategias_padrao() -> tuple[Estrategia, ...]:
     base = [
         Estrategia(
@@ -769,7 +750,6 @@ def main(argv: list[str] | None = None) -> int:
         reader,
         tamanho=args.tamanho,
         reprice_ticks=args.reprice_ticks,
-        estrategias=estrategias_padrao(),
     )
     index.build()
 
@@ -786,25 +766,12 @@ def main(argv: list[str] | None = None) -> int:
         print(texto)
 
     print(
-        "\nestratégia                                       janelas  par 1perna"
-        "  pnl s/reb  pnl c/reb   ¢/jan  soma_par  soltas ganharam/pago"
-    )
-    for e in relatorio["estrategias"]:
-        j, p, s = e["janelas"], e["pnl_usdc"], e["pernas_soltas"]
         est = e["estrategia"]
         recolhe = "fica" if est["recolher_ms"] is None else f"rec-{int(est['recolher_ms'])}ms"
         salto = "salto-off" if est["salto_bps"] is None else f"salto-{est['salto_bps']:g}"
         nome = (
             f"para-{est['parar_antes_do_fim_s']}s {recolhe:<9} "
             f"{'trava' if est['trava_do_par'] else 'livre'} {salto:<9} "
-            f"colc-{est['colchao_x']:g} {est['atravessada'][:5]}"
-        )
-        soma = e["soma_pup_pdown_nos_pares"]["media"]
-        print(
-            f"{nome:<48} {j['cotadas']:>6} {j['com_par']:>4} {j['so_uma_perna']:>6} "
-            f"{p['total_sem_rebate']:>10.2f} {p['total_com_rebate']:>10.2f} "
-            f"{e['por_janela_contada_cents']:>7.2f}  {soma if soma is not None else float('nan'):>7.3f}"
-            f"  {s['fracao_que_ganhou']:.3f}/{s['preco_medio_pago']:.3f}"
         )
     return 0
 

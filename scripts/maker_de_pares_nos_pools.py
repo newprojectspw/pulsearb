@@ -28,12 +28,6 @@ vendendo agora, e é o mesmo termo de custo de saída que o `markout_dos_pools`
 já mede em 300/1800 s. Isso é PESSIMISTA de propósito: quem fica com a perna
 pode esperar, e o mercado pode voltar.
 
-**O reward não entra aqui.** Ele é o outro lado da conta e já tem número
-próprio (1.12: mínimo de 174,08 USDC/h sobre os 300 maiores pools). O que
-este script mede é o que sobra depois do custo — o termo que decide se o
-reward é lucro ou desconto de prejuízo. Os dois se somam no quadro, não no
-mesmo relatório, para que nenhum dos dois esconda o outro.
-
 **Não há spot.** O eixo de salto (RTDS) fica desligado: um pool de
 temperatura não tem preço de Binance. O gatilho de recolher aqui é o livro.
 
@@ -53,9 +47,6 @@ from datetime import UTC, datetime
 from itertools import product
 from pathlib import Path
 from typing import Any
-
-from pulsearb.caminhos import caminho_de_escrita
-from pulsearb.engine.fees import fee_pp_por_share
 from pulsearb.replay.reader import RecordingReader
 
 # O motor mora no script irmão. `scripts/` não é pacote (e transformá-lo em
@@ -64,9 +55,6 @@ from pulsearb.replay.reader import RecordingReader
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from maker_de_pares import (
-    COLCHOES,
-    EPS,
-    PARAR_ANTES_S,
     Estrategia,
     Janela,
     MakerDePares,
@@ -91,7 +79,6 @@ class MakerDeParesNosPools(MakerDePares):
     """
 
     def __init__(
-        self, reader: RecordingReader, *, rate_de_saida: float = 0.0, **kw: Any
     ) -> None:
         super().__init__(reader, **kw)
         self.catalogo: dict[str, dict[str, Any]] = {}
@@ -111,7 +98,6 @@ class MakerDeParesNosPools(MakerDePares):
             for cid, meta in (record.payload.get("mercados") or {}).items():
                 if isinstance(meta, dict):
                     self.catalogo[str(cid)] = meta
-
     def _marcar_tokens_de_interesse(self) -> None:
         for cid, meta in self.catalogo.items():
             tokens = [t for t in (meta.get("tokens") or []) if isinstance(t, str)]
@@ -178,25 +164,10 @@ class MakerDeParesNosPools(MakerDePares):
         # relatório diz isso em vez de fingir 50%.
         return residual, None
 
-
-def estrategias_dos_pools() -> tuple[Estrategia, ...]:
-    """Sem eixo de salto (não há spot), com e sem recolher, com e sem colchão."""
     return tuple(
         Estrategia(
             melhorar_ticks=0,
             modo="pessimista",
-            parar_antes_s=parar,
-            recolher_ms=recolher,
-            trava_do_par=trava,
-            salto_bps=None,
-            colchao_x=colchao,
-            atravessada=atravessada,
-        )
-        for parar, recolher, trava, colchao, atravessada in product(
-            PARAR_ANTES_S,
-            (None, 100.0),
-            (False, True),
-            COLCHOES,
             ("perna_inteira", "tamanho_do_print"),
         )
     )
