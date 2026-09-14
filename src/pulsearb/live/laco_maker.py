@@ -310,7 +310,13 @@ class LacoMaker:
                 janela.slug, aberta, livro, params, agora_epoch=agora_epoch
             )
 
-        decisao = decidir(aberta, melhor, atual, agora_epoch=agora_epoch)
+        decisao = decidir(
+            aberta,
+            melhor,
+            atual,
+            agora_epoch=agora_epoch,
+            teto_ancorado=self._teto_ancorado(janela, ancora),
+        )
         self._contar(decisao.motivo)
 
         # O portão, a CADA passada em que haja algo em jogo — e não só quando
@@ -398,6 +404,24 @@ class LacoMaker:
             ),
             None,
         )
+
+    def _teto_ancorado(
+        self, janela: JanelaAoVivo, ancora: AncoraDoMicroprice | None
+    ) -> tuple[float, float] | None:
+        """O preço máximo de cada perna sob a âncora, `(up, down)`.
+
+        A perna Down é um bid no livro dela, então o teto vem da âncora
+        espelhada — o mesmo espelho que monta a ordem.
+        """
+        if ancora is None:
+            return None
+        teto_up = ancora.limite(janela.tick_size, do_lado_bid=True)
+        teto_down = ancora.no_livro_do_down().limite(
+            janela.tick_size, do_lado_bid=True
+        )
+        if teto_up is None or teto_down is None:
+            return None
+        return teto_up, teto_down
 
     def _ancora_do_microprice(
         self, livro: OrderBook, livro_down: OrderBook | None

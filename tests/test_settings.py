@@ -101,3 +101,16 @@ def test_all_price_assets_sem_duplicata(tmp_path):
 def test_modo_case_insensitive(tmp_path):
     settings = Settings.load(tmp_path / "x.yaml", mode="shadow")
     assert settings.mode is Mode.SHADOW
+
+
+def test_ticks_do_microprice_negativo_e_recusado_no_carregamento(tmp_path, monkeypatch):
+    """O laço maker roda como tarefa PRÓPRIA: um defeito nele sai no log sem
+    derrubar a rodada. Um valor negativo no ambiente mataria em silêncio a
+    rota inteira por 14 dias, com o processo vivo e o operador convencido de
+    que está medindo (revisão do Codex, #127). O lugar de recusar é aqui."""
+    monkeypatch.setenv("PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE", "-1")
+    with pytest.raises(ValueError):
+        Settings.load(tmp_path / "inexistente.yaml")
+
+    monkeypatch.setenv("PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE", "0")
+    assert Settings.load(tmp_path / "inexistente.yaml").maker_ticks_abaixo_do_microprice == 0

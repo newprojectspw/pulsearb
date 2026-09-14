@@ -228,7 +228,11 @@ class Settings(BaseSettings):
     #: `docs/OUTROS_BOTS.md` §6, item 6. Desligado por padrão: ele MUDA o
     #: preço enviado, e a linha de base das rodadas em curso tem de continuar
     #: a mesma.
-    maker_ticks_abaixo_do_microprice: int | None = None
+    #: Validado AQUI, e não só na `AncoraDoMicroprice`: o laço maker roda como
+    #: tarefa própria e um defeito nele sai no log sem derrubar a rodada — um
+    #: valor negativo no ambiente mataria em silêncio a rota inteira por 14
+    #: dias, com o processo vivo. O lugar de recusar é o carregamento.
+    maker_ticks_abaixo_do_microprice: int | None = Field(default=None, ge=0)
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"

@@ -117,6 +117,34 @@ MOTIVOS = (
 )
 
 
+#: Tolerância de preço (o nosso preço vem da grade do tick; o do livro, de
+#: decimal em string).
+_EPS_PRECO = 1e-9
+
+
+def _acima_do_teto(
+    teto_ancorado: tuple[float, float] | None, aberta: CotacaoAberta
+) -> bool:
+    """A ordem que repousa ficou ACIMA do teto do microprice?
+
+    `teto_ancorado` é `(up, down)` e só vem com a âncora ligada; sem ela isto
+    é sempre falso e nada muda.
+
+    O microprice anda quando o TAMANHO no topo muda — sem o meio se mexer e
+    sem a distância escolhida mudar. A ordem que repousa fica então acima do
+    teto novo, continua pontuando (logo `atual_nao_pontua_mais` não a pega) e
+    a candidata, agora presa ao teto, pontua MENOS que ela: o piso de ganho
+    jamais aprovaria a troca. Sem esta trava a âncora valeria só na
+    colocação, que é o contrário do que ela é (revisão do Codex, #127).
+    """
+    if teto_ancorado is None:
+        return False
+    return (
+        aberta.preco_up > teto_ancorado[0] + _EPS_PRECO
+        or aberta.preco_down > teto_ancorado[1] + _EPS_PRECO
+    )
+
+
 def decidir(
     aberta: CotacaoAberta | None,
     melhor_agora: RetornoEstimado | None,
@@ -125,6 +153,7 @@ def decidir(
     agora_epoch: float,
     ganho_minimo_usdc: float = GANHO_MINIMO_USDC,
     segundos_minimos: float = SEGUNDOS_MINIMOS_REPOUSADA,
+    teto_ancorado: tuple[float, float] | None = None,
 ) -> Decisao:
     """Mexer na cotação que está no livro, ou deixar?
 
@@ -138,6 +167,9 @@ def decidir(
     de histerese entram na ordem em que aparecem no corpo — e a ordem importa:
     "não pontua mais" precisa vencer "repousada há pouco tempo", senão uma
     cotação morta fica presa pelo tempo mínimo.
+
+    `teto_ancorado` é o preço máximo de cada perna sob a âncora do microprice,
+    `(up, down)`, e só vem quando ela está ligada — ver `_acima_do_teto`.
     """
     if aberta is None:
         if melhor_agora is None:
@@ -159,6 +191,22 @@ def decidir(
         return Decisao(
             AcaoNaCotacao.REPOSICIONAR,
             "atual_nao_pontua_mais",
+            nova=melhor_agora.cotacao,
+            ganho_estimado_usdc=melhor_agora.liquido_usdc,
+        )
+
+    # A âncora do microprice é regra de SEGURANÇA, não de ganho: uma ordem que
+    # ficou ACIMA do teto de agora é a opção grátis que a âncora existe para
+    # não dar. Vence a histerese e o piso, como o "não pontua mais" logo acima
+    # — e pela mesma razão de ordem: deixá-la para o piso de ganho seria
+    # deixá-la nunca, porque a candidata ancorada pontua menos que a que já
+    # repousa.
+    if _acima_do_teto(teto_ancorado, aberta):
+        if melhor_agora is None:
+            return Decisao(AcaoNaCotacao.CANCELAR, "acima_do_teto_do_microprice")
+        return Decisao(
+            AcaoNaCotacao.REPOSICIONAR,
+            "acima_do_teto_do_microprice",
             nova=melhor_agora.cotacao,
             ganho_estimado_usdc=melhor_agora.liquido_usdc,
         )

@@ -507,6 +507,45 @@ class TestAncoraDoMicroprice:
         )
         assert 1.0 - aberta.preco_down == pytest.approx(avaliado)
 
+    async def test_a_ordem_que_ficou_acima_do_teto_e_reposicionada(self, tmp_path):
+        """O microprice anda quando o TAMANHO no topo muda — sem o meio se
+        mexer e sem a distância mudar. A ordem que repousa fica acima do teto
+        novo, CONTINUA pontuando (então `atual_nao_pontua_mais` não a pega) e
+        a candidata ancorada pontua MENOS que ela, então o piso de ganho
+        jamais aprovaria a troca. Sem trava própria a âncora valeria só na
+        colocação (revisão do Codex, #127)."""
+        # entra com o microprice ACIMA do meio: a âncora não aperta, o bid
+        # nasce a 1 tick do meio
+        entrando, _ = self._livros(tamanho_do_bid=900.0, tamanho_do_ask=100.0)
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=entrando, agora_epoch=1000.0, agora_ns=1)
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+        # o topo vira: microprice 0,492, teto 0,482 — a ordem a 0,49 ficou acima
+        virou, up = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        assert up.mid == pytest.approx(0.50)  # o MEIO não andou
+        efeitos = await laco.passo(
+            [_janela()], livro_de=virou, agora_epoch=1100.0, agora_ns=2
+        )
+
+        assert len(efeitos) == 1
+        assert laco.motivos["acima_do_teto_do_microprice"] == 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.48)
+
+    async def test_sem_ancora_a_mesma_troca_de_topo_nao_mexe_na_ordem(self, tmp_path):
+        """A linha de base não muda: sem a âncora, `Cotacao` igual é preço
+        igual, e não reagir é o que preserva a fila."""
+        entrando, _ = self._livros(tamanho_do_bid=900.0, tamanho_do_ask=100.0)
+        laco = _laco(tmp_path)
+        await laco.passo([_janela()], livro_de=entrando, agora_epoch=1000.0, agora_ns=1)
+        virou, _ = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        efeitos = await laco.passo(
+            [_janela()], livro_de=virou, agora_epoch=1100.0, agora_ns=2
+        )
+        assert efeitos == []
+        assert laco.motivos["estavel"] >= 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
     async def test_desligada_por_padrao(self, tmp_path):
         laco = _laco(tmp_path)
         assert laco.ticks_abaixo_do_microprice is None
