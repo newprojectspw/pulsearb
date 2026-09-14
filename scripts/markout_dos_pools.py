@@ -272,6 +272,11 @@ def escolher_mercados(top: int) -> dict[str, dict[str, Any]]:
                 "pergunta": mercado.get("question"),
                 "tick_size": mercado.get("minimum_tick_size"),
                 "daily_rate": float(pool.get("total_daily_rate") or 0),
+                # Os dois que a simulação de reward exige (§15.3). Sem eles a
+                # gravação serve só para medir custo, e quem for replayá-la
+                # teria de buscá-los de novo — num dia em que já mudaram.
+                "rewards_max_spread": pool.get("rewards_max_spread"),
+                "rewards_min_size": pool.get("rewards_min_size"),
             }
     return saida
 
@@ -292,6 +297,8 @@ def _envelope_do_catalogo(mercados: dict[str, dict[str, Any]]) -> RecordEnvelope
                         "pergunta": meta.get("pergunta"),
                         "tick_size": meta.get("tick_size"),
                         "daily_rate": meta.get("daily_rate"),
+                        "rewards_max_spread": meta.get("rewards_max_spread"),
+                        "rewards_min_size": meta.get("rewards_min_size"),
                     }
                     for cid, meta in mercados.items()
                 },

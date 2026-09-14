@@ -183,6 +183,9 @@ class Estrategia:
     atravessada: str = "perna_inteira"
     #: Lote por perna. `None` = o `--tamanho` da linha de comando.
     tamanho: float | None = None
+    #: Cotar a `d` ticks do MEIO do livro, como o maker ao vivo faz nos pools
+    #: (`laco_maker`), em vez de juntar ao melhor bid. `None` = juntar.
+    distancia_ticks_do_meio: int | None = None
     skew_ticks: int = 0
     delta_do_microprice: int | None = None
 
@@ -195,7 +198,8 @@ class Estrategia:
             f"junta-{self.melhorar_ticks}t_{self.modo}_para-{self.parar_antes_s}s_"
             f"{recolhe}_{trava}_{salto}_colchao-{self.colchao_x:g}x_"
             f"atrav-{self.atravessada}_lote-{self.tamanho or 0:g}_"
-            f"skew-{self.skew_ticks}_micro-{self.delta_do_microprice}"
+            f"skew-{self.skew_ticks}_micro-{self.delta_do_microprice}_"
+            f"meio-{self.distancia_ticks_do_meio}"
         )
 
 
@@ -416,6 +420,20 @@ class MakerDePares(RecordingIndex):
                 continue
             melhor, tamanho_no_topo = book.bids[0]
             alvo = melhor - estrategia.melhorar_ticks * janela.tick
+            if estrategia.distancia_ticks_do_meio is not None:
+                # O maker ao vivo cota a N ticks do MEIO, não no topo: é onde
+                # o §15.3 pontua. Pode ficar acima do melhor bid — e aí a
+                # ordem É o topo, que é justamente o que o programa de reward
+                # paga. Continua sem cruzar o ask.
+                meio = book.mid
+                if meio is None:
+                    continue
+                alvo = meio - estrategia.distancia_ticks_do_meio * janela.tick
+                # Nunca cruzar: um bid a partir do ask não é maker, é taker —
+                # e pagaria fee em vez de receber rebate.
+                topo_do_ask = book.asks[0][0] if book.asks else None
+                if topo_do_ask is not None:
+                    alvo = min(alvo, topo_do_ask - janela.tick)
             if estrategia.delta_do_microprice is not None:
                 micro = _microprice(book)
                 if micro is None:
