@@ -56,7 +56,9 @@ def _cliente(*respostas):
 
 
 def _cotacao(dist=2, tam=5.0):
-    return Cotacao(distancia_ticks=dist, tamanho=tam)
+    # Um lado só: estes testes exercitam a mecânica de UMA perna. As duas
+    # pernas têm classe própria no fim do arquivo.
+    return Cotacao(distancia_ticks=dist, tamanho=tam, dois_lados=False)
 
 
 def _ordem_da_cotacao(cot: Cotacao) -> OrdemPretendida:
@@ -342,3 +344,144 @@ class TestReconciliar:
         assert set(desfechos) == {"orfa-x", "orfa-y"}
         metodos = [c[0] for c in cliente.transporte.chamadas]
         assert metodos == ["DELETE", "DELETE"]
+
+
+def _ordem_do_lado_down(cot: Cotacao) -> OrdemPretendida:
+    return OrdemPretendida(
+        slug="btc-updown-5m-1",
+        token_id="tok-down",
+        lado_up=False,
+        shares=cot.tamanho,
+        preco_limite=0.48,
+    )
+
+
+def _aceita(order_id):
+    return (200, {"success": True, "orderID": order_id, "status": "live"})
+
+
+async def _aplicar_dois_lados(decisao, aberta, cliente):
+    return await aplicar_decisao(
+        decisao,
+        aberta,
+        cliente=cliente,
+        ordem_da_cotacao=_ordem_da_cotacao,
+        ordem_do_lado_down=_ordem_do_lado_down,
+        janela="j1",
+        agora_epoch=2000.0,
+    )
+
+
+class TestDuasPernas:
+    """§15.3: um lado só vale um terço na faixa e ZERO fora. A cotação maker
+    tem duas pernas — bid no Up, bid no Down — e elas entram e saem JUNTAS."""
+
+    def _nova(self):
+        return Decisao(
+            AcaoNaCotacao.REPOSICIONAR,
+            "entrar",
+            nova=Cotacao(distancia_ticks=2, tamanho=5.0),  # dois_lados=True
+        )
+
+    async def test_as_duas_pernas_entram_e_os_dois_ids_ficam_guardados(self):
+        cliente = _cliente(_aceita("o-up"), _aceita("o-down"))
+
+        efeito = await _aplicar_dois_lados(self._nova(), None, cliente)
+
+        assert efeito.resultado is ResultadoDaAcao.COLOCADA
+        assert efeito.aberta.order_id == "o-up"
+        assert efeito.aberta.order_id_down == "o-down"
+        assert efeito.aberta.order_ids == ("o-up", "o-down")
+        envios = [c for c in cliente.transporte.chamadas if c[0] == "POST"]
+        assert len(envios) == 2
+
+    async def test_dois_lados_SEM_como_montar_o_down_NAO_envia_nada(self):
+        """Falha fechada: contar dois lados e colocar um é o defeito da r4."""
+        cliente = _cliente(_aceita("o-up"))
+
+        efeito = await _aplicar(self._nova(), None, cliente)
+
+        assert efeito.resultado is ResultadoDaAcao.MANTIDA
+        assert efeito.motivo == "dois_lados_sem_ordem_do_lado_down"
+        assert cliente.transporte.chamadas == []
+
+    async def test_down_RECUSADO_desfaz_o_up(self):
+        """Tudo ou nada: o Up sozinho não é a cotação que foi avaliada."""
+        cliente = _cliente(
+            _aceita("o-up"),
+            (400, {"success": False, "errorMsg": "invalid"}),
+            (200, {"success": True}),  # cancel do Up
+        )
+
+        efeito = await _aplicar_dois_lados(self._nova(), None, cliente)
+
+        assert efeito.resultado is ResultadoDaAcao.MANTIDA
+        assert efeito.motivo == "envio_recusado"
+        assert efeito.aberta is None
+        metodos = [c[0] for c in cliente.transporte.chamadas]
+        assert metodos == ["POST", "POST", "DELETE"]
+
+    async def test_down_INCERTO_para_e_pede_reconciliacao_com_os_dois_ids(self):
+        cliente = _cliente(_aceita("o-up"), TimeoutError())
+
+        efeito = await _aplicar_dois_lados(self._nova(), None, cliente)
+
+        assert efeito.resultado is ResultadoDaAcao.RECONCILIAR
+        assert efeito.aberta.order_id == "o-up"
+        assert efeito.aberta.order_id_down == ""
+        assert efeito.aberta.id_do_cliente_down != ""
+
+    async def test_cancelar_tira_as_DUAS_pernas(self):
+        cliente = _cliente((200, {"success": True}), (200, {"success": True}))
+        aberta = CotacaoAberta(
+            cotacao=Cotacao(2, 5.0),
+            desde_epoch=1000.0,
+            id_do_cliente="c-up",
+            order_id="o-up",
+            id_do_cliente_down="c-down",
+            order_id_down="o-down",
+        )
+
+        efeito = await _aplicar_dois_lados(
+            Decisao(AcaoNaCotacao.CANCELAR, "janela_fechou"), aberta, cliente
+        )
+
+        assert efeito.resultado is ResultadoDaAcao.CANCELADA
+        assert efeito.aberta is None
+        assert [c[0] for c in cliente.transporte.chamadas] == ["DELETE", "DELETE"]
+
+    async def test_cancelamento_INCERTO_da_segunda_perna_NAO_da_a_cotacao_por_fechada(self):
+        cliente = _cliente((200, {"success": True}), TimeoutError())
+        aberta = CotacaoAberta(
+            cotacao=Cotacao(2, 5.0),
+            desde_epoch=1000.0,
+            id_do_cliente="c-up",
+            order_id="o-up",
+            id_do_cliente_down="c-down",
+            order_id_down="o-down",
+        )
+
+        efeito = await _aplicar_dois_lados(
+            Decisao(AcaoNaCotacao.CANCELAR, "janela_fechou"), aberta, cliente
+        )
+
+        assert efeito.resultado is ResultadoDaAcao.RECONCILIAR
+        assert efeito.detalhe["perna"] == "down"
+        assert efeito.aberta is aberta
+
+    async def test_perna_down_com_id_do_cliente_e_SEM_order_id_reconcilia(self):
+        cliente = _cliente((200, {"success": True}))
+        aberta = CotacaoAberta(
+            cotacao=Cotacao(2, 5.0),
+            desde_epoch=1000.0,
+            id_do_cliente="c-up",
+            order_id="o-up",
+            id_do_cliente_down="c-down",
+        )
+
+        efeito = await _aplicar_dois_lados(
+            Decisao(AcaoNaCotacao.CANCELAR, "janela_fechou"), aberta, cliente
+        )
+
+        assert efeito.resultado is ResultadoDaAcao.RECONCILIAR
+        assert efeito.motivo == "aberta_sem_order_id"
