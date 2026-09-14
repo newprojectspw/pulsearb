@@ -464,6 +464,37 @@ cobre 35 divisões dentro e fora da faixa). Logo:
 positiva; e tira da mesa qualquer variante de cotar um lado só nos mercados
 longos — ela vale zero por regra do programa, não por falta de fila.
 
+**Dois termos do 1.12 que ainda não são medida, e o que mede cada um
+(registrado ANTES de rodar, 2026-09-14):**
+
+1. **Capital — deixou de ser estimativa.** `capital_da_ordem` em
+   `analysis/rewards.py` lê do livro: cotar os dois lados de um mercado
+   binário é pôr DUAS compras, uma em cada token, e cada uma imobiliza
+   `tamanho × preço` — `tamanho × (1 − spread_nosso)` no total, sempre ≤
+   `tamanho`. Sem cunhar nada. A estimativa de "~1.000 por mercado" era boa;
+   agora é conta, e o `conta_do_maker_nos_pools.py` da branch pode publicar
+   `capital_usdc` por mercado em vez de um `~`.
+2. **Custo de saída — o buraco.** O markout do 1.12 é de **5 s**
+   (`markout_dos_pools.py` chama `medir_markout` com os horizontes padrão
+   1/5/30 s). Cinco segundos medem seleção adversa num livro que se move;
+   não medem o que acontece quando UMA das duas compras executa num mercado
+   que resolve por oráculo em dias e cujo livro tem 11 centavos de spread
+   (o `LAC (-9.5)` da seção acima). Sair desse inventário custa **metade do
+   spread**, à vista — 5,5 c/share naquele livro, contra os 0,06 c/share do
+   markout de 5 s. É ~90× o custo modelado, e o 1.12 fecha por 3% de custo
+   sobre receita: **não sobrevive a um custo de saída assim se as execuções
+   de um lado só forem frequentes.** O que decide é `taxa de execução
+   unilateral × (spread/2)` por mercado, e nada disso foi medido.
+   **Medição:** `markout_dos_pools.py --top 60 --duracao 4h` de novo, mas
+   com `medir_markout(janelas, horizontes_s=(5, 30, 300, 1800))` — o
+   markout a 30 min é a proxy do custo até conseguir sair — e, no mesmo
+   relatório, `spread_no_fill / 2` por execução. **Critério:** o 1.12 passa
+   de novo se `receita − (execuções/h × max(markout_1800s, spread/2))`
+   continuar positivo nos mesmos 95 mercados. Se não, a rota maker nos pools
+   longos cai como caiu nos updown, e por motivo com nome:
+   `custo_de_saida_maior_que_reward`. Roda no Mac — este ambiente não
+   alcança a Polymarket (`403 CONNECT` em `clob`, `gamma-api`, `data-api`).
+
 ### O pool de reward não é esporádico — ele é da JANELA DE 4 H
 
 Esta página dizia "≈ 1 % das janelas participam", e a frase estava certa na
