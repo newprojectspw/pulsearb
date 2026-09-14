@@ -297,8 +297,6 @@ def _envelope_do_catalogo(mercados: dict[str, dict[str, Any]]) -> RecordEnvelope
                         "pergunta": meta.get("pergunta"),
                         "tick_size": meta.get("tick_size"),
                         "daily_rate": meta.get("daily_rate"),
-                        "rewards_max_spread": meta.get("rewards_max_spread"),
-                        "rewards_min_size": meta.get("rewards_min_size"),
                     }
                     for cid, meta in mercados.items()
                 },

@@ -87,7 +87,7 @@ from pulsearb.live.caixa_maker import CaixaDoMaker
 from pulsearb.live.cotacao import (
     Cotacao,
     escolher_cotacao,
-    estimar_retorno,
+    estimar_retorno_repousando,
 )
 from pulsearb.live.execucao_maker import (
     Efeito,
@@ -214,6 +214,7 @@ class LacoMaker:
                 token_down=janela.token_down,
                 negocios_desde=self._negocios_desde,
                 agora_ns=agora_ns,
+                livro_de=livro_de,
             )
 
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
@@ -243,8 +244,11 @@ class LacoMaker:
         ]
         melhor = escolher_cotacao(candidatas, livro, params, horas=horas)
 
+        # A cotação que JÁ repousa é avaliada no preço em que foi enviada, não
+        # a `distancia_ticks` do meio de agora: é assim que o meio andando a
+        # deixa "não pontuar mais" (revisão do #118).
         atual = (
-            estimar_retorno(aberta.cotacao, livro, params, horas=horas)
+            estimar_retorno_repousando(aberta, livro, params, horas=horas)
             if aberta is not None
             else None
         )

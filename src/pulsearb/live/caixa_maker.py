@@ -63,7 +63,7 @@ from pulsearb.backtest.book import OrderBook
 from pulsearb.live.cotacao import (
     FATOR_DE_CAPTURA_PADRAO,
     RetornoEstimado,
-    estimar_retorno,
+    estimar_retorno_repousando,
 )
 from pulsearb.live.livros import Negocio
 from pulsearb.live.repouso import CotacaoAberta
@@ -104,6 +104,12 @@ class ExecucaoPossivel:
     #: no nosso preço — a fila decide quanto foi nosso.
     tipo: str
     ts_ns: int
+    #: O meio do livro do token NO instante do print. O markout é meio-a-meio
+    #: (`meio_depois − meio_no_fill`), como o `medir_markout` da análise — e
+    #: não `meio_depois − preco_nosso`, que creditava a distância inicial ao
+    #: meio como ganho (mercado parado dava +d ticks). `None` = sem livro no
+    #: fill; a execução vai a `markout_sem_referencia`, nunca a um número.
+    meio_no_fill: float | None = None
 
 
 def _atraso_do_print_s(negocio: Any, agora_ns: int) -> float | None:
@@ -145,10 +151,38 @@ class CaixaDoMaker:
     markout_shares: float = 0.0
     markout_soma_horizonte_s: float = 0.0
     markout_sem_referencia: int = 0
+    #: Prints que bateriam uma perna JÁ consumida na conta-sombra: ignorados
+    #: e contados. Uma perna executada saiu do livro; contá-la de novo a cada
+    #: print multiplicava execuções, shares e custo pelo número de prints.
+    prints_em_perna_consumida: int = 0
+    #: Passadas em que as duas pernas já estavam consumidas: tempo que NÃO é
+    #: repouso, e reward que NÃO se ganha.
+    acertos_apos_execucao: int = 0
+    #: Cotação aberta sem o preço enviado de nenhuma perna: não há onde
+    #: pontuar. Contado e recusado — não se estima "a d ticks do meio de
+    #: agora" no lugar, que foi o defeito consertado aqui.
+    acertos_sem_preco: int = 0
 
     _ultimo_acerto_epoch: dict[str, float] = field(default_factory=dict)
     _ultimo_print_ns: dict[str, int] = field(default_factory=dict)
     _pendentes: list[ExecucaoPossivel] = field(default_factory=list)
+    #: Quanto de cada perna ainda repousa, por slug: (desde_epoch, [up, down]).
+    #: `desde_epoch` diferente = cotação nova (reposicionada) = pernas cheias.
+    _restante: dict[str, tuple[float, list[float]]] = field(default_factory=dict)
+
+    def _pernas(self, slug: str, aberta: CotacaoAberta) -> list[float]:
+        guardado = self._restante.get(slug)
+        if guardado is None or guardado[0] != aberta.desde_epoch:
+            cheias = [
+                aberta.cotacao.tamanho if aberta.preco_up > 0.0 else 0.0,
+                (
+                    aberta.cotacao.tamanho
+                    if aberta.cotacao.dois_lados and aberta.preco_down > 0.0
+                    else 0.0
+                ),
+            ]
+            self._restante[slug] = (aberta.desde_epoch, cheias)
+        return self._restante[slug][1]
 
     # ─────────────────────────────────────────────────────────────── rewards
     def acertar(
@@ -170,12 +204,26 @@ class CaixaDoMaker:
             self.intervalos_truncados += 1
             intervalo = INTERVALO_MAXIMO_POR_PASSADA_S
 
-        estimado = estimar_retorno(
-            aberta.cotacao,
+        if aberta.preco_up <= 0.0 and aberta.preco_down <= 0.0:
+            self.acertos_sem_preco += 1
+            return None
+        pernas = self._pernas(slug, aberta)
+        if pernas[0] <= 0.0 and pernas[1] <= 0.0:
+            # As duas pernas já executaram na conta-sombra: a ordem não está
+            # mais no livro. Nem repouso, nem reward — só a contagem.
+            self.acertos_apos_execucao += 1
+            return None
+        # No preço em que a ordem REPOUSA, não a `distancia_ticks` do meio de
+        # agora — uma ordem que o meio deixou para trás não pontua, e é isso
+        # que tem de aparecer aqui (revisão do #118).
+        estimado = estimar_retorno_repousando(
+            aberta,
             livro,
             params,
             horas=intervalo / 3600.0,
             fator_de_captura=self.fator_de_captura,
+            restante_up=pernas[0],
+            restante_down=pernas[1],
         )
         self.acertos += 1
         self.segundos_repousando += intervalo
@@ -198,34 +246,51 @@ class CaixaDoMaker:
         token_down: str,
         negocios_desde: Callable[..., list[Negocio]],
         agora_ns: int,
+        livro_de: Callable[..., OrderBook | None] | None = None,
     ) -> int:
-        """Olha os prints desde a última passada e anota os que nos pegariam."""
+        """Olha os prints desde a última passada e anota os que nos pegariam.
+
+        Cada perna é CONSUMIDA pelo que executa: atravessada leva o que resta
+        dela, no nível leva o mínimo entre o print e o que resta. Perna
+        consumida não executa de novo — a ordem saiu do livro — e não ganha
+        mais reward (`acertar` lê o restante). `livro_de`, quando vem, dá o
+        meio do token no instante do print, para o markout meio-a-meio.
+        """
         desde_ns = max(
             self._ultimo_print_ns.get(slug, 0), int(aberta.desde_epoch * 1e9)
         )
         self._ultimo_print_ns[slug] = agora_ns
+        restante = self._pernas(slug, aberta)
         pernas = (
-            (token_up, True, aberta.preco_up),
-            (token_down, False, aberta.preco_down),
+            (0, token_up, True, aberta.preco_up),
+            (1, token_down, False, aberta.preco_down),
         )
         novas = 0
-        for token_id, lado_up, preco_nosso in pernas:
+        for indice, token_id, lado_up, preco_nosso in pernas:
             if preco_nosso <= 0.0:
                 continue
             for negocio in negocios_desde(token_id, ts_ns=desde_ns):
                 self.prints_vistos += 1
                 if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
                     continue
+                if restante[indice] <= 0.0:
+                    self.prints_em_perna_consumida += 1
+                    continue
                 if negocio.preco < preco_nosso - EPS:
                     tipo = "atravessada"
-                    shares = aberta.cotacao.tamanho
+                    shares = restante[indice]
                     self.execucoes_atravessadas += 1
                     self.shares_atravessadas += shares
                 else:
                     tipo = "no_nivel"
-                    shares = min(negocio.tamanho, aberta.cotacao.tamanho)
+                    shares = min(negocio.tamanho, restante[indice])
                     self.execucoes_no_nivel += 1
                     self.shares_no_nivel += shares
+                restante[indice] -= shares
+                meio_no_fill = None
+                if livro_de is not None:
+                    livro_do_fill = livro_de(token_id, agora_ns=agora_ns)
+                    meio_no_fill = livro_do_fill.mid if livro_do_fill is not None else None
                 self._pendentes.append(
                     ExecucaoPossivel(
                         slug=slug,
@@ -236,6 +301,7 @@ class CaixaDoMaker:
                         shares=shares,
                         tipo=tipo,
                         ts_ns=negocio.ts_ns,
+                        meio_no_fill=meio_no_fill,
                     )
                 )
                 novas += 1
@@ -263,6 +329,12 @@ class CaixaDoMaker:
             if decorrido_s < self.horizonte_markout_s:
                 restantes.append(pendente)
                 continue
+            if pendente.meio_no_fill is None:
+                # Sem o meio no instante do fill não há de onde medir. Contado,
+                # nunca aproximado pelo nosso preço — isso creditava a
+                # distância ao meio como ganho.
+                self.markout_sem_referencia += 1
+                continue
             livro = livro_de(pendente.token_id, agora_ns=agora_ns)
             meio = livro.mid if livro is not None else None
             if meio is None:
@@ -271,8 +343,10 @@ class CaixaDoMaker:
                 else:
                     self.markout_sem_referencia += 1
                 continue
-            # Compramos a `preco_nosso`: o meio acima dele é a nosso favor.
-            centavos = (meio - pendente.preco_nosso) * 100.0
+            # Compramos: o meio subindo depois do fill é a nosso favor. Mede-se
+            # do meio NO fill ao meio de agora — a mesma conta do
+            # `medir_markout` da análise (quem forneceu a liquidez).
+            centavos = (meio - pendente.meio_no_fill) * 100.0
             self.markout_medidas += 1
             self.markout_soma_centavos_x_shares += centavos * pendente.shares
             self.markout_shares += pendente.shares
@@ -285,6 +359,7 @@ class CaixaDoMaker:
         """A cotação saiu do livro: a próxima começa a contar do zero."""
         self._ultimo_acerto_epoch.pop(slug, None)
         self._ultimo_print_ns.pop(slug, None)
+        self._restante.pop(slug, None)
 
     # ─────────────────────────────────────────────────────────────── relato
     @property
@@ -311,8 +386,11 @@ class CaixaDoMaker:
             "segundos_repousando": round(self.segundos_repousando, 1),
             "segundos_pontuando": round(self.segundos_pontuando, 1),
             "acertos": self.acertos,
+            "acertos_apos_execucao": self.acertos_apos_execucao,
+            "acertos_sem_preco": self.acertos_sem_preco,
             "intervalos_truncados": self.intervalos_truncados,
             "prints_vistos": self.prints_vistos,
+            "prints_em_perna_consumida": self.prints_em_perna_consumida,
             "execucoes_possiveis": {
                 "atravessadas": self.execucoes_atravessadas,
                 "no_nivel": self.execucoes_no_nivel,
