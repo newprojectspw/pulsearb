@@ -195,6 +195,19 @@ class Settings(BaseSettings):
     # Grade de sondagem para gerar slugs candidatos quando durations=auto.
     probe_durations_seconds: list[int] = Field(default_factory=lambda: [300, 900, 14400])
 
+    # ── a rota maker sobre mercados de reward (1.12, VEREDITO_M2 §2f) ──
+    #
+    # OPT-IN, e o default é `False` de propósito. Ligar muda o que a rodada
+    # faz: assina ~240 tokens novos e põe o laço maker a cotar mercados que
+    # o taker nunca viu. A rodada de 24 h que produz o dado do taker não pode
+    # mudar de comportamento por causa de um default novo.
+    descobrir_pools_de_reward: bool = False
+    #: Quantos mercados, do maior pool para o menor. O 1.12 mediu o ótimo em
+    #: 95 — acima disso o líquido CAI, porque entram os de volume enorme e
+    #: receita mínima (a eleição sueca negocia 54.014 shares/h e paga 1,86
+    #: USDC/h). 120 dá folga para os que fecharem no meio da rodada.
+    top_de_pools_de_reward: int = 120
+
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"
 

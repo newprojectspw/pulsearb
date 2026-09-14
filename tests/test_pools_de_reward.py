@@ -379,3 +379,68 @@ def test_o_laco_maker_COTA_um_mercado_de_reward_descoberto(tmp_path) -> None:
     # Todo id do cliente sombra sai com prefixo `sombra-`: a invariante que
     # impede uma ordem de sombra ser confundida com uma real.
     assert all(oid.startswith("sombra-") for oid in cliente.repousadas)
+
+
+# ── o interruptor ────────────────────────────────────────────────────────
+def test_a_rota_de_pools_e_OPT_IN() -> None:
+    """Default `False`, e isso não é timidez.
+
+    Ligar assina ~240 tokens novos e põe o laço maker a cotar mercados que o
+    taker nunca viu. A rodada de 24 h que produz o dado do taker não pode
+    mudar de comportamento por causa de um default novo — foi assim que o
+    projeto perdeu uma rodada inteira antes.
+    """
+    from pulsearb.settings import Settings
+
+    s = Settings()
+    assert s.descobrir_pools_de_reward is False
+    # O topo default sai do ótimo MEDIDO (95), com folga para os que fecham.
+    assert s.top_de_pools_de_reward == 120
+
+
+def test_um_ciclo_de_pools_absorve_assina_e_CONTA() -> None:
+    """O ciclo alimenta o rastreador, assina os tokens e conta o que fez.
+
+    Assinar importa: sem livro o `_passo_da_janela` sai em `sem_livro`, e
+    "não sei nada sobre ela" é pior que "recusei por X".
+    """
+    import asyncio
+
+    from pulsearb.live.shadow import ProcessoShadow
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={"0x1": _mercado(), "0x2": _mercado(tokens=[
+            {"token_id": "333"}, {"token_id": "444"}
+        ])},
+    )
+
+    class _PolyFake:
+        def __init__(self) -> None:
+            self.assinados: list[str] = []
+
+        async def subscribe(self, tokens):
+            self.assinados.extend(tokens)
+
+    processo = ProcessoShadow.__new__(ProcessoShadow)
+    processo.ciclo = type("C", (), {"motor": type("M", (), {
+        "rastreador": RastreadorDeJanelas()
+    })()})()
+    processo.poly = _PolyFake()
+    processo.tokens_assinados = set()
+    processo.desassinar_apos = {}
+    processo.pools_descobertos = 0
+
+    from pulsearb.markets.pools_de_reward import DescobertaDePools
+
+    descoberta = DescobertaDePools(fake, base_clob="https://clob.example")
+    asyncio.run(processo._um_ciclo_de_pools(descoberta))
+
+    assert processo.pools_descobertos == 2
+    assert len(processo.ciclo.motor.rastreador.janelas) == 2
+    assert set(processo.poly.assinados) == {"111", "222", "333", "444"}
+    # Segundo ciclo não reassina o que já está assinado: reassinar custa um
+    # snapshot de livro por token e não compra nada.
+    processo.poly.assinados.clear()
+    asyncio.run(processo._um_ciclo_de_pools(descoberta))
+    assert processo.poly.assinados == []

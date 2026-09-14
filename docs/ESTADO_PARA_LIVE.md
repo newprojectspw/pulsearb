@@ -458,6 +458,17 @@ matou esta rota uma vez:
 4. **A trava tripla do LIVE segue intacta.** Operar exige `MODE=LIVE` +
    `PULSEARB_CONFIRM_LIVE` + a frase exata, e isso é decisão humana.
 
+**A rota está LIGADA no processo (2026-09-13), e é opt-in.** `Settings.
+descobrir_pools_de_reward` (padrão `False`; env
+`PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`) faz o `ProcessoShadow` rodar
+`laco_de_descoberta_de_pools` a cada 300 s: `DescobertaDePools.descobrir()` →
+`Rastreador.absorver()` → assina os tokens no WS → o `LacoMaker` cota pelo
+mesmo caminho das janelas Up/Down. O taker continua recusando essas janelas
+(`jogo="reward"` ∉ `jogos_operados` → `PULOU_JOGO_NAO_OPERADO`, coberto por
+teste com executor hostil). 17 testes em `tests/test_pools_de_reward.py`; o
+relato de 60 s ganha `pools_descobertos`. **Ainda não rodou em SHADOW ao vivo**
+— esse é o próximo passo, e o quadro só marca quando houver relato.
+
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
 | 1.11 | Arbitragem de soma-dos-lados tomável | ≥ 1 episódio que sobrevive a 300 ms de latência | ❌ **MEDIDO E REPROVADO sobre 116 h (2026-09-13).** 385.339.627 registros, 3.878 janelas, 7.756 tokens pareados, **3,37 milhões de instantes avaliados** por direção. Bruto: 2.267 + 2.344 instantes com soma fora de 1,00. Líquido de taxa: 531 + 573. **Episódios que sobrevivem a 300 ms: ZERO, nas duas direções.** `duracao_dos_episodios_s` = `p50 = p90 = max = 0,0 s` — cada um dos 1.104 aparece em UM update de livro e some no seguinte. E não é só dessincronia: **201 deles (82 + 119) tinham o livro do par fresco a ≤ 1 ms**, genuinamente simultâneos, e ainda assim duraram zero. A capacidade nos melhores é de 14 a 28 USDC. O nome do projeto (*bot de arbitragem de latência*) está medido e morto: a soma sai de 1,00 em 0,016% dos instantes, e nunca por tempo suficiente para uma ordem chegar. `scripts/soma_dos_lados.py`, passada 2 em memória constante. | ❌ |
