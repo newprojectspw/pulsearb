@@ -127,12 +127,18 @@ class AncoraEmVigor:
     """O que a âncora do microprice impõe a ESTA passada.
 
     `teto` é o preço máximo de cada perna, `(up, down)`; `precos` é onde a
-    candidata escolhida repousaria. As duas coisas são necessárias e dizem
-    coisas diferentes — uma é segurança, a outra é oportunidade.
+    candidata escolhida repousaria. As duas coisas dizem coisas diferentes —
+    uma é segurança, a outra é oportunidade.
+
+    O teto existe sempre que a regra está ligada; `precos` só quando há
+    candidata que pontue. Quando o livro alarga e NENHUMA candidata ancorada
+    pontua, é justamente quando o teto mais importa: a que repousa continua
+    pontuando, e sem o teto ela ficaria acima dele para sempre (revisão do
+    Codex, #127).
     """
 
     teto: tuple[float, float]
-    precos: tuple[float, float]
+    precos: tuple[float, float] | None = None
 
 
 def _acima_do_teto(ancora: AncoraEmVigor | None, aberta: CotacaoAberta) -> bool:
@@ -172,7 +178,7 @@ def _a_ancora_mudou_o_preco(
     decide são a histerese de tempo e o piso de ganho, como em qualquer outra
     troca.
     """
-    if ancora is None:
+    if ancora is None or ancora.precos is None:
         return False
     return (
         abs(ancora.precos[0] - aberta.preco_up) > _EPS_PRECO

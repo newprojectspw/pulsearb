@@ -617,6 +617,42 @@ class TestAncoraDoMicroprice:
         assert len(efeitos) == 1
         assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
 
+    async def test_sem_candidata_que_pontue_o_teto_ainda_tira_a_ordem(self, tmp_path):
+        """O livro ALARGA com o meio parado: toda a grade ancorada cai fora da
+        faixa de reward e nenhuma candidata pontua. A que repousa continua
+        pontuando — então `atual_nao_pontua_mais` não a pega — e sem o teto
+        ela ficaria acima dele para sempre. É justamente quando o teto mais
+        importa, e era quando ele não existia (revisão do Codex, #127)."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(500.0, 500.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+        # 0,40/0,60 com o ask pesado nos DOIS livros (eles são independentes):
+        # microprice ~0,40 em cada um, então o bid ancorado desce para 0,39 e
+        # o ask sobe para 0,61 — a grade inteira sai da faixa de 3 ¢, e nenhuma
+        # candidata pontua. A ordem a 0,49 continua pontuando.
+        largo_up = OrderBook(
+            asset_id="tok-up", bids=[(0.40, 5.0)], asks=[(0.60, 5_000.0)]
+        )
+        largo_down = OrderBook(
+            asset_id="tok-down", bids=[(0.40, 5.0)], asks=[(0.60, 5_000.0)]
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return largo_down if token_id == "tok-down" else largo_up
+
+        assert largo_up.mid == pytest.approx(0.50)  # o MEIO não andou
+        efeitos = await laco.passo(
+            [_janela()], livro_de=livro_de, agora_epoch=1200.0, agora_ns=2
+        )
+
+        assert laco.motivos["acima_do_teto_do_microprice"] == 1
+        assert len(efeitos) == 1
+        assert laco.abertas == {}
+
     async def test_desligada_por_padrao(self, tmp_path):
         laco = _laco(tmp_path)
         assert laco.ticks_abaixo_do_microprice is None

@@ -425,25 +425,30 @@ class LacoMaker:
         Os preços saem da MESMA função que monta a ordem, para o número que o
         repouso compara ser o número que iria para o fio. A perna Down é um
         bid no livro dela, então teto e preço vêm da âncora espelhada.
+
+        O TETO sai mesmo sem candidata: livro que alarga tira toda a grade
+        ancorada da faixa de reward, e é aí que a que repousa mais precisa do
+        teto — ela ainda pontua, e sem ele ficaria acima dele para sempre
+        (revisão do Codex, #127).
         """
-        if ancora is None or melhor is None:
+        if ancora is None:
             return None
         espelhada = ancora.no_livro_do_down()
         teto_up = ancora.limite(janela.tick_size, do_lado_bid=True)
         teto_down = espelhada.limite(janela.tick_size, do_lado_bid=True)
         if teto_up is None or teto_down is None:
             return None
-        return AncoraEmVigor(
-            teto=(teto_up, teto_down),
-            precos=(
+        precos = None
+        if melhor is not None:
+            precos = (
                 self._ordem_da_cotacao(janela, meio=meio, ancora=ancora)(
                     melhor.cotacao
                 ).preco_limite,
                 self._ordem_da_cotacao(janela, meio=meio, lado_up=False, ancora=ancora)(
                     melhor.cotacao
                 ).preco_limite,
-            ),
-        )
+            )
+        return AncoraEmVigor(teto=(teto_up, teto_down), precos=precos)
 
     def _ancora_do_microprice(
         self, livro: OrderBook, livro_down: OrderBook | None
