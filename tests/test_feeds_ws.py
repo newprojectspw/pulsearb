@@ -320,6 +320,30 @@ async def test_heartbeat_ping_pong(server):
         await feed.stop()
 
 
+async def test_sem_assinatura_NAO_manda_ping(server):
+    """Conexão vazia: nenhum PING até o primeiro `subscribe`.
+
+    O CLOB real lê qualquer texto antes da primeira assinatura como payload
+    de assinatura e fecha com `1008 invalid subscription payload` — foi o
+    que o SHADOW via 10 s depois de toda primeira conexão (conecta vazio,
+    assina depois da descoberta). Depois do `subscribe`, o PING volta.
+    """
+    feed = PolyMarketWsFeed(
+        url=server.url, user_agent="ua", ping_interval_seconds=0.05
+    )
+    await feed.start()
+    try:
+        await _wait_for(lambda: feed.connected)
+        await asyncio.sleep(0.3)  # seis intervalos de PING
+        assert PING not in server.received
+        assert feed.pong_count == 0
+        await feed.subscribe(["a"])
+        await _wait_for(lambda: feed.pong_count >= 1, limite_s=3.0)
+        assert PING in server.received
+    finally:
+        await feed.stop()
+
+
 async def test_pong_atualiza_watchdog_de_heartbeat(server):
     feed = PolyMarketWsFeed(
         url=server.url, user_agent="ua", token_ids=["a"], ping_interval_seconds=0.05

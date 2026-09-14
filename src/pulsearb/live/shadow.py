@@ -272,7 +272,7 @@ class ProcessoShadow:
                 cliente=ClienteSombraDeOrdens(
                     caminho_do_diario=diario, modo=settings.mode
                 ),
-                tamanho_da_cotacao=settings.risk.stake_max_por_trade_usdc,
+                tamanho_da_cotacao=settings.tamanho_da_cotacao_maker_shares,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o
                 # cabeçalho do `laco_maker`.
@@ -319,7 +319,20 @@ class ProcessoShadow:
             )
             for indice in range(max(1, settings.feeds.rtds_conexoes))
         ]
-        self.poly = PolyMarketWsFeed(
+        self.poly = self._nova_conexao_clob("clob[updown]")
+        # A rota de pools tem CONEXÃO PRÓPRIA, medido em 2026-09-14: os
+        # tokens Up/Down derrubam a conexão com `1013 slow consumer: send
+        # buffer full` até 6 vezes em 7 min (dois mercados de 5 min são 54 %
+        # do tráfego, rajadas de 4 MB/s), e a queda é do LADO DO SERVIDOR —
+        # acontece igual com consumidor vazio, e no mesmo instante em 3
+        # processos paralelos. Os tokens dos pools são 50–120 msg/s e nunca
+        # caíram. Na mesma conexão, cada queda dos Up/Down levava 1–2 s de
+        # livro dos pools junto — e é o livro dos pools que o maker cota.
+        self.poly_pools = self._nova_conexao_clob("clob[pools]")
+
+    def _nova_conexao_clob(self, rotulo: str) -> PolyMarketWsFeed:
+        settings = self.settings
+        return PolyMarketWsFeed(
             url=settings.endpoints.clob_market_ws,
             user_agent=settings.user_agent,
             custom_feature_enabled=True,
@@ -329,6 +342,7 @@ class ProcessoShadow:
             stale_after_seconds=settings.feeds.stale_after_seconds_book,
             reconnect_initial_seconds=settings.feeds.reconnect_initial_seconds,
             reconnect_max_seconds=settings.feeds.reconnect_max_seconds,
+            rotulo=rotulo,
         )
 
     # ────────────────────────────────────────────────────────────── ingestão
@@ -434,7 +448,7 @@ class ProcessoShadow:
                 if token not in self.tokens_assinados:
                     novos.add(token)
         if novos:
-            await self.poly.subscribe(sorted(novos))
+            await self.poly_pools.subscribe(sorted(novos))
             self.tokens_assinados |= novos
         log.info(
             "descoberta de pools",
@@ -475,7 +489,10 @@ class ProcessoShadow:
             if agora >= self.desassinar_apos.get(token, 0.0)
         }
         if encerrados:
+            # `tokens_assinados` é um conjunto só; cada conexão ignora o que
+            # não é dela (`unsubscribe` filtra pelo próprio `token_ids`).
             await self.poly.unsubscribe(sorted(encerrados))
+            await self.poly_pools.unsubscribe(sorted(encerrados))
             self.tokens_assinados -= encerrados
             for token in encerrados:
                 self.desassinar_apos.pop(token, None)
@@ -670,6 +687,8 @@ class ProcessoShadow:
             for feed in self.rtds_feeds:
                 await feed.start()
             await self.poly.start()
+            if self.settings.descobrir_pools_de_reward:
+                await self.poly_pools.start()
             tarefas = [
                 asyncio.create_task(
                     self.laco_de_descoberta(
@@ -699,6 +718,9 @@ class ProcessoShadow:
                                 ),
                                 base_clob=self.settings.endpoints.clob,
                                 top=self.settings.top_de_pools_de_reward,
+                                tamanho_da_cotacao=(
+                                    self.settings.tamanho_da_cotacao_maker_shares
+                                ),
                             ),
                             deadline,
                             deadline_de_parede,
@@ -736,6 +758,7 @@ class ProcessoShadow:
                 for feed in self.rtds_feeds:
                     await feed.stop()
                 await self.poly.stop()
+                await self.poly_pools.stop()
         return self.estado()
 
 
