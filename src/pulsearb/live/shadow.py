@@ -526,6 +526,7 @@ class ProcessoShadow:
                     agora_epoch=agora,
                     agora_ns=agora_ns,
                     feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
+                    negocios_desde=self.ciclo.motor.livros.negocios_desde,
                 )
             except OSError as erro:
                 # Mesma leitura que o laço de decisão faz: I/O do diário não é

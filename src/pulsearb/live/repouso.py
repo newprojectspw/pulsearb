@@ -82,6 +82,12 @@ class CotacaoAberta:
     #: sem `order_id` é perna em estado desconhecido, não perna inexistente.
     id_do_cliente_down: str = ""
     order_id_down: str = ""
+    #: O preço a que cada perna foi ENVIADA (o `preco_limite` da ordem), e não
+    #: recalculado do meio: é contra ele que a caixa-sombra (`caixa_maker`)
+    #: confere os prints de negócio — um print no nosso preço ou através dele
+    #: é execução que teria acontecido. Zero numa cotação sem a perna.
+    preco_up: float = 0.0
+    preco_down: float = 0.0
 
     @property
     def order_ids(self) -> tuple[str, ...]:
