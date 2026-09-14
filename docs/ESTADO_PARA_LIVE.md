@@ -772,7 +772,7 @@ descansa e não recolhe perde **−4.227,56 USDC no dia**. A MESMA cotação, qu
 recolhe a ordem 100 ms depois de o melhor bid cair abaixo dela, fecha o termo
 determinístico em **−79,76**. É a maior diferença que este projeto já mediu
 entre duas regras de cotação, e a regra é a que o `poly-maker` já usa (o
-regime EVENT do `strategy/regime.py`).
+regime EVENT do `poly-maker`, documentado em `docs/OUTROS_BOTS.md` §2).
 
 **(2) O que sobra é pequeno e ainda negativo.** Com o recolher ligado e o
 gatilho de salto do spot a 3 bps (cooloff de 5 s), o termo que NÃO depende de
