@@ -439,6 +439,7 @@ def medir_markout(
     janelas: list[Any],
     *,
     horizontes_s: tuple[float, ...] = (1.0, 5.0, 30.0),
+    recorte_por_janela: bool = False,
 ) -> dict[str, Any]:
     """Adverse selection: quanto o preço anda CONTRA quem foi executado.
 
@@ -463,6 +464,21 @@ def medir_markout(
     Só entram execuções cujo preço estava no topo (dentro de meio tick do
     melhor preço do lado): quem foi executado fundo no livro não é o maker
     que estamos simulando.
+
+    **Custo de saída (2026-09-14).** O markout de segundos mede seleção
+    adversa num livro que se move; não mede o que custa SAIR de um inventário
+    que ficou de um lado só num mercado que resolve em dias. Esse custo é, à
+    vista, metade do spread no instante da execução — e num livro de 11 c de
+    spread isso é ~90× o markout de 5 s. Por isso cada amostra guarda o
+    spread do livro no fill, e a tabela publica
+    `custo_de_saida_centavos_por_share` (spread/2) ao lado dos horizontes,
+    na MESMA função e sobre as MESMAS execuções — um segundo caminho para
+    isso discordaria do primeiro na primeira edição.
+
+    `recorte_por_janela=True` acrescenta um recorte por `slug` da janela.
+    Fica desligado no backtest (milhares de janelas virariam milhares de
+    recortes) e ligado no coletor de pools, onde a janela É o mercado e a
+    conta precisa do custo por mercado.
     """
     por_recorte: dict[str, list[dict[str, float]]] = defaultdict(list)
     total = 0
@@ -500,21 +516,29 @@ def medir_markout(
             if not amostra:
                 sem_referencia += 1
                 continue
-            for recorte in (
+            if book.best_bid is not None and book.best_ask is not None:
+                amostra[CHAVE_SPREAD_NO_FILL] = (book.best_ask - book.best_bid) * 100.0
+            recortes = [
                 RECORTE_GERAL,
                 f"duracao={janela.duracao_s}s",
                 f"hora_utc={hora:02d}",
                 f"distancia_ticks={min(distancia_ticks, 5)}",
-            ):
+            ]
+            if recorte_por_janela:
+                recortes.append(f"mercado={getattr(janela, 'slug', '?')}")
+            for recorte in recortes:
                 por_recorte[recorte].append(amostra)
 
-    saida = {
-        recorte: {
+    saida = {}
+    for recorte, amostras in sorted(por_recorte.items()):
+        tabela = {
             f"{h:g}s": _dist([a[f"{h:g}s"] for a in amostras if f"{h:g}s" in a])
             for h in horizontes_s
         }
-        for recorte, amostras in sorted(por_recorte.items())
-    }
+        spreads = [a[CHAVE_SPREAD_NO_FILL] for a in amostras if CHAVE_SPREAD_NO_FILL in a]
+        # spread/2: o que custa desfazer, à vista, uma execução de um lado só.
+        tabela[CHAVE_CUSTO_DE_SAIDA] = _dist([s / 2.0 for s in spreads])
+        saida[recorte] = tabela
     return {
         "execucoes_observadas": total,
         "descartadas_fora_do_topo": fora_do_topo,
@@ -551,6 +575,15 @@ PRECO_DE_TAXA_MAXIMA = 0.50
 #: O recorte "tudo junto" da tabela de markout. Constante, e nao string
 #: solta, para que produtor e consumidor nao possam divergir de novo.
 RECORTE_GERAL = "total"
+
+#: Chave, em cada amostra, do spread do livro no instante da execução (em
+#: centavos). Não é horizonte: não entra na comprehension dos horizontes.
+CHAVE_SPREAD_NO_FILL = "spread_no_fill_c"
+
+#: Chave, em cada recorte, da distribuição de spread/2 — o custo de SAÍDA de
+#: uma execução unilateral. Constante pelo mesmo motivo de `RECORTE_GERAL`:
+#: o `conta_do_maker_nos_pools` lê exatamente esta.
+CHAVE_CUSTO_DE_SAIDA = "custo_de_saida_centavos_por_share"
 
 
 def _rebate_vs_markout(

@@ -171,3 +171,46 @@ def test_markout_invalido_avisa_e_a_conta_ainda_recusa(tmp_path, monkeypatch, ca
     assert "aviso:" in saida.err
     assert "MARKOUT AUSENTE" in saida.err
     assert codigo == 1
+
+
+# ── custo de saída: max(markout 30 min, spread/2) × execuções/h, ou AUSENTE ─
+
+
+def _markout_com_saida(media_1800: float, spread_meio: float, n: int = 12) -> dict:
+    return {
+        "regime": {"horas_de_coleta": 4.0},
+        "markout": {
+            "markout_centavos_por_share": {
+                "total": {"5s": {"media": -0.06, "n": n}},
+                "mercado=lac-9-5": {
+                    "5s": {"media": -0.06, "n": n},
+                    "1800s": {"media": media_1800, "n": n},
+                    "custo_de_saida_centavos_por_share": {"media": spread_meio, "n": n},
+                },
+            }
+        },
+    }
+
+
+def test_custo_de_saida_e_o_maior_entre_markout_longo_e_spread_meio() -> None:
+    # spread/2 = 5,5 c vence um markout a 30 min de −0,9 c
+    saida = conta._custo_de_saida(_markout_com_saida(-0.9, 5.5), horas=4.0)
+    assert saida == {"lac-9-5": (5.5, 3.0)}  # 12 execuções / 4 h
+    # markout longo pior que o spread vence
+    saida = conta._custo_de_saida(_markout_com_saida(-8.0, 5.5), horas=4.0)
+    assert saida["lac-9-5"][0] == 8.0
+    # markout POSITIVO a 30 min não vira crédito: fica o spread/2
+    saida = conta._custo_de_saida(_markout_com_saida(+3.0, 5.5), horas=4.0)
+    assert saida["lac-9-5"][0] == 5.5
+
+
+def test_custo_de_saida_ausente_e_none_nunca_zero() -> None:
+    """Sem recorte por mercado, sem horizonte de 30 min ou sem horas: None.
+    Zero fecharia a conta a favor sem medida."""
+    assert conta._custo_de_saida(None, 4.0) is None
+    assert conta._custo_de_saida(_markout_com_saida(-0.9, 5.5), horas=None) is None
+    sem_longo = _markout_com_saida(-0.9, 5.5)
+    del sem_longo["markout"]["markout_centavos_por_share"]["mercado=lac-9-5"]["1800s"]
+    assert conta._custo_de_saida(sem_longo, 4.0) is None
+    so_total = {"markout": {"markout_centavos_por_share": {"total": {"5s": {"media": -0.06}}}}}
+    assert conta._custo_de_saida(so_total, 4.0) is None
