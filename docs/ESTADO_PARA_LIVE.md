@@ -835,6 +835,24 @@ Coleta de 6 h em curso desde 2026-09-14 15:37 UTC (60 mercados), com a
 varredura de persistência de 2 h ao lado (300 pools) para refazer o 1.12 com
 dado do mesmo dia.
 
+**A latência que este Mac tem NÃO é a que a medida usou, e isso importa.**
+`scripts/benchmark_latency.py --label mac-casa`
+(`relatorios/LATENCIA_MAC_20260914.json`, 2026-09-14 18:05 UTC, 100
+requisições em conexão quente): REST do CLOB **p50 = 244,9 ms, p90 = 260,0,
+p99 = 349,7, máx 609,6**; conexão fria 161,7 ms até o TLS e 256,9 até o
+primeiro byte; WS do CLOB 471,3 ms para conectar; WS do RTDS 694,1 ms, com a
+primeira mensagem 208,4 ms depois de assinar. O PING/PONG do WS não
+respondeu sem assinatura ativa — fica anotado que a melhor aproximação de
+decisão→ack ainda é o REST quente.
+
+Ou seja: **cancelar leva ~245 ms no p50 e ~350 ms no p99 daqui**, não os
+100 ms que a rodada do dia usou. A grade de 4 h mediu os três: −31,87 (100
+ms), −53,07 (300 ms), −56,55 (1000 ms) contra −583,54 parado — o recolher
+continua valendo a 300 ms, mas o número do dia inteiro tem de ser refeito na
+latência real, e é isso que falta. Uma VPS perto do CLOB muda esse número;
+a decisão de onde hospedar passa a ter um efeito medido em USDC, não só em
+milissegundos.
+
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
