@@ -118,22 +118,39 @@ depende de latência. Cabe como filtro do 4.2: só descansar onde há colchão
 chave privada em `.env`. Sem código de estratégia para ler. **Padrão de
 drenagem de carteira; nunca rodar**, nem em carteira vazia.
 
-## 6. O que cabe portar para cá, e em que ordem
+## 6. O que cabe portar — agora com número (medido em 2026-09-13)
 
-Depende do que `maker_de_pares.py` medir — nada aqui é ✅ até a medida
-existir. Candidatos, do mais barato ao mais caro:
+`scripts/maker_de_pares.py` rodou sobre o dia inteiro (1.000 janelas
+Up/Down, lote de 20 shares). O que a medida diz, em ordem de tamanho do
+efeito:
 
-1. **recolher a cotação quando o livro anda contra** (EVENT do
-   `poly-maker`): o `_dormir_medindo_markout` já acorda a cada segundo; o
-   gatilho é `best_bid < preço da ordem`. A medida diz se 100–300 ms bastam;
-2. **trava do par**: com uma perna executada a `p`, a outra só descansa a
-   `≤ 1 − p − margem`;
-3. **juntar, nunca melhorar** o topo — já é o que a cotação sintética faz;
-4. **`rewards_min_size` como tamanho** em pool fino, refrescado do Gamma;
-5. viés de inventário (`r = fv − γσu`) e corte de tamanho em tendência;
-6. fusão YES+NO via CTF — só vale com posição real, isto é, depois do LIVE;
-7. filtro do RuneDn (colchão ≥ 1,5 × à frente) como *variante* de 4.2 para
-   reward sem fill.
+1. **Recolher a cotação quando o livro anda contra é quase tudo.** Sem
+   recolher: **−4.227,56 USDC no dia**. Recolhendo 100 ms depois de o melhor
+   bid cair abaixo da nossa ordem: **−79,76** no termo determinístico. É o
+   regime EVENT do `poly-maker` reduzido ao gatilho mais barato que existe, e
+   cabe no laço do 4.2, que já acorda a cada segundo para fechar markout.
+2. **O gatilho pelo SPOT ajuda um pouco mais** (salto de 3 bps em 2 s,
+   cooloff de 5 s): o taker que nos varre reage ao Binance, e esperar o livro
+   andar já é tarde. Melhora o termo determinístico e reduz o fill tóxico.
+3. **Janela longa > janela curta:** +143,96 ¢ por janela de 1 h contra
+   **+0,63 ¢** por janela de 5 min. As janelas curtas de cripto são o pior
+   lugar para esta estrutura — e são justamente as do taker.
+4. **A trava do par PIORA** (345 → 184 pares, termo determinístico junto): a
+   perna que sobra é a cara.
+5. **O colchão do RuneDn quase elimina o fill** (4 pares em 1.000 janelas).
+   Numa amostra de 4 h ele parecia o melhor de todos; com o dia inteiro,
+   some. Serve como filtro de *reward sem fill*, não como estratégia de par.
+6. **Ainda sem número aqui** (rodada `--grade focada`): lote descartável
+   (5/20/100 shares), viés de inventário (`r = fv − γσu`) e cotação por
+   microprice em vez de juntar ao topo.
+7. **Só com posição real, isto é, depois do LIVE:** fusão YES+NO via CTF
+   `mergePositions`, e `rewards_min_size` refrescado do Gamma como tamanho em
+   pool fino.
+
+O que a medida NÃO autoriza a dizer: que a rota maker morreu. Ela foi medida
+nas janelas Up/Down de cripto; os pools do 1.12 são outro regime, têm reward
+por estar no livro, e estão sendo medidos com o mesmo motor
+(`scripts/maker_de_pares_nos_pools.py`).
 
 ## 7. Fontes
 
