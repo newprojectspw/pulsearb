@@ -282,3 +282,69 @@ class TestOPortao:
         assert laco.cliente.repousadas == {}
         # Nenhuma consulta nova: sair não pede autorização.
         assert len(portao.consultas) == consultas_antes
+
+
+class TestOPrecoSegueOMeioDoLivro:
+    """O achado da rodada r4 de 2026-09-14: 69 cotações entre 0,46 e 0,499 em
+    mercados cujo meio ia de 0,03 a 0,97. O `montar` fechava sobre `meio=0.5`
+    fixo. Num mercado a 0,90 o bid ficava 40 ¢ abaixo do meio (não pontua,
+    não executa); num a 0,10, 39 ¢ ACIMA do ask (executa na hora, como taker).
+    """
+
+    async def _preco_colocado(self, tmp_path, mid):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=mid)), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.cliente.repousadas) == 1, laco.motivos
+        (repousada,) = laco.cliente.repousadas.values()
+        return repousada.ordem.preco_limite
+
+    async def test_o_bid_fica_ABAIXO_do_meio_de_cada_mercado(self, tmp_path):
+        alto = await self._preco_colocado(tmp_path, mid=0.80)
+        baixo = await self._preco_colocado(tmp_path, mid=0.30)
+
+        # Abaixo do meio e dentro da grade avaliada (1 a 5 ticks).
+        assert 0.75 <= alto < 0.80
+        assert 0.25 <= baixo < 0.30
+        # E nunca ACIMA do ask, que era o que 0,5 fixo produzia a 0,30.
+        assert baixo < 0.31
+
+    async def test_o_portao_ve_o_MESMO_preco_que_vai_para_o_livro(self, tmp_path):
+        portao = _PortaoDuble(pode=True)
+        laco = _laco(tmp_path, portao=portao)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=0.80)), agora_epoch=1000.0, agora_ns=1
+        )
+
+        (consultada,) = portao.consultas
+        (repousada,) = laco.cliente.repousadas.values()
+        assert consultada.preco_limite == repousada.ordem.preco_limite
+        assert consultada.preco_limite < 0.80
+
+    async def test_fora_da_faixa_de_lado_unico_NAO_cota(self, tmp_path):
+        """§15.3: cotação de um lado só vale ZERO fora de [0,10, 0,90]. Como
+        o laço coloca um lado (o bid do Up), ele não pode cotar ali — antes,
+        contava dois lados e cotava."""
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(mid=0.95)), agora_epoch=1000.0, agora_ns=1
+        )
+
+        assert laco.abertas == {}
+        assert laco.cliente.repousadas == {}
+
+    async def test_livro_sem_meio_NAO_cota_e_NAO_cancela(self, tmp_path):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+
+        so_bids = OrderBook(asset_id="tok-up", bids=[(0.49, 500.0)], asks=[])
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(so_bids), agora_epoch=1100.0, agora_ns=2
+        )
+
+        assert len(laco.abertas) == 1
+        assert laco.motivos.get("livro_sem_meio") == 1

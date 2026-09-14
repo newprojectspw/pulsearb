@@ -49,6 +49,24 @@ reposicionamento, o resultado é a cotação antiga cancelada e nenhuma nova —
 livro fica sem a nossa ordem, que é o lado certo de errar quando uma trava de
 risco disse não.
 
+## O preço sai do meio DO LIVRO, e a conta é do lado que se coloca
+
+Achado da rodada SHADOW r4 de 2026-09-14 (`data/shadow/diario-20260914-045201-*`):
+todas as 69 cotações saíram entre 0,46 e 0,499 em mercados cujo meio ia de
+0,03 a 0,97. O `montar` fechava sobre `meio=0.5` fixo — o preço não olhava o
+livro. Num mercado a 0,90 isso é um bid 40 ¢ abaixo do meio, que não pontua e
+nunca executa; num mercado a 0,10 é um bid 39 ¢ ACIMA do ask — que executa na
+hora como taker, pagando o spread inteiro. O meio vem do `livro.mid`, o
+mesmo que o `estimar_retorno` usa; sem meio, não se cota (`livro_sem_meio`).
+
+E a estimativa contava DOIS lados (`Cotacao.dois_lados=True`) enquanto o
+`montar` colocava UM — o bid do Up. O §15.3 paga o lado único a um terço
+dentro de [0,10, 0,90] e a ZERO fora; contar dois e colocar um inflava o
+score três vezes (ou infinitamente) e ainda pontuava fora da faixa. As
+candidatas são `dois_lados=False`: a conta descreve a ordem que existe.
+Cotar os dois lados (bid no Up e bid no Down) é o passo seguinte e está no
+quadro como falta — exige duas ordens por janela no `execucao_maker`.
+
 ## Sem pool, não cota
 
 Janela sem `reward_daily_rate` não tem numerador: cotar nela seria pagar risco
@@ -183,8 +201,18 @@ class LacoMaker:
             self._contar("janela_sem_tempo")
             return None
 
+        meio = livro.mid
+        if meio is None:
+            # Livro de um lado só não tem meio, e sem meio não há onde cotar.
+            # Mesmo tratamento do livro indisponível: não cancela, espera.
+            self._contar("livro_sem_meio")
+            return None
+
+        # Um lado só, porque é UM lado que o `montar` coloca. Ver o cabeçalho.
         candidatas = [
-            Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
+            Cotacao(
+                distancia_ticks=t, tamanho=self.tamanho_da_cotacao, dois_lados=False
+            )
             for t in self.grade_de_ticks
         ]
         melhor = escolher_cotacao(candidatas, livro, params, horas=horas)
@@ -210,7 +238,11 @@ class LacoMaker:
         )
         if candidata is not None:
             recusa = self._portao_recusa(
-                candidata, janela, livro=livro, feeds_saudaveis=feeds_saudaveis
+                candidata,
+                janela,
+                livro=livro,
+                meio=meio,
+                feeds_saudaveis=feeds_saudaveis,
             )
             if recusa is not None:
                 self._contar(f"portao:{recusa}")
@@ -225,10 +257,18 @@ class LacoMaker:
             # nada não pode custar uma ida à rede.
             return None
 
-        return await self._executar(decisao, janela, agora_epoch=agora_epoch)
+        return await self._executar(
+            decisao, janela, meio=meio, agora_epoch=agora_epoch
+        )
 
     def _portao_recusa(
-        self, nova: Cotacao, janela: JanelaAoVivo, *, livro, feeds_saudaveis: bool
+        self,
+        nova: Cotacao,
+        janela: JanelaAoVivo,
+        *,
+        livro,
+        meio: float,
+        feeds_saudaveis: bool,
     ) -> str | None:
         """O motivo da recusa, ou `None` se os portões liberam.
 
@@ -242,7 +282,7 @@ class LacoMaker:
             # Falha fechada: sem portão não se cota. Um laço que cotasse
             # "porque ninguém passou trava" seria o oposto do que a trava serve.
             return "sem_portao"
-        ordem = self._ordem_da_cotacao(janela)(nova)
+        ordem = self._ordem_da_cotacao(janela, meio=meio)(nova)
         decisao = self.portao.avaliar_risco(
             ordem,
             feeds_saudaveis=feeds_saudaveis,
@@ -252,13 +292,18 @@ class LacoMaker:
         return None if decisao.pode else (decisao.motivo or "recusado_sem_motivo")
 
     async def _executar(
-        self, decisao: Decisao, janela: JanelaAoVivo, *, agora_epoch: float
+        self,
+        decisao: Decisao,
+        janela: JanelaAoVivo,
+        *,
+        meio: float,
+        agora_epoch: float,
     ) -> Efeito:
         efeito = await aplicar_decisao(
             decisao,
             self.abertas.get(janela.slug),
             cliente=self.cliente,
-            ordem_da_cotacao=self._ordem_da_cotacao(janela),
+            ordem_da_cotacao=self._ordem_da_cotacao(janela, meio=meio),
             janela=janela.slug,
             agora_epoch=agora_epoch,
         )
@@ -316,15 +361,18 @@ class LacoMaker:
             tick_size=janela.tick_size,
         )
 
-    def _ordem_da_cotacao(self, janela: JanelaAoVivo) -> OrdemDaCotacao:
-        """Como esta janela vira ordem. Fecha sobre a janela porque o preço
-        depende do tick e do meio DELA."""
+    def _ordem_da_cotacao(
+        self, janela: JanelaAoVivo, *, meio: float
+    ) -> OrdemDaCotacao:
+        """Como esta janela vira ordem. Fecha sobre a janela e sobre o meio
+        DO LIVRO desta passada: o preço depende do tick dela e de onde o
+        mercado está agora — não de 0,5. Ver o cabeçalho."""
 
         def montar(cotacao: Cotacao) -> OrdemPretendida:
             # Cotamos do lado Up, no bid: a rota maker ganha por repousar, e
             # repousar do lado comprado é o que o `cotacao.py` mede.
             preco = cotacao.preco(
-                meio=0.5, tick_size=janela.tick_size, do_lado_bid=True
+                meio=meio, tick_size=janela.tick_size, do_lado_bid=True
             )
             return OrdemPretendida(
                 slug=janela.slug,
