@@ -1,0 +1,130 @@
+"""A conta do maker nos pools: as regras que a mantêm um LIMITE INFERIOR.
+
+Uma conta que limita por baixo só serve se cada aproximação errar para o
+mesmo lado. Estes testes prendem as três que importam — e a primeira já foi
+violada uma vez no projeto, no `limite_pessimista`, onde omitir o rebate foi
+decisão deliberada pelo mesmo motivo.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parents[1]
+
+
+def _carregar(nome: str):
+    spec = importlib.util.spec_from_file_location(nome, RAIZ / "scripts" / f"{nome}.py")
+    assert spec is not None and spec.loader is not None
+    modulo = importlib.util.module_from_spec(spec)
+    sys.modules[nome] = modulo
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+conta = _carregar("conta_do_maker_nos_pools")
+
+
+def _markout(media: float, n: int = 500) -> dict:
+    return {
+        "markout": {
+            "markout_centavos_por_share": {"total": {"5s": {"media": media, "n": n}}}
+        }
+    }
+
+
+def test_markout_negativo_vira_custo_positivo() -> None:
+    custo, n = conta._markout_adverso(_markout(-0.31))
+    assert custo == 0.31
+    assert n == 500
+
+
+def test_markout_POSITIVO_vira_custo_zero_e_nao_credito() -> None:
+    """A regra que mantém a conta um limite INFERIOR.
+
+    Markout positivo quer dizer que o preço andou a nosso favor depois da
+    execução. Creditar isso somaria a hipótese otimista dos DOIS lados —
+    receita estimada com fila generosa E custo virando lucro. O limite
+    inferior exige que cada aproximação erre para o mesmo lado.
+    """
+    custo, _ = conta._markout_adverso(_markout(+0.42))
+    assert custo == 0.0
+
+
+def test_sem_markout_a_conta_nao_finge() -> None:
+    """Ausência devolve `None`, nunca 0,0.
+
+    Zero seria custo nenhum — a conta fecharia positiva por falta de dado,
+    que é o modo de falha mais caro que existe aqui.
+    """
+    custo, n = conta._markout_adverso(None)
+    assert custo is None and n == 0
+    custo, _ = conta._markout_adverso({"markout": {}})
+    assert custo is None
+
+
+def test_volume_trunca_sem_enviesar_a_taxa(monkeypatch) -> None:
+    """Truncar em 1.000 trades não infla nem desinfla shares/h.
+
+    A taxa é normalizada pelo span OBSERVADO, então um mercado movimentado
+    devolve menos horas e a mesma taxa. Se fosse normalizada por um span fixo,
+    truncar viraria subestimativa de volume — e volume é CUSTO, então
+    subestimá-lo quebraria o limite inferior.
+    """
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, trades):
+            self._t = trades
+
+        def json(self):
+            return self._t
+
+    base = 1_000_000_000
+    # 200 trades de 10 shares, um a cada 36 s -> ~1.000 shares/h
+    completo = [
+        {"timestamp": base + i * 36, "size": 10, "price": 0.5} for i in range(200)
+    ]
+    # o MESMO fluxo, mas só a metade final sobreviveu ao corte de 1.000
+    truncado = completo[100:]
+
+    class _Http:
+        def __init__(self, trades):
+            self._t = trades
+
+        def get(self, *_a, **_k):
+            return _Resp(self._t)
+
+    a = conta.volume_taker(_Http(completo), "0x1")
+    b = conta.volume_taker(_Http(truncado), "0x1")
+    assert a is not None and b is not None
+    # Tolerância RELATIVA: o span vai do primeiro ao último trade, então N
+    # trades cobrem N-1 intervalos e as duas taxas diferem por discretização,
+    # não por viés. Exigir igualdade exata reprovaria a aritmética correta.
+    relativo = abs(a["shares_por_hora"] - b["shares_por_hora"]) / a["shares_por_hora"]
+    assert relativo < 0.02, (a["shares_por_hora"], b["shares_por_hora"])
+
+
+def test_mercado_sem_trade_nao_vira_custo_infinito() -> None:
+    """Lista vazia é volume ZERO, não erro nem divisão por zero."""
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return []
+
+    class _Http:
+        def get(self, *_a, **_k):
+            return _Resp()
+
+    vol = conta.volume_taker(_Http(), "0x1")
+    assert vol == {
+        "trades": 0,
+        "shares_por_hora": 0.0,
+        "usdc_por_hora": 0.0,
+        "span_h": 0.0,
+    }

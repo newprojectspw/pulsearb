@@ -61,6 +61,7 @@ from pulsearb.live.precos import PrecosAoVivo
 from pulsearb.live.rastreador import RastreadorDeJanelas
 from pulsearb.markets.discovery import MarketDiscovery, parse_end_date_epoch
 from pulsearb.markets.http import fazer_http_get_json
+from pulsearb.markets.pools_de_reward import DescobertaDePools
 from pulsearb.obs import get_logger, setup_logging
 from pulsearb.risk import PortaoDeRisco
 from pulsearb.settings import Mode, Settings
@@ -74,6 +75,15 @@ CADENCIA_DA_DECISAO_S = 1.0
 CADENCIA_DA_DESCOBERTA_S = 30.0
 #: De quanto em quanto tempo o estado sai no log.
 CADENCIA_DO_RELATO_S = 60.0
+
+#: De quanto em quanto tempo a descoberta de POOLS roda.
+#:
+#: 5 min, e não os 30 s da descoberta Up/Down: aquela persegue janelas de 5
+#: minutos que nascem e morrem o tempo todo; estas duram horas ou dias, e o
+#: 1.12 mediu que o conjunto que qualifica não pisca (185 de 300 pontuaram em
+#: TODAS as 12 amostras de 2 h). Consultar a cada 30 s custaria ~120 idas ao
+#: CLOB por ciclo para descobrir o mesmo conjunto.
+CADENCIA_DA_DESCOBERTA_DE_POOLS_S = 300.0
 
 
 def montar_ciclo(
@@ -233,6 +243,10 @@ class ProcessoShadow:
         self.desassinar_apos: dict[str, float] = {}
         self.passos = 0
         self.descobertas = 0
+        #: Quantas janelas de POOL o último ciclo trouxe. Vai no relato de
+        #: 60 s: zero aqui com a rota ligada é sintoma, e sintoma tem de ser
+        #: visível sem abrir o JSON.
+        self.pools_descobertos = 0
         #: Motivo pelo qual a rodada foi abortada, ou `None`. Quando existe,
         #: `main` sai com código != 0: uma rodada sem saída não é sucesso.
         self.falhou: str | None = None
@@ -376,6 +390,59 @@ class ProcessoShadow:
                     "descoberta falhou", erro=f"{type(erro).__name__}: {erro}"
                 )
             await _dormir_ate(CADENCIA_DA_DESCOBERTA_S, deadline)
+
+    async def laco_de_descoberta_de_pools(
+        self,
+        descoberta: DescobertaDePools,
+        deadline: float,
+        deadline_de_parede: float | None = None,
+    ) -> None:
+        """A rota maker nos mercados de reward — o que o 1.12 aprovou.
+
+        NÃO substitui `laco_de_descoberta`: os dois alimentam o MESMO
+        rastreador, e o taker segue operando só as janelas Up/Down porque
+        `jogos_operados` recusa `JOGO_REWARD` com motivo nomeado.
+
+        Falha aqui **não derruba a rodada**, pela mesma razão que o laço maker
+        não derruba: o taker é o caminho medido, e uma rota nova não pode
+        custar as 24 h dele.
+        """
+        while not prazo_vencido(deadline, deadline_de_parede):
+            try:
+                await self._um_ciclo_de_pools(descoberta)
+            except Exception as erro:
+                log.warning(
+                    "descoberta de pools falhou",
+                    erro=f"{type(erro).__name__}: {erro}",
+                )
+            await _dormir_ate(CADENCIA_DA_DESCOBERTA_DE_POOLS_S, deadline)
+
+    async def _um_ciclo_de_pools(self, descoberta: DescobertaDePools) -> None:
+        janelas = await descoberta.descobrir()
+        self.ciclo.motor.rastreador.absorver(janelas)
+        self.pools_descobertos = len(janelas)
+
+        # Assina os tokens para o laço maker ter livro. Sem livro, o
+        # `_passo_da_janela` sai em `sem_livro` — e "não sei nada sobre ela" é
+        # pior que "recusei por X".
+        agora = time.time()
+        novos: set[str] = set()
+        for janela in janelas:
+            limite = janela.fechamento_epoch + RESOLUTION_GRACE_SECONDS
+            for token in (janela.token_up, janela.token_down):
+                self.desassinar_apos[token] = limite
+                if token not in self.tokens_assinados:
+                    novos.add(token)
+        if novos:
+            await self.poly.subscribe(sorted(novos))
+            self.tokens_assinados |= novos
+        log.info(
+            "descoberta de pools",
+            janelas=len(janelas),
+            tokens_novos=len(novos),
+            descartes=dict(descoberta.descartes),
+            agora=agora,
+        )
 
     async def _um_ciclo_de_descoberta(self, discovery: MarketDiscovery) -> None:
         mercados = await discovery.discover()
@@ -619,6 +686,25 @@ class ProcessoShadow:
                     self.laco_de_relato(deadline, deadline_de_parede)
                 ),
             ]
+            # A rota maker sobre mercados de reward é OPT-IN. Ligá-la por
+            # default mudaria o que a rodada de 24 h faz — e é a rodada de
+            # 24 h que produz o dado do taker. Quem liga, sabe que ligou.
+            if self.settings.descobrir_pools_de_reward:
+                tarefas.append(
+                    asyncio.create_task(
+                        self.laco_de_descoberta_de_pools(
+                            DescobertaDePools(
+                                fazer_http_get_json(
+                                    http, bases=[self.settings.endpoints.clob]
+                                ),
+                                base_clob=self.settings.endpoints.clob,
+                                top=self.settings.top_de_pools_de_reward,
+                            ),
+                            deadline,
+                            deadline_de_parede,
+                        )
+                    )
+                )
             try:
                 # `wait` com prazo, e não `gather`: uma descoberta em voo pode
                 # ficar pendurada em vários HTTP de 15 s em sequência, e o

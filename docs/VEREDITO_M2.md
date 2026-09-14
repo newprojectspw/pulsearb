@@ -2149,3 +2149,165 @@ Um defeito real que essa verificação pegou: `PULSEARB_RECORDER__OUTPUT_DIR`
 sobrepunha o `config.yaml`**. A imagem gravaria no caminho errado, em
 silêncio, e a descoberta só viria ao procurar os arquivos que não existiam.
 Corrigido, com teste.
+
+---
+
+# §2e — ARBITRAGEM DE SOMA-DOS-LADOS (critério registrado ANTES dos números)
+
+Escrito em 2026-09-13, **antes** de rodar sobre as 72 h. A hipótese dá nome ao
+projeto desde o primeiro commit (`bot de arbitragem de latência`) e nunca foi
+medida: uma busca no código por `soma_dos_lados`, `sum_to_one` e `arbitragem`
+não achou nada além do docstring do pacote.
+
+## A hipótese
+
+Numa janela Up/Down os dois tokens liquidam em 1,00 USDC **juntos**. Isso abre
+duas operações que **não preveem nada** — e portanto escapam inteiras dos
+critérios 1.1, 1.3 e 1.4, que reprovaram medindo qualidade de previsão:
+
+- **cunhar e vender** — pague 1,00, receba 1 Up + 1 Down, venda os dois nos
+  *bids*. Lucra se `bid(Up) + bid(Down) > 1,00` + taxas.
+- **comprar e fundir** — compre os dois nos *asks*, funda o par em 1,00.
+  Lucra se `ask(Up) + ask(Down) < 1,00` − taxas.
+
+Ela **não** escapa do 1.5: capacidade continua sendo o que o livro comporta.
+
+## 1.11 — Existe arbitragem de soma-dos-lados tomável?
+
+**Passa se, e somente se, a CONJUNÇÃO valer:**
+
+1. `episodios_que_sobrevivem_a_latencia >= 1` com `--latencia-ms 300`, em
+   qualquer das duas direções. Episódio é uma janela contígua de tempo em que
+   o par esteve lucrativo; instante **não** é episódio, porque o mesmo topo é
+   reafirmado dezenas de vezes por segundo.
+2. O lucro é **líquido**: `rate * (p(1-p))^exponent` em **cada** perna, com
+   `r`/`e` lidos do snapshot. As duas pernas são taker (`takerOnly=true`,
+   API_NOTES §15.1), então a taxa entra dobrada — ~3,5 c/par em p=0,50.
+3. A massa em `idade_do_outro_lado_nos_lucrativos_ms` **não** pode estar
+   concentrada acima de 300 ms.
+
+## Por que o item 3 existe, e por que ele é o que decide
+
+Os dois tokens são atualizados por mensagens **separadas**. Quando um lado
+anda, o outro ainda carrega o topo anterior até a própria mensagem chegar.
+Comparar os dois nesse intervalo produz uma soma que **não existiu em instante
+nenhum** — é o preço de antes contra o preço de agora.
+
+Medido na hora de 2026-08-22 04:00 UTC, com o corte frouxo de 2 s:
+
+| corte | cunhar e vender | comprar e fundir |
+|---|---|---|
+| frescor 2000 ms | 156 episódios | 151 episódios |
+| frescor 10 ms | **6** | **4** |
+
+96% do achado evapora ao exigir simultaneidade. Dos 156, **zero** tinham o
+outro lado mais fresco que 1 ms e **98 (63%)** tinham o outro livro com mais
+de 300 ms — mais velho que a latência do próprio bot.
+
+E os sobreviventes duram `p50 = p90 = max = 0,0 s`: cada um aparece em
+exatamente UM update de livro e some no seguinte. É por isso que o critério é
+sobrevivência à latência, e não contagem de instantes. Contar instantes
+publicaria 307 "oportunidades" por hora que ninguém consegue tomar.
+
+## O que um PASSA aqui obrigaria, e o que não
+
+Obrigaria a remedir **1.5** restrito aos episódios sobreviventes: a capacidade
+é `min(tamanho no topo dos dois lados)`, e a medição já publica
+`capacidade_usdc_no_melhor` por episódio. Não obrigaria nada sobre 1.1–1.4:
+esta rota não usa a âncora, não usa o preditor e não aposta em direção.
+
+**Medição:** `scripts/soma_dos_lados.py`. Passada 2 em memória constante (não
+guarda `BookTimeline`), então varre 72 h onde o backtest de fills precisou de
+fatias por dia.
+
+---
+
+# §2f — ONDE O REWARD PAGA (critério registrado em 2026-09-13)
+
+A rodada de 24 h fez 44.430 avaliações maker com motivo ÚNICO
+`sem_pool_de_reward`. O reward existe; não está onde este bot opera. §2f mede
+**onde ele está** e **quanto dele sobraria para nós**.
+
+## A correção de escala, primeiro
+
+O quadro dizia "940 mercados com pool, 6.766 USDC/dia", de uma amostra de
+2.500 mercados da Gamma. A lista autoritativa é do próprio CLOB
+(`GET /rewards/markets/current`, paginada pelo cursor até `LTE=`):
+
+| | amostra Gamma 08/09 | CLOB 13/09 |
+|---|---|---|
+| mercados com pool | 940 | **18.384** |
+| USDC/dia | 6.766 | **185.520** |
+
+Errado por 27×. A conclusão qualitativa (o programa vive fora das janelas
+curtas) sobrevive; a escala não.
+
+O pool é concentrado: 18 mercados pagam ≥1.000/dia, 210 pagam ≥100/dia, e a
+**mediana é 3 USDC/dia** — pool mediano não paga nem o gás.
+
+## 1.12 — Existe recorte onde a rota maker se paga?
+
+**Pool grande não é mercado bom.** O reward é rateado pro-rata pelo score
+(§15.3), então o que decide é `(nosso score / score total) × pool`. Um pool de
+1.000/dia dividido com 50 profissionais paga menos por share que um de 50/dia
+num livro vazio.
+
+**Passa se, e somente se, a CONJUNÇÃO valer:**
+
+1. **Persistência.** A cotação pontuaria em ≥50% das amostras do livro, por
+   mercado, ao longo de ≥2 h. Uma foto não decide — ver abaixo.
+2. **Receita.** ≥10 USDC/h somados, contando cada mercado pelo **mínimo**
+   observado nas amostras, não pela média.
+3. **Custo medido.** O markout **deste regime** medido — não transportado das
+   janelas de 5 min.
+
+O item 3 é o que ainda não existe, e por isso o 1.12 nasce **NÃO AVALIÁVEL**,
+não reprovado.
+
+## Por que o item 1 existe: a primeira rodada mentiu
+
+A primeira rodada deu 76%/dia sobre o capital. Absurdo na cara, e o motivo era
+o mesmo defeito do §2e: **foto instantânea de um livro que se move.**
+
+Duas rodadas seguidas, top 200:
+
+| | rodada A | rodada B |
+|---|---|---|
+| receita/h somada | 48,74 | 54,14 |
+| top 15 em comum | — | **9 de 15** |
+| trocaram de lado (paga ⇄ não paga) | — | 9 de 190 (5%) |
+
+Os DOIS maiores da rodada A valiam **zero** na B. Fui ao livro do maior
+(temperatura em Denver, pool 109/dia, `max_spread` 4,5 c): spread de **26
+centavos**, nenhuma ordem dentro de 4,5 c do meio. Nossa cotação não
+pontuaria nada. O que a rodada A pegou foi um instante em que o livro estava
+apertado.
+
+**O agregado, porém, é estável** (+11% entre as duas), e 65 de 190 mercados
+pagaram nas duas fotos — o oposto do §2e, onde 96% evaporou. Contando cada
+mercado pelo MENOR das duas rodadas:
+
+| recorte | receita | capital estimado | retorno |
+|---|---|---|---|
+| top 10 | 21,5 USDC/h | ~1.000 USDC | 51%/dia |
+| top 50 | 32,7 USDC/h | ~5.000 USDC | 16%/dia |
+| top 190 | 33,4 USDC/h | ~19.000 USDC | 4%/dia |
+
+## As quatro ressalvas que impedem chamar isso de lucro
+
+1. **É receita, nunca lucro.** O custo do maker é markout, e os −0,2838
+   c/share vêm de janelas Up/Down de 5 min de cripto. Temperatura em Denver
+   tem outra seleção adversa, **não medida**. Transportar aquele número seria
+   usá-lo fora do regime em que foi feito.
+2. **Capital é estimativa, não medida** — ~100 USDC por mercado para 100
+   shares nos dois lados.
+3. **O livro vem agregado por nível, não por ordem.** O portão `min_size` é
+   aplicado ao nível inteiro: dez ordens de 20 shares aparecem como um nível
+   de 200 e passam, enquanto nenhuma individual passaria. Mesma limitação
+   estrutural do B.4.
+4. **Os mercados são de outro mundo** — temperatura, Emmy, esports, petróleo.
+   Resolução por oráculo em dias. Nada do que foi medido em cripto de 5
+   minutos se transporta para cá sem remedir.
+
+**Medição:** `scripts/varredura_de_pools.py`, usando as MESMAS
+`score_do_livro` e `score_da_ordem` do backtest e do motor ao vivo.
