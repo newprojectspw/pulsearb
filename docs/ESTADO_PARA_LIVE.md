@@ -472,11 +472,11 @@ longos — ela vale zero por regra do programa, não por falta de fila.
    binário é pôr DUAS compras, uma em cada token, e cada uma imobiliza
    `tamanho × preço` — `tamanho × (1 − spread_nosso)` no total, sempre ≤
    `tamanho`. Sem cunhar nada. A estimativa de "~1.000 por mercado" era boa;
-   agora é conta, e o `conta_do_maker_nos_pools.py` da branch pode publicar
+   agora é conta, e o *conta_do_maker_nos_pools* da branch `soma-dos-lados-e-pools` pode publicar
    `capital_usdc` por mercado em vez de um `~`.
 2. **Custo de saída — o buraco.** O markout do 1.12 é de **5 s**
-   (`markout_dos_pools.py` chama `medir_markout` com os horizontes padrão
-   1/5/30 s). Cinco segundos medem seleção adversa num livro que se move;
+   (o *markout_dos_pools* da mesma branch chama `medir_markout` com os
+   horizontes padrão 1/5/30 s). Cinco segundos medem seleção adversa num livro que se move;
    não medem o que acontece quando UMA das duas compras executa num mercado
    que resolve por oráculo em dias e cujo livro tem 11 centavos de spread
    (o `LAC (-9.5)` da seção acima). Sair desse inventário custa **metade do
@@ -485,7 +485,7 @@ longos — ela vale zero por regra do programa, não por falta de fila.
    sobre receita: **não sobrevive a um custo de saída assim se as execuções
    de um lado só forem frequentes.** O que decide é `taxa de execução
    unilateral × (spread/2)` por mercado, e nada disso foi medido.
-   **Medição:** `markout_dos_pools.py --top 60 --duracao 4h` de novo, mas
+   **Medição:** o *markout_dos_pools* de novo (`--top 60 --duracao 4h`), mas
    com `medir_markout(janelas, horizontes_s=(5, 30, 300, 1800))` — o
    markout a 30 min é a proxy do custo até conseguir sair — e, no mesmo
    relatório, `spread_no_fill / 2` por execução. **Critério:** o 1.12 passa
