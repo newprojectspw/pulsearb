@@ -57,6 +57,7 @@ from typing import Any
 import httpx
 
 from pulsearb.analysis.measurements import CHAVE_CUSTO_DE_SAIDA
+from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
 
 DATA_API = "https://data-api.polymarket.com"
 
@@ -167,6 +168,67 @@ def _markout_adverso(markout: dict[str, Any] | None) -> tuple[float | None, int]
     return abs(min(0.0, float(media))), int(total.get("n") or 0)
 
 
+def _ler_entradas(
+    caminho_pools: str, caminho_markout: str | None
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Lê `--pools` (obrigatório) e `--markout` (opcional), contidos.
+
+    Os dois vêm de fora do programa e vão direto ao sistema de arquivos;
+    entregá-los ao `read_text` do jeito que chegam é travessia de caminho
+    (S2083). A contenção é a mesma do `--json` de escrita, no espelho de
+    leitura já usado pelo backtest e pelo SHADOW.
+
+    `--pools` inválido levanta `ValueError` (o `main` sai com 2). O markout é
+    opcional de propósito — o 1.6 ficou NÃO AVALIÁVEL por semanas justamente
+    por faltar este dado —, então ausente ou inválido avisa e segue `None`,
+    em vez de abortar a conta.
+    """
+    pools = json.loads(caminho_de_relatorio_lido(caminho_pools).read_text(encoding="utf-8"))
+    if not caminho_markout:
+        return pools, None
+    try:
+        entrada = caminho_de_relatorio_lido(caminho_markout)
+    except ValueError as erro:
+        print(f"aviso: {erro}", file=sys.stderr)
+        return pools, None
+    return pools, json.loads(entrada.read_text(encoding="utf-8"))
+
+
+def _linha_do_mercado(
+    m: dict[str, Any],
+    vol: dict[str, Any],
+    custo_c: float | None,
+    saida: tuple[float, float] | None,
+) -> dict[str, Any]:
+    """A conta de UM mercado: receita, custo no pior caso, custo de saída."""
+    receita = float(m["receita_usdc_por_hora_minima"])
+    shares_h = vol["shares_por_hora"]
+    custo_h = None if custo_c is None else round(shares_h * custo_c / 100.0, 4)
+    # Custo de saída por hora: execuções/h × max(markout 30 min, spread/2).
+    # `None` quando não medido — nunca zero.
+    custo_saida_h = None if saida is None else round(saida[1] * saida[0] / 100.0, 4)
+    return {
+        "pergunta": m.get("pergunta"),
+        "condition_id": m["condition_id"],
+        "daily_rate_usdc": m.get("daily_rate_usdc"),
+        "receita_usdc_por_hora": round(receita, 4),
+        "volume": vol,
+        "custo_maximo_usdc_por_hora": custo_h,
+        "liquido_no_pior_caso_usdc_por_hora": (
+            None if custo_h is None else round(receita - custo_h, 4)
+        ),
+        "custo_de_saida_usdc_por_hora": custo_saida_h,
+        "liquido_com_custo_de_saida_usdc_por_hora": (
+            None if custo_saida_h is None else round(receita - custo_saida_h, 4)
+        ),
+        # O número de SELEÇÃO: paga-se por unidade de fluxo que nos atropela,
+        # não por hora bruta.
+        "receita_por_mil_shares": (
+            round(receita / shares_h * 1000, 4) if shares_h > 0 else None
+        ),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="conta_do_maker_nos_pools")
     parser.add_argument("--pools", required=True)
@@ -175,30 +237,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
 
-    # `--pools` e `--markout` vêm de fora do programa e vão direto ao sistema
-    # de arquivos; entregá-los ao `read_text` do jeito que chegam é travessia
-    # de caminho (S2083). A contenção é a mesma do `--json` de escrita, no
-    # espelho de leitura já usado pelo backtest e pelo SHADOW.
-    from pulsearb.caminhos import caminho_de_relatorio_lido
-
     try:
-        entrada_pools = caminho_de_relatorio_lido(args.pools)
+        pools, markout = _ler_entradas(args.pools, args.markout)
     except ValueError as erro:
         print(str(erro), file=sys.stderr)
         return 2
-    pools = json.loads(entrada_pools.read_text(encoding="utf-8"))
-
-    markout = None
-    if args.markout:
-        # O markout é opcional de propósito — o 1.6 ficou NÃO AVALIÁVEL por
-        # semanas justamente por faltar este dado. Ausente ou inválido avisa e
-        # segue sem custo, em vez de abortar a conta.
-        try:
-            entrada_markout = caminho_de_relatorio_lido(args.markout)
-        except ValueError as erro:
-            print(f"aviso: {erro}", file=sys.stderr)
-        else:
-            markout = json.loads(entrada_markout.read_text(encoding="utf-8"))
     custo_c, n_exec = _markout_adverso(markout)
     horas_coleta = (markout or {}).get("regime", {}).get("horas_de_coleta")
     saida_por_mercado = _custo_de_saida(markout, horas_coleta)
@@ -220,41 +263,8 @@ def main(argv: list[str] | None = None) -> int:
             vol = volume_taker(http, m["condition_id"])
             if vol is None:
                 continue
-            receita = float(m["receita_usdc_por_hora_minima"])
-            shares_h = vol["shares_por_hora"]
-            custo_h = (
-                None if custo_c is None else round(shares_h * custo_c / 100.0, 4)
-            )
             saida = (saida_por_mercado or {}).get(str(m.get("slug")))
-            # Custo de saída por hora: execuções/h × max(markout 30 min, spread/2).
-            # `None` quando não medido — nunca zero.
-            custo_saida_h = (
-                None if saida is None else round(saida[1] * saida[0] / 100.0, 4)
-            )
-            linhas.append(
-                {
-                    "pergunta": m.get("pergunta"),
-                    "condition_id": m["condition_id"],
-                    "daily_rate_usdc": m.get("daily_rate_usdc"),
-                    "receita_usdc_por_hora": round(receita, 4),
-                    "volume": vol,
-                    "custo_maximo_usdc_por_hora": custo_h,
-                    "liquido_no_pior_caso_usdc_por_hora": (
-                        None if custo_h is None else round(receita - custo_h, 4)
-                    ),
-                    "custo_de_saida_usdc_por_hora": custo_saida_h,
-                    "liquido_com_custo_de_saida_usdc_por_hora": (
-                        None
-                        if custo_saida_h is None
-                        else round(receita - custo_saida_h, 4)
-                    ),
-                    # O número de SELEÇÃO: paga-se por unidade de fluxo que
-                    # nos atropela, não por hora bruta.
-                    "receita_por_mil_shares": (
-                        round(receita / shares_h * 1000, 4) if shares_h > 0 else None
-                    ),
-                }
-            )
+            linhas.append(_linha_do_mercado(m, vol, custo_c, saida))
             if i % 20 == 0:
                 print(f"  {i}/{len(alvo)} mercados…", file=sys.stderr)
 
@@ -344,8 +354,6 @@ def main(argv: list[str] | None = None) -> int:
 
     texto = json.dumps(relatorio, indent=2, ensure_ascii=False)
     if args.json:
-        from pulsearb.caminhos import caminho_de_escrita
-
         destino = caminho_de_escrita(args.json)
         destino.write_text(texto, encoding="utf-8")
         print(f"relatório gravado em {destino}")
