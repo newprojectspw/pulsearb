@@ -149,6 +149,28 @@ class RastreadorDeJanelas:
             if janela is not None:
                 self.janelas[mercado.condition_id] = janela
 
+    def absorver(self, janelas: list[JanelaAoVivo]) -> None:
+        """Absorve janelas JÁ MONTADAS, sem passar pelo `_converter`.
+
+        Existe para a rota maker sobre mercados de reward
+        (`markets/pools_de_reward.py`). O `_converter` exige `Up`/`Down` nos
+        outcomes e duração derivável do slug — dois requisitos do jogo TWAP
+        que "vai chover em Wellington" não cumpre e não deveria precisar
+        cumprir, porque a rota maker não prevê nada.
+
+        A segurança NÃO está aqui: está no `jogo`. Estas janelas chegam com
+        `JOGO_REWARD`, e o `MotorAoVivo` recusa jogo fora de
+        `config.jogos_operados` (default `{JOGO_TWAP}`) com
+        `PULOU_JOGO_NAO_OPERADO` — motivo nomeado. Um caminho que aceitasse
+        estas janelas no taker o faria apostar direção com um preditor cuja
+        âncora não existe para elas.
+
+        **Não aposenta nada**, pelo mesmo motivo que `atualizar`: quem
+        aposenta é quem liquida.
+        """
+        for janela in janelas:
+            self.janelas[janela.condition_id] = janela
+
     def _converter(
         self, mercado: DiscoveredMarket, *, agora_epoch: float
     ) -> JanelaAoVivo | None:
