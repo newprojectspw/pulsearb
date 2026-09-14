@@ -61,7 +61,9 @@ Environment=PULSEARB_MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=true
 # Âncora do microprice (quadro 4.0 (f)): DESLIGADA de propósito nesta unit.
 # Ela muda o PREÇO enviado e o recolher acima muda QUANDO a ordem sai — as
 # duas juntas na mesma rodada não se distinguem, e nenhuma das duas fica
-# medida. A rodada que medir a âncora liga só ela:
+# medida. A rodada que medir a âncora troca UMA pela outra, as duas linhas
+# juntas — ligar só a de baixo deixaria as duas ligadas:
+#   PULSEARB_MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=false
 #   PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE=1
 # Registro de risco PRÓPRIO: o registro do taker em SHADOW carrega perdas
 # sintéticas que armam o disjuntor e pausam o portão compartilhado — e o

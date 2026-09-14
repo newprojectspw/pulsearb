@@ -12,6 +12,7 @@ uma é testada sozinha:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -544,6 +545,76 @@ class TestAncoraDoMicroprice:
         )
         assert efeitos == []
         assert laco.motivos["estavel"] >= 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    def _com_topos(self, tamanho_do_bid, tamanho_do_ask):
+        """Livros com topo de tamanho escolhido — é o tamanho que move o
+        microprice, com o meio parado em 0,50."""
+        up = OrderBook(
+            asset_id="tok-up",
+            bids=[(0.49, tamanho_do_bid), (0.48, 500.0)],
+            asks=[(0.51, tamanho_do_ask), (0.52, 500.0)],
+        )
+        down = OrderBook(
+            asset_id="tok-down",
+            bids=[(0.49, tamanho_do_ask), (0.48, 500.0)],
+            asks=[(0.51, tamanho_do_bid), (0.52, 500.0)],
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return down if token_id == "tok-down" else up
+
+        return livro_de
+
+    async def test_o_teto_que_AFROUXA_tira_a_ordem_do_preco_de_fora(self, tmp_path):
+        """A catraca: o teto aperta, a ordem vai para fora, e quando o topo
+        engorda de novo ela NÃO volta — a mesma `Cotacao` vence, o atalho do
+        `estavel` a dá como igual, e ela fica no preço de fora pontuando menos
+        para sempre. Não é risco, é oportunidade: quem decide são a histerese
+        e o piso de ganho, mas o atalho nem os deixava opinar (revisão do
+        Codex, #127; caso achado por busca sobre o próprio código)."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        # topo magro do lado do bid: microprice 0,494, teto 0,484 → 0,48
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(5.0, 20.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        aberta = laco.abertas["btc-updown-4h-1"]
+        assert aberta.preco_up == pytest.approx(0.48)
+        assert aberta.cotacao.distancia_ticks == 1
+
+        # o topo equilibra: microprice 0,50, teto 0,49 — a MESMA cotação de 1
+        # tick agora caberia a 0,49, e a ordem a 0,48 não está acima do teto
+        efeitos = await laco.passo(
+            [_janela()], livro_de=self._com_topos(5.0, 5.0),
+            agora_epoch=1200.0, agora_ns=2,
+        )
+
+        # o atalho não fecha mais a porta: quem decide passa a ser o piso de
+        # ganho, e neste pool pequeno ele segura — o que é a política certa
+        assert laco.motivos.get("estavel", 0) == 0
+        assert laco.motivos["ganho_abaixo_do_piso"] == 1
+        assert efeitos == []
+
+    async def test_com_pool_que_paga_o_teto_que_afrouxa_reposiciona_de_fato(
+        self, tmp_path
+    ):
+        """O mesmo caso com um pool que paga: aí o ganho vence o piso e a
+        ordem volta para perto do meio. É o que a catraca impedia."""
+        janela = replace(_janela(), reward_daily_rate=1_000.0)
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo(
+            [janela], livro_de=self._com_topos(5.0, 20.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.48)
+
+        efeitos = await laco.passo(
+            [janela], livro_de=self._com_topos(5.0, 5.0),
+            agora_epoch=1200.0, agora_ns=2,
+        )
+
+        assert len(efeitos) == 1
         assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
 
     async def test_desligada_por_padrao(self, tmp_path):

@@ -122,13 +122,23 @@ MOTIVOS = (
 _EPS_PRECO = 1e-9
 
 
-def _acima_do_teto(
-    teto_ancorado: tuple[float, float] | None, aberta: CotacaoAberta
-) -> bool:
+@dataclass(frozen=True, slots=True)
+class AncoraEmVigor:
+    """O que a âncora do microprice impõe a ESTA passada.
+
+    `teto` é o preço máximo de cada perna, `(up, down)`; `precos` é onde a
+    candidata escolhida repousaria. As duas coisas são necessárias e dizem
+    coisas diferentes — uma é segurança, a outra é oportunidade.
+    """
+
+    teto: tuple[float, float]
+    precos: tuple[float, float]
+
+
+def _acima_do_teto(ancora: AncoraEmVigor | None, aberta: CotacaoAberta) -> bool:
     """A ordem que repousa ficou ACIMA do teto do microprice?
 
-    `teto_ancorado` é `(up, down)` e só vem com a âncora ligada; sem ela isto
-    é sempre falso e nada muda.
+    Sem âncora isto é sempre falso e nada muda.
 
     O microprice anda quando o TAMANHO no topo muda — sem o meio se mexer e
     sem a distância escolhida mudar. A ordem que repousa fica então acima do
@@ -137,11 +147,36 @@ def _acima_do_teto(
     jamais aprovaria a troca. Sem esta trava a âncora valeria só na
     colocação, que é o contrário do que ela é (revisão do Codex, #127).
     """
-    if teto_ancorado is None:
+    if ancora is None:
         return False
     return (
-        aberta.preco_up > teto_ancorado[0] + _EPS_PRECO
-        or aberta.preco_down > teto_ancorado[1] + _EPS_PRECO
+        aberta.preco_up > ancora.teto[0] + _EPS_PRECO
+        or aberta.preco_down > ancora.teto[1] + _EPS_PRECO
+    )
+
+
+def _a_ancora_mudou_o_preco(
+    ancora: AncoraEmVigor | None, aberta: CotacaoAberta
+) -> bool:
+    """A MESMA cotação repousaria hoje noutro preço?
+
+    O caso inverso do `_acima_do_teto`: o teto AFROUXA (o topo do livro
+    engorda de novo), a ordem que repousa continua abaixo dele — então não há
+    risco a corrigir — mas a candidata volta a caber mais perto do meio. Sem
+    isto o atalho do `estavel` daria a mesma `Cotacao` como igual e a ordem
+    ficaria presa no preço de fora para sempre: uma catraca que só anda para
+    longe do meio, pontuando menos a cada aperto (revisão do Codex, #127;
+    caso achado por busca sobre o próprio código, 186 combinações de topo).
+
+    Isto só ABRE o caminho. Aqui não há risco, só oportunidade — então quem
+    decide são a histerese de tempo e o piso de ganho, como em qualquer outra
+    troca.
+    """
+    if ancora is None:
+        return False
+    return (
+        abs(ancora.precos[0] - aberta.preco_up) > _EPS_PRECO
+        or abs(ancora.precos[1] - aberta.preco_down) > _EPS_PRECO
     )
 
 
@@ -153,7 +188,7 @@ def decidir(
     agora_epoch: float,
     ganho_minimo_usdc: float = GANHO_MINIMO_USDC,
     segundos_minimos: float = SEGUNDOS_MINIMOS_REPOUSADA,
-    teto_ancorado: tuple[float, float] | None = None,
+    ancora: AncoraEmVigor | None = None,
 ) -> Decisao:
     """Mexer na cotação que está no livro, ou deixar?
 
@@ -168,8 +203,9 @@ def decidir(
     "não pontua mais" precisa vencer "repousada há pouco tempo", senão uma
     cotação morta fica presa pelo tempo mínimo.
 
-    `teto_ancorado` é o preço máximo de cada perna sob a âncora do microprice,
-    `(up, down)`, e só vem quando ela está ligada — ver `_acima_do_teto`.
+    `ancora` é o que a âncora do microprice impõe a esta passada — o teto de
+    cada perna e o preço em que a candidata repousaria —, e só vem quando ela
+    está ligada. Ver `_acima_do_teto` e `_a_ancora_mudou_o_preco`.
     """
     if aberta is None:
         if melhor_agora is None:
@@ -201,7 +237,7 @@ def decidir(
     # — e pela mesma razão de ordem: deixá-la para o piso de ganho seria
     # deixá-la nunca, porque a candidata ancorada pontua menos que a que já
     # repousa.
-    if _acima_do_teto(teto_ancorado, aberta):
+    if _acima_do_teto(ancora, aberta):
         if melhor_agora is None:
             return Decisao(AcaoNaCotacao.CANCELAR, "acima_do_teto_do_microprice")
         return Decisao(
@@ -215,7 +251,9 @@ def decidir(
         # A atual pontua e não há candidata melhor calculada: ficar é o certo.
         return Decisao(AcaoNaCotacao.MANTER, "estavel")
 
-    if melhor_agora.cotacao == aberta.cotacao:
+    if melhor_agora.cotacao == aberta.cotacao and not _a_ancora_mudou_o_preco(
+        ancora, aberta
+    ):
         return Decisao(AcaoNaCotacao.MANTER, "estavel")
 
     if agora_epoch - aberta.desde_epoch < segundos_minimos:

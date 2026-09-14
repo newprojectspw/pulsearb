@@ -823,7 +823,7 @@ nenhum destes números serve sem decisão nova, com capital real conferido.
 | `maker.motivos` | `repousada` / `manter` aparecendo; **`sem_pool_de_reward` NÃO pode ser o motivo único** | motivo único `sem_pool_de_reward` = o opt-in não pegou (variável ausente na unit) |
 | `desde_o_relato` | andando a cada 60 s | congelado = 3.14 |
 | `maker.motivos.livro_andou_contra` | > 0 ao longo da primeira hora (o livro anda; a regra recolhe) | 0 com o livro andando = a variável `MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA` não pegou |
-| `maker.motivos.sem_microprice` | **ausente** nesta rodada — a âncora do microprice (4.0 (f)) está desligada aqui de propósito | aparecer quer dizer que alguém ligou `MAKER_TICKS_ABAIXO_DO_MICROPRICE` junto com o recolher: as duas na mesma rodada não se distinguem, e a rodada não mede nenhuma das duas |
+| `maker.motivos.sem_microprice` | **ausente** nesta rodada — a âncora do microprice (4.0 (f)) está desligada aqui de propósito | aparecer quer dizer que alguém ligou `MAKER_TICKS_ABAIXO_DO_MICROPRICE` sem desligar o recolher: as duas na mesma rodada não se distinguem, e a rodada não mede nenhuma das duas. A rodada da âncora troca uma pela outra — `MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=false` na mesma edição |
 | id das ordens no diário | todo id com prefixo `sombra-` | qualquer id sem `sombra-` é **PARAR AGORA**: `systemctl stop` e abrir issue — significaria ordem real |
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede

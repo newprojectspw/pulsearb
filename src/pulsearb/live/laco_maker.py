@@ -98,7 +98,13 @@ from pulsearb.live.execucao_maker import (
     aplicar_decisao,
 )
 from pulsearb.live.rastreador import JanelaAoVivo
-from pulsearb.live.repouso import AcaoNaCotacao, CotacaoAberta, Decisao, decidir
+from pulsearb.live.repouso import (
+    AcaoNaCotacao,
+    AncoraEmVigor,
+    CotacaoAberta,
+    Decisao,
+    decidir,
+)
 from pulsearb.obs.logging import get_logger
 from pulsearb.risk import OrdemPretendida
 
@@ -315,7 +321,7 @@ class LacoMaker:
             melhor,
             atual,
             agora_epoch=agora_epoch,
-            teto_ancorado=self._teto_ancorado(janela, ancora),
+            ancora=self._ancora_em_vigor(janela, melhor, meio=meio, ancora=ancora),
         )
         self._contar(decisao.motivo)
 
@@ -405,23 +411,39 @@ class LacoMaker:
             None,
         )
 
-    def _teto_ancorado(
-        self, janela: JanelaAoVivo, ancora: AncoraDoMicroprice | None
-    ) -> tuple[float, float] | None:
-        """O preço máximo de cada perna sob a âncora, `(up, down)`.
+    def _ancora_em_vigor(
+        self,
+        janela: JanelaAoVivo,
+        melhor,
+        *,
+        meio: float,
+        ancora: AncoraDoMicroprice | None,
+    ) -> AncoraEmVigor | None:
+        """O que a âncora impõe a esta passada: o teto de cada perna e o preço
+        em que a candidata repousaria.
 
-        A perna Down é um bid no livro dela, então o teto vem da âncora
-        espelhada — o mesmo espelho que monta a ordem.
+        Os preços saem da MESMA função que monta a ordem, para o número que o
+        repouso compara ser o número que iria para o fio. A perna Down é um
+        bid no livro dela, então teto e preço vêm da âncora espelhada.
         """
-        if ancora is None:
+        if ancora is None or melhor is None:
             return None
+        espelhada = ancora.no_livro_do_down()
         teto_up = ancora.limite(janela.tick_size, do_lado_bid=True)
-        teto_down = ancora.no_livro_do_down().limite(
-            janela.tick_size, do_lado_bid=True
-        )
+        teto_down = espelhada.limite(janela.tick_size, do_lado_bid=True)
         if teto_up is None or teto_down is None:
             return None
-        return teto_up, teto_down
+        return AncoraEmVigor(
+            teto=(teto_up, teto_down),
+            precos=(
+                self._ordem_da_cotacao(janela, meio=meio, ancora=ancora)(
+                    melhor.cotacao
+                ).preco_limite,
+                self._ordem_da_cotacao(janela, meio=meio, lado_up=False, ancora=ancora)(
+                    melhor.cotacao
+                ).preco_limite,
+            ),
+        )
 
     def _ancora_do_microprice(
         self, livro: OrderBook, livro_down: OrderBook | None
