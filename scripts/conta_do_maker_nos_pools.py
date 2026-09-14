@@ -112,26 +112,30 @@ def volume_taker(http: httpx.Client, condition_id: str) -> dict[str, Any] | None
 HORIZONTE_DE_SAIDA = "1800s"
 
 
-def _custo_de_saida(
-    markout: dict[str, Any] | None, horas: float | None
-) -> dict[str, tuple[float, float]] | None:
-    """Por mercado: (custo de saída em c/share, execuções por hora).
+def _custo_de_saida(markout: dict[str, Any] | None) -> dict[str, float] | None:
+    """Por mercado: o custo de SAÍDA em centavos por share.
 
-    O custo de saída é o MAIOR entre o markout adverso a 30 min e spread/2
-    no instante da execução — os dois medidos pelo `medir_markout` sobre as
-    mesmas execuções, no recorte `mercado=<slug>` que o `markout_dos_pools`
-    liga. É o termo que o 1.12 não media: uma execução de um lado só num
-    mercado que resolve em dias custa o que custa desfazê-la, não o que o
-    preço andou em 5 s.
+    É o MAIOR entre o markout adverso a 30 min e spread/2 no instante da
+    execução — os dois medidos pelo `medir_markout` sobre as mesmas
+    execuções, no recorte `mercado=<slug>` que o `markout_dos_pools` liga.
+    É o termo que o 1.12 não media: uma execução de um lado só num mercado
+    que resolve em dias custa o que custa desfazê-la, não o que o preço andou
+    em 5 s.
 
-    `None` — e não zero — quando o relatório não traz o recorte por mercado,
-    o horizonte de 30 min ou as horas de coleta: cada um desses ausentes
-    viraria "custo zero" e fecharia a conta a favor sem ter medido nada.
+    Devolve ¢/share, e SÓ isso: quem multiplica é a linha do mercado, pelo
+    fluxo taker em shares/h — a MESMA hipótese pessimista da conta de 5 s
+    (todo o fluxo nos atropela). Multiplicar por execuções/h seria ¢ por
+    trade-hora, e um fill de 1.000 shares contaria como um de uma (achado do
+    Codex no PR #114).
+
+    `None` — e não zero — quando o relatório não traz o recorte por mercado
+    ou o horizonte de 30 min: cada um desses ausentes viraria "custo zero" e
+    fecharia a conta a favor sem ter medido nada.
     """
-    if not markout or not horas or horas <= 0:
+    if not markout:
         return None
     tabela = markout.get("markout", {}).get("markout_centavos_por_share", {})
-    saida: dict[str, tuple[float, float]] = {}
+    saida: dict[str, float] = {}
     for recorte, dist in tabela.items():
         if not recorte.startswith("mercado=") or not isinstance(dist, dict):
             continue
@@ -140,10 +144,37 @@ def _custo_de_saida(
         if longo.get("media") is None or spread.get("media") is None:
             continue
         adverso_longo = abs(min(0.0, float(longo["media"])))
-        custo_c = max(adverso_longo, float(spread["media"]))
-        n = int(longo.get("n") or 0)
-        saida[recorte.removeprefix("mercado=")] = (custo_c, n / horas)
+        saida[recorte.removeprefix("mercado=")] = max(adverso_longo, float(spread["media"]))
     return saida or None
+
+
+def _soma_do_recorte(sub: list[dict[str, Any]]) -> dict[str, Any]:
+    """A soma de um recorte — e o líquido com custo de saída SÓ se TODOS os
+    mercados do recorte tiverem a medida. Somar os medidos e calar os outros
+    deixaria o recorte passar com um subconjunto (achado do Codex, PR #114)."""
+    sem_saida = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is None]
+    return {
+        "mercados": len(sub),
+        "receita_usdc_por_hora": round(sum(x["receita_usdc_por_hora"] for x in sub), 4),
+        "custo_maximo_usdc_por_hora": round(
+            sum(x["custo_maximo_usdc_por_hora"] for x in sub), 4
+        ),
+        "liquido_no_pior_caso_usdc_por_hora": round(
+            sum(x["liquido_no_pior_caso_usdc_por_hora"] for x in sub), 4
+        ),
+        "volume_shares_por_hora": round(
+            sum(x["volume"]["shares_por_hora"] for x in sub), 1
+        ),
+        # O critério de retorno a ✅ do 1.12: cobertura COMPLETA ou nada.
+        "mercados_sem_custo_de_saida": len(sem_saida),
+        "liquido_com_custo_de_saida_usdc_por_hora": (
+            None
+            if sem_saida or not sub
+            else round(
+                sum(x["liquido_com_custo_de_saida_usdc_por_hora"] for x in sub), 4
+            )
+        ),
+    }
 
 
 def _markout_adverso(markout: dict[str, Any] | None) -> tuple[float | None, int]:
@@ -198,15 +229,18 @@ def _linha_do_mercado(
     m: dict[str, Any],
     vol: dict[str, Any],
     custo_c: float | None,
-    saida: tuple[float, float] | None,
+    custo_saida_c: float | None,
 ) -> dict[str, Any]:
     """A conta de UM mercado: receita, custo no pior caso, custo de saída."""
     receita = float(m["receita_usdc_por_hora_minima"])
     shares_h = vol["shares_por_hora"]
     custo_h = None if custo_c is None else round(shares_h * custo_c / 100.0, 4)
-    # Custo de saída por hora: execuções/h × max(markout 30 min, spread/2).
-    # `None` quando não medido — nunca zero.
-    custo_saida_h = None if saida is None else round(saida[1] * saida[0] / 100.0, 4)
+    # Custo de saída por hora: o MESMO fluxo (shares/h do taker, hipótese
+    # pessimista de que todo ele nos atropela) × max(markout 30 min, spread/2)
+    # em ¢/share. `None` quando não medido — nunca zero.
+    custo_saida_h = (
+        None if custo_saida_c is None else round(shares_h * custo_saida_c / 100.0, 4)
+    )
     return {
         "pergunta": m.get("pergunta"),
         "condition_id": m["condition_id"],
@@ -243,8 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(erro), file=sys.stderr)
         return 2
     custo_c, n_exec = _markout_adverso(markout)
-    horas_coleta = (markout or {}).get("regime", {}).get("horas_de_coleta")
-    saida_por_mercado = _custo_de_saida(markout, horas_coleta)
+    saida_por_mercado = _custo_de_saida(markout)
 
     persistentes = [
         m
@@ -272,32 +305,7 @@ def main(argv: list[str] | None = None) -> int:
     com_conta.sort(key=lambda x: -x["liquido_no_pior_caso_usdc_por_hora"])
 
     def _soma(quantos: int) -> dict[str, Any]:
-        sub = com_conta[:quantos]
-        com_saida = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is not None]
-        return {
-            # O critério de retorno a ✅ do 1.12: só soma quem TEM a medida.
-            "mercados_com_custo_de_saida": len(com_saida),
-            "liquido_com_custo_de_saida_usdc_por_hora": (
-                None
-                if not com_saida
-                else round(
-                    sum(x["liquido_com_custo_de_saida_usdc_por_hora"] for x in com_saida), 4
-                )
-            ),
-            "mercados": len(sub),
-            "receita_usdc_por_hora": round(
-                sum(x["receita_usdc_por_hora"] for x in sub), 4
-            ),
-            "custo_maximo_usdc_por_hora": round(
-                sum(x["custo_maximo_usdc_por_hora"] for x in sub), 4
-            ),
-            "liquido_no_pior_caso_usdc_por_hora": round(
-                sum(x["liquido_no_pior_caso_usdc_por_hora"] for x in sub), 4
-            ),
-            "volume_shares_por_hora": round(
-                sum(x["volume"]["shares_por_hora"] for x in sub), 1
-            ),
-        }
+        return _soma_do_recorte(com_conta[:quantos])
 
     relatorio = {
         "markout_usado": {
@@ -315,12 +323,16 @@ def main(argv: list[str] | None = None) -> int:
         "custo_de_saida": {
             "ausente": saida_por_mercado is None,
             "horizonte": HORIZONTE_DE_SAIDA,
-            "regra": "max(|markout adverso a 30 min|, spread/2 no fill) x execucoes/h",
+            "regra": (
+                "max(|markout adverso a 30 min|, spread/2 no fill) em c/share "
+                "x shares/h do fluxo taker (mesma hipotese pessimista da conta de 5 s); "
+                "recorte so soma com cobertura COMPLETA"
+            ),
             "nota": (
                 "É o termo que o 1.12 não media. Ausente aqui significa que o "
-                "markout veio sem recorte por mercado, sem o horizonte de 30 "
-                "min ou sem horas_de_coleta — rode markout_dos_pools.py da "
-                "versão de 2026-09-14 ou posterior."
+                "markout veio sem recorte por mercado ou sem o horizonte de 30 "
+                "min — rode markout_dos_pools.py da versão de 2026-09-14 ou "
+                "posterior."
             ),
         },
         "mercados_avaliados": len(linhas),
@@ -379,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             liq = s["liquido_com_custo_de_saida_usdc_por_hora"]
             print(
                 f"  {nome:<10} líquido COM custo de saída: {liq!s:>10} USDC/h "
-                f"({s['mercados_com_custo_de_saida']} mercados medidos)"
+                f"({s['mercados_sem_custo_de_saida']} de {s['mercados']} sem medida)"
             )
     print()
     cab = ("mercado", "receita/h", "custo/h", "liq/h", "USDC/1k sh")

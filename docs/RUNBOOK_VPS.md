@@ -802,6 +802,19 @@ A unit já traz `PULSEARB_MODE=SHADOW` e `PULSEARB_DESCOBRIR_POOLS_DE_REWARD=tru
 anexa ao diário `data/diarios/shadow-maker-4-2.jsonl`: um restart continua a
 mesma rodada.
 
+**E traz o perfil do ensaio por escrito**, porque com os defaults do projeto
+(os do taker: 5 shares, tetos 5/15/50 USDC, spread 0,04) esta rota não cota
+nada — a descoberta descarta todo pool cujo `rewards_min_size` passa de 5, e
+o portão recusa 1.000 shares. Os valores são os das rodadas r4–r8:
+`TAMANHO_DA_COTACAO_MAKER_SHARES=1000`, `TOP_DE_POOLS_DE_REWARD=60`,
+`RISK__STAKE_MAX_POR_TRADE_USDC=1000`, `RISK__STAKE_MAX_POR_JANELA_USDC=2000`,
+`RISK__EXPOSICAO_MAX_USDC=120000`, `RISK__POSICOES_MAX_ABERTAS=120`,
+`RISK__SPREAD_MAXIMO=0.06`, e registro de risco próprio
+(`RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_4_2.json`), para as
+perdas sintéticas do taker não pausarem o maker. **Valem só em SHADOW** —
+o bot não sobe tetos sozinho; a unit é o operador escrevendo. Para LIVE
+nenhum destes números serve sem decisão nova, com capital real conferido.
+
 ### 10.1. O que o relato de 60 s tem de mostrar — na primeira hora
 
 | campo | esperado | se não |

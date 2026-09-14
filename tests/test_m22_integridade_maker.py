@@ -717,3 +717,13 @@ def test_recorte_por_janela_e_opt_in():
     assert not any(k.startswith("mercado=") for k in sem["markout_centavos_por_share"])
     chaves = [k for k in com["markout_centavos_por_share"] if k.startswith("mercado=")]
     assert chaves == [f"mercado={janela.slug}"]
+
+
+def test_horizonte_alem_do_fim_da_coleta_nao_conta():
+    """Snapshots em t=0 e t=5 s; horizontes 5 s e 30 s. O de 30 s NÃO tem
+    livro — `at()` devolveria o de 5 s vestido de 30 s. Achado do Codex no
+    PR #114."""
+    resultado = medir_markout([_janela_com_trade("BUY", 0.55)], horizontes_s=(5.0, 30.0))
+    total = resultado["markout_centavos_por_share"]["total"]
+    assert total["5s"]["n"] == 1
+    assert total["30s"]["n"] == 0

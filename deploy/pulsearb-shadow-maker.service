@@ -32,11 +32,32 @@ WorkingDirectory=/opt/pulsearb
 
 # Mesma razão do recorder: ProtectSystem=strict exige a pasta existente ANTES
 # de o Python subir (226/NAMESPACE se não existir).
-ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios /opt/pulsearb/data/risco
 ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
 
 Environment=PULSEARB_MODE=SHADOW
 Environment=PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true
+
+# O PERFIL DO ENSAIO, escrito aqui de propósito. Os defaults do projeto são
+# os do taker (5 shares, 5/15/50 USDC, spread 0,04) e com eles esta rota não
+# cota NADA: a descoberta descarta todo pool cujo rewards_min_size passa de 5,
+# e o portão de risco recusa uma cotação de 1.000 shares. O bot não sobe os
+# tetos sozinho (quadro, 4.0 (c)); quem sobe é o operador, e este arquivo é o
+# operador escrevendo. São os valores das rodadas r4–r8 de 2026-09-14. Vale
+# SÓ em SHADOW — nenhum destes números autoriza dinheiro: MODE=SHADOW acima
+# troca o cliente pelo sombra, e a trava tripla do LIVE segue fechada.
+Environment=PULSEARB_TAMANHO_DA_COTACAO_MAKER_SHARES=1000
+Environment=PULSEARB_TOP_DE_POOLS_DE_REWARD=60
+Environment=PULSEARB_RISK__STAKE_MAX_POR_TRADE_USDC=1000
+Environment=PULSEARB_RISK__STAKE_MAX_POR_JANELA_USDC=2000
+Environment=PULSEARB_RISK__EXPOSICAO_MAX_USDC=120000
+Environment=PULSEARB_RISK__POSICOES_MAX_ABERTAS=120
+Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
+# Registro de risco PRÓPRIO: o registro do taker em SHADOW carrega perdas
+# sintéticas que armam o disjuntor e pausam o portão compartilhado — e o
+# maker entra pelo mesmo portão (achados das rodadas r2 e r6). O modo sufixa
+# o nome (`.shadow.json`).
+Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_4_2.json
 
 ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-4-2.jsonl
 

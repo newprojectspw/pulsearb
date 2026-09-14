@@ -507,7 +507,13 @@ def medir_markout(
             )
             amostra: dict[str, float] = {}
             for horizonte in horizontes_s:
-                depois = _primeiro_book(timelines, ts_ns + int(horizonte * 1e9))
+                # Só conta o horizonte se a gravação COBRE o instante-alvo:
+                # `at()` devolve o último snapshot ≤ alvo, e perto do fim da
+                # coleta isso seria um livro de minutos atrás vestido de
+                # "30 min depois" — o markout longo sairia curto.
+                depois = _primeiro_book(
+                    timelines, ts_ns + int(horizonte * 1e9), exigir_cobertura=True
+                )
                 if depois is None or depois.mid is None:
                     continue
                 # Sinal do ponto de vista de quem FORNECEU a liquidez.
@@ -552,13 +558,22 @@ def medir_markout(
     }
 
 
-def _primeiro_book(timelines: list[Any], ts_ns: int) -> Any:
+def _primeiro_book(
+    timelines: list[Any], ts_ns: int, *, exigir_cobertura: bool = False
+) -> Any:
     """O book de qualquer timeline da janela naquele instante.
 
     As duas pernas (Up e Down) são espelhos uma da outra; para medir
     deslocamento do meio, a primeira que tiver snapshot serve.
+
+    `exigir_cobertura=True` recusa a timeline cujo ÚLTIMO snapshot é anterior
+    a `ts_ns`: o livro "naquele instante" só existe se a gravação chegou até
+    lá. Sem isso, um horizonte além do fim da coleta viraria o último livro
+    visto, com carimbo de futuro.
     """
     for timeline in timelines:
+        if exigir_cobertura and (not timeline.ts or timeline.ts[-1] < ts_ns):
+            continue
         book = timeline.at(ts_ns)
         if book is not None:
             return book
