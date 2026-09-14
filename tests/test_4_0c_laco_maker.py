@@ -657,6 +657,45 @@ class TestAncoraDoMicroprice:
         laco = _laco(tmp_path)
         assert laco.ticks_abaixo_do_microprice is None
 
+    async def test_sem_microprice_a_caixa_conta_e_o_portao_ainda_tira_do_livro(
+        self, tmp_path
+    ):
+        """Faltar o microprice impede COTAR, e só. A passada tem de seguir: a
+        caixa conta o repouso (senão a falta trunca em silêncio a medida que
+        a rodada existe para fazer) e o portão tem de poder tirar do livro o
+        que já está lá — um disjuntor que armasse durante a falta não a
+        tiraria. É a propriedade que o 4.0 registra ter custado caro para
+        achar (revisão do Codex, #127)."""
+        livro_de, _ = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        portao = _PortaoDuble()
+        laco = _laco(tmp_path, portao=portao, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert len(laco.abertas) == 1
+
+        up = OrderBook(asset_id="tok-up", bids=[(0.49, 100.0)], asks=[(0.51, 900.0)])
+        so_bids = OrderBook(asset_id="tok-down", bids=[(0.49, 900.0)], asks=[])
+
+        def sem_o_ask_do_down(token_id, *, agora_ns):
+            return so_bids if token_id == "tok-down" else up
+
+        # com o portão aberto: não cota, conta o motivo, e a caixa acerta o
+        # tempo repousado
+        await laco.passo(
+            [_janela()], livro_de=sem_o_ask_do_down, agora_epoch=1015.0, agora_ns=2
+        )
+        assert laco.motivos["sem_microprice"] == 1
+        assert len(laco.abertas) == 1
+        assert laco.caixa.acertos == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(15.0)
+
+        # o disjuntor arma DURANTE a falta: a ordem sai
+        portao.decisao = SimpleNamespace(pode=False, motivo="kill_acionado")
+        efeitos = await laco.passo(
+            [_janela()], livro_de=sem_o_ask_do_down, agora_epoch=1030.0, agora_ns=3
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["portao:kill_acionado"] == 1
+
     async def test_sem_microprice_nao_cota_e_nao_cancela_o_que_repousa(self, tmp_path):
         """Com a âncora ligada e o livro do Down de um lado só, não há como
         avaliar a regra — e cotar sob uma regra que não se aplicou é o que a

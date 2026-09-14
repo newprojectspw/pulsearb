@@ -88,6 +88,7 @@ from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
     AncoraDoMicroprice,
     Cotacao,
+    RetornoEstimado,
     escolher_cotacao,
     estimar_retorno_repousando,
 )
@@ -139,6 +140,10 @@ class _DadosDaPassada:
     meio: float
     horas: float
     ancora: AncoraDoMicroprice | None
+    #: A âncora está ligada e o microprice de alguma perna não está à mão.
+    #: Não se COTA sob uma regra que não se conseguiu avaliar — mas a passada
+    #: continua, porque o que já repousa tem de ser contado e reavaliado.
+    sem_microprice: bool = False
 
 
 @dataclass
@@ -296,12 +301,7 @@ class LacoMaker:
         livro, livro_down = dados.livro, dados.livro_down
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
-        # Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
-        candidatas = [
-            Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
-            for t in self.grade_de_ticks
-        ]
-        melhor = escolher_cotacao(candidatas, livro, params, horas=horas, ancora=ancora)
+        melhor = self._melhor_candidata(dados, params)
 
         atual = None
         if aberta is not None:
@@ -366,6 +366,31 @@ class LacoMaker:
             ancora=ancora,
         )
 
+    def _melhor_candidata(
+        self, dados: _DadosDaPassada, params: ParametrosDeReward
+    ) -> RetornoEstimado | None:
+        """A melhor da grade para este livro, ou `None`.
+
+        `None` também quando a âncora está ligada e o microprice não está à
+        mão: aí não se COTA — cotar sob uma regra que não se conseguiu avaliar
+        é não ter a regra —, e só isso. Quem já repousa segue sendo contado
+        pela caixa e reavaliado pelo portão, senão um disjuntor que armasse
+        durante a falta não tiraria a ordem do livro (revisão do Codex, #127;
+        é a propriedade que o 4.0 registra ter custado caro para achar).
+
+        Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
+        """
+        if dados.sem_microprice:
+            self._contar("sem_microprice")
+            return None
+        candidatas = [
+            Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
+            for t in self.grade_de_ticks
+        ]
+        return escolher_cotacao(
+            candidatas, dados.livro, params, horas=dados.horas, ancora=dados.ancora
+        )
+
     def _dados_da_passada(
         self,
         janela: JanelaAoVivo,
@@ -397,9 +422,7 @@ class LacoMaker:
         # o espelho do Up (a revisão do #126 mostrou que os dois não são
         # complementares).
         livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
-        ancora, recusa = self._ancora_do_microprice(livro, livro_down)
-        if recusa is not None:
-            return None, recusa
+        ancora, sem_microprice = self._ancora_do_microprice(livro, livro_down)
         return (
             _DadosDaPassada(
                 livro=livro,
@@ -407,6 +430,7 @@ class LacoMaker:
                 meio=meio,
                 horas=horas,
                 ancora=ancora,
+                sem_microprice=sem_microprice,
             ),
             None,
         )
@@ -452,33 +476,33 @@ class LacoMaker:
 
     def _ancora_do_microprice(
         self, livro: OrderBook, livro_down: OrderBook | None
-    ) -> tuple[AncoraDoMicroprice | None, str | None]:
-        """A âncora desta passada, ou o motivo de não cotar.
+    ) -> tuple[AncoraDoMicroprice | None, bool]:
+        """A âncora desta passada, e se ela está ligada mas indisponível.
 
-        Devolve `(None, None)` com a regra desligada — é o caminho de sempre.
-        Com ela ligada e o microprice de alguma perna indisponível, devolve o
-        MOTIVO: falha fechada, porque a âncora é uma regra de colocação e
-        cotar sem conseguir avaliá-la é cotar sob uma regra que não se
-        aplicou. Quem chama não cancela o que já repousa — é falta de dado
-        nosso, como o `livro_indisponivel`.
+        Devolve `(None, False)` com a regra desligada — o caminho de sempre.
+        Com ela ligada e o microprice de alguma perna fora de alcance, devolve
+        `(None, True)`: falha fechada para COLOCAR, porque cotar sob uma regra
+        que não se conseguiu avaliar é não ter a regra. Só isso — a passada
+        segue, e quem já repousa continua a ser contado e reavaliado pelo
+        portão (revisão do Codex, #127).
 
         Cada perna é ancorada pelo microprice do LIVRO DELA: os dois livros
         não são complementares (revisão do #126), e o espelho do Up daria
         âncora sintética contra um livro real.
         """
         if self.ticks_abaixo_do_microprice is None:
-            return None, None
+            return None, False
         micro_up = livro.microprice
         micro_down = livro_down.microprice if livro_down is not None else None
         if micro_up is None or micro_down is None:
-            return None, "sem_microprice"
+            return None, True
         return (
             AncoraDoMicroprice(
                 bid=micro_up,
                 ask=1.0 - micro_down,
                 ticks=self.ticks_abaixo_do_microprice,
             ),
-            None,
+            False,
         )
 
     def _perna_down_sem_bids(
