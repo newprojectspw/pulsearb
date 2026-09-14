@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from pulsearb.backtest.book import OrderBook
 from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
 from pulsearb.live.execucao_maker import ResultadoDaAcao
@@ -464,6 +466,20 @@ class TestRecolherQuandoOLivroAnda:
         caiu = _livro_com_bids((0.38, 500.0), asks=((0.60, 500.0),))
         assert len(await laco.recolher_se_o_livro_andou(_livro_de(caiu), agora_ns=5)) == 1
         assert laco.abertas == {}
+
+    async def test_mercado_que_anda_no_primeiro_segundo_e_recolhido_na_primeira_observacao(
+        self, tmp_path
+    ):
+        """A referência nasce na COLOCAÇÃO (livro 0,49/0,51 → referência 0,49),
+        não na primeira observação do sono: se o mercado cair para 0,47 dentro
+        do primeiro segundo, o primeiro poll já recolhe (revisão do Codex, #126)."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        chave = ("btc-updown-4h-1", int(laco.abertas["btc-updown-4h-1"].desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave][0] == pytest.approx(0.49)
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=2
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
 
     async def test_lado_de_bids_vazio_recolhe(self, tmp_path):
         laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)

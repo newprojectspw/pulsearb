@@ -1718,6 +1718,28 @@ class TestOMarkoutFechaEntreAsPassadas:
         assert chamadas == []
         assert relogio[0] == pytest.approx(102.0)
 
+    def test_diario_que_nao_grava_no_recolher_derruba_a_rodada(self, tmp_path, monkeypatch):
+        """OSError no recolher entre passadas segue o MESMO caminho fatal da
+        passada do maker (`io_do_diario_maker`): `falhou` marcado e a exceção
+        sobe — nunca engolida com a rodada seguindo (revisão do Codex, #126)."""
+        processo, _ = self._processo(tmp_path, pendentes=[])
+
+        async def recolher(livro_de, *, agora_ns):
+            raise OSError("No space left on device")
+
+        processo.laco_maker.recolhe_quando_o_livro_anda = True
+        processo.laco_maker.recolher_se_o_livro_andou = recolher
+        relogio = [100.0]
+
+        async def _sleep(s):
+            relogio[0] += s
+
+        monkeypatch.setattr("pulsearb.live.shadow.asyncio.sleep", _sleep)
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: relogio[0])
+        with pytest.raises(OSError):
+            asyncio.run(processo._dormir_medindo_markout(2.0, deadline=1_000.0))
+        assert processo.falhou is not None and processo.falhou.startswith("io_do_diario_maker")
+
     def test_o_prazo_do_run_manda_mais_que_a_cadencia(self, tmp_path, monkeypatch):
         processo, _ = self._processo(tmp_path, pendentes=[])
         relogio = [100.0]

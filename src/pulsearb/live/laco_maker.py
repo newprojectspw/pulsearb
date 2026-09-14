@@ -320,7 +320,7 @@ class LacoMaker:
             return None
 
         return await self._executar(
-            decisao, janela, meio=meio, agora_epoch=agora_epoch
+            decisao, janela, meio=meio, agora_epoch=agora_epoch, livro=livro
         )
 
     def _portao_recusa(
@@ -368,6 +368,7 @@ class LacoMaker:
         *,
         meio: float,
         agora_epoch: float,
+        livro: OrderBook | None = None,
     ) -> Efeito:
         efeito = await aplicar_decisao(
             decisao,
@@ -379,6 +380,26 @@ class LacoMaker:
             agora_epoch=agora_epoch,
         )
         self._guardar(janela.slug, efeito)
+        aberta = self.abertas.get(janela.slug)
+        if aberta is not None and livro is not None:
+            # A referência do recolher nasce AQUI, do livro que colocou a
+            # cotação — não na primeira observação do sono, que perderia um
+            # mercado que andou dentro do primeiro segundo (revisão do Codex,
+            # #126). A perna Down é lida no espelho do livro do Up: o melhor
+            # bid do Down é `1 − melhor ask do Up`.
+            chave = (janela.slug, int(aberta.desde_epoch * 1e6))
+            if chave not in self._referencia_do_recolher:
+                melhor_bid_down = (
+                    1.0 - livro.best_ask if livro.best_ask is not None else None
+                )
+                self._referencia_do_recolher[chave] = (
+                    min(aberta.preco_up, livro.best_bid)
+                    if livro.best_bid is not None
+                    else aberta.preco_up,
+                    min(aberta.preco_down, melhor_bid_down)
+                    if melhor_bid_down is not None
+                    else aberta.preco_down,
+                )
         return efeito
 
     async def recolher_se_o_livro_andou(self, livro_de, *, agora_ns: int) -> list[Efeito]:
@@ -413,9 +434,8 @@ class LacoMaker:
             pernas = ((0, tokens[0], aberta.preco_up), (1, tokens[1], aberta.preco_down))
             livros = [livro_de(token_id, agora_ns=agora_ns) for _, token_id, _ in pernas]
             if chave not in self._referencia_do_recolher:
-                # Primeira observação desta cotação: a referência é o menor
-                # entre o nosso preço e o melhor bid do mercado agora. Não
-                # decide nada — só marca de onde o mercado pode cair.
+                # Cotação sem referência (colocada sem livro à mão): marca
+                # agora e não decide. O caminho normal a marca na colocação.
                 self._referencia_do_recolher[chave] = tuple(
                     _referencia(livros[i], preco) for i, _, preco in pernas
                 )

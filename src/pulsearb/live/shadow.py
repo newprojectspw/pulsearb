@@ -565,6 +565,13 @@ class ProcessoShadow:
                     await self.laco_maker.recolher_se_o_livro_andou(
                         self._livro_para_o_maker, agora_ns=time.time_ns()
                     )
+                except OSError as erro:
+                    # O MESMO caminho fatal da passada do maker: diário que não
+                    # grava é rodada que não vale, e o cliente sombra já tirou a
+                    # ordem da memória antes de gravar o cancelamento — seguir
+                    # deixaria a medição inconsistente com `falhou == None`.
+                    self.falhou = f"io_do_diario_maker: {erro}"
+                    raise
                 except Exception:
                     log.exception("recolher entre passadas falhou")
 
