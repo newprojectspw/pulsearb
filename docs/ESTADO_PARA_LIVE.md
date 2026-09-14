@@ -1355,6 +1355,19 @@ SonarCloud, com `permissions: contents: read` não resolvendo — não voltou a
 aparecer. Fica o registro da hipótese nunca testada: supply-chain,
 `actions/checkout@v5` e `actions/setup-python@v6` não fixadas por commit SHA.
 
+**A contenção de LEITURA ganhou raiz própria em 2026-09-14.** A mensagem de
+erro de `caminho_de_relatorio_lido` mandava definir
+`PULSEARB_BACKTEST_OUTPUT_ROOT` para ler de outra raiz — variável de SAÍDA
+liberando leitura, e liberando junto toda `caminho_de_escrita` do mesmo
+processo, porque as duas partilhavam `raiz_de_saida()`. Agora
+`PULSEARB_RELATORIOS_INPUT_ROOT` abre a leitura sem abrir a escrita (teste
+confere os dois lados), e ausente cai na raiz de saída, que é o caso comum.
+No mesmo commit `scripts/resumo_m2.py` deixou de ter a sua cópia da regra
+(com `is_relative_to`, que o motor de taint do SonarCloud não reconhece) e
+passou a chamar a função compartilhada — uma contenção, não duas. Achado
+revisando o patch S2083 dos scripts novos da branch `soma-dos-lados-e-pools`,
+que herdam a mesma mensagem e passam a herdar a variável certa ao rebasear.
+
 ---
 
 ## Quando é OK avançar

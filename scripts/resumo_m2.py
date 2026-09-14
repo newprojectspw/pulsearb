@@ -39,11 +39,7 @@ from itertools import pairwise
 from typing import Any, NamedTuple
 
 from pulsearb.backtest.report import MINIMO_DE_FAIXAS
-from pulsearb.caminhos import (
-    ENV_RAIZ_DE_SAIDA,
-    PADRAO_SAIDA,
-    raiz_de_saida,
-)
+from pulsearb.caminhos import caminho_de_relatorio_lido
 from pulsearb.engine.decisao import BASE_DO_ENCOLHIMENTO
 
 # Os limiares do VEREDITO_M2 "Regras de decisão", escritos ANTES dos números.
@@ -66,31 +62,20 @@ NAO_AVALIAVEL = "NAO AVALIAVEL"
 def caminho_do_relatorio(bruto: str):
     """Monta o caminho do relatório a partir da raiz permitida.
 
-    Mesmo tratamento que o `--json` recebeu no M2.5, e pela mesma razão
-    registrada lá: conferir o caminho DEPOIS de montá-lo continua entregando
-    a string de fora ao sistema de arquivos, e a análise de fluxo do
-    SonarCloud aponta isso — com razão. Validar ANTES contra um padrão fixo e
-    só então montar a partir de uma raiz confiável não deixa o valor externo
-    chegar ao disco em forma nenhuma.
+    É o `caminho_de_relatorio_lido` de `pulsearb.caminhos` — a MESMA
+    contenção que o backtest e o SHADOW usam para ler relatório. Até
+    2026-09-14 este arquivo tinha uma cópia própria da regra, com
+    `is_relative_to` (que o motor de taint do SonarCloud não reconhece) e
+    mandando definir a variável de SAÍDA para ler. Duas cópias da mesma
+    contenção divergem na primeira edição; esta é a única.
 
-    O relatório é gravado sob essa mesma raiz pelo `--json`, então ler dali é
-    simétrico: quem mudou a raiz para gravar usa a mesma variável para ler.
+    `SystemExit` em vez de `ValueError` porque quem chama é o `main` de um
+    script: a mensagem já diz o que está errado e o que fazer.
     """
-    relativo = bruto.strip().removeprefix("./")
-    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
-        raise SystemExit(
-            f"nome de relatório inválido: {bruto!r}\n"
-            "esperado: caminho relativo terminando em .json, com letras, "
-            "dígitos, '-', '_' e '.' (ex.: relatorios/hora_1900.json).\n"
-            f"para ler de outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
-        )
-    raiz = raiz_de_saida()
-    resolvido = (raiz / relativo).resolve(strict=False)
-    if not resolvido.is_relative_to(raiz.resolve(strict=False)):
-        raise SystemExit(f"relatório fora da raiz permitida: {resolvido}")
-    if not resolvido.is_file():
-        raise SystemExit(f"relatório não encontrado: {resolvido}")
-    return resolvido
+    try:
+        return caminho_de_relatorio_lido(bruto)
+    except ValueError as erro:
+        raise SystemExit(str(erro)) from None
 
 
 class Criterio(NamedTuple):

@@ -431,6 +431,54 @@ def test_curva_inexistente_diz_o_que_esta_errado(tmp_path, monkeypatch):
         caminho_de_relatorio_lido("relatorios/nao-existe.json")
 
 
+def test_raiz_de_leitura_abre_a_leitura_sem_abrir_a_escrita(tmp_path, monkeypatch):
+    """A variável de LEITURA não pode ser a de escrita: quem a define para ler
+    um relatório copiado de outra máquina não está autorizando `--json` a
+    gravar lá — e antes de 2026-09-14 estava, sem saber."""
+    from pulsearb.caminhos import (
+        ENV_RAIZ_DE_LEITURA,
+        ENV_RAIZ_DE_SAIDA,
+        caminho_de_escrita,
+        caminho_de_relatorio_lido,
+    )
+
+    leitura = tmp_path / "copiados"
+    leitura.mkdir()
+    (leitura / "M2.json").write_text("{}", encoding="utf-8")
+    escrita = tmp_path / "trabalho"
+    escrita.mkdir()
+
+    monkeypatch.setenv(ENV_RAIZ_DE_LEITURA, str(leitura))
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(escrita))
+
+    assert caminho_de_relatorio_lido("M2.json") == (leitura / "M2.json").resolve()
+    # a escrita continua na raiz de saída, não na de leitura
+    assert caminho_de_escrita("saida.json") == (escrita / "saida.json").resolve()
+
+
+def test_sem_raiz_de_leitura_le_da_raiz_de_saida(tmp_path, monkeypatch):
+    """O caso comum — ler o que o próprio `--json` gravou — não pede variável."""
+    from pulsearb.caminhos import (
+        ENV_RAIZ_DE_LEITURA,
+        ENV_RAIZ_DE_SAIDA,
+        caminho_de_relatorio_lido,
+    )
+
+    monkeypatch.delenv(ENV_RAIZ_DE_LEITURA, raising=False)
+    monkeypatch.setenv(ENV_RAIZ_DE_SAIDA, str(tmp_path))
+    (tmp_path / "r.json").write_text("{}", encoding="utf-8")
+
+    assert caminho_de_relatorio_lido("r.json") == (tmp_path / "r.json").resolve()
+
+
+def test_erro_de_leitura_nomeia_a_variavel_de_leitura(tmp_path, monkeypatch):
+    from pulsearb.caminhos import ENV_RAIZ_DE_LEITURA, caminho_de_relatorio_lido
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match=ENV_RAIZ_DE_LEITURA):
+        caminho_de_relatorio_lido("/etc/passwd.json")
+
+
 def test_relatorio_sem_curva_avaliavel_falha_alto(tmp_path, monkeypatch):
     """Pedir o modelo medido e não ter curva não pode virar modelo derivado.
 
