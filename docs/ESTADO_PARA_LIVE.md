@@ -789,9 +789,17 @@ Três números que o instrumento produziu e que valem por si:
    pagou 19 vezes. É cara ou coroa com 25 lançamentos, não estratégia. Fica
    registrado como o que é: amostra insuficiente.
 
+**A hipótese que mais infla o fill está isolada e medível.** Um print que
+passa ABAIXO do nosso preço conta a perna INTEIRA — é o que o `CaixaDoMaker`
+faz (§4.2), e é por onde vêm 221 das 251 execuções da rodada de 4 h. Um
+print de 3 shares não pode ter comprado 20. O eixo `atravessada` liga o teto
+de verdade (`tamanho_do_print`), e a diferença entre os dois dirá quanto do
+veredito é mercado e quanto é hipótese. Como a hipótese gera MAIS fill, ela
+puxa o resultado para BAIXO: o negativo acima é, nessa direção, pessimista.
+
 ⬜ **falta**: a rodada do dia inteiro (24 h de 2026-09-13) para tirar a
-variância das pernas soltas, e a mesma conta sobre os POOLS de reward do
-1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
+variância das pernas soltas, a sensibilidade do eixo `atravessada`, e a
+mesma conta sobre os POOLS de reward do 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
 conta. Enquanto isso não existir, isto NÃO reprova a rota maker: reprova a
 ideia de copiar o formato "compra os dois lados e espera" para as janelas de
 cripto de 5 min.

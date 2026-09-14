@@ -36,7 +36,8 @@ Para cada janela, desde a abertura até `fim − parar_antes_do_fim_s`:
      cancelamento dos outros não conta a nosso favor.
    - `otimista`: a fila à frente é no máximo o tamanho do nível que a
      gravação mostra agora (cancelamentos à frente contam).
-   Print abaixo do nosso preço executa o que restava, nos dois modos.
+   Print abaixo do nosso preço executa, conforme `atravessada`, a perna
+   inteira (o que o `CaixaDoMaker` conta) ou no máximo o tamanho do print.
 4. Cada perna executa no máximo `tamanho` shares por janela (um lote).
 5. Resultado da janela: `pares = min(qUp, qDown)` travam
    `pares × (1 − pUp − pDown)`; o que sobrou de uma perna só vai à
@@ -107,6 +108,12 @@ COOLOFF_DO_SALTO_S = 5.0
 #: Colchão: só descansar quando há ≥ K × o nosso tamanho NA FRENTE no nível
 #: (RuneDn), e recolher quando o colchão some. 0 desliga.
 COLCHOES: tuple[float, ...] = (0.0, 10.0)
+#: Quanto executa um print que passou ABAIXO do nosso preço. `perna_inteira`
+#: é o que o `CaixaDoMaker` conta (§4.2) — o taker desceu o livro, logo levou
+#: tudo o que estava no caminho. `tamanho_do_print` é o teto de verdade: não
+#: se pode comprar mais shares do que foram negociadas. A diferença entre os
+#: dois é o quanto do veredito vem da hipótese, e não do mercado.
+ATRAVESSADAS = ("perna_inteira", "tamanho_do_print")
 
 
 def _numero(valor: Any) -> float | None:
@@ -143,6 +150,7 @@ class Estrategia:
     trava_do_par: bool
     salto_bps: float | None = None
     colchao_x: float = 0.0
+    atravessada: str = "perna_inteira"
 
     @property
     def nome(self) -> str:
@@ -151,7 +159,8 @@ class Estrategia:
         salto = "salto-off" if self.salto_bps is None else f"salto-{self.salto_bps:g}bps"
         return (
             f"junta-{self.melhorar_ticks}t_{self.modo}_para-{self.parar_antes_s}s_"
-            f"{recolhe}_{trava}_{salto}_colchao-{self.colchao_x:g}x"
+            f"{recolhe}_{trava}_{salto}_colchao-{self.colchao_x:g}x_"
+            f"atrav-{self.atravessada}"
         )
 
 
@@ -446,7 +455,11 @@ class MakerDePares(RecordingIndex):
             if ordem.cancela_em_ns is not None:
                 perna.execucoes_durante_o_recolher += 1
             if preco < ordem.preco - EPS:
-                shares = ordem.restante
+                shares = (
+                    ordem.restante
+                    if estrategia.atravessada == "perna_inteira"
+                    else min(tamanho, ordem.restante)
+                )
                 perna.execucoes_atravessadas += 1
             else:
                 sobra = tamanho - ordem.fila_a_frente
@@ -560,6 +573,7 @@ class MakerDePares(RecordingIndex):
                 "trava_do_par": estrategia.trava_do_par,
                 "salto_bps": estrategia.salto_bps,
                 "colchao_x": estrategia.colchao_x,
+                "atravessada": estrategia.atravessada,
             },
             "janelas": {
                 "cotadas": len(linhas),
@@ -690,9 +704,10 @@ def estrategias_padrao() -> tuple[Estrategia, ...]:
             trava_do_par=trava,
             salto_bps=salto,
             colchao_x=colchao,
+            atravessada=atravessada,
         )
-        for parar, trava, salto, colchao in product(
-            PARAR_ANTES_S, (False, True), SALTOS_BPS, COLCHOES
+        for parar, trava, salto, colchao, atravessada in product(
+            PARAR_ANTES_S, (False, True), SALTOS_BPS, COLCHOES, ATRAVESSADAS
         )
     ]
     return tuple(base + grade)
@@ -756,7 +771,8 @@ def main(argv: list[str] | None = None) -> int:
         salto = "salto-off" if est["salto_bps"] is None else f"salto-{est['salto_bps']:g}"
         nome = (
             f"para-{est['parar_antes_do_fim_s']}s {recolhe:<9} "
-            f"{'trava' if est['trava_do_par'] else 'livre'} {salto:<9} colc-{est['colchao_x']:g}"
+            f"{'trava' if est['trava_do_par'] else 'livre'} {salto:<9} "
+            f"colc-{est['colchao_x']:g} {est['atravessada'][:5]}"
         )
         soma = e["soma_pup_pdown_nos_pares"]["media"]
         print(

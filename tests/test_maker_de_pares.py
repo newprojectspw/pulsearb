@@ -317,3 +317,28 @@ def test_a_grade_padrao_tem_a_linha_base_que_fica_parada() -> None:
     grade = mp.estrategias_padrao()
     assert any(e.recolher_ms is None and e.salto_bps is None for e in grade)
     assert len({e.nome for e in grade}) == len(grade)
+
+
+class TestAAtravessadaLimitadaPeloPrint:
+    """A hipótese que mais infla fill: print pequeno abaixo do nosso preço."""
+
+    def test_perna_inteira_leva_tudo_e_tamanho_do_print_leva_o_print(self) -> None:
+        inteira = _estrategia(atravessada="perna_inteira")
+        pelo_print = _estrategia(atravessada="tamanho_do_print")
+        i = _indice(inteira, pelo_print)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _print(UP, 0.55, 3)))
+        assert _resultado(i, inteira)["q_up"] == 20.0
+        assert _resultado(i, pelo_print)["q_up"] == 3.0
+
+    def test_o_resto_continua_no_livro_e_executa_no_print_seguinte(self) -> None:
+        e = _estrategia(atravessada="tamanho_do_print")
+        i = _indice(e)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _print(UP, 0.55, 3)))
+        i._on_poly_book(_rec(t + 2 * S, _print(UP, 0.55, 50)))
+        r = _resultado(i, e)
+        assert r["q_up"] == 20.0
+        assert r["atravessadas"] == 2
