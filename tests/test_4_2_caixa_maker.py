@@ -24,7 +24,6 @@ import pytest
 from tests.test_4_0c_laco_maker import _janela, _laco, _livro, _livro_de
 
 from pulsearb.analysis.rewards import ParametrosDeReward
-from pulsearb.backtest.book import OrderBook
 from pulsearb.live.caixa_maker import (
     INTERVALO_MAXIMO_POR_PASSADA_S,
     CaixaDoMaker,
@@ -99,28 +98,26 @@ class TestRewardsIntegradosNoTempo:
         assert caixa.intervalos_truncados == 1
 
     def test_cotacao_que_nao_pontua_mais_conta_tempo_mas_nao_reward(self):
-        """O meio andou 5 ticks: a cotação a 1 tick do meio ANTIGO está fora
-        do spread de reward. Repousa (conta tempo), não pontua (zero reward)."""
+        """O meio andou 10 ticks: a cotação enviada a 1 tick do meio ANTIGO
+        (0,49) está fora do spread de reward (max_spread 0,03). Repousa
+        (conta tempo), não pontua (zero reward). Desde a revisão do #118 a
+        caixa avalia a ordem NO PREÇO ENVIADO, e é isso que faz este caso
+        existir — antes ela reposicionava a 1 tick do meio de agora."""
         caixa = CaixaDoMaker()
-        # `Cotacao.preco` é relativo ao meio de AGORA, então para simular a
-        # cotação parada usamos um livro cujo spread fecha o reward: bids e
-        # asks longe demais (max_spread 0,03 → a 4 ticks não pontua).
-        livro = OrderBook(
-            asset_id="tok-up", bids=[(0.40, 500.0)], asks=[(0.60, 500.0)]
-        )
-        est = estimar_retorno(Cotacao(4, 50.0), livro, PARAMS, horas=1.0)
-        assert est is not None and not est.pontua
-
-        caixa.acertar(
-            "j",
-            CotacaoAberta(Cotacao(4, 50.0), desde_epoch=1000.0),
-            livro,
-            PARAMS,
-            agora_epoch=1015.0,
-        )
+        livro = _livro(0.60)
+        caixa.acertar("j", _aberta(0.49, 0.49, desde=1000.0), livro, PARAMS, agora_epoch=1015.0)
         assert caixa.segundos_repousando == pytest.approx(15.0)
         assert caixa.segundos_pontuando == 0.0
         assert caixa.rewards_pro_rata_usdc == 0.0
+
+    def test_cotacao_sem_preco_enviado_e_recusada_com_nome(self):
+        caixa = CaixaDoMaker()
+        assert caixa.acertar(
+            "j", CotacaoAberta(Cotacao(1, 50.0), desde_epoch=1000.0), _livro(0.50), PARAMS,
+            agora_epoch=1015.0,
+        ) is None
+        assert caixa.acertos_sem_preco == 1
+        assert caixa.segundos_repousando == 0.0
 
     def test_esquecer_zera_o_relogio_do_slug(self):
         caixa = CaixaDoMaker()
@@ -165,8 +162,13 @@ class TestExecucoesPossiveis:
         assert caixa.execucoes_no_nivel == 1
         assert caixa.shares_no_nivel == 10.0
 
+        # Perna de 50: já foram 10, restam 40. O print de 900 leva os 40 e
+        # NÃO mais — a perna acabou (revisão do #118: antes contava 60 > 50).
         self._conferir(caixa, _aberta(0.49, 0.49), _n(1035, 0.49, 900.0, "SELL"), agora_s=1045)
-        assert caixa.shares_no_nivel == 60.0
+        assert caixa.shares_no_nivel == 50.0
+        self._conferir(caixa, _aberta(0.49, 0.49), _n(1050, 0.49, 5.0, "SELL"), agora_s=1060)
+        assert caixa.shares_no_nivel == 50.0
+        assert caixa.prints_em_perna_consumida == 1
 
     def test_buy_ou_preco_acima_nao_pega_o_bid(self):
         caixa = CaixaDoMaker()
@@ -203,8 +205,66 @@ class TestExecucoesPossiveis:
         assert caixa.execucoes_atravessadas == 1
 
 
+class TestAPernaConsumidaEAOrdemQueRepousa:
+    def test_perna_atravessada_nao_executa_de_novo_nem_ganha_reward(self):
+        caixa = CaixaDoMaker()
+        aberta = _aberta(0.49, 0.49, desde=1000.0)
+        kw = dict(token_up="tok-up", token_down="tok-down")
+        caixa.conferir_prints(
+            "j", aberta, negocios_desde=_negocios(_n(1010, 0.47, 5.0, "SELL")),
+            agora_ns=int(1012 * 1e9), **kw
+        )
+        assert caixa.shares_atravessadas == 50.0
+        # três prints depois no mesmo nível: perna Up já saiu do livro
+        caixa.conferir_prints(
+            "j", aberta,
+            negocios_desde=_negocios(*[_n(1020 + i, 0.47, 5.0, "SELL") for i in range(3)]),
+            agora_ns=int(1030 * 1e9), **kw
+        )
+        assert caixa.execucoes_atravessadas == 1
+        assert caixa.shares_atravessadas == 50.0
+        assert caixa.prints_em_perna_consumida == 3
+        # a perna Down ainda repousa: o reward segue, mas de UM lado só (§15.3)
+        est = caixa.acertar("j", aberta, _livro(0.50), PARAMS, agora_epoch=1030.0)
+        assert est is not None and est.pontua
+        # consome a Down também: nada mais repousa, nada mais rende
+        caixa.conferir_prints(
+            "j", aberta, negocios_desde=_negocios(_n(1031, 0.47, 5.0, "SELL", perna="tok-down")),
+            agora_ns=int(1032 * 1e9), **kw
+        )
+        antes = caixa.rewards_pro_rata_usdc
+        assert caixa.acertar("j", aberta, _livro(0.50), PARAMS, agora_epoch=1045.0) is None
+        assert caixa.rewards_pro_rata_usdc == antes
+        assert caixa.acertos_apos_execucao == 1
+
+    def test_reposicionar_devolve_as_pernas_cheias(self):
+        caixa = CaixaDoMaker()
+        kw = dict(token_up="tok-up", token_down="tok-down")
+        caixa.conferir_prints(
+            "j", _aberta(0.49, 0.49, desde=1000.0),
+            negocios_desde=_negocios(_n(1010, 0.47, 5.0, "SELL")), agora_ns=int(1012 * 1e9), **kw
+        )
+        nova = _aberta(0.48, 0.48, desde=1020.0)  # cotação nova (outro desde_epoch)
+        caixa.conferir_prints(
+            "j", nova, negocios_desde=_negocios(_n(1025, 0.46, 5.0, "SELL")),
+            agora_ns=int(1030 * 1e9), **kw
+        )
+        assert caixa.shares_atravessadas == 100.0
+
+    def test_ordem_que_o_meio_deixou_para_tras_nao_pontua(self):
+        """Colocada a 0,49 com meio 0,50; o meio vai a 0,60 (max_spread 0,03).
+        A ordem ficou a 11 ¢ do meio: não pontua, e a caixa não paga."""
+        caixa = CaixaDoMaker()
+        aberta = _aberta(0.49, 0.49, desde=1000.0)
+        est = caixa.acertar("j", aberta, _livro(0.60), PARAMS, agora_epoch=1015.0)
+        assert est is not None and not est.pontua
+        assert caixa.rewards_pro_rata_usdc == 0.0
+        assert caixa.segundos_pontuando == 0.0
+        assert caixa.segundos_repousando == pytest.approx(15.0)
+
+
 class TestMarkout:
-    def test_fecha_apos_o_horizonte_contra_o_nosso_preco(self):
+    def test_fecha_apos_o_horizonte_meio_a_meio(self):
         caixa = CaixaDoMaker()
         caixa.conferir_prints(
             "j",
@@ -213,18 +273,50 @@ class TestMarkout:
             token_down="tok-down",
             negocios_desde=_negocios(_n(1010, 0.47, 10.0, "SELL")),
             agora_ns=int(1012 * 1e9),
+            livro_de=_livro_de(_livro(0.50)),  # meio no fill: 0,50
         )
         # 2 s depois: ainda não. Horizonte é 5 s.
         assert caixa.medir_markout(_livro_de(_livro(0.50)), agora_ns=int(1012 * 1e9)) == 0
 
-        # 15 s depois, meio a 0,46: compramos a 0,49 → −3 ¢/share.
+        # 15 s depois, meio a 0,46: o meio andou de 0,50 para 0,46 → −4 ¢/share.
+        # (Antes media contra o NOSSO preço, 0,49 → −3: creditava 1 ¢ de
+        # distância inicial ao meio como ganho.)
         medidas = caixa.medir_markout(_livro_de(_livro(0.46)), agora_ns=int(1025 * 1e9))
         assert medidas == 1
-        assert caixa.markout_centavos_por_share == pytest.approx(-3.0)
-        assert caixa.custo_de_markout_usdc == pytest.approx(-0.03 * 50.0)
+        assert caixa.markout_centavos_por_share == pytest.approx(-4.0)
+        assert caixa.custo_de_markout_usdc == pytest.approx(-0.04 * 50.0)
         r = caixa.resumo()
         assert r["markout"]["horizonte_medio_s"] == pytest.approx(15.0)
-        assert r["liquido_pro_rata_usdc"] == pytest.approx(-1.5)
+        assert r["liquido_pro_rata_usdc"] == pytest.approx(-2.0)
+
+    def test_mercado_parado_da_markout_zero_e_nao_a_distancia_ao_meio(self):
+        """Bid a 3 ticks do meio, meio não anda: markout 0, não +3 ¢."""
+        caixa = CaixaDoMaker()
+        caixa.conferir_prints(
+            "j",
+            _aberta(0.47, 0.47),
+            token_up="tok-up",
+            token_down="tok-down",
+            negocios_desde=_negocios(_n(1010, 0.46, 10.0, "SELL")),
+            agora_ns=int(1012 * 1e9),
+            livro_de=_livro_de(_livro(0.50)),
+        )
+        caixa.medir_markout(_livro_de(_livro(0.50)), agora_ns=int(1025 * 1e9))
+        assert caixa.markout_centavos_por_share == pytest.approx(0.0)
+
+    def test_sem_meio_no_fill_vai_a_sem_referencia_e_nao_a_numero(self):
+        caixa = CaixaDoMaker()
+        caixa.conferir_prints(
+            "j",
+            _aberta(),
+            token_up="tok-up",
+            token_down="tok-down",
+            negocios_desde=_negocios(_n(1010, 0.47, 10.0, "SELL")),
+            agora_ns=int(1012 * 1e9),
+        )  # sem livro_de: meio_no_fill None
+        assert caixa.medir_markout(_livro_de(_livro(0.46)), agora_ns=int(1025 * 1e9)) == 0
+        assert caixa.markout_sem_referencia == 1
+        assert caixa.markout_centavos_por_share is None
 
     def test_sem_livro_espera_e_depois_do_prazo_desiste_contando(self):
         caixa = CaixaDoMaker()
@@ -235,6 +327,7 @@ class TestMarkout:
             token_down="tok-down",
             negocios_desde=_negocios(_n(1010, 0.47, 10.0, "SELL")),
             agora_ns=int(1012 * 1e9),
+            livro_de=_livro_de(_livro(0.50)),
         )
         assert caixa.medir_markout(_livro_de(None), agora_ns=int(1030 * 1e9)) == 0
         assert len(caixa._pendentes) == 1
@@ -367,7 +460,9 @@ class TestOLacoLigaACaixa:
         )
         caixa = laco.resumo()["caixa"]
         assert caixa["markout"]["medidas"] == 1
-        assert caixa["markout"]["centavos_por_share"] == pytest.approx(1.0)
+        # Meio 0,50 no fill, 0,50 agora: mercado parado, markout ZERO — e não
+        # +1 ¢ (a distância do nosso bid ao meio, que a caixa creditava).
+        assert caixa["markout"]["centavos_por_share"] == pytest.approx(0.0)
 
     async def test_janela_que_fecha_zera_o_relogio_da_cotacao(self, tmp_path):
         laco = _laco(tmp_path)
