@@ -84,7 +84,7 @@ from typing import Any, Protocol
 
 from pulsearb.analysis.rewards import ParametrosDeReward
 from pulsearb.backtest.book import OrderBook
-from pulsearb.live.caixa_maker import CaixaDoMaker
+from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
     Cotacao,
     escolher_cotacao,
@@ -254,6 +254,7 @@ class LacoMaker:
                 negocios_desde=self._negocios_desde,
                 agora_ns=agora_ns,
                 livro_de=livro_de,
+                params=params,
             )
 
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
@@ -332,13 +333,32 @@ class LacoMaker:
             # nada não pode custar uma ida à rede.
             return None
 
+        livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
+        if (
+            self.recolhe_quando_o_livro_anda
+            and decisao.nova is not None
+            and decisao.nova.dois_lados
+            and livro_down is not None
+            and not livro_down.bids
+        ):
+            # Lado de bids do Down VAZIO: o recolher tiraria o par no segundo
+            # seguinte, e a passada de 15 s o poria de volta — coloca-e-recolhe
+            # sem fim, diário inflado e repouso nenhum para medir. A simulação
+            # medida não coloca sem bid (`maker_de_pares.py`); aqui idem
+            # (revisão do Codex, #126). O livro do Up sem bids já para antes,
+            # em `livro_sem_meio`.
+            self._contar("perna_down_sem_bids")
+            if aberta is not None:
+                return await self._sair(janela.slug, motivo="perna_down_sem_bids")
+            return None
+
         return await self._executar(
             decisao,
             janela,
             meio=meio,
             agora_epoch=agora_epoch,
             livro=livro,
-            livro_down=livro_de(janela.token_down, agora_ns=agora_ns),
+            livro_down=livro_down,
         )
 
     def _portao_recusa(
@@ -490,7 +510,7 @@ class LacoMaker:
                         self.caixa.conferir_prints(
                             slug, aberta, token_up=tokens[0], token_down=tokens[1],
                             negocios_desde=self._negocios_desde, agora_ns=agora_ns,
-                            livro_de=livro_de,
+                            livro_de=livro_de, params=self._params.get(slug),
                         )
                     # O último intervalo de reward, ANTES de sair: `_sair`
                     # apaga o relógio da cotação, e uma que repousou 14 s e
@@ -507,7 +527,7 @@ class LacoMaker:
                     livro_up = (
                         livros[0]
                         if livros[0] is not None
-                        else _espelho_do_livro(livros[1], asset_id=tokens[0])
+                        else espelho_do_livro(livros[1], asset_id=tokens[0])
                     )
                     if params is not None:
                         self.caixa.acertar(
@@ -661,18 +681,6 @@ def _referencia(
     if not bids:
         return preco
     return min(preco, bids[0][0])
-
-
-def _espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
-    """O livro do Up visto pelo do Down: bid do Up = 1 − ask do Down, ask do
-    Up = 1 − bid do Down. Os asks do Down sobem, logo os bids do espelho
-    descem — a ordem que `OrderBook` exige sai de graça."""
-    return OrderBook(
-        asset_id=asset_id,
-        bids=[(1.0 - preco, tamanho) for preco, tamanho in livro.asks],
-        asks=[(1.0 - preco, tamanho) for preco, tamanho in livro.bids],
-        ts_ns=livro.ts_ns,
-    )
 
 
 def _sem_o_nosso_nivel(

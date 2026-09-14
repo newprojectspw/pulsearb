@@ -610,6 +610,60 @@ class TestRecolherQuandoOLivroAnda:
         assert await laco.recolher_se_o_livro_andou(com_down(0.35), agora_ns=3) == []
         assert len(await laco.recolher_se_o_livro_andou(com_down(0.33), agora_ns=4)) == 1
 
+    async def test_perna_down_sem_bids_nao_coloca_o_par_com_a_regra_ligada(self, tmp_path):
+        """Down sem bid nenhum: o recolher tiraria o par no segundo seguinte e
+        a passada de 15 s o poria de volta — coloca-e-recolhe sem fim (revisão
+        do Codex, #126). Com a regra ligada não entra, com nome; desligada,
+        entra como sempre (a linha de base não muda)."""
+        up = _livro(0.50)
+        down_sem_bids = OrderBook(asset_id="tok-down", bids=[], asks=[(0.51, 500.0)])
+
+        def livro_de(token_id, *, agora_ns):
+            return down_sem_bids if token_id == "tok-down" else up
+
+        ligada = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await ligada.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert ligada.abertas == {}
+        assert ligada.motivos["perna_down_sem_bids"] == 1
+        assert not ligada.cliente.repousadas
+
+        desligada = _laco(tmp_path / "b")
+        (tmp_path / "b").mkdir()
+        await desligada.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert len(desligada.abertas) == 1
+
+    async def test_o_reward_e_acertado_no_instante_do_print_antes_de_consumir_a_perna(
+        self, tmp_path
+    ):
+        """Par colocado em t=1000, print que consome a perna Up em t=1005,
+        recolhido em t=1010: 5 s de dois lados e 5 s de um lado. Sem acertar
+        no print, o acerto do recolher aplicaria o restante de DEPOIS aos 10 s
+        inteiros, e os 10 s pareceriam de um lado só (revisão do Codex, #126).
+        Prova por comparação: o mesmo par com o print em t=1000,5 rende MENOS."""
+
+        async def rodar(pasta, ts_do_print_s):
+            pasta.mkdir()
+            laco = await self._com_cotacao(pasta, recolhe_quando_o_livro_anda=True)
+            print_ = SimpleNamespace(
+                ts_ns=int(ts_do_print_s * 1e9), preco=0.47, tamanho=10.0,
+                lado="SELL", token="tok-up",
+            )
+            laco._negocios_desde = lambda token_id, *, ts_ns: (
+                [print_] if token_id == "tok-up" and print_.ts_ns > ts_ns else []
+            )
+            efeitos = await laco.recolher_se_o_livro_andou(
+                _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1010e9)
+            )
+            assert len(efeitos) == 1
+            assert laco.caixa.execucoes_atravessadas == 1
+            assert laco.caixa.acertos == 2  # no print e no recolher
+            assert laco.caixa.segundos_repousando == pytest.approx(10.0)
+            return laco.caixa.rewards_com_captura_usdc
+
+        no_meio = await rodar(tmp_path / "a", 1005.0)
+        no_comeco = await rodar(tmp_path / "b", 1000.5)
+        assert no_meio > no_comeco > 0.0
+
     async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
         """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
         perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —

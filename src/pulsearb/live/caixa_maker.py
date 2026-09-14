@@ -197,9 +197,11 @@ class CaixaDoMaker:
         """Soma o que `aberta` rendeu desde a última passada, sobre `livro`."""
         desde = max(self._ultimo_acerto_epoch.get(slug, 0.0), aberta.desde_epoch)
         intervalo = agora_epoch - desde
-        self._ultimo_acerto_epoch[slug] = agora_epoch
         if intervalo <= 0.0:
+            # O relógio nunca anda para trás: um acerto no instante de um
+            # print anterior ao último acerto não pode reabrir o intervalo.
             return None
+        self._ultimo_acerto_epoch[slug] = agora_epoch
         if intervalo > INTERVALO_MAXIMO_POR_PASSADA_S:
             self.intervalos_truncados += 1
             intervalo = INTERVALO_MAXIMO_POR_PASSADA_S
@@ -247,6 +249,7 @@ class CaixaDoMaker:
         negocios_desde: Callable[..., list[Negocio]],
         agora_ns: int,
         livro_de: Callable[..., OrderBook | None] | None = None,
+        params: ParametrosDeReward | None = None,
     ) -> int:
         """Olha os prints desde a última passada e anota os que nos pegariam.
 
@@ -255,6 +258,13 @@ class CaixaDoMaker:
         consumida não executa de novo — a ordem saiu do livro — e não ganha
         mais reward (`acertar` lê o restante). `livro_de`, quando vem, dá o
         meio do token no instante do print, para o markout meio-a-meio.
+
+        Com `params`, o reward é acertado NO INSTANTE do print, com as pernas
+        de ANTES dele: senão o acerto seguinte aplicaria o restante de depois
+        ao intervalo inteiro, e um print no meio de 10 s faria os 10 s
+        parecerem de um lado só (revisão do Codex, #126). O livro é o de
+        agora — o de então não existe mais — e é o do Up, ou o espelho do
+        Down se só ele estiver à mão.
         """
         desde_ns = max(
             self._ultimo_print_ns.get(slug, 0), int(aberta.desde_epoch * 1e9)
@@ -286,6 +296,12 @@ class CaixaDoMaker:
                     shares = min(negocio.tamanho, restante[indice])
                     self.execucoes_no_nivel += 1
                     self.shares_no_nivel += shares
+                if params is not None and livro_de is not None:
+                    self._acertar_no_print(
+                        slug, aberta, params,
+                        token_up=token_up, token_down=token_down,
+                        livro_de=livro_de, agora_ns=agora_ns, ts_ns=negocio.ts_ns,
+                    )
                 restante[indice] -= shares
                 meio_no_fill = None
                 if livro_de is not None:
@@ -354,6 +370,26 @@ class CaixaDoMaker:
             medidas += 1
         self._pendentes = restantes
         return medidas
+
+    def _acertar_no_print(
+        self,
+        slug: str,
+        aberta: CotacaoAberta,
+        params: ParametrosDeReward,
+        *,
+        token_up: str,
+        token_down: str,
+        livro_de: Callable[..., OrderBook | None],
+        agora_ns: int,
+        ts_ns: int,
+    ) -> None:
+        livro_up = livro_de(token_up, agora_ns=agora_ns)
+        if livro_up is None:
+            livro_down = livro_de(token_down, agora_ns=agora_ns)
+            if livro_down is None:
+                return
+            livro_up = espelho_do_livro(livro_down, asset_id=token_up)
+        self.acertar(slug, aberta, livro_up, params, agora_epoch=ts_ns / 1e9)
 
     def esquecer(self, slug: str) -> None:
         """A cotação saiu do livro: a próxima começa a contar do zero."""
@@ -428,3 +464,15 @@ class CaixaDoMaker:
                 "REPROVAR a rota."
             ),
         }
+
+
+def espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
+    """O livro do Up visto pelo do Down: bid do Up = 1 − ask do Down, ask do
+    Up = 1 − bid do Down. Os asks do Down sobem, logo os bids do espelho
+    descem — a ordem que `OrderBook` exige sai de graça."""
+    return OrderBook(
+        asset_id=asset_id,
+        bids=[(1.0 - preco, tamanho) for preco, tamanho in livro.asks],
+        asks=[(1.0 - preco, tamanho) for preco, tamanho in livro.bids],
+        ts_ns=livro.ts_ns,
+    )
