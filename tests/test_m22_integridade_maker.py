@@ -694,3 +694,36 @@ def test_magnitudes_tem_teto_de_amostras():
     assert len(monitor.magnitudes) <= MAX_MAGNITUDES
     # o contador completo não é limitado pela amostra
     assert monitor.resumo()["com_magnitude_finita"] > MAX_MAGNITUDES
+
+
+# ═══════════════════════════════ custo de saída — o termo que o 1.12 não media
+
+
+def test_markout_publica_o_custo_de_saida_como_metade_do_spread_no_fill():
+    """Livro 0,49/0,51 no instante da execução: spread 2 c → custo de saída 1 c.
+    Sai na MESMA tabela e sobre as MESMAS execuções que os horizontes."""
+    from pulsearb.analysis.measurements import CHAVE_CUSTO_DE_SAIDA
+
+    resultado = medir_markout([_janela_com_trade("BUY", 0.55)], horizontes_s=(5.0,))
+    total = resultado["markout_centavos_por_share"]["total"]
+    assert total[CHAVE_CUSTO_DE_SAIDA]["media"] == pytest.approx(1.0)
+    assert total[CHAVE_CUSTO_DE_SAIDA]["n"] == total["5s"]["n"] == 1
+
+
+def test_recorte_por_janela_e_opt_in():
+    janela = _janela_com_trade("BUY", 0.55)
+    sem = medir_markout([janela], horizontes_s=(5.0,))
+    com = medir_markout([janela], horizontes_s=(5.0,), recorte_por_janela=True)
+    assert not any(k.startswith("mercado=") for k in sem["markout_centavos_por_share"])
+    chaves = [k for k in com["markout_centavos_por_share"] if k.startswith("mercado=")]
+    assert chaves == [f"mercado={janela.slug}"]
+
+
+def test_horizonte_alem_do_fim_da_coleta_nao_conta():
+    """Snapshots em t=0 e t=5 s; horizontes 5 s e 30 s. O de 30 s NÃO tem
+    livro — `at()` devolveria o de 5 s vestido de 30 s. Achado do Codex no
+    PR #114."""
+    resultado = medir_markout([_janela_com_trade("BUY", 0.55)], horizontes_s=(5.0, 30.0))
+    total = resultado["markout_centavos_por_share"]["total"]
+    assert total["5s"]["n"] == 1
+    assert total["30s"]["n"] == 0

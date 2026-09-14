@@ -1,0 +1,81 @@
+# PULSEARB SHADOW da rota MAKER nos pools de reward — o relógio do 4.2.
+#
+#   sudo cp deploy/pulsearb-shadow-maker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pulsearb-shadow-maker
+#
+# O que esta unit faz, e o que ela NÃO faz: decide e anota; não envia ordem.
+# MODE=SHADOW troca o cliente de ordens pelo sombra (`ClienteSombraDeOrdens`,
+# todo id com prefixo `sombra-`), e a trava tripla do LIVE (risk/autorizacao.py)
+# continua fechada — não há PULSEARB_CONFIRM_LIVE aqui, e não deve haver.
+#
+# PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true é o opt-in que liga a descoberta de
+# pools (a cada 300 s) e põe o LacoMaker a cotar os mercados de horizonte
+# longo — os ~120 maiores pools (top_de_pools_de_reward). Sem ela a rodada é a
+# do taker, que está medida e reprovada.
+#
+# Restart=always pelo mesmo motivo do recorder: duas semanas não podem
+# terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
+# --diario), então um restart continua a mesma rodada em vez de abrir outra.
+
+[Unit]
+Description=PULSEARB SHADOW maker (4.2) — cota nos pools, nao envia
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pulsearb
+Group=pulsearb
+WorkingDirectory=/opt/pulsearb
+
+# Mesma razão do recorder: ProtectSystem=strict exige a pasta existente ANTES
+# de o Python subir (226/NAMESPACE se não existir).
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios /opt/pulsearb/data/risco
+ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
+
+Environment=PULSEARB_MODE=SHADOW
+Environment=PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true
+
+# O PERFIL DO ENSAIO, escrito aqui de propósito. Os defaults do projeto são
+# os do taker (5 shares, 5/15/50 USDC, spread 0,04) e com eles esta rota não
+# cota NADA: a descoberta descarta todo pool cujo rewards_min_size passa de 5,
+# e o portão de risco recusa uma cotação de 1.000 shares. O bot não sobe os
+# tetos sozinho (quadro, 4.0 (c)); quem sobe é o operador, e este arquivo é o
+# operador escrevendo. São os valores das rodadas r4–r8 de 2026-09-14. Vale
+# SÓ em SHADOW — nenhum destes números autoriza dinheiro: MODE=SHADOW acima
+# troca o cliente pelo sombra, e a trava tripla do LIVE segue fechada.
+Environment=PULSEARB_TAMANHO_DA_COTACAO_MAKER_SHARES=1000
+Environment=PULSEARB_TOP_DE_POOLS_DE_REWARD=60
+Environment=PULSEARB_RISK__STAKE_MAX_POR_TRADE_USDC=1000
+Environment=PULSEARB_RISK__STAKE_MAX_POR_JANELA_USDC=2000
+Environment=PULSEARB_RISK__EXPOSICAO_MAX_USDC=120000
+Environment=PULSEARB_RISK__POSICOES_MAX_ABERTAS=120
+Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
+# Registro de risco PRÓPRIO: o registro do taker em SHADOW carrega perdas
+# sintéticas que armam o disjuntor e pausam o portão compartilhado — e o
+# maker entra pelo mesmo portão (achados das rodadas r2 e r6). O modo sufixa
+# o nome (`.shadow.json`).
+Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_4_2.json
+
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-4-2.jsonl
+
+# Opcional. Se um dia houver segredo aqui, ele vem de arquivo 0600, nunca da
+# unit (que é legível por todos).
+EnvironmentFile=-/opt/pulsearb/.env
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/opt/pulsearb/data
+
+[Install]
+WantedBy=multi-user.target

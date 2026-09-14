@@ -265,6 +265,22 @@ async def coletar(coletor: Coletor, settings: Settings, duracao_s: float) -> Non
         await feed.stop()
 
 
+def parse_horizontes(bruto: str) -> tuple[float, ...]:
+    """`"1,5,30,300,1800"` → `(1.0, 5.0, 30.0, 300.0, 1800.0)`. Vazio ou
+    não numérico recusa — um horizonte inventado aqui viraria coluna vazia
+    com cara de medida."""
+    partes = [p.strip() for p in bruto.split(",") if p.strip()]
+    if not partes:
+        raise ValueError("--horizontes vazio; esperado lista como 1,5,30,300,1800")
+    try:
+        valores = tuple(float(p) for p in partes)
+    except ValueError:
+        raise ValueError(f"--horizontes inválido: {bruto!r}") from None
+    if any(v <= 0 for v in valores):
+        raise ValueError(f"--horizontes precisa ser positivo: {bruto!r}")
+    return valores
+
+
 def parse_duracao(bruto: str) -> float:
     unidades = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     if bruto and bruto[-1] in unidades:
@@ -278,7 +294,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duracao", default="4h")
     parser.add_argument("--json", default=None)
     parser.add_argument("--config", default="config.yaml")
+    # 300 e 1800 s não são markout de seleção adversa: são a proxy do custo
+    # até conseguir SAIR de um inventário unilateral num mercado que resolve
+    # em dias. É o termo que o 1.12 não media (quadro, 2026-09-14).
+    parser.add_argument("--horizontes", default="1,5,30,300,1800")
     args = parser.parse_args(argv)
+
+    try:
+        horizontes = parse_horizontes(args.horizontes)
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return 2
 
     try:
         destino = caminho_de_escrita(args.json) if args.json else None
@@ -301,16 +327,21 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
-    asyncio.run(coletar(coletor, settings, parse_duracao(args.duracao)))
+    duracao_s = parse_duracao(args.duracao)
+    asyncio.run(coletar(coletor, settings, duracao_s))
 
     janelas = coletor.janelas()
-    markout = medir_markout(janelas)
+    # Recorte por mercado LIGADO: aqui a janela é o mercado, e a conta do
+    # maker precisa de custo de saída e execuções/hora POR mercado.
+    markout = medir_markout(janelas, horizontes_s=horizontes, recorte_por_janela=True)
     relatorio = {
         "regime": {
             "mercados": len(mercados),
             "tokens": len(coletor.dono),
             "pool_total_usdc_por_dia": round(pool_total, 2),
             "duracao_da_coleta": args.duracao,
+            "horas_de_coleta": round(duracao_s / 3600.0, 4),
+            "horizontes_s": list(horizontes),
             "eventos": coletor.eventos,
             "execucoes_vistas": coletor.execucoes,
             "nota": (

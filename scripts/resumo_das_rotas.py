@@ -33,8 +33,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
+
+from pulsearb.caminhos import caminho_de_relatorio_lido
 
 # ── os caminhos que este arquivo lê, nomeados ────────────────────────────
 CAMPO_SOMA_VENDER = "cunhar_e_vender.episodios_que_sobrevivem_a_latencia"
@@ -53,6 +54,11 @@ CAMPO_MARKOUT_N = "markout.markout_centavos_por_share.total.5s.n"
 CAMPO_CONTA_RECORTES = "por_recorte"
 CAMPO_CONTA_MERCADOS = "mercados"
 CAMPO_CONTA_MARKOUT = "markout_usado.centavos_por_share_adverso"
+#: O quarto termo do 1.12 (quadro, 2026-09-14): custo de SAÍDA de uma execução
+#: unilateral. `ausente: true` é NÃO AVALIÁVEL — nunca zero.
+CAMPO_CONTA_SAIDA_AUSENTE = "custo_de_saida.ausente"
+CHAVE_LIQUIDO_PESSIMISTA = "liquido_no_pior_caso_usdc_por_hora"
+CHAVE_LIQUIDO_COM_SAIDA = "liquido_com_custo_de_saida_usdc_por_hora"
 
 #: 1.11 — latência que uma ordem leva para chegar (1.1/1.4 mediram 300/600 ms).
 LATENCIA_EXIGIDA_S = 0.3
@@ -150,6 +156,28 @@ def criterio_1_11(soma: dict[str, Any] | None) -> str:
 
 
 # ── 1.12 ─────────────────────────────────────────────────────────────────
+def _liquido_com_custo_de_saida(
+    conta: dict[str, Any] | None,
+) -> tuple[str, float] | None:
+    """(recorte, líquido com custo de saída) no recorte que era o ÓTIMO da
+    conta pessimista. `None` se a conta não veio, se ela diz que o custo de
+    saída está ausente, ou se o recorte ótimo não tem o número — cada um
+    desses viraria "custo zero" se fosse tratado como 0."""
+    if not conta or _ler(conta, CAMPO_CONTA_SAIDA_AUSENTE) is not False:
+        return None
+    recortes = _ler(conta, CAMPO_CONTA_RECORTES)
+    if not isinstance(recortes, dict) or not recortes:
+        return None
+    otimo = max(
+        recortes.items(),
+        key=lambda kv: (kv[1].get(CHAVE_LIQUIDO_PESSIMISTA) or float("-inf")),
+    )
+    liquido = otimo[1].get(CHAVE_LIQUIDO_COM_SAIDA)
+    if liquido is None:
+        return None
+    return otimo[0], float(liquido)
+
+
 def _conta_fechada(conta: dict[str, Any]) -> None:
     """A conta com os dois lados medidos, e o ÓTIMO impresso.
 
@@ -182,6 +210,11 @@ def _conta_fechada(conta: dict[str, Any]) -> None:
         cus += m["custo_maximo_usdc_por_hora"]
         if rec - cus > melhor_liq:
             melhor_n, melhor_liq = i, rec - cus
+    if melhor_n == 0:
+        # Conta sem mercado com número (todos None, ou lista vazia): não há
+        # ótimo a imprimir, e dividir por zero aqui derrubava o resumo inteiro.
+        print("\n  OTIMO: sem mercado com liquido calculado nesta conta.")
+        return
     capital = 1000 * melhor_n
     print(
         f"\n  OTIMO: {melhor_n} mercados, {melhor_liq:+.2f} USDC/h "
@@ -254,9 +287,26 @@ def criterio_1_12(
         CAMPO_MARKOUT_5S,
     )
 
-    if receita is None or persistentes is None or custo is None:
+    # item 4 — custo de SAÍDA (2026-09-14): o markout de 5 s não mede o que
+    # custa desfazer uma execução de um lado só num mercado que resolve em
+    # dias. Sai da conta, no recorte que era o ÓTIMO da conta pessimista —
+    # "os mesmos mercados", como o quadro registrou antes de rodar.
+    saida = _liquido_com_custo_de_saida(conta)
+    _linha(
+        _julgar(None if saida is None else saida[1] > 0),
+        "1.12d", "Líquido COM custo de saída, no ótimo",
+        "> 0 USDC/h em receita - execucoes/h x max(markout 30 min, spread/2)",
+        (
+            "AUSENTE — passe --conta gerada com markout_dos_pools de 2026-09-14+"
+            if saida is None
+            else f"{saida[1]:+.4f} USDC/h no recorte {saida[0]}"
+        ),
+        f"{CAMPO_CONTA_RECORTES}.<ótimo>.{CHAVE_LIQUIDO_COM_SAIDA}",
+    )
+
+    if receita is None or persistentes is None or custo is None or saida is None:
         print(
-            "\n  >> 1.12 NAO AVALIAVEL: os três itens são CONJUNÇÃO, e falta pelo\n"
+            "\n  >> 1.12 NAO AVALIAVEL: os quatro itens são CONJUNÇÃO, e falta pelo\n"
             "     menos um. NAO AVALIAVEL não é o mesmo que REPROVADO."
         )
         return NAO_AVALIAVEL
@@ -264,9 +314,10 @@ def criterio_1_12(
     ok = (
         len(persistentes) >= 1
         and receita >= RECEITA_MINIMA_USDC_POR_HORA
+        and saida[1] > 0
     )
     veredito = _julgar(ok)
-    print(f"\n  >> 1.12 {veredito} — os três itens são CONJUNÇÃO.")
+    print(f"\n  >> 1.12 {veredito} — os quatro itens são CONJUNÇÃO.")
     print(
         "\n  Os dois lados no MESMO regime, pela primeira vez:\n"
         f"    receita  {receita:+.4f} USDC/h somados (pelo mínimo das amostras)\n"
@@ -286,11 +337,16 @@ def criterio_1_12(
 def _carregar(caminho: str | None) -> dict[str, Any] | None:
     if not caminho:
         return None
-    p = Path(caminho)
-    if not p.exists():
-        print(f"aviso: {caminho} não existe", file=sys.stderr)
+    # O caminho vem de fora do programa (--soma/--pools/--markout/--conta) e
+    # vai direto ao sistema de arquivos; contê-lo aqui é o que fecha a
+    # travessia de caminho (S2083). Ausente ou inválido segue como veredito
+    # NÃO AVALIÁVEL, que é o comportamento antigo — nunca aborta.
+    try:
+        destino = caminho_de_relatorio_lido(caminho)
+    except ValueError as erro:
+        print(f"aviso: {erro}", file=sys.stderr)
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(destino.read_text(encoding="utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:

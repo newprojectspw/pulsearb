@@ -12,6 +12,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 RAIZ = Path(__file__).resolve().parents[1]
 
 
@@ -128,3 +130,120 @@ def test_mercado_sem_trade_nao_vira_custo_infinito() -> None:
         "usdc_por_hora": 0.0,
         "span_h": 0.0,
     }
+
+
+# ── o caminho de entrada é contido (S2083) — e os testes vão por `main()` ──
+#
+# Os testes acima chamam funções puras; nenhum passava por `main()`, então a
+# contenção dos caminhos de `--pools`/`--markout` não tinha teste que a
+# provasse. "A suíte passa" era verdade e não era evidência.
+
+
+def _raiz_de_leitura(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PULSEARB_RELATORIOS_INPUT_ROOT", raising=False)
+    monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
+    (tmp_path / "pools.json").write_text('{"mercados": []}', encoding="utf-8")
+
+
+def test_pools_absoluto_sai_com_2_e_diz_por_que(tmp_path, monkeypatch, capsys) -> None:
+    """Caminho absoluto funcionava antes da contenção e agora recusa — é a
+    contenção fazendo o trabalho dela, e a mensagem diz qual variável abre."""
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    codigo = conta.main(["--pools", str(tmp_path / "pools.json")])
+    assert codigo == 2
+    erro = capsys.readouterr().err
+    assert "inválido" in erro
+    assert "PULSEARB_RELATORIOS_INPUT_ROOT" in erro
+
+
+def test_pools_inexistente_sai_com_2(tmp_path, monkeypatch, capsys) -> None:
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    assert conta.main(["--pools", "nao-existe.json"]) == 2
+    assert "não existe" in capsys.readouterr().err
+
+
+def test_markout_invalido_avisa_e_a_conta_ainda_recusa(tmp_path, monkeypatch, capsys) -> None:
+    """O markout é opcional de propósito: inválido vira aviso, não aborto. Mas
+    ausente a conta NÃO fecha — sai com 1 e diz MARKOUT AUSENTE, em vez de
+    publicar receita sem custo."""
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    codigo = conta.main(["--pools", "pools.json", "--markout", "/etc/hosts.json"])
+    saida = capsys.readouterr()
+    assert "aviso:" in saida.err
+    assert "MARKOUT AUSENTE" in saida.err
+    assert codigo == 1
+
+
+# ── custo de saída: max(markout 30 min, spread/2) × execuções/h, ou AUSENTE ─
+
+
+def _markout_com_saida(media_1800: float, spread_meio: float, n: int = 12) -> dict:
+    return {
+        "regime": {"horas_de_coleta": 4.0},
+        "markout": {
+            "markout_centavos_por_share": {
+                "total": {"5s": {"media": -0.06, "n": n}},
+                "mercado=lac-9-5": {
+                    "5s": {"media": -0.06, "n": n},
+                    "1800s": {"media": media_1800, "n": n},
+                    "custo_de_saida_centavos_por_share": {"media": spread_meio, "n": n},
+                },
+            }
+        },
+    }
+
+
+def test_custo_de_saida_e_o_maior_entre_markout_longo_e_spread_meio() -> None:
+    # spread/2 = 5,5 c vence um markout a 30 min de −0,9 c
+    assert conta._custo_de_saida(_markout_com_saida(-0.9, 5.5)) == {"lac-9-5": 5.5}
+    # markout longo pior que o spread vence
+    assert conta._custo_de_saida(_markout_com_saida(-8.0, 5.5)) == {"lac-9-5": 8.0}
+    # markout POSITIVO a 30 min não vira crédito: fica o spread/2
+    assert conta._custo_de_saida(_markout_com_saida(+3.0, 5.5)) == {"lac-9-5": 5.5}
+
+
+def test_custo_de_saida_ausente_e_none_nunca_zero() -> None:
+    """Sem recorte por mercado ou sem horizonte de 30 min: None. Zero
+    fecharia a conta a favor sem medida."""
+    assert conta._custo_de_saida(None) is None
+    sem_longo = _markout_com_saida(-0.9, 5.5)
+    del sem_longo["markout"]["markout_centavos_por_share"]["mercado=lac-9-5"]["1800s"]
+    assert conta._custo_de_saida(sem_longo) is None
+    so_total = {"markout": {"markout_centavos_por_share": {"total": {"5s": {"media": -0.06}}}}}
+    assert conta._custo_de_saida(so_total) is None
+
+
+def _mercado(receita: float, shares_h: float, custo_saida_h: float | None) -> dict:
+    return {
+        "receita_usdc_por_hora": receita,
+        "custo_maximo_usdc_por_hora": 0.5,
+        "liquido_no_pior_caso_usdc_por_hora": receita - 0.5,
+        "volume": {"shares_por_hora": shares_h},
+        "custo_de_saida_usdc_por_hora": custo_saida_h,
+        "liquido_com_custo_de_saida_usdc_por_hora": (
+            None if custo_saida_h is None else receita - custo_saida_h
+        ),
+    }
+
+
+def test_custo_de_saida_multiplica_por_shares_e_nao_por_trades() -> None:
+    """¢/share × shares/h. Um fill de 1.000 shares não é um de uma."""
+    m = {"receita_usdc_por_hora_minima": 10.0, "condition_id": "0x1", "slug": "s"}
+    vol = {"shares_por_hora": 2000.0}
+    linha = conta._linha_do_mercado(m, vol, custo_c=0.06, custo_saida_c=5.5)
+    assert linha["custo_de_saida_usdc_por_hora"] == pytest.approx(2000 * 5.5 / 100)
+    assert linha["liquido_com_custo_de_saida_usdc_por_hora"] == pytest.approx(10 - 110)
+
+
+def test_recorte_so_soma_custo_de_saida_com_cobertura_completa() -> None:
+    """Um mercado sem medida no recorte → líquido com custo de saída None,
+    e o relatório diz quantos faltam. Somar só os medidos deixaria o recorte
+    passar com um subconjunto."""
+    completo = conta._soma_do_recorte([_mercado(10, 100, 2.0), _mercado(8, 50, 1.0)])
+    assert completo["liquido_com_custo_de_saida_usdc_por_hora"] == pytest.approx(15.0)
+    assert completo["mercados_sem_custo_de_saida"] == 0
+    parcial = conta._soma_do_recorte([_mercado(10, 100, 2.0), _mercado(8, 50, None)])
+    assert parcial["liquido_com_custo_de_saida_usdc_por_hora"] is None
+    assert parcial["mercados_sem_custo_de_saida"] == 1
+    assert conta._soma_do_recorte([])["liquido_com_custo_de_saida_usdc_por_hora"] is None
