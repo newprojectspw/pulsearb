@@ -201,6 +201,13 @@ class LacoMaker:
         for slug in [s for s in self.abertas if s not in abertas_agora]:
             efeito = await self._sair(slug, motivo="janela_fechou")
             efeitos.append(efeito)
+        # Tokens e parâmetros são de toda janela AVALIADA, cotada ou não —
+        # a saída da cotação não os alcança quando nunca houve cotação, e
+        # 14 dias de janelas curtas rodando acumulariam (revisão do Codex,
+        # #126). Janela que sumiu leva os seus.
+        for cache in (self._tokens, self._params):
+            for slug in [s for s in cache if s not in abertas_agora]:
+                cache.pop(slug, None)
 
         # 2) As abertas.
         for janela in janelas:

@@ -539,6 +539,22 @@ class TestRecolherQuandoOLivroAnda:
         # 0,48 (externo), não 0,49 (a nossa antiga)
         assert laco._referencia_do_recolher[chave][0] == pytest.approx(0.48)
 
+    async def test_janela_que_nunca_cotou_nao_deixa_tokens_nem_parametros(self, tmp_path):
+        """Tokens e parâmetros entram para toda janela AVALIADA — sem pool, com
+        o portão fechado, sem livro —, e a limpeza da saída da cotação não os
+        alcança quando nunca houve cotação (revisão do Codex, #126). A janela
+        sumir tem de levá-los."""
+        laco = _laco(tmp_path, portao=_PortaoDuble(pode=False, motivo="fechado"))
+        await laco.passo(
+            [_janela(), _janela(slug="eth-updown-4h-1", com_pool=False)],
+            livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas == {}
+        assert set(laco._tokens) == {"btc-updown-4h-1", "eth-updown-4h-1"}
+        assert set(laco._params) == {"btc-updown-4h-1"}
+        await laco.passo([], livro_de=_livro_de(_livro(0.50)), agora_epoch=1001.0, agora_ns=2)
+        assert laco._tokens == {} and laco._params == {}
+
     async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
         """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
         perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —
