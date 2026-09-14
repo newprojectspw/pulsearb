@@ -15,6 +15,7 @@ from pulsearb.backtest.book import OrderBook
 from pulsearb.live.cotacao import (
     FATOR_DE_CAPTURA_PADRAO,
     MARKOUT_CENTAVOS_POR_SHARE,
+    AncoraDoMicroprice,
     Cotacao,
     escolher_cotacao,
     estimar_retorno,
@@ -272,3 +273,130 @@ class TestOPrecoCaiNaGradeDoTick:
         assert c.preco(0.50, 0.01, do_lado_bid=True) == 0.49
         assert c.preco(0.50, 0.01, do_lado_bid=False) == 0.51
         assert Cotacao(3, 50.0).preco(0.07, 0.01, do_lado_bid=True) == 0.04
+
+
+class TestMicropriceEAncora:
+    """O microprice como ÂNCORA da cotação (`docs/OUTROS_BOTS.md` §6, item 6).
+
+    O `maker_de_pares` mediu sobre a gravação que cotar a partir do microprice
+    é o que vira o sinal do termo determinístico. Aqui se trava o que a porta
+    para o caminho ao vivo tem de garantir: que a âncora só aperta, que ela é
+    a MESMA função que o script mediu, e — o que nenhum número denuncia — que
+    o preço avaliado e o preço enviado continuam sendo o mesmo.
+    """
+
+    def test_o_microprice_pende_para_o_lado_pequeno(self) -> None:
+        # bid de 900 contra ask de 100: quem quer comprar já está na fila, e o
+        # pouco que resta do outro lado é o que vai ser levado — o justo está
+        # perto do ASK.
+        livro = OrderBook(asset_id="tok", bids=[(0.49, 900.0)], asks=[(0.51, 100.0)])
+        assert livro.microprice == pytest.approx(0.49 * 100 / 1000 + 0.51 * 900 / 1000)
+        assert livro.microprice > livro.mid
+        # E o espelho: ask grande puxa para o bid.
+        invertido = OrderBook(asset_id="tok", bids=[(0.49, 100.0)], asks=[(0.51, 900.0)])
+        assert invertido.microprice < invertido.mid
+
+    def test_sem_os_dois_lados_nao_inventa_microprice(self) -> None:
+        """Sem um dos lados não há para onde ponderar. Inventar aqui daria
+        âncora para um livro que não se sabe onde está."""
+        assert OrderBook(asset_id="t", bids=[(0.49, 10.0)], asks=[]).microprice is None
+        assert OrderBook(asset_id="t", bids=[], asks=[(0.51, 10.0)]).microprice is None
+        zerado = OrderBook(asset_id="t", bids=[(0.49, 0.0)], asks=[(0.51, 0.0)])
+        assert zerado.microprice is None
+
+    def test_ancora_com_ticks_negativo_falha_na_construcao(self) -> None:
+        """`ticks` negativo mandaria a cotação para CIMA do microprice — o
+        oposto do que a âncora faz, e em silêncio."""
+        with pytest.raises(ValueError, match="negativo"):
+            AncoraDoMicroprice(bid=0.50, ticks=-1)
+
+    def test_a_ancora_so_aperta_nunca_afrouxa(self) -> None:
+        """Microprice ACIMA do meio: o bid já está mais longe do que a âncora
+        exige, e a âncora não pode puxá-lo de volta para perto do meio."""
+        cotacao = Cotacao(distancia_ticks=2, tamanho=50.0)
+        sem = cotacao.preco(0.50, 0.01, do_lado_bid=True)
+        com = cotacao.preco(
+            0.50, 0.01, do_lado_bid=True, ancora=AncoraDoMicroprice(bid=0.55, ticks=1)
+        )
+        assert sem == pytest.approx(0.48)
+        assert com == pytest.approx(sem)
+        # Agora o microprice ABAIXO: aí ela aperta.
+        apertada = cotacao.preco(
+            0.50, 0.01, do_lado_bid=True, ancora=AncoraDoMicroprice(bid=0.46, ticks=1)
+        )
+        assert apertada == pytest.approx(0.45)
+
+    def test_a_ancora_do_ask_empurra_para_cima(self) -> None:
+        """Do lado do ask o conservador é o contrário: afastar-se para cima."""
+        cotacao = Cotacao(distancia_ticks=1, tamanho=50.0)
+        assert cotacao.preco(0.50, 0.01, do_lado_bid=False) == pytest.approx(0.51)
+        assert cotacao.preco(
+            0.50, 0.01, do_lado_bid=False, ancora=AncoraDoMicroprice(ask=0.54, ticks=1)
+        ) == pytest.approx(0.55)
+
+    def test_perna_sem_microprice_nao_ancora_aquele_lado(self) -> None:
+        cotacao = Cotacao(distancia_ticks=1, tamanho=50.0)
+        so_o_bid = AncoraDoMicroprice(bid=0.46, ask=None, ticks=1)
+        assert cotacao.preco(0.50, 0.01, do_lado_bid=True, ancora=so_o_bid) == (
+            pytest.approx(0.45)
+        )
+        assert cotacao.preco(0.50, 0.01, do_lado_bid=False, ancora=so_o_bid) == (
+            pytest.approx(0.51)
+        )
+
+    @pytest.mark.parametrize("micro_down", [0.30, 0.44, 0.50, 0.61])
+    @pytest.mark.parametrize("meio", [0.50, 0.37, 0.735])
+    def test_o_preco_AVALIADO_e_o_ENVIADO_sao_o_mesmo_numero(
+        self, meio: float, micro_down: float
+    ) -> None:
+        """A conta vê a perna Down como o ASK do livro do Up (`1 − preço`); o
+        laço a envia como BID no livro do Down, com a âncora espelhada. Se os
+        dois arredondamentos não derem no mesmo tick, a cotação é escolhida
+        por um preço e enviada por outro — o modo de falha do §6.1b, que não
+        levanta erro nenhum. Este é o teste que trava isso."""
+        cotacao = Cotacao(distancia_ticks=2, tamanho=50.0)
+        ancora = AncoraDoMicroprice(bid=0.48, ask=1.0 - micro_down, ticks=1)
+
+        avaliado = cotacao.preco(meio, 0.01, do_lado_bid=False, ancora=ancora)
+        enviado = cotacao.preco(
+            1.0 - meio, 0.01, do_lado_bid=True, ancora=ancora.no_livro_do_down()
+        )
+
+        assert 1.0 - enviado == pytest.approx(avaliado)
+
+    def test_ancora_que_tira_todas_da_faixa_nao_escolhe_cotacao(self) -> None:
+        """Microprice bem abaixo do meio empurra toda a grade para fora do
+        `max_spread`: nenhuma pontua, e cotar mesmo assim seria pagar risco de
+        execução por zero reward."""
+        livro = _livro(meio=0.50)
+        candidatas = [Cotacao(distancia_ticks=t, tamanho=50.0) for t in (1, 2)]
+        assert escolher_cotacao(candidatas, livro, PARAMS, horas=1.0) is not None
+        assert (
+            escolher_cotacao(
+                candidatas,
+                livro,
+                PARAMS,
+                horas=1.0,
+                ancora=AncoraDoMicroprice(bid=0.44, ask=0.56, ticks=1),
+            )
+            is None
+        )
+
+    def test_a_ancora_entra_no_score_da_candidata(self) -> None:
+        """A candidata é avaliada NO preço que a âncora produz, não no preço
+        do meio: escolher por um e enviar outro seria o defeito do #118 de
+        novo, agora pela âncora."""
+        livro = _livro(meio=0.50)
+        cotacao = Cotacao(distancia_ticks=1, tamanho=50.0)
+        solto = estimar_retorno(cotacao, livro, PARAMS, horas=1.0)
+        ancorado = estimar_retorno(
+            cotacao,
+            livro,
+            PARAMS,
+            horas=1.0,
+            ancora=AncoraDoMicroprice(bid=0.49, ask=0.51, ticks=1),
+        )
+        assert solto is not None and ancorado is not None
+        # 1 tick do meio pontua mais que 2 ticks: a âncora afastou a cotação.
+        assert ancorado.score_proprio < solto.score_proprio
+        assert ancorado.pontua

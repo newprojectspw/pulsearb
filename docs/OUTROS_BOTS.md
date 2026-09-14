@@ -124,7 +124,9 @@ drenagem de carteira; nunca rodar**, nem em carteira vazia.
 Up/Down, lote de 20 shares). O que a medida diz, em ordem de tamanho do
 efeito:
 
-1. **Recolher a cotação quando o livro anda contra é quase tudo.** Sem
+1. **Recolher a cotação quando o livro anda contra é quase tudo.** *(Portado
+   em 2026-09-14 — quadro 4.0 (e), knob `maker_recolhe_quando_o_livro_anda`.)*
+   Sem
    recolher: **−4.227,56 USDC no dia**. Recolhendo 100 ms depois de o melhor
    bid cair abaixo da nossa ordem: **−79,76** no termo determinístico. É o
    regime EVENT do `poly-maker` reduzido ao gatilho mais barato que existe, e
@@ -147,7 +149,11 @@ efeito:
    100, +137,84. O viés de inventário soma no lote pequeno (+36,09) e
    subtrai no grande. Três ticks abaixo do microprice mata o fill.
    É a peça central do `poly-maker` (`quoting.py:37-39`), e era a que
-   faltava aqui.
+   faltava aqui. **Portado em 2026-09-14** como ÂNCORA do laço ao vivo
+   (quadro 4.0 (f)): `OrderBook.microprice` é agora a única implementação —
+   este script chama a mesma —, e o knob `maker_ticks_abaixo_do_microprice`
+   liga o teto. Desligado por padrão, e a rodada que o medir tem de ser
+   separada da do item 1: as duas juntas não se distinguem.
 7. **Só com posição real, isto é, depois do LIVE:** fusão YES+NO via CTF
    `mergePositions`, e `rewards_min_size` refrescado do Gamma como tamanho em
    pool fino.
