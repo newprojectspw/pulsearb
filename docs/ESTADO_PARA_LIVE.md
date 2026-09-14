@@ -808,6 +808,33 @@ inventário (`r = fv − γσu`, o bid do lado comprado desce com o inventário)
 cotação por **microprice** em vez de juntar ao topo. Nenhuma delas melhora o
 topo do livro — essa é a regra que os três bots públicos compartilham.
 
+**A mesma conta no regime que PAGA tem instrumento, coleta e as duas
+parcelas.** Os pools do 1.12 são outro mercado — markout 4,7× menor, reward
+por estar no livro, resolução em dias. `scripts/markout_dos_pools.py
+--gravar` passou a guardar os eventos crus no formato do recorder (com um
+registro `pools_snapshot` que diz quais dois tokens formam cada par, mais
+`rewards_max_spread` e `rewards_min_size` do instante da coleta — eles mudam
+ao vivo), e `scripts/maker_de_pares_nos_pools.py` (13 testes) roda o MESMO
+motor sobre essa gravação, com três diferenças que não podiam ser
+escondidas:
+
+- **a perna solta é marcada a preço de saída** (melhor bid do fim, menos o
+  fee de taker): marcar a resultado num mercado que não resolveu seria
+  inventar o resultado. Sem bid no fim, a janela sai do P&L;
+- **a cotação é a do bot ao vivo** — a N ticks do MEIO, que é onde o §15.3
+  pontua, e não juntando ao melhor bid: num livro largo (o `LAC` tem 11
+  centavos de spread) juntar ao topo é ficar fora da banda e não pontuar. O
+  motor ganhou guarda para nunca cruzar o ask, que seria virar taker;
+- **o reward entra, pela MESMA função que o `laco_maker` chama**
+  (`estimar_retorno`), integrada no tempo em que as DUAS pernas repousam,
+  truncando intervalo acima de 60 s para que queda de feed não vire receita.
+  Reward e custo ficam separados no JSON: um é estimativa com hipótese de
+  fila, o outro é medido nos prints.
+
+Coleta de 6 h em curso desde 2026-09-14 15:37 UTC (60 mercados), com a
+varredura de persistência de 2 h ao lado (300 pools) para refazer o 1.12 com
+dado do mesmo dia.
+
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
