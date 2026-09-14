@@ -235,6 +235,29 @@ class TestOPortao:
         assert laco.cliente.repousadas == {}
         assert laco.motivos.get("portao:kill_acionado") == 1
 
+    async def test_o_motivo_da_recusa_conta_UMA_vez_quando_ha_cotacao_repousando(
+        self, tmp_path
+    ):
+        """`_sair` já conta o motivo com que sai, e contar antes dele punha o
+        mesmo motivo DUAS vezes no relato — justamente quando a trava faz o
+        que mais importa, tirar uma cotação que já estava no livro. O relato
+        de 60 s é a métrica que diz quantas vezes cada trava agiu."""
+        portao = _PortaoDuble()
+        laco = _laco(tmp_path, portao=portao)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+
+        # o disjuntor arma no meio da rodada, com a cotação repousando
+        portao.decisao = SimpleNamespace(pode=False, motivo="kill_acionado")
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1015.0, agora_ns=2
+        )
+
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["portao:kill_acionado"] == 1
+
     async def test_SEM_portao_NAO_cota_falha_fechada(self, tmp_path):
         """Um laço que cotasse 'porque ninguém passou trava' seria o oposto do
         que a trava serve."""

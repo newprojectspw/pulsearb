@@ -122,6 +122,19 @@ class ClienteDeCotacao(Protocol):
     async def cancelar(self, order_id: str) -> Any: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _DadosDaPassada:
+    """O que uma passada precisa do livro para decidir. Junta o que os
+    portões de dados produzem, para o passo não carregar cinco variáveis
+    soltas nem repetir a leitura."""
+
+    livro: OrderBook
+    livro_down: OrderBook | None
+    meio: float
+    horas: float
+    ancora: AncoraDoMicroprice | None
+
+
 @dataclass
 class LacoMaker:
     """O estado do que está repousando, por janela, e o passo que o move."""
@@ -241,14 +254,15 @@ class LacoMaker:
     ) -> Efeito | None:
         self._tokens[janela.slug] = (janela.token_up, janela.token_down)
         params = self._parametros(janela)
-        if params is not None:
-            self._params[janela.slug] = params
         if params is None:
             self._contar("sem_pool_de_reward")
             # Se havia cotação e o pool sumiu, sai: ficar seria risco por zero.
+            # O motivo da SAÍDA tem outro nome de propósito — `sem_pool` conta
+            # janela que nunca teve pool, `pool_sumiu` conta cotação perdida.
             if janela.slug in self.abertas:
                 return await self._sair(janela.slug, motivo="pool_sumiu")
             return None
+        self._params[janela.slug] = params
 
         aberta = self.abertas.get(janela.slug)
         if aberta is not None and self._negocios_desde is not None:
@@ -265,47 +279,16 @@ class LacoMaker:
                 params=params,
             )
 
-        livro = livro_de(janela.token_up, agora_ns=agora_ns)
-        if livro is None:
-            # Livro que não serve para decidir é o mesmo caso do portão: quem
-            # não sabe não decide. NÃO cancela — o livro pode voltar no passo
-            # seguinte, e sair por falta de dado nosso perderia a fila de graça.
-            self._contar("livro_indisponivel")
+        dados, recusa = self._dados_da_passada(
+            janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
+        )
+        if dados is None:
+            # Todo motivo daqui é falta de dado NOSSO, e nenhum cancela: o
+            # livro volta no passo seguinte, e sair perderia a fila de graça.
+            self._contar(recusa)
             return None
-
-        horas = max(janela.seconds_left(agora_epoch), 0.0) / 3600.0
-        if horas <= 0.0:
-            self._contar("janela_sem_tempo")
-            return None
-
-        meio = livro.mid
-        if meio is None:
-            # Livro de um lado só não tem meio, e sem meio não há onde cotar.
-            # Mesmo tratamento do livro indisponível: não cancela, espera.
-            self._contar("livro_sem_meio")
-            return None
-
-        # O livro do Down é lido AQUI, antes da escolha: a âncora do
-        # microprice precisa dele, e a perna Down é um bid no livro dela — não
-        # o espelho do Up (a revisão do #126 mostrou que os dois não são
-        # complementares).
-        livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
-        ancora = None
-        if self.ticks_abaixo_do_microprice is not None:
-            micro_up = livro.microprice
-            micro_down = livro_down.microprice if livro_down is not None else None
-            if micro_up is None or micro_down is None:
-                # Falha fechada: a âncora ligada é uma regra de colocação, e
-                # cotar sem conseguir avaliá-la é cotar sob uma regra que não
-                # se aplicou. NÃO cancela o que já repousa — é falta de dado
-                # nosso, como o `livro_indisponivel`.
-                self._contar("sem_microprice")
-                return None
-            ancora = AncoraDoMicroprice(
-                bid=micro_up,
-                ask=1.0 - micro_down,
-                ticks=self.ticks_abaixo_do_microprice,
-            )
+        livro, livro_down = dados.livro, dados.livro_down
+        meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
         # Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
         candidatas = [
@@ -314,15 +297,12 @@ class LacoMaker:
         ]
         melhor = escolher_cotacao(candidatas, livro, params, horas=horas, ancora=ancora)
 
-        # A cotação que JÁ repousa é avaliada no preço em que foi enviada, não
-        # a `distancia_ticks` do meio de agora: é assim que o meio andando a
-        # deixa "não pontuar mais" (revisão do #118).
-        atual = (
-            estimar_retorno_repousando(aberta, livro, params, horas=horas)
-            if aberta is not None
-            else None
-        )
+        atual = None
         if aberta is not None:
+            # A cotação que JÁ repousa é avaliada no preço em que foi enviada,
+            # não a `distancia_ticks` do meio de agora: é assim que o meio
+            # andando a deixa "não pontuar mais" (revisão do #118).
+            atual = estimar_retorno_repousando(aberta, livro, params, horas=horas)
             # O relógio do 4.2: o que ESTA cotação rendeu desde a última
             # passada, pela mesma conta que a colocou. Antes da decisão, porque
             # o tempo já correu — sair agora não apaga o que repousou.
@@ -339,9 +319,9 @@ class LacoMaker:
         # um disjuntor que armasse no meio da rodada não a tirava do livro. A
         # trava tem de valer para a exposição que existe agora, não só para a
         # que se vai criar.
-        candidata = decisao.nova if decisao.nova is not None else (
-            aberta.cotacao if aberta is not None else None
-        )
+        candidata = decisao.nova
+        if candidata is None and aberta is not None:
+            candidata = aberta.cotacao
         if candidata is not None:
             recusa = self._portao_recusa(
                 candidata,
@@ -352,35 +332,17 @@ class LacoMaker:
                 ancora=ancora,
             )
             if recusa is not None:
-                self._contar(f"portao:{recusa}")
                 # Havia cotação e o risco mudou? Sai. Manter uma cotação que o
                 # portão não autorizaria HOJE é exposição que ninguém aprovou.
-                if aberta is not None:
-                    return await self._sair(janela.slug, motivo=f"portao:{recusa}")
-                return None
+                return await self._recusar(janela.slug, f"portao:{recusa}")
 
         if decisao.acao is AcaoNaCotacao.MANTER:
             # Nada a fazer no livro. Não chama o I/O: uma passada que não muda
             # nada não pode custar uma ida à rede.
             return None
 
-        if (
-            self.recolhe_quando_o_livro_anda
-            and decisao.nova is not None
-            and decisao.nova.dois_lados
-            and livro_down is not None
-            and not livro_down.bids
-        ):
-            # Lado de bids do Down VAZIO: o recolher tiraria o par no segundo
-            # seguinte, e a passada de 15 s o poria de volta — coloca-e-recolhe
-            # sem fim, diário inflado e repouso nenhum para medir. A simulação
-            # medida não coloca sem bid (`maker_de_pares.py`); aqui idem
-            # (revisão do Codex, #126). O livro do Up sem bids já para antes,
-            # em `livro_sem_meio`.
-            self._contar("perna_down_sem_bids")
-            if aberta is not None:
-                return await self._sair(janela.slug, motivo="perna_down_sem_bids")
-            return None
+        if self._perna_down_sem_bids(decisao, livro_down):
+            return await self._recusar(janela.slug, "perna_down_sem_bids")
 
         return await self._executar(
             decisao,
@@ -390,6 +352,101 @@ class LacoMaker:
             livro=livro,
             livro_down=livro_down,
             ancora=ancora,
+        )
+
+    def _dados_da_passada(
+        self,
+        janela: JanelaAoVivo,
+        *,
+        livro_de,
+        agora_epoch: float,
+        agora_ns: int,
+    ) -> tuple[_DadosDaPassada | None, str | None]:
+        """O que esta passada precisa para decidir, ou o motivo de não decidir.
+
+        Os quatro portões daqui têm o MESMO tratamento, e é por isso que moram
+        juntos: nenhum cancela o que já repousa. Livro que não serve, janela
+        sem tempo, livro de um lado só e microprice indisponível são todos
+        falta de dado NOSSO — quem não sabe não decide, mas sair por isso
+        perderia a fila de graça, e o dado volta no passo seguinte.
+        """
+        livro = livro_de(janela.token_up, agora_ns=agora_ns)
+        if livro is None:
+            return None, "livro_indisponivel"
+        horas = max(janela.seconds_left(agora_epoch), 0.0) / 3600.0
+        if horas <= 0.0:
+            return None, "janela_sem_tempo"
+        meio = livro.mid
+        if meio is None:
+            # Livro de um lado só não tem meio, e sem meio não há onde cotar.
+            return None, "livro_sem_meio"
+        # O livro do Down é lido AQUI, antes da escolha: a âncora do
+        # microprice precisa dele, e a perna Down é um bid no livro dela — não
+        # o espelho do Up (a revisão do #126 mostrou que os dois não são
+        # complementares).
+        livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
+        ancora, recusa = self._ancora_do_microprice(livro, livro_down)
+        if recusa is not None:
+            return None, recusa
+        return (
+            _DadosDaPassada(
+                livro=livro,
+                livro_down=livro_down,
+                meio=meio,
+                horas=horas,
+                ancora=ancora,
+            ),
+            None,
+        )
+
+    def _ancora_do_microprice(
+        self, livro: OrderBook, livro_down: OrderBook | None
+    ) -> tuple[AncoraDoMicroprice | None, str | None]:
+        """A âncora desta passada, ou o motivo de não cotar.
+
+        Devolve `(None, None)` com a regra desligada — é o caminho de sempre.
+        Com ela ligada e o microprice de alguma perna indisponível, devolve o
+        MOTIVO: falha fechada, porque a âncora é uma regra de colocação e
+        cotar sem conseguir avaliá-la é cotar sob uma regra que não se
+        aplicou. Quem chama não cancela o que já repousa — é falta de dado
+        nosso, como o `livro_indisponivel`.
+
+        Cada perna é ancorada pelo microprice do LIVRO DELA: os dois livros
+        não são complementares (revisão do #126), e o espelho do Up daria
+        âncora sintética contra um livro real.
+        """
+        if self.ticks_abaixo_do_microprice is None:
+            return None, None
+        micro_up = livro.microprice
+        micro_down = livro_down.microprice if livro_down is not None else None
+        if micro_up is None or micro_down is None:
+            return None, "sem_microprice"
+        return (
+            AncoraDoMicroprice(
+                bid=micro_up,
+                ask=1.0 - micro_down,
+                ticks=self.ticks_abaixo_do_microprice,
+            ),
+            None,
+        )
+
+    def _perna_down_sem_bids(
+        self, decisao: Decisao, livro_down: OrderBook | None
+    ) -> bool:
+        """A perna Down iria para um livro sem bid nenhum?
+
+        Só importa com o recolher ligado: ele tiraria o par no segundo
+        seguinte, e a passada de 15 s o poria de volta — coloca-e-recolhe sem
+        fim, diário inflado e repouso nenhum para medir. A simulação medida
+        não coloca sem bid (`maker_de_pares.py`). O livro do Up sem bids já
+        para antes, em `livro_sem_meio`.
+        """
+        return (
+            self.recolhe_quando_o_livro_anda
+            and decisao.nova is not None
+            and decisao.nova.dois_lados
+            and livro_down is not None
+            and not livro_down.bids
         )
 
     def _portao_recusa(
@@ -575,6 +632,19 @@ class LacoMaker:
                     efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
                     break
         return efeitos
+
+    async def _recusar(self, slug: str, motivo: str) -> Efeito | None:
+        """Não cotar por `motivo` — e tirar do livro o que já repousava.
+
+        Conta UMA vez: `_sair` já conta o motivo com que sai, e contar antes
+        dele punha o mesmo motivo duas vezes no relato, justamente quando a
+        regra faz o que mais importa — tirar uma cotação que já estava lá.
+        Era assim no portão e no `perna_down_sem_bids`.
+        """
+        if slug in self.abertas:
+            return await self._sair(slug, motivo=motivo)
+        self._contar(motivo)
+        return None
 
     async def _sair(self, slug: str, *, motivo: str) -> Efeito:
         aberta = self.abertas.get(slug)
