@@ -59,13 +59,18 @@ class Negocio:
 
     `lado` é o do TAKER — `BUY` comprou dos asks, `SELL` vendeu nos bids —,
     a mesma convenção que `medir_markout` lê da gravação. O carimbo é o de
-    chegada, o mesmo eixo do livro.
+    chegada, o mesmo eixo do livro; `ts_servidor_ms` é o `timestamp` do
+    próprio evento (§6.1a), guardado para que um print antigo reenviado
+    numa reassinatura possa ser reconhecido como antigo — sem ele, a r7
+    (2026-09-14) não pôde dizer se duas "atravessadas" na mesma passada
+    eram do mercado ou do fio.
     """
 
     ts_ns: int
     preco: float
     tamanho: float
     lado: str
+    ts_servidor_ms: int | None = None
 
 
 @dataclass
@@ -201,10 +206,22 @@ class LivrosAoVivo:
             self.eventos_ignorados += 1
             return
         lado = str(evento.get("side", "")).upper()
+        try:
+            servidor_ms = int(evento["timestamp"]) if "timestamp" in evento else None
+        except (TypeError, ValueError):
+            servidor_ms = None
         fila = self.negocios.get(token_id)
         if fila is None:
             fila = self.negocios[token_id] = deque(maxlen=PRINTS_GUARDADOS_POR_TOKEN)
-        fila.append(Negocio(ts_ns=ts_ns, preco=preco, tamanho=tamanho, lado=lado))
+        fila.append(
+            Negocio(
+                ts_ns=ts_ns,
+                preco=preco,
+                tamanho=tamanho,
+                lado=lado,
+                ts_servidor_ms=servidor_ms,
+            )
+        )
         self.negocios_recebidos += 1
 
     # ────────────────────────────────────────────────────────────── consulta
@@ -227,13 +244,25 @@ class LivrosAoVivo:
         self.negocios.pop(token_id, None)
         return self.por_token.pop(token_id, None) is not None
 
-    def confiavel(self, token_id: str, *, agora_ns: int) -> bool:
-        registro = self.por_token.get(token_id)
-        return registro is not None and registro.confiavel(
-            agora_ns, silencio_s=self.silencio_do_token_s
-        )
+    def confiavel(
+        self, token_id: str, *, agora_ns: int, silencio_s: float | None = None
+    ) -> bool:
+        """`silencio_s` troca o limite de silêncio SÓ nesta consulta.
 
-    def livro(self, token_id: str, *, agora_ns: int) -> OrderBook | None:
+        Existe para o livro dos pools de reward: mercado de horizonte longo
+        fica dezenas de segundos sem evento porque NADA mudou, e o WS só manda
+        delta quando muda — os 10 s do Up/Down de 5 min chamariam de mudo
+        mais da metade deles (medido na r7 de 2026-09-14: 55–60% dos tokens
+        "mudos" a qualquer instante). Quem passa um limite maior assume o
+        dever de vigiar a CONEXÃO em vez do token — ver `live/shadow.py`.
+        """
+        registro = self.por_token.get(token_id)
+        limite = self.silencio_do_token_s if silencio_s is None else silencio_s
+        return registro is not None and registro.confiavel(agora_ns, silencio_s=limite)
+
+    def livro(
+        self, token_id: str, *, agora_ns: int, silencio_s: float | None = None
+    ) -> OrderBook | None:
         """O livro, ou None se ele não serve para decidir.
 
         Devolver None em vez de um livro suspeito é a mesma regra dos
@@ -248,7 +277,7 @@ class LivrosAoVivo:
         do livro por tick por token no caminho quente, para proteger um uso
         que a decisão não faz: ela lê e decide no mesmo instante.
         """
-        if not self.confiavel(token_id, agora_ns=agora_ns):
+        if not self.confiavel(token_id, agora_ns=agora_ns, silencio_s=silencio_s):
             return None
         return self.por_token[token_id].livro
 

@@ -28,6 +28,7 @@ from pulsearb.backtest.book import OrderBook
 from pulsearb.live.caixa_maker import (
     INTERVALO_MAXIMO_POR_PASSADA_S,
     CaixaDoMaker,
+    _atraso_do_print_s,
 )
 from pulsearb.live.cotacao import FATOR_DE_CAPTURA_PADRAO, Cotacao, estimar_retorno
 from pulsearb.live.livros import LivrosAoVivo, Negocio
@@ -253,6 +254,15 @@ def _print(asset_id, price, size, side):
     }
 
 
+class TestOAtrasoDoPrint:
+    def test_atraso_e_agora_menos_o_carimbo_do_servidor(self):
+        # 1789366908.437 s de parede, print carimbado 1789366905123 ms → 3,314 s.
+        print_ = _n(1789366908.0, 0.5, 1.0, "SELL")
+        assert _atraso_do_print_s(print_, 1789366908_437_000_000) is None
+        print_.ts_servidor_ms = 1789366905123
+        assert _atraso_do_print_s(print_, 1789366908_437_000_000) == pytest.approx(3.314)
+
+
 class TestLivrosGuardamOsPrints:
     def test_print_de_token_com_livro_fica_e_sai_por_ts(self):
         livros = LivrosAoVivo()
@@ -278,6 +288,21 @@ class TestLivrosGuardamOsPrints:
         assert [n.preco for n in livros.negocios_desde("tok", ts_ns=5)] == [0.51]
         assert livros.negocios_desde("tok", ts_ns=0)[0] == Negocio(5, 0.49, 7.0, "SELL")
         assert livros.resumo(agora_ns=10)["negocios_recebidos"] == 2
+
+    def test_o_carimbo_do_servidor_fica_guardado_quando_vem(self):
+        # §6.1a: `timestamp` em ms, como string. Sem ele, `None` — e não zero,
+        # que pareceria um print de 1970 com atraso de décadas.
+        livros = LivrosAoVivo()
+        livros.aplicar(
+            {"event_type": "book", "asset_id": "tok", "bids": [], "asks": []}, ts_ns=1
+        )
+        com = _print("tok", "0.49", "7", "SELL") | {"timestamp": "1789366908123"}
+        livros.aplicar(com, ts_ns=5)
+        livros.aplicar(_print("tok", "0.49", "7", "SELL"), ts_ns=6)
+        livros.aplicar(_print("tok", "0.49", "7", "SELL") | {"timestamp": "x"}, ts_ns=7)
+
+        carimbos = [n.ts_servidor_ms for n in livros.negocios_desde("tok", ts_ns=0)]
+        assert carimbos == [1789366908123, None, None]
 
     def test_print_de_token_sem_livro_e_ignorado(self):
         livros = LivrosAoVivo()

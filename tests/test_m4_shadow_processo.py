@@ -20,6 +20,7 @@ from pulsearb.execution.executor import ExecutorSombra
 from pulsearb.live.ciclo import CicloAoVivo
 from pulsearb.live.motor import ConfigDoMotor
 from pulsearb.live.shadow import (
+    SILENCIO_DO_LIVRO_DE_POOL_S,
     ProcessoShadow,
     _curvas,
     montar_ciclo,
@@ -851,6 +852,71 @@ class _CicloFalso:
 
 def _processo(tmp_path, ciclo):
     return ProcessoShadow(_settings(tmp_path), ciclo)
+
+
+class _LivrosQueLembramALeitura:
+    """Devolve um livro e guarda com que silêncio foi consultado."""
+
+    def __init__(self) -> None:
+        self.consultas: list[float | None] = []
+
+    def livro(self, token_id, *, agora_ns, silencio_s=None):
+        self.consultas.append(silencio_s)
+        return f"livro-de-{token_id}"
+
+    def esquecer(self, token_id):
+        return True
+
+
+class TestOLivroDoMakerEhVigiadoPelaConexao:
+    """Um token de pool mudo há 40 s é mercado parado, não livro velho.
+
+    Medido na r7 (2026-09-14): com os 10 s do Up/Down, 55–60% dos tokens de
+    pool estavam "mudos" a qualquer instante e o maker viu
+    `livro_indisponivel` em 38% das passadas — o relógio do 4.2 parava num
+    livro que estava certo. O sinal que vale é a CONEXÃO dos pools ter
+    parado de falar (o heartbeat derruba com 30 s sem PONG).
+    """
+
+    def _processo_com_pools(self, tmp_path, *, conectado, idade_s):
+        settings = _settings(tmp_path)
+        settings.descobrir_pools_de_reward = True
+        ciclo = _CicloFalso()
+        ciclo.motor = SimpleNamespace(livros=_LivrosQueLembramALeitura())
+        processo = ProcessoShadow(settings, ciclo)
+        processo.poly_pools = SimpleNamespace(
+            connected=conectado,
+            last_message_age_seconds=idade_s,
+            pong_stale_seconds=30.0,
+        )
+        return processo, ciclo.motor.livros
+
+    def test_conexao_viva_consulta_com_o_silencio_dos_pools(self, tmp_path):
+        processo, livros = self._processo_com_pools(tmp_path, conectado=True, idade_s=3.0)
+        assert processo._livro_para_o_maker("tok", agora_ns=1) == "livro-de-tok"
+        assert livros.consultas == [SILENCIO_DO_LIVRO_DE_POOL_S]
+        assert SILENCIO_DO_LIVRO_DE_POOL_S > 60.0
+
+    def test_conexao_caida_nao_devolve_livro_nenhum(self, tmp_path):
+        processo, livros = self._processo_com_pools(tmp_path, conectado=False, idade_s=1.0)
+        assert processo._livro_para_o_maker("tok", agora_ns=1) is None
+        assert livros.consultas == []
+
+    def test_conexao_aberta_mas_calada_alem_do_pong_nao_serve(self, tmp_path):
+        # Conexão "viva" que o heartbeat já vai derrubar: 30 s sem nada, nem
+        # PONG. Nenhum livro dela descreve o presente.
+        processo, livros = self._processo_com_pools(tmp_path, conectado=True, idade_s=31.0)
+        assert processo._livro_para_o_maker("tok", agora_ns=1) is None
+        assert livros.consultas == []
+
+    def test_sem_rota_de_pools_vale_a_regra_de_sempre(self, tmp_path):
+        # Sem conexão de pools não há o que vigiar: o maker lê com os 10 s
+        # por token, como o taker.
+        ciclo = _CicloFalso()
+        ciclo.motor = SimpleNamespace(livros=_LivrosQueLembramALeitura())
+        processo = ProcessoShadow(_settings(tmp_path), ciclo)
+        assert processo._livro_para_o_maker("tok", agora_ns=1) == "livro-de-tok"
+        assert ciclo.motor.livros.consultas == [None]
 
 
 class TestORunRespeitaOPrazo:
