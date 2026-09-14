@@ -430,7 +430,78 @@ fixou antes de existir dado. Nenhuma duração passa.
 | 1.7 | Markout 5 s | ≥ −0,5 ¢/share | **−0,1974** (246.504 execuções) — **remedido no M2.2** (`M2_20260824.json`, 2026-08-31, fórmula confirmada) | ✅ |
 | 1.8 | Horas de amostra na célula | ≥ 20 h | **65,922 h** — **remedido no M2.2** (2026-08-31) — mas isso era sobre a gravação de 24/08, **quando ainda havia pool**. **Remedido em 2026-09-12 sobre 72 h: 2,325 h — ❌.** E a causa não é amostra curta: de **2.233 janelas, UMA tinha pool de reward**; as outras **2.232 saíram por `sem_taxa_diaria`**. As 2,3 h são dessa única janela. Isto confirma em escala o achado do #93 — os mercados updown deixaram de participar do programa de rewards — e é ACHADO SOBRE O PROGRAMA, não defeito nosso. O 1.8 volta a ✅ se e quando o pool voltar; não há código a consertar. | ❌ (era ✅ em 24/08) |
 | 1.9 | Divergência com topo deslocado (emenda no VEREDITO_M2) | < 1 % | **0,20 %** (agregada: 2,82 %) | ✅ |
-| 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3 | ✅ |
+| 1.10 | Fórmula de reward confirmada na doc | sim | **CONFIRMADA** — `docs.polymarket.com/programs/liquidity-rewards` (2026-08-30): `S(v,s)=((v-s)/v)²×b`, quadrática, v=`rewardsMaxSpread` em centavos, amostrada a cada 1 min (10.080/epoch). **`analysis/rewards.py` corrigida no mesmo commit** — remove fórmula exponencial, fator_desconto e varredura. O M2.2 maker precisa re-rodar com a fórmula certa. Ver API_NOTES §15.3. ⚠️ **A fórmula tinha DUAS partes e o código implementava UMA (achado em 2026-09-14):** `S(v,s)` por ordem entrou em 30/08; a combinação dos lados — `Q_min = max(min(Q_ne,Q_no), max(Q_ne,Q_no)/3)` dentro de [0,10, 0,90], `min(Q_ne,Q_no)` fora — está no §15.3 desde o mesmo dia e o código **somava** os lados. `exige_dois_lados` existia como campo e nunca era ligado. **Corrigido:** `combinar_lados` em `analysis/rewards.py`, usado por `score_da_ordem` e por `live/cotacao.py` (mesmo caminho), e `denominador_pessimista` com prova de que o piso da fatia é o publicado. Dois testes que encodavam a soma (`dois == 2 × um`) reescritos; 7 novos. **O 1.12 não muda** — ver a seção abaixo | ✅ |
+
+### A fórmula do §15.3 tinha uma metade que o código não implementava (2026-09-14)
+
+O `API_NOTES` §15.3 está `[VERIFICADO]` desde 30/08 e diz, em duas linhas, como
+os dois lados de um maker se combinam:
+
+```
+dentro de [0,10, 0,90]:  Q_min = max(min(Q_ne, Q_no), max(Q_ne, Q_no) / 3)
+fora:                    Q_min = min(Q_ne, Q_no)
+```
+
+`score_da_ordem` e `live/cotacao.py` **somavam** `Q_ne + Q_no`. O campo
+`exige_dois_lados` de `ParametrosDeReward` existia para isso e `grep` em
+`src/` e `scripts/` só acha a declaração e um `if` que ninguém liga. É a
+terceira vez que este projeto acha o mesmo defeito: fato conferido na fonte,
+guardado na doc, ausente do código (`price_change` §6.1b, `market_resolved`
+§12.13, e agora este). Dois testes encodavam a soma — `dois == 2 × um` — e
+passavam porque o código somava também.
+
+**O sinal do erro, provado e não estimado.** Para um maker com `a + b = S`
+nos dois lados, `Q_min ≤ S/2` sempre, com igualdade só em `a = b` (prova de
+três linhas na docstring de `denominador_pessimista`; teste parametrizado
+cobre 35 divisões dentro e fora da faixa). Logo:
+
+- **cotação simétrica:** numerador certo = `S/2`; o antigo era `S` (2×).
+  Denominador certo ≤ `Σ/2`; o antigo era `Σ` (≥ 2×). Os dois erros se
+  cancelavam e a fatia saía **exatamente o piso**. Por isso **o 1.12 não
+  muda**: os +148,02 USDC/h foram medidos com as quatro cotações simétricas
+  da varredura e continuam sendo limite inferior. Há um teste que reproduz a
+  conta antiga à mão e confere que a nova dá a mesma fatia.
+- **cotação de UM lado:** o antigo pagava inteira; a doc paga **um terço**
+  dentro da faixa e **ZERO** fora dela. `ORDENS_PADRAO` do M2.2 tem uma de um
+  lado, e `live/cotacao.py` aceita `dois_lados=False` — ali o motor ao vivo
+  superestimava a própria receita por 3×, ou por infinito nos mercados de
+  horizonte longo, que vivem fora de [0,10, 0,90] e são **exatamente onde o
+  pool foi parar**.
+
+**O que isto muda para a decisão:** nada no 1.12, que é a única conta
+positiva; e tira da mesa qualquer variante de cotar um lado só nos mercados
+longos — ela vale zero por regra do programa, não por falta de fila.
+
+**Dois termos do 1.12 que ainda não são medida, e o que mede cada um
+(registrado ANTES de rodar, 2026-09-14):**
+
+1. **Capital — deixou de ser estimativa.** `capital_da_ordem` em
+   `analysis/rewards.py` lê do livro: cotar os dois lados de um mercado
+   binário é pôr DUAS compras, uma em cada token, e cada uma imobiliza
+   `tamanho × preço` — `tamanho × (1 − spread_nosso)` no total, sempre ≤
+   `tamanho`. Sem cunhar nada. A estimativa de "~1.000 por mercado" era boa;
+   agora é conta, e o *conta_do_maker_nos_pools* da branch `soma-dos-lados-e-pools` pode publicar
+   `capital_usdc` por mercado em vez de um `~`.
+2. **Custo de saída — o buraco.** O markout do 1.12 é de **5 s**
+   (o *markout_dos_pools* da mesma branch chama `medir_markout` com os
+   horizontes padrão 1/5/30 s). Cinco segundos medem seleção adversa num livro que se move;
+   não medem o que acontece quando UMA das duas compras executa num mercado
+   que resolve por oráculo em dias e cujo livro tem 11 centavos de spread
+   (o `LAC (-9.5)` da seção acima). Sair desse inventário custa **metade do
+   spread**, à vista — 5,5 c/share naquele livro, contra os 0,06 c/share do
+   markout de 5 s. É ~90× o custo modelado, e o 1.12 fecha por 3% de custo
+   sobre receita: **não sobrevive a um custo de saída assim se as execuções
+   de um lado só forem frequentes.** O que decide é `taxa de execução
+   unilateral × (spread/2)` por mercado, e nada disso foi medido.
+   **Medição:** o *markout_dos_pools* de novo (`--top 60 --duracao 4h`), mas
+   com `medir_markout(janelas, horizontes_s=(5, 30, 300, 1800))` — o
+   markout a 30 min é a proxy do custo até conseguir sair — e, no mesmo
+   relatório, `spread_no_fill / 2` por execução. **Critério:** o 1.12 passa
+   de novo se `receita − (execuções/h × max(markout_1800s, spread/2))`
+   continuar positivo nos mesmos 95 mercados. Se não, a rota maker nos pools
+   longos cai como caiu nos updown, e por motivo com nome:
+   `custo_de_saida_maior_que_reward`. Roda no Mac — este ambiente não
+   alcança a Polymarket (`403 CONNECT` em `clob`, `gamma-api`, `data-api`).
 
 ### Duas rotas que não dependem do preditor — 1.11 e 1.12 (2026-09-13)
 
@@ -1390,6 +1461,19 @@ O achado que segurou o workflow antes — `C Security Rating on New Code` no
 SonarCloud, com `permissions: contents: read` não resolvendo — não voltou a
 aparecer. Fica o registro da hipótese nunca testada: supply-chain,
 `actions/checkout@v5` e `actions/setup-python@v6` não fixadas por commit SHA.
+
+**A contenção de LEITURA ganhou raiz própria em 2026-09-14.** A mensagem de
+erro de `caminho_de_relatorio_lido` mandava definir
+`PULSEARB_BACKTEST_OUTPUT_ROOT` para ler de outra raiz — variável de SAÍDA
+liberando leitura, e liberando junto toda `caminho_de_escrita` do mesmo
+processo, porque as duas partilhavam `raiz_de_saida()`. Agora
+`PULSEARB_RELATORIOS_INPUT_ROOT` abre a leitura sem abrir a escrita (teste
+confere os dois lados), e ausente cai na raiz de saída, que é o caso comum.
+No mesmo commit `scripts/resumo_m2.py` deixou de ter a sua cópia da regra
+(com `is_relative_to`, que o motor de taint do SonarCloud não reconhece) e
+passou a chamar a função compartilhada — uma contenção, não duas. Achado
+revisando o patch S2083 dos scripts novos da branch `soma-dos-lados-e-pools`,
+que herdam a mesma mensagem e passam a herdar a variável certa ao rebasear.
 
 ---
 

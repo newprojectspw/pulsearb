@@ -193,7 +193,13 @@ class TestAEscolha:
 
 
 class TestUmLadoContraDoisLados:
-    def test_dois_lados_pontuam_o_dobro_de_um(self):
+    def test_dois_lados_pontuam_o_triplo_de_um_dentro_da_faixa(self):
+        """§15.3: um lado só é dividido por 3 dentro de [0,10, 0,90].
+
+        Até 2026-09-14 este teste dizia "o dobro", e passava porque o código
+        somava os dois lados. A doc combina por `Q_min`, e a soma pagava a
+        cotação de um lado como se fossem dois.
+        """
         um = estimar_retorno(
             Cotacao(1, 50.0, dois_lados=False), _livro(), PARAMS, horas=4.0
         )
@@ -201,7 +207,22 @@ class TestUmLadoContraDoisLados:
             Cotacao(1, 50.0, dois_lados=True), _livro(), PARAMS, horas=4.0
         )
 
-        assert dois.score_proprio == pytest.approx(2 * um.score_proprio)
+        assert dois.score_proprio == pytest.approx(3 * um.score_proprio)
+
+    def test_um_lado_so_vale_zero_fora_da_faixa(self):
+        """Fora de [0,10, 0,90] a doc EXIGE dois lados. É o regime dos
+        mercados de horizonte longo, onde o pool foi parar."""
+        um = estimar_retorno(
+            Cotacao(1, 50.0, dois_lados=False), _livro(meio=0.95), PARAMS, horas=4.0
+        )
+        dois = estimar_retorno(
+            Cotacao(1, 50.0, dois_lados=True), _livro(meio=0.95), PARAMS, horas=4.0
+        )
+
+        assert um is not None and dois is not None
+        assert um.score_proprio == 0.0
+        assert um.rewards_usdc == 0.0
+        assert dois.score_proprio > 0
 
     def test_dois_lados_tambem_dobram_a_execucao_esperada(self):
         """O score dobra, mas a exposição a markout também. Publicar só o

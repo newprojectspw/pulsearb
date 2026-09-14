@@ -182,6 +182,48 @@ def score_de_nivel(
     return (1.0 - ratio) ** 2 * tamanho
 
 
+#: Divisor do lado único, confirmado em `API_NOTES` §15.3. Dentro da faixa de
+#: preço o maker de um lado só não é excluído — ele é dividido por 3.
+C_LADO_UNICO = 3.0
+
+#: Faixa de ponto médio em que o lado único ainda pontua (dividido por `c`).
+#: FORA dela a doc não aplica penalidade: aplica EXIGÊNCIA — `Q_min = min(Q_ne,
+#: Q_no)`, e quem cota de um lado só recebe ZERO. Mercados de horizonte longo
+#: ("antes de 2027", campeonatos) vivem fora desta faixa, e é exatamente onde
+#: o pool foi parar depois de 08/09 — a regra não é canto de tabela, é o
+#: regime em que a rota maker teria de operar.
+FAIXA_DE_LADO_UNICO = (0.10, 0.90)
+
+
+def combinar_lados(
+    q_bid: float, q_ask: float, *, meio: float | None
+) -> float:
+    """`Q_min` do §15.3 — e nunca a soma dos dois lados.
+
+    A doc é explícita: o score de um maker NÃO é `Q_ne + Q_no`. É
+
+        dentro de [0,10, 0,90]:  max(min(Q_ne, Q_no), max(Q_ne, Q_no) / 3)
+        fora:                    min(Q_ne, Q_no)
+
+    Somar os dois lados — que é o que este arquivo fazia — vale o dobro do
+    certo para uma cotação simétrica, e vale **três vezes** o certo (ou
+    infinitamente mais, fora da faixa, onde o certo é ZERO) para uma cotação
+    de um lado só. O §15.3 está marcado `[VERIFICADO]` desde 2026-08-30 e a
+    conta não o implementava: é o mesmo tipo de defeito do `price_change`
+    §6.1b e do `market_resolved` §12.13 — fato conferido na fonte, guardado
+    na doc, e ausente do código.
+
+    `meio` ausente devolve zero: sem ponto médio não se sabe de que lado da
+    faixa o mercado está, e chutar o lado generoso inventaria receita.
+    """
+    if meio is None:
+        return 0.0
+    piso, teto = FAIXA_DE_LADO_UNICO
+    if piso <= meio <= teto:
+        return max(min(q_bid, q_ask), max(q_bid, q_ask) / C_LADO_UNICO)
+    return min(q_bid, q_ask)
+
+
 def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
     """Score de TODOS os makers já presentes no livro, os dois lados.
 
@@ -199,6 +241,32 @@ def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
     return total
 
 
+def denominador_pessimista(book: OrderBook, params: ParametrosDeReward) -> float:
+    """O MAIOR valor que a soma dos `Q_min` dos makers do livro pode ter.
+
+    O livro agregado não diz quem é quem, então o `Q_min` de cada maker não
+    se calcula. Mas ele se LIMITA, e com prova curta. Para um maker com
+    `a + b = S` nos dois lados, dentro da faixa:
+
+        Q = max(min(a, b), max(a, b) / 3)  ≤  S / 2,   com igualdade em a = b
+
+    e fora da faixa `Q = min(a, b) ≤ S / 2` do mesmo jeito. Somando sobre os
+    makers, `Σ Q_min ≤ score_do_livro / 2` — sempre, e vale a igualdade só
+    se todo maker do livro cota simétrico. Usar o TETO do denominador dá o
+    PISO da fatia: é o mesmo desenho do `conta_pessimista_do_maker`, o erro
+    entra de um lado só e o lado é o que reprova.
+
+    Por que isto importa para o que já foi publicado: antes, o numerador
+    somava os dois lados (2× o certo) e o denominador também (≥ 2× o
+    certo), e os dois erros se cancelavam para cotação SIMÉTRICA — a fatia
+    saía exatamente este piso. O 1.12 foi medido com cotações simétricas, e
+    por isso os +148,02 USDC/h dele **não mudam** com esta correção: eram, e
+    continuam sendo, limite inferior. O que muda é a cotação de UM lado, que
+    o código antigo pagava inteira e a doc paga em um terço, ou em nada.
+    """
+    return score_do_livro(book, params) / 2.0
+
+
 def score_da_ordem(
     ordem: OrdemHipotetica, book: OrderBook, params: ParametrosDeReward
 ) -> float:
@@ -206,29 +274,73 @@ def score_da_ordem(
     meio = book.mid
     if meio is None:
         return 0.0
-    total = 0.0
+    por_lado = [0.0, 0.0]
     lados = (
         (book.best_bid, -1),
         (book.best_ask, +1),
     )
-    for melhor, sentido in lados:
+    for i, (melhor, sentido) in enumerate(lados):
         if melhor is None:
             continue
         preco = melhor + sentido * ordem.distancia_ticks * params.tick_size
         if not 0.0 < preco < 1.0:
             continue
-        total += score_de_nivel(preco, ordem.tamanho, meio=meio, params=params)
+        por_lado[i] = score_de_nivel(
+            preco, ordem.tamanho, meio=meio, params=params
+        )
         if not ordem.dois_lados:
             break
     if params.exige_dois_lados and (book.best_bid is None or book.best_ask is None):
         return 0.0
-    return total
+    # Os dois lados NÃO se somam — §15.3. Ver `combinar_lados`.
+    return combinar_lados(por_lado[0], por_lado[1], meio=meio)
+
+
+def capital_da_ordem(
+    ordem: OrdemHipotetica, book: OrderBook, params: ParametrosDeReward
+) -> float | None:
+    """USDC que a cotação IMOBILIZA, lido do livro — não estimado.
+
+    O 1.12 publicou "~1.000 USDC por mercado para 1.000 shares nos dois
+    lados" como estimativa. Não precisa ser: cotar os dois lados de um
+    mercado binário é pôr DUAS ordens de compra, uma em cada token — comprar
+    YES a `p_b` e comprar NO a `1 − p_a` é o mesmo que comprar YES a `p_b` e
+    vender YES a `p_a`, sem cunhar nada. Cada compra imobiliza
+    `tamanho × preço`, então
+
+        dois lados:  tamanho × (p_b + (1 − p_a)) = tamanho × (1 − spread_nosso)
+        um lado:     tamanho × p_b
+
+    e é sempre ≤ `tamanho`, porque `p_a > p_b`. Se as DUAS executam, o par
+    custou `1 − spread` e vale 1 na resolução — o spread é ganho, não
+    risco. O risco é UMA executar só, e esse custo não está aqui: está no
+    markout, e no horizonte em que ele é medido (ver o quadro, 1.12).
+
+    `None` quando o livro não dá os preços — sem preço não há capital, e um
+    zero aqui diria "de graça".
+    """
+    meio = book.mid
+    if meio is None or book.best_bid is None or book.best_ask is None:
+        return None
+    p_b = book.best_bid - ordem.distancia_ticks * params.tick_size
+    p_a = book.best_ask + ordem.distancia_ticks * params.tick_size
+    if not (0.0 < p_b < 1.0 and 0.0 < p_a < 1.0):
+        return None
+    if not ordem.dois_lados:
+        return ordem.tamanho * p_b
+    return ordem.tamanho * (p_b + (1.0 - p_a))
 
 
 def fatia_do_pool(
     nosso_score: float, score_do_mercado: float
 ) -> float:
-    """`nosso / (mercado + nosso)`. Zero se não pontuamos."""
+    """`nosso / (mercado + nosso)`. Zero se não pontuamos.
+
+    `nosso` é o `Q_min` da nossa cotação (`score_da_ordem`); `score_do_mercado`
+    tem de ser o `denominador_pessimista`, não o `score_do_livro` cru —
+    passar a soma dos dois lados aqui com um numerador já combinado dividiria
+    por um número 2× a 4× maior que qualquer denominador real.
+    """
     denominador = score_do_mercado + nosso_score
     if denominador <= 0 or nosso_score <= 0:
         return 0.0
@@ -294,7 +406,7 @@ def simular_serie(
         intervalo_s = max(0.0, (proximo - ts_ns) / 1e9)
         if intervalo_s <= 0:
             continue
-        mercado = score_do_livro(book, params)
+        mercado = denominador_pessimista(book, params)
         nosso = score_da_ordem(ordem, book, params)
         fatia = fatia_do_pool(nosso, mercado)
         resultado.segundos += intervalo_s

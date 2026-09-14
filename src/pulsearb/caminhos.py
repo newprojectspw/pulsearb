@@ -27,6 +27,17 @@ from pathlib import Path
 #: Variável que amplia a raiz permitida para o arquivo de saída.
 ENV_RAIZ_DE_SAIDA = "PULSEARB_BACKTEST_OUTPUT_ROOT"
 
+#: Variável que amplia a raiz permitida para LER relatórios — e só para ler.
+#:
+#: Até 2026-09-14 a leitura mandava definir `PULSEARB_BACKTEST_OUTPUT_ROOT`
+#: para ler de outra raiz. Duas coisas erradas nisso: variável chamada OUTPUT
+#: liberando leitura é confuso, e ela mexe em `raiz_de_saida()`, que todo
+#: `caminho_de_escrita` do mesmo processo usa — quem afrouxava a leitura
+#: afrouxava junto a escrita, sem ser avisado. Esta variável separa as duas.
+#: Ausente, a leitura cai na raiz de saída, que é onde o próprio projeto
+#: gravou o relatório: o caso comum continua sem variável nenhuma.
+ENV_RAIZ_DE_LEITURA = "PULSEARB_RELATORIOS_INPUT_ROOT"
+
 
 def raiz_de_saida() -> Path:
     """Onde o relatório PODE ser escrito. Diretório de trabalho, por padrão.
@@ -46,6 +57,20 @@ def raiz_de_saida() -> Path:
     if bruto:
         return Path(bruto).expanduser().resolve(strict=False)
     return Path.cwd().resolve()
+
+
+def raiz_de_leitura() -> Path:
+    """Onde um relatório PODE ser lido. A raiz de saída, por padrão.
+
+    Ler e escrever costumam ser o mesmo lugar — o relatório que se lê é o que
+    o `--json` gravou. Quando não é (relatório copiado de outra máquina, por
+    exemplo), `PULSEARB_RELATORIOS_INPUT_ROOT` abre a leitura ali SEM abrir a
+    escrita.
+    """
+    bruto = os.environ.get(ENV_RAIZ_DE_LEITURA)
+    if bruto:
+        return Path(bruto).expanduser().resolve(strict=False)
+    return raiz_de_saida()
 
 
 #: Forma aceita para o `--json`: caminho RELATIVO, segmentos de letras,
@@ -146,9 +171,9 @@ def caminho_de_relatorio_lido(bruto: str) -> Path:
             f"nome de entrada inválido: {bruto!r}\n"
             "esperado: caminho relativo terminando em .json, com letras, "
             "dígitos, '-', '_' e '.' (ex.: relatorios/VARIANCIA_23AGO.json).\n"
-            f"para ler de outra raiz, defina {ENV_RAIZ_DE_SAIDA}."
+            f"para ler de outra raiz, defina {ENV_RAIZ_DE_LEITURA}."
         )
-    raiz = raiz_de_saida()
+    raiz = raiz_de_leitura()
     caminho = raiz / relativo
     raiz_resolvida = raiz.resolve(strict=False)
     resolvido = caminho.resolve(strict=False)

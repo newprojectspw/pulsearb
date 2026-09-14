@@ -766,5 +766,5 @@ def test_resumo_contem_o_caminho_do_relatorio(tmp_path, monkeypatch):
         with pytest.raises(SystemExit, match="inválido"):
             resumo.caminho_do_relatorio(ruim)
 
-    with pytest.raises(SystemExit, match="não encontrado"):
+    with pytest.raises(SystemExit, match="não existe"):
         resumo.caminho_do_relatorio("nao_existe.json")

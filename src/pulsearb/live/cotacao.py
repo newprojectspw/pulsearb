@@ -45,8 +45,9 @@ from dataclasses import dataclass
 
 from pulsearb.analysis.rewards import (
     ParametrosDeReward,
+    combinar_lados,
+    denominador_pessimista,
     score_de_nivel,
-    score_do_livro,
 )
 from pulsearb.backtest.book import OrderBook
 
@@ -127,17 +128,23 @@ def estimar_retorno(
         return None
 
     lados = 2 if cotacao.dois_lados else 1
-    proprio = 0.0
-    for do_lado_bid in (True, False)[:lados]:
+    por_lado = [0.0, 0.0]
+    for i, do_lado_bid in enumerate((True, False)[:lados]):
         preco = cotacao.preco(meio, params.tick_size, do_lado_bid=do_lado_bid)
-        proprio += score_de_nivel(
+        por_lado[i] = score_de_nivel(
             preco, cotacao.tamanho, meio=meio, params=params
         )
+    # Os dois lados NÃO se somam: §15.3 combina por `Q_min`, e cotação de um
+    # lado só vale um terço dentro da faixa e ZERO fora dela. Somar era pagar
+    # a cotação de um lado como se fossem dois.
+    proprio = combinar_lados(por_lado[0], por_lado[1], meio=meio)
 
     # O denominador inclui o nosso próprio score: entrar no livro aumenta o
     # total, e ignorar isso superestimaria a fatia — o erro fica maior
-    # justamente quando a cotação é grande, que é quando ela importa.
-    do_livro = score_do_livro(livro, params)
+    # justamente quando a cotação é grande, que é quando ela importa. E é o
+    # TETO do que os outros makers somam em `Q_min`, para que a fatia saia
+    # como piso — ver `denominador_pessimista`.
+    do_livro = denominador_pessimista(livro, params)
     total = do_livro + proprio
     fracao = proprio / total if total > 0 else 0.0
 
