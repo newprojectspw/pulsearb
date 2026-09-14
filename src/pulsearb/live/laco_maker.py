@@ -83,7 +83,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pulsearb.analysis.rewards import ParametrosDeReward
-from pulsearb.live.caixa_maker import CaixaDoMaker
+from pulsearb.backtest.book import OrderBook
+from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
     Cotacao,
     escolher_cotacao,
@@ -140,7 +141,35 @@ class LacoMaker:
     #: O relógio do 4.2: o que as cotações repousando teriam rendido e quantas
     #: vezes teriam executado. Ver `caixa_maker`.
     caixa: CaixaDoMaker = field(default_factory=CaixaDoMaker)
+    #: A regra que os makers dos leaderboards usam e que o `maker_de_pares`
+    #: mediu na gravação (2026-09-14): ficar parado com o livro andando contra
+    #: era quase toda a perda — −583,54 USDC em 4 h deixando a ordem
+    #: descansar, −31,87 recolhendo-a quando o melhor bid cai abaixo dela.
+    #: Desligada por padrão para as rodadas em curso não mudarem de
+    #: comportamento; a rota de pools liga por `Settings`.
+    recolhe_quando_o_livro_anda: bool = False
+    #: Em SHADOW a nossa ordem NÃO está no livro, então `best_bid < preço` é
+    #: o gatilho exato. Em LIVE ela está — e quando o mercado anda para
+    #: baixo, ela VIRA o melhor bid: o gatilho passa a ser "somos o topo e
+    #: estamos sozinhos nele" (tamanho no nível ≤ o nosso).
+    nossa_ordem_esta_no_livro: bool = False
     _negocios_desde: Any = field(default=None, repr=False)
+    #: Os tokens de cada janela com cotação, para o recolher entre passadas
+    #: (ele não recebe as janelas — só o livro).
+    _tokens: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
+    #: A referência de cada perna para o recolher: `min(preço, melhor bid do
+    #: mercado na primeira observação)`, por slug e por `desde_epoch`. Uma
+    #: cotação que já MELHORA o topo ao nascer (livro largo: bid 0,40, meio
+    #: 0,50, nós a 0,49) veria `best_bid < preço` no primeiro segundo e
+    #: cancelaria sem o mercado ter andado (revisão do Codex, #126). O que
+    #: recolhe é o mercado cair ABAIXO de onde estava quando entramos.
+    _referencia_do_recolher: dict[tuple[str, int], tuple[float | None, float | None]] = (
+        field(default_factory=dict, repr=False)
+    )
+    #: Os parâmetros de reward de cada janela com cotação, para a caixa
+    #: acertar o último intervalo ANTES de recolher (o recolher não recebe a
+    #: janela — só o livro).
+    _params: dict[str, ParametrosDeReward] = field(default_factory=dict, repr=False)
 
     async def passo(
         self,
@@ -172,6 +201,13 @@ class LacoMaker:
         for slug in [s for s in self.abertas if s not in abertas_agora]:
             efeito = await self._sair(slug, motivo="janela_fechou")
             efeitos.append(efeito)
+        # Tokens e parâmetros são de toda janela AVALIADA, cotada ou não —
+        # a saída da cotação não os alcança quando nunca houve cotação, e
+        # 14 dias de janelas curtas rodando acumulariam (revisão do Codex,
+        # #126). Janela que sumiu leva os seus.
+        for cache in (self._tokens, self._params):
+            for slug in [s for s in cache if s not in abertas_agora]:
+                cache.pop(slug, None)
 
         # 2) As abertas.
         for janela in janelas:
@@ -195,7 +231,10 @@ class LacoMaker:
         agora_ns: int,
         feeds_saudaveis: bool,
     ) -> Efeito | None:
+        self._tokens[janela.slug] = (janela.token_up, janela.token_down)
         params = self._parametros(janela)
+        if params is not None:
+            self._params[janela.slug] = params
         if params is None:
             self._contar("sem_pool_de_reward")
             # Se havia cotação e o pool sumiu, sai: ficar seria risco por zero.
@@ -215,6 +254,7 @@ class LacoMaker:
                 negocios_desde=self._negocios_desde,
                 agora_ns=agora_ns,
                 livro_de=livro_de,
+                params=params,
             )
 
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
@@ -293,8 +333,32 @@ class LacoMaker:
             # nada não pode custar uma ida à rede.
             return None
 
+        livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
+        if (
+            self.recolhe_quando_o_livro_anda
+            and decisao.nova is not None
+            and decisao.nova.dois_lados
+            and livro_down is not None
+            and not livro_down.bids
+        ):
+            # Lado de bids do Down VAZIO: o recolher tiraria o par no segundo
+            # seguinte, e a passada de 15 s o poria de volta — coloca-e-recolhe
+            # sem fim, diário inflado e repouso nenhum para medir. A simulação
+            # medida não coloca sem bid (`maker_de_pares.py`); aqui idem
+            # (revisão do Codex, #126). O livro do Up sem bids já para antes,
+            # em `livro_sem_meio`.
+            self._contar("perna_down_sem_bids")
+            if aberta is not None:
+                return await self._sair(janela.slug, motivo="perna_down_sem_bids")
+            return None
+
         return await self._executar(
-            decisao, janela, meio=meio, agora_epoch=agora_epoch
+            decisao,
+            janela,
+            meio=meio,
+            agora_epoch=agora_epoch,
+            livro=livro,
+            livro_down=livro_down,
         )
 
     def _portao_recusa(
@@ -342,10 +406,13 @@ class LacoMaker:
         *,
         meio: float,
         agora_epoch: float,
+        livro: OrderBook | None = None,
+        livro_down: OrderBook | None = None,
     ) -> Efeito:
+        anterior = self.abertas.get(janela.slug)
         efeito = await aplicar_decisao(
             decisao,
-            self.abertas.get(janela.slug),
+            anterior,
             cliente=self.cliente,
             ordem_da_cotacao=self._ordem_da_cotacao(janela, meio=meio),
             ordem_do_lado_down=self._ordem_da_cotacao(janela, meio=meio, lado_up=False),
@@ -353,7 +420,122 @@ class LacoMaker:
             agora_epoch=agora_epoch,
         )
         self._guardar(janela.slug, efeito)
+        aberta = self.abertas.get(janela.slug)
+        if aberta is not None:
+            # A referência do recolher nasce AQUI, do livro que colocou a
+            # cotação — não na primeira observação do sono, que perderia um
+            # mercado que andou dentro do primeiro segundo (revisão do Codex,
+            # #126). Cada perna lê o SEU livro: o do Down não é o espelho do
+            # Up, e uma referência sintética (1 − ask do Up) contra o livro
+            # real do Down recolheria pares parados. Perna sem livro agora
+            # fica sem referência, e o poll a marca na primeira observação.
+            # Em LIVE o livro que colocou a cotação NOVA ainda pode ter a
+            # ANTERIOR (recotação): o melhor bid externo desconta o nosso
+            # nível, senão a referência seria a nossa própria ordem.
+            chave = (janela.slug, int(aberta.desde_epoch * 1e6))
+            if chave not in self._referencia_do_recolher:
+                excluir = self.nossa_ordem_esta_no_livro and anterior is not None
+                self._referencia_do_recolher[chave] = (
+                    _referencia(
+                        livro,
+                        aberta.preco_up,
+                        excluir=(anterior.preco_up, anterior.cotacao.tamanho)
+                        if excluir
+                        else None,
+                    ),
+                    _referencia(
+                        livro_down,
+                        aberta.preco_down,
+                        excluir=(anterior.preco_down, anterior.cotacao.tamanho)
+                        if excluir
+                        else None,
+                    ),
+                )
         return efeito
+
+    async def recolher_se_o_livro_andou(self, livro_de, *, agora_ns: int) -> list[Efeito]:
+        """Entre passadas: tira do livro a cotação que o mercado deixou exposta.
+
+        Quando o melhor bid cai ABAIXO de onde estava quando entramos (e
+        abaixo do nosso preço), o fluxo que vem a seguir nos executa
+        primeiro — e é seleção adversa quase pura: o `maker_de_pares` mediu
+        −583,54 USDC em 4 h ficando, contra −31,87 recolhendo com 100 ms.
+        Aqui a latência é a do sono de 1 s do processo, e o que se mede em
+        SHADOW é se 1 s basta.
+
+        Três regras, cada uma por um motivo:
+        - **livro indisponível NÃO recolhe** — sair por falta de dado nosso
+          perde a fila de graça (mesma regra do `_passo_da_janela`);
+        - **lado de bids VAZIO recolhe** — é o caso mais forte de o mercado
+          ter ido embora, e é o que a simulação medida faz;
+        - **antes de sair, confere os prints do intervalo** — senão a saída
+          apaga o cursor da caixa e uma execução entre a passada e o
+          recolher some, subcontando justamente a métrica que esta regra
+          quer melhorar.
+        Basta uma perna para sair, porque as pernas entram e saem juntas.
+        """
+        if not self.recolhe_quando_o_livro_anda:
+            return []
+        efeitos: list[Efeito] = []
+        for slug, aberta in list(self.abertas.items()):
+            tokens = self._tokens.get(slug)
+            if tokens is None:
+                continue
+            chave = (slug, int(aberta.desde_epoch * 1e6))
+            pernas = ((0, tokens[0], aberta.preco_up), (1, tokens[1], aberta.preco_down))
+            livros = [livro_de(token_id, agora_ns=agora_ns) for _, token_id, _ in pernas]
+            referencias = list(self._referencia_do_recolher.get(chave, (None, None)))
+            for i, _, preco in pernas:
+                if preco <= 0.0 or livros[i] is None:
+                    continue
+                if referencias[i] is None:
+                    # Perna sem referência (o livro dela não estava à mão na
+                    # colocação): marca agora, do livro DELA, e não decide.
+                    # Em LIVE a nossa ordem já está nele — sai da conta.
+                    referencias[i] = _referencia(
+                        livros[i],
+                        preco,
+                        excluir=(preco, aberta.cotacao.tamanho)
+                        if self.nossa_ordem_esta_no_livro
+                        else None,
+                    )
+                    self._referencia_do_recolher[chave] = (referencias[0], referencias[1])
+                    continue
+                if _o_livro_andou_contra(
+                    livros[i], referencias[i],
+                    preco_nosso=preco, tamanho=aberta.cotacao.tamanho,
+                    nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
+                ):
+                    if self._negocios_desde is not None:
+                        self.caixa.conferir_prints(
+                            slug, aberta, token_up=tokens[0], token_down=tokens[1],
+                            negocios_desde=self._negocios_desde, agora_ns=agora_ns,
+                            livro_de=livro_de, params=self._params.get(slug),
+                        )
+                    # O último intervalo de reward, ANTES de sair: `_sair`
+                    # apaga o relógio da cotação, e uma que repousou 14 s e
+                    # foi recolhida contribuiria zero — o experimento
+                    # compara reward com execução, e recolher muito
+                    # empurraria o reward para baixo por construção.
+                    # A caixa conta no livro do Up. Se foi o Down que
+                    # disparou e o do Up não está à mão, o do Down serve:
+                    # o Up é o seu espelho (bid = 1 − ask), e é o mesmo
+                    # espelho que a colocação e o portão usam. Sem nenhum
+                    # dos dois não há como disparar — o laço acima só chega
+                    # aqui com o livro da perna que andou.
+                    params = self._params.get(slug)
+                    livro_up = (
+                        livros[0]
+                        if livros[0] is not None
+                        else espelho_do_livro(livros[1], asset_id=tokens[0])
+                    )
+                    if params is not None:
+                        self.caixa.acertar(
+                            slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
+                        )
+                    efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
+                    break
+        return efeitos
 
     async def _sair(self, slug: str, *, motivo: str) -> Efeito:
         aberta = self.abertas.get(slug)
@@ -377,11 +559,26 @@ class LacoMaker:
         cotação transformaria "não sei" em "não tenho" — que é a suposição que
         cria órfã. É a mesma regra do INCERTA do cliente.
         """
+        anterior = self.abertas.get(slug)
         if efeito.aberta is None:
             self.abertas.pop(slug, None)
             self.caixa.esquecer(slug)
         else:
             self.abertas[slug] = efeito.aberta
+        # A referência do recolher é da cotação, não da janela: cotação que
+        # saiu ou foi trocada (novo `desde_epoch`) leva a sua embora. Só o
+        # caminho do recolher a apagava, e cada `janela_fechou`, `pool_sumiu`
+        # ou recotação deixava uma chave morta para sempre (revisão do
+        # Codex, #126).
+        if anterior is not None and (
+            efeito.aberta is None or efeito.aberta.desde_epoch != anterior.desde_epoch
+        ):
+            self._referencia_do_recolher.pop(
+                (slug, int(anterior.desde_epoch * 1e6)), None
+            )
+        if efeito.aberta is None:
+            self._tokens.pop(slug, None)
+            self._params.pop(slug, None)
         if efeito.resultado is ResultadoDaAcao.RECONCILIAR:
             log.warning(
                 "cotacao maker em estado desconhecido: reconciliar",
@@ -459,3 +656,70 @@ def _nunca_chamado(_: Cotacao) -> OrdemPretendida:
     raise AssertionError(
         "ordem_da_cotacao chamado num CANCELAR — o `execucao_maker` nao deveria"
     )
+
+
+#: Tolerância de preço na comparação com o livro (o CLOB manda decimal como
+#: string; o nosso preço vem da grade do tick).
+_EPS_PRECO = 1e-9
+
+
+def _referencia(
+    livro: OrderBook | None,
+    preco: float,
+    *,
+    excluir: tuple[float, float] | None = None,
+) -> float | None:
+    """De onde o mercado pode cair: o nosso preço, ou o melhor bid EXTERNO de
+    agora se ele já está abaixo (cotação que melhora o topo). `excluir` é a
+    nossa ordem que está neste livro (LIVE), `(preço, tamanho)`, e sai da
+    conta. Sem livro não há referência — `None`, e quem chama marca depois."""
+    if livro is None:
+        return None
+    bids = livro.bids
+    if excluir is not None:
+        bids = _sem_o_nosso_nivel(bids, excluir[0], excluir[1])
+    if not bids:
+        return preco
+    return min(preco, bids[0][0])
+
+
+def _sem_o_nosso_nivel(
+    niveis: list[tuple[float, float]], preco_nosso: float, tamanho: float
+) -> list[tuple[float, float]]:
+    """Os níveis do livro sem a NOSSA ordem: no nosso preço desconta o nosso
+    tamanho, e o nível some se não sobra ninguém nele."""
+    externos: list[tuple[float, float]] = []
+    for preco, quantidade in niveis:
+        if abs(preco - preco_nosso) <= _EPS_PRECO:
+            quantidade -= tamanho
+            if quantidade <= _EPS_PRECO:
+                continue
+        externos.append((preco, quantidade))
+    return externos
+
+
+def _o_livro_andou_contra(
+    livro: OrderBook,
+    referencia: float,
+    *,
+    preco_nosso: float,
+    tamanho: float,
+    nossa_ordem_no_livro: bool,
+) -> bool:
+    """O melhor bid do MERCADO caiu abaixo da referência?
+
+    Lado de bids vazio é o caso mais forte de "caiu" — o mercado foi embora.
+    Sem a nossa ordem no livro (SHADOW), o melhor bid do livro É o do
+    mercado. Com ela (LIVE), o melhor bid do livro pode ser a NOSSA ordem —
+    e quando a cotação melhora o topo (livro largo: os pools) ela é o topo
+    desde que nasce, e comparar o topo com a referência nunca dispararia
+    (revisão do Codex, #126). O que se compara é o melhor bid EXTERNO: o
+    livro sem o nosso nível. "Sozinho no topo" é o caso particular em que
+    ele fica abaixo do nosso preço.
+    """
+    bids = livro.bids
+    if nossa_ordem_no_livro:
+        bids = _sem_o_nosso_nivel(bids, preco_nosso, tamanho)
+    if not bids:
+        return True
+    return bids[0][0] < referencia - _EPS_PRECO

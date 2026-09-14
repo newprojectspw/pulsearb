@@ -53,6 +53,11 @@ Environment=PULSEARB_RISK__STAKE_MAX_POR_JANELA_USDC=2000
 Environment=PULSEARB_RISK__EXPOSICAO_MAX_USDC=120000
 Environment=PULSEARB_RISK__POSICOES_MAX_ABERTAS=120
 Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
+# Recolher quando o melhor bid cai abaixo da cotação — a regra dos makers dos
+# leaderboards, medida na gravação (−583 → −32 USDC em 4 h). Ligada AQUI para
+# o SHADOW medir se o sono de 1 s basta; o relato tem de mostrar
+# `livro_andou_contra` entre os motivos.
+Environment=PULSEARB_MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=true
 # Registro de risco PRÓPRIO: o registro do taker em SHADOW carrega perdas
 # sintéticas que armam o disjuntor e pausam o portão compartilhado — e o
 # maker entra pelo mesmo portão (achados das rodadas r2 e r6). O modo sufixa

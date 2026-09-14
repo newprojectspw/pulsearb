@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from pulsearb.backtest.book import OrderBook
 from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
 from pulsearb.live.execucao_maker import ResultadoDaAcao
@@ -392,3 +394,396 @@ class TestOPrecoSegueOMeioDoLivro:
 
         assert laco.cliente.repousadas == {}
         assert laco.abertas == {}
+
+
+# ═══════════════ recolher quando o livro anda contra — a regra dos leaderboards
+
+
+def _livro_com_bids(*bids, asks=((0.51, 500.0), (0.52, 500.0))):
+    return OrderBook(asset_id="tok-up", bids=list(bids), asks=list(asks))
+
+
+class TestRecolherQuandoOLivroAnda:
+    async def _com_cotacao(self, tmp_path, **kw):
+        laco = _laco(tmp_path, **kw)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == 0.49
+        return laco
+
+    async def test_melhor_bid_abaixo_da_cotacao_recolhe_com_nome(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        # primeira observação só marca a referência (o livro de quando entramos)
+        assert await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2) == []
+        # o mercado andou: melhor bid a 0,47, abaixo do nosso 0,49
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=3
+        )
+        assert len(efeitos) == 1
+        assert laco.abertas == {}
+        assert not laco.cliente.repousadas  # as DUAS pernas saíram
+        assert laco.motivos["livro_andou_contra"] == 1
+
+    async def test_livro_parado_nao_recolhe(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2) == []
+        assert await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=3) == []
+        assert len(laco.abertas) == 1
+
+    async def test_desligada_por_padrao_nao_recolhe_mesmo_com_o_livro_andando(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path)
+        assert laco.recolhe_quando_o_livro_anda is False
+        assert await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=2
+        ) == []
+        assert len(laco.abertas) == 1
+
+    async def test_livro_indisponivel_nao_recolhe(self, tmp_path):
+        """Sair por falta de dado nosso perde a fila de graça — mesma regra
+        do passo."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2)
+        assert await laco.recolher_se_o_livro_andou(_livro_de(None), agora_ns=3) == []
+        assert len(laco.abertas) == 1
+
+    async def test_cotacao_que_ja_melhora_o_topo_nao_e_recolhida_de_saida(self, tmp_path):
+        """Livro largo (bid 0,40 / ask 0,60, meio 0,50): a cotação nasce a 0,49,
+        ACIMA do melhor bid do mercado. Isso não é o mercado andando contra —
+        é o livro em que entramos. Só recolhe se o mercado cair de onde
+        estava (revisão do Codex, #126)."""
+        largo = _livro_com_bids((0.40, 500.0), asks=((0.60, 500.0),))
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.passo([_janela()], livro_de=_livro_de(largo), agora_epoch=1000.0, agora_ns=1)
+        # a grade escolhe a distância pelo líquido; o que importa é que a
+        # cotação nasce ACIMA do melhor bid do mercado (0,40)
+        assert 0.40 < laco.abertas["btc-updown-4h-1"].preco_up < 0.50
+        for n in (2, 3, 4):
+            assert await laco.recolher_se_o_livro_andou(_livro_de(largo), agora_ns=n) == []
+        assert len(laco.abertas) == 1
+        # agora o mercado caiu de 0,40 para 0,38: recolhe
+        caiu = _livro_com_bids((0.38, 500.0), asks=((0.60, 500.0),))
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(caiu), agora_ns=5)) == 1
+        assert laco.abertas == {}
+
+    async def test_mercado_que_anda_no_primeiro_segundo_e_recolhido_na_primeira_observacao(
+        self, tmp_path
+    ):
+        """A referência nasce na COLOCAÇÃO (livro 0,49/0,51 → referência 0,49),
+        não na primeira observação do sono: se o mercado cair para 0,47 dentro
+        do primeiro segundo, o primeiro poll já recolhe (revisão do Codex, #126)."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        chave = ("btc-updown-4h-1", int(laco.abertas["btc-updown-4h-1"].desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave][0] == pytest.approx(0.49)
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=2
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
+
+    async def test_acerta_o_ultimo_intervalo_de_reward_antes_de_sair(self, tmp_path):
+        """Colocada em t=1000 e recolhida em t=1005: os 5 s repousando contam,
+        com o livro e os parâmetros da janela — `_sair` apaga o relógio, e sem
+        isto recolher muito empurraria o reward para baixo por construção."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert laco.caixa.segundos_repousando == 0.0
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1005e9)
+        )
+        assert len(efeitos) == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+        assert laco.caixa.acertos == 1
+
+    async def test_em_live_cotacao_que_melhora_o_topo_compara_o_bid_externo(self, tmp_path):
+        """Livro largo (bid externo 0,40) e a nossa ordem NO livro, acima
+        dele: o melhor bid do livro é a nossa própria ordem, e comparar o
+        topo com a referência (0,40) nunca dispararia (revisão do Codex,
+        #126). O que se compara é o melhor bid EXTERNO — o livro sem o
+        nosso nível: 0,40 segura, 0,38 recolhe, e só nós no lado recolhe."""
+        largo = _livro_com_bids((0.40, 500.0), asks=((0.60, 500.0),))
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True)
+        await laco.passo([_janela()], livro_de=_livro_de(largo), agora_epoch=1000.0, agora_ns=1)
+        nosso = laco.abertas["btc-updown-4h-1"].preco_up
+        assert 0.40 < nosso < 0.50
+        com_a_nossa = _livro_com_bids((nosso, 50.0), (0.40, 500.0), asks=((0.60, 500.0),))
+        assert await laco.recolher_se_o_livro_andou(_livro_de(com_a_nossa), agora_ns=2) == []
+        assert len(laco.abertas) == 1
+        caiu = _livro_com_bids((nosso, 50.0), (0.38, 500.0), asks=((0.60, 500.0),))
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(caiu), agora_ns=3)) == 1
+        assert laco.abertas == {}
+        # só a nossa no lado dos bids: o mercado foi embora
+        await laco.passo([_janela()], livro_de=_livro_de(largo), agora_epoch=1010.0, agora_ns=4)
+        sozinha = _livro_com_bids((nosso, 50.0), asks=((0.60, 500.0),))
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(sozinha), agora_ns=5)) == 1
+
+    async def test_em_live_a_referencia_da_recotacao_desconta_a_nossa_ordem_anterior(
+        self, tmp_path
+    ):
+        """Na recotação em LIVE, o livro que coloca a cotação nova ainda tem a
+        ANTERIOR: sem descontá-la a referência seria a nossa própria ordem."""
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1
+        )
+        antiga = laco.abertas["btc-updown-4h-1"]
+        assert antiga.preco_up == 0.49
+        # os asks subiram (meio 0,60): o livro mostra a NOSSA 0,49 no topo dos
+        # bids e o bid externo 0,48 atrás dela
+        com_a_antiga = _livro_com_bids((0.49, 50.0), (0.48, 500.0), asks=((0.71, 500.0),))
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(com_a_antiga), agora_epoch=1100.0, agora_ns=2
+        )
+        nova = laco.abertas["btc-updown-4h-1"]
+        assert nova.desde_epoch != antiga.desde_epoch and nova.preco_up > 0.49
+        chave = ("btc-updown-4h-1", int(nova.desde_epoch * 1e6))
+        # 0,48 (externo), não 0,49 (a nossa antiga)
+        assert laco._referencia_do_recolher[chave][0] == pytest.approx(0.48)
+
+    async def test_janela_que_nunca_cotou_nao_deixa_tokens_nem_parametros(self, tmp_path):
+        """Tokens e parâmetros entram para toda janela AVALIADA — sem pool, com
+        o portão fechado, sem livro —, e a limpeza da saída da cotação não os
+        alcança quando nunca houve cotação (revisão do Codex, #126). A janela
+        sumir tem de levá-los."""
+        laco = _laco(tmp_path, portao=_PortaoDuble(pode=False, motivo="fechado"))
+        await laco.passo(
+            [_janela(), _janela(slug="eth-updown-4h-1", com_pool=False)],
+            livro_de=_livro_de(_livro(0.50)), agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas == {}
+        assert set(laco._tokens) == {"btc-updown-4h-1", "eth-updown-4h-1"}
+        assert set(laco._params) == {"btc-updown-4h-1"}
+        await laco.passo([], livro_de=_livro_de(_livro(0.50)), agora_epoch=1001.0, agora_ns=2)
+        assert laco._tokens == {} and laco._params == {}
+
+    async def test_a_referencia_do_down_vem_do_livro_do_down_nao_do_espelho_do_up(
+        self, tmp_path
+    ):
+        """Up 0,49/0,51 e Down com bid 0,35 parado: o espelho do Up diria
+        referência 0,49 para o Down e o primeiro poll recolheria um par que
+        não andou (revisão do Codex, #126). Cada perna lê o SEU livro: a
+        referência do Down é 0,35, o par parado fica, e cair para 0,33 recolhe."""
+        up = _livro(0.50)
+        down = OrderBook(asset_id="tok-down", bids=[(0.35, 500.0)], asks=[(0.51, 500.0)])
+
+        def livro_de(token_id, *, agora_ns, _down=down):
+            return _down if token_id == "tok-down" else up
+
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        aberta = laco.abertas["btc-updown-4h-1"]
+        chave = ("btc-updown-4h-1", int(aberta.desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave] == (pytest.approx(0.49), pytest.approx(0.35))
+        for n in (2, 3):
+            assert await laco.recolher_se_o_livro_andou(livro_de, agora_ns=n) == []
+        assert len(laco.abertas) == 1
+        caiu = OrderBook(asset_id="tok-down", bids=[(0.33, 500.0)], asks=[(0.51, 500.0)])
+
+        def livro_de_caiu(token_id, *, agora_ns):
+            return caiu if token_id == "tok-down" else up
+
+        assert len(await laco.recolher_se_o_livro_andou(livro_de_caiu, agora_ns=4)) == 1
+        assert laco.motivos["livro_andou_contra"] == 1
+
+    async def test_perna_sem_livro_na_colocacao_marca_a_referencia_na_primeira_observacao(
+        self, tmp_path
+    ):
+        """Down sem livro ao colocar: a perna fica SEM referência (não com a
+        do espelho), o primeiro poll com livro do Down marca do livro dele e
+        não decide; só o mercado cair dali recolhe."""
+        up = _livro(0.50)
+        laco = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.passo(
+            [_janela()],
+            livro_de=lambda token_id, *, agora_ns: up if token_id == "tok-up" else None,
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        aberta = laco.abertas["btc-updown-4h-1"]
+        chave = ("btc-updown-4h-1", int(aberta.desde_epoch * 1e6))
+        assert laco._referencia_do_recolher[chave] == (pytest.approx(0.49), None)
+
+        def com_down(bid):
+            down = OrderBook(asset_id="tok-down", bids=[(bid, 500.0)], asks=[(0.51, 500.0)])
+            return lambda token_id, *, agora_ns: down if token_id == "tok-down" else up
+
+        assert await laco.recolher_se_o_livro_andou(com_down(0.35), agora_ns=2) == []
+        assert laco._referencia_do_recolher[chave][1] == pytest.approx(0.35)
+        assert await laco.recolher_se_o_livro_andou(com_down(0.35), agora_ns=3) == []
+        assert len(await laco.recolher_se_o_livro_andou(com_down(0.33), agora_ns=4)) == 1
+
+    async def test_perna_down_sem_bids_nao_coloca_o_par_com_a_regra_ligada(self, tmp_path):
+        """Down sem bid nenhum: o recolher tiraria o par no segundo seguinte e
+        a passada de 15 s o poria de volta — coloca-e-recolhe sem fim (revisão
+        do Codex, #126). Com a regra ligada não entra, com nome; desligada,
+        entra como sempre (a linha de base não muda)."""
+        up = _livro(0.50)
+        down_sem_bids = OrderBook(asset_id="tok-down", bids=[], asks=[(0.51, 500.0)])
+
+        def livro_de(token_id, *, agora_ns):
+            return down_sem_bids if token_id == "tok-down" else up
+
+        ligada = _laco(tmp_path, recolhe_quando_o_livro_anda=True)
+        await ligada.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert ligada.abertas == {}
+        assert ligada.motivos["perna_down_sem_bids"] == 1
+        assert not ligada.cliente.repousadas
+
+        desligada = _laco(tmp_path / "b")
+        (tmp_path / "b").mkdir()
+        await desligada.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert len(desligada.abertas) == 1
+
+    async def test_o_reward_e_acertado_no_instante_do_print_antes_de_consumir_a_perna(
+        self, tmp_path
+    ):
+        """Par colocado em t=1000, print que consome a perna Up em t=1005,
+        recolhido em t=1010: 5 s de dois lados e 5 s de um lado. Sem acertar
+        no print, o acerto do recolher aplicaria o restante de DEPOIS aos 10 s
+        inteiros, e os 10 s pareceriam de um lado só (revisão do Codex, #126).
+        Prova por comparação: o mesmo par com o print em t=1000,5 rende MENOS."""
+
+        async def rodar(pasta, ts_do_print_s):
+            pasta.mkdir()
+            laco = await self._com_cotacao(pasta, recolhe_quando_o_livro_anda=True)
+            print_ = SimpleNamespace(
+                ts_ns=int(ts_do_print_s * 1e9), preco=0.47, tamanho=10.0,
+                lado="SELL", token="tok-up",
+            )
+            laco._negocios_desde = lambda token_id, *, ts_ns: (
+                [print_] if token_id == "tok-up" and print_.ts_ns > ts_ns else []
+            )
+            efeitos = await laco.recolher_se_o_livro_andou(
+                _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1010e9)
+            )
+            assert len(efeitos) == 1
+            assert laco.caixa.execucoes_atravessadas == 1
+            assert laco.caixa.acertos == 2  # no print e no recolher
+            assert laco.caixa.segundos_repousando == pytest.approx(10.0)
+            return laco.caixa.rewards_com_captura_usdc
+
+        no_meio = await rodar(tmp_path / "a", 1005.0)
+        no_comeco = await rodar(tmp_path / "b", 1000.5)
+        assert no_meio > no_comeco > 0.0
+
+    async def test_prints_das_duas_pernas_entram_em_ordem_de_tempo(self, tmp_path):
+        """Down executa em t=1002 e Up em t=1005: perna a perna, o print do Up
+        seria visto primeiro, o relógio iria a 1005 com as duas pernas ainda
+        abertas, e o do Down (1002) seria descartado como tempo para trás —
+        dois lados até 1005 em vez de um lado a partir de 1002 (revisão do
+        Codex, #126). Em ordem de tempo há um acerto POR PRINT, em qualquer
+        ordem de pernas — perna a perna, o segundo print era descartado."""
+
+        async def rodar(pasta, ts_down_s, ts_up_s):
+            pasta.mkdir()
+            laco = await self._com_cotacao(pasta, recolhe_quando_o_livro_anda=True)
+            prints = {
+                "tok-down": SimpleNamespace(
+                    ts_ns=int(ts_down_s * 1e9), preco=0.47, tamanho=10.0,
+                    lado="SELL", token="tok-down",
+                ),
+                "tok-up": SimpleNamespace(
+                    ts_ns=int(ts_up_s * 1e9), preco=0.47, tamanho=10.0,
+                    lado="SELL", token="tok-up",
+                ),
+            }
+            laco._negocios_desde = lambda token_id, *, ts_ns: (
+                [prints[token_id]] if prints[token_id].ts_ns > ts_ns else []
+            )
+            efeitos = await laco.recolher_se_o_livro_andou(
+                _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1010e9)
+            )
+            assert len(efeitos) == 1
+            assert laco.caixa.execucoes_atravessadas == 2
+            # um acerto por print; o do recolher acha as duas pernas consumidas
+            assert laco.caixa.acertos == 2
+            assert laco.caixa.acertos_apos_execucao == 1
+            assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+            assert laco.caixa.rewards_com_captura_usdc > 0.0
+
+        await rodar(tmp_path / "a", 1002.0, 1005.0)  # Down primeiro
+        await rodar(tmp_path / "b", 1005.0, 1002.0)  # Up primeiro
+
+    async def test_so_o_livro_do_down_disparando_ainda_acerta_o_reward(self, tmp_path):
+        """O livro do Up sumiu e o do Down andou contra: a saída dispara pela
+        perna Down, e o reward dos 5 s repousando tem de contar mesmo assim —
+        a caixa acerta no ESPELHO do livro do Down (bid = 1 − ask), o mesmo
+        espelho da colocação. Sem isto, `_sair` apagava o intervalo inteiro
+        (revisão do Codex, #126)."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        down_caiu = OrderBook(
+            asset_id="tok-down", bids=[(0.47, 500.0)], asks=[(0.51, 500.0), (0.52, 500.0)]
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return down_caiu if token_id == "tok-down" else None
+
+        efeitos = await laco.recolher_se_o_livro_andou(livro_de, agora_ns=int(1005e9))
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["livro_andou_contra"] == 1
+        assert laco.caixa.acertos == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(5.0)
+
+    async def test_referencia_e_tokens_saem_com_a_cotacao_por_qualquer_caminho(self, tmp_path):
+        """Só o recolher apagava a sua referência; `janela_fechou`, `pool_sumiu`
+        e a recotação deixavam a chave morta para sempre (revisão do Codex,
+        #126). A referência é da COTAÇÃO: sai com ela, por qualquer porta."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        assert len(laco._referencia_do_recolher) == 1
+        # a janela fechou: a cotação sai por `janela_fechou`
+        await laco.passo([], livro_de=_livro_de(_livro(0.50)), agora_epoch=1001.0, agora_ns=2)
+        assert laco.abertas == {}
+        assert laco.motivos["janela_fechou"] == 1
+        assert laco._referencia_do_recolher == {}
+        assert laco._tokens == {} and laco._params == {}
+        # de novo, agora trocada por recotação: fica só a chave da NOVA cotação
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.50)), agora_epoch=1002.0, agora_ns=3
+        )
+        antiga = laco.abertas["btc-updown-4h-1"]
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro(0.70)), agora_epoch=1003.0, agora_ns=4
+        )
+        nova = laco.abertas["btc-updown-4h-1"]
+        assert nova.desde_epoch != antiga.desde_epoch
+        assert set(laco._referencia_do_recolher) == {
+            ("btc-updown-4h-1", int(nova.desde_epoch * 1e6))
+        }
+
+    async def test_lado_de_bids_vazio_recolhe(self, tmp_path):
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2)
+        vazio = OrderBook(asset_id="tok-up", bids=[], asks=[(0.51, 500.0)])
+        assert len(await laco.recolher_se_o_livro_andou(_livro_de(vazio), agora_ns=3)) == 1
+        assert laco.motivos["livro_andou_contra"] == 1
+
+    async def test_confere_os_prints_do_intervalo_antes_de_sair(self, tmp_path):
+        """Um SELL abaixo do nosso bid entre a passada e o recolher é execução
+        — e sair apagaria o cursor da caixa antes de a passada seguinte olhar.
+        A métrica que esta regra quer melhorar não pode sumir por causa dela."""
+        laco = await self._com_cotacao(tmp_path, recolhe_quando_o_livro_anda=True)
+        await laco.recolher_se_o_livro_andou(_livro_de(_livro(0.50)), agora_ns=2)
+        print_ = SimpleNamespace(
+            ts_ns=int(1005e9), preco=0.47, tamanho=10.0, lado="SELL", token="tok-up"
+        )
+        laco._negocios_desde = lambda token_id, *, ts_ns: (
+            [print_] if token_id == "tok-up" and print_.ts_ns > ts_ns else []
+        )
+        efeitos = await laco.recolher_se_o_livro_andou(
+            _livro_de(_livro_com_bids((0.47, 500.0))), agora_ns=int(1010e9)
+        )
+        assert len(efeitos) == 1
+        assert laco.caixa.execucoes_atravessadas == 1
+
+    async def test_em_live_o_gatilho_e_estar_sozinho_no_topo(self, tmp_path):
+        """Com a nossa ordem no livro, o melhor bid nunca cai abaixo dela —
+        ela VIRA o topo. Sozinha no nível (tamanho ≤ o nosso) = o mercado
+        foi embora; acompanhada (500 no nível) = ainda há mercado ali."""
+        laco = await self._com_cotacao(
+            tmp_path, recolhe_quando_o_livro_anda=True, nossa_ordem_esta_no_livro=True
+        )
+        sozinhos = _livro_com_bids((0.49, 50.0), (0.47, 500.0))  # 50 = só a nossa
+        acompanhados = _livro_com_bids((0.49, 550.0), (0.48, 500.0))
+        await laco.recolher_se_o_livro_andou(_livro_de(acompanhados), agora_ns=2)  # referência
+        assert await laco.recolher_se_o_livro_andou(_livro_de(acompanhados), agora_ns=3) == []
+        assert len(laco.abertas) == 1
+        efeitos = await laco.recolher_se_o_livro_andou(_livro_de(sozinhos), agora_ns=4)
+        assert len(efeitos) == 1 and laco.abertas == {}
