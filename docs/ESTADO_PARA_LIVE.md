@@ -439,13 +439,29 @@ inteiras dos critérios 1.1, 1.3 e 1.4, que reprovaram medindo qualidade de
 previsão — nenhuma delas prevê nada. Nenhuma escapa do **1.5**: capacidade
 continua sendo o que o livro comporta.
 
-**1.11 fechou em 2026-09-13: REPROVA.** A arbitragem que dá nome ao projeto
-não existe de forma tomável. Sobra o 1.12.
+**As duas fecharam em 2026-09-13.** 1.11 **REPROVA** — a arbitragem que dá
+nome ao projeto não existe de forma tomável. 1.12 **PASSA** — e é a primeira
+conta deste projeto que fecha positiva com os dois lados medidos no mesmo
+regime.
+
+**O que 1.12 NÃO autoriza.** Ele diz que a conta fecha sobre dado medido; não
+diz que o dinheiro está no bolso. Quatro coisas ficam de pé, e a primeira já
+matou esta rota uma vez:
+
+1. **O programa de rewards pode mudar.** Foi exatamente o que aconteceu com as
+   janelas Up/Down entre 24/08 e 08/09 — o pool sumiu do lado da Polymarket,
+   sem aviso. Nada aqui está sob nosso controle.
+2. **O capital é estimativa** (~1.000 USDC por mercado para 1.000 shares nos
+   dois lados), não medição.
+3. **`shares_executadas` é teto pelo volume do mercado**, não simulação de
+   fila — de propósito, mas é aproximação.
+4. **A trava tripla do LIVE segue intacta.** Operar exige `MODE=LIVE` +
+   `PULSEARB_CONFIRM_LIVE` + a frase exata, e isso é decisão humana.
 
 | # | Critério | Exigido | Medido | |
 |---|---|---|---|---|
 | 1.11 | Arbitragem de soma-dos-lados tomável | ≥ 1 episódio que sobrevive a 300 ms de latência | ❌ **MEDIDO E REPROVADO sobre 116 h (2026-09-13).** 385.339.627 registros, 3.878 janelas, 7.756 tokens pareados, **3,37 milhões de instantes avaliados** por direção. Bruto: 2.267 + 2.344 instantes com soma fora de 1,00. Líquido de taxa: 531 + 573. **Episódios que sobrevivem a 300 ms: ZERO, nas duas direções.** `duracao_dos_episodios_s` = `p50 = p90 = max = 0,0 s` — cada um dos 1.104 aparece em UM update de livro e some no seguinte. E não é só dessincronia: **201 deles (82 + 119) tinham o livro do par fresco a ≤ 1 ms**, genuinamente simultâneos, e ainda assim duraram zero. A capacidade nos melhores é de 14 a 28 USDC. O nome do projeto (*bot de arbitragem de latência*) está medido e morto: a soma sai de 1,00 em 0,016% dos instantes, e nunca por tempo suficiente para uma ordem chegar. `scripts/soma_dos_lados.py`, passada 2 em memória constante. | ❌ |
-| 1.12 | Existe recorte onde a rota maker se paga | persistência ≥ 50% das amostras **E** ≥ 10 USDC/h **E** markout DESTE regime | ⚠️ **NÃO AVALIÁVEL — mas agora falta SÓ o item 3.** ✅ **1.12a e 1.12b passaram em 2026-09-13, com 12 amostras ao longo de 2 h sobre os 300 maiores pools.** **185 de 300 mercados pontuam em TODAS as 12 amostras** — e o conjunto que pontua em ≥50% é EXATAMENTE o que pontua em 100%: ou o mercado qualifica de forma persistente, ou nunca qualifica. Não há piscada no qualificar. **Os 185 têm concessão ZERO** (`p50 = p90 = max = 0,00 c`): basta entrar na fila, sem apertar o spread — então não há markout imediato de travessia. Receita **pelo mínimo das 12 amostras**: **174,08 USDC/h** somados (4.178/dia); top 10 = 44,71 USDC/h (1.073/dia) sobre ~10.000 USDC de capital estimado = **10,7%/dia**. A distância entre mínimo (174) e mediana (380) mede o quanto oscila em MAGNITUDE — por isso o critério usa o mínimo. ⬜ **1.12c: o markout deste regime está sendo coletado** (`scripts/markout_dos_pools.py`, 4 h sobre os 60 maiores pools, chamando a **mesma** `medir_markout` que produziu os −0,2838). Sem ele o 1.12 não é avaliável, e **não avaliável não é reprovado**. | ⚠️ |
+| 1.12 | Existe recorte onde a rota maker se paga | persistência ≥ 50% das amostras **E** ≥ 10 USDC/h **E** markout DESTE regime | ✅ **PASSA — os três itens, medidos em 2026-09-13.** **(a) Persistência:** 12 amostras ao longo de 2 h sobre os 300 maiores pools. **185 de 300 pontuam em TODAS as 12**, e o conjunto que pontua em ≥50% é EXATAMENTE o que pontua em 100% — ou qualifica sempre, ou nunca. Os 185 têm **concessão ZERO** (`p50 = p90 = max = 0,00 c`): basta entrar na fila, sem apertar o spread. **(b) Receita, pelo MÍNIMO das 12 amostras: 174,08 USDC/h.** **(c) Markout DESTE regime: −0,0606 c/share em 5 s, sobre 4.272 execuções** (`scripts/markout_dos_pools.py`, 4 h, 60 mercados, 104.780 USDC/dia de pool) — **4,7× menor** que os −0,2838 das janelas de 5 min de cripto, e é por isso que transportar aquele número teria decidido errado. **A CONTA FECHA:** ótimo em **95 mercados, +148,02 USDC/h = 3.552 USDC/dia**, capital estimado ~95.000 USDC → **3,74%/dia**; em top_10, +44,08 USDC/h sobre ~10.000 = **10,6%/dia**. O custo no ótimo é 3% da receita. **É LIMITE INFERIOR:** assume que TODO o fluxo taker nos atropela, o que superestima o custo — e como o reward não depende de fila (§15.3), o erro entra só de um lado. `scripts/conta_do_maker_nos_pools.py`. | ✅ |
 
 **A correção de escala do programa de rewards.** O quadro dizia *"940 mercados
 com pool, 6.766 USDC/dia"*, de uma **amostra** de 2.500 mercados da Gamma. A

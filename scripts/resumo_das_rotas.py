@@ -50,6 +50,10 @@ CAMPO_POOLS_REPETICOES = "universo.repeticoes"
 CAMPO_MARKOUT_5S = "markout.markout_centavos_por_share.total.5s.media"
 CAMPO_MARKOUT_N = "markout.markout_centavos_por_share.total.5s.n"
 
+CAMPO_CONTA_RECORTES = "por_recorte"
+CAMPO_CONTA_MERCADOS = "mercados"
+CAMPO_CONTA_MARKOUT = "markout_usado.centavos_por_share_adverso"
+
 #: 1.11 — latência que uma ordem leva para chegar (1.1/1.4 mediram 300/600 ms).
 LATENCIA_EXIGIDA_S = 0.3
 
@@ -146,8 +150,55 @@ def criterio_1_11(soma: dict[str, Any] | None) -> str:
 
 
 # ── 1.12 ─────────────────────────────────────────────────────────────────
+def _conta_fechada(conta: dict[str, Any]) -> None:
+    """A conta com os dois lados medidos, e o ÓTIMO impresso.
+
+    O ótimo existe e não é "todos os mercados": volume é custo, e os mercados
+    marginais são os de muito volume e pouca receita. Imprimir só o total
+    esconderia isso — e foi exatamente o que o primeiro cálculo fez.
+    """
+    recortes = _ler(conta, CAMPO_CONTA_RECORTES)
+    mercados = _ler(conta, CAMPO_CONTA_MERCADOS)
+    custo_c = _ler(conta, CAMPO_CONTA_MARKOUT)
+    if not isinstance(recortes, dict) or not isinstance(mercados, list):
+        return
+
+    print(
+        f"\n  A CONTA FECHADA (markout -{custo_c} c/share; custo no PIOR caso,\n"
+        "  assumindo que TODO o fluxo taker nos atropela):\n"
+    )
+    for nome, r in recortes.items():
+        print(
+            f"    {nome:<10} {r['mercados']:>3} mercados: "
+            f"receita {r['receita_usdc_por_hora']:>7.2f} "
+            f"- custo {r['custo_maximo_usdc_por_hora']:>7.2f} "
+            f"= LIQUIDO {r['liquido_no_pior_caso_usdc_por_hora']:>+8.2f} USDC/h"
+        )
+
+    rec = cus = 0.0
+    melhor_n, melhor_liq = 0, float("-inf")
+    for i, m in enumerate(mercados, 1):
+        rec += m["receita_usdc_por_hora"]
+        cus += m["custo_maximo_usdc_por_hora"]
+        if rec - cus > melhor_liq:
+            melhor_n, melhor_liq = i, rec - cus
+    capital = 1000 * melhor_n
+    print(
+        f"\n  OTIMO: {melhor_n} mercados, {melhor_liq:+.2f} USDC/h "
+        f"= {melhor_liq * 24:.0f} USDC/dia"
+        f"\n         capital estimado ~{capital:,} USDC -> "
+        f"{100 * melhor_liq * 24 / capital:.2f}%/dia"
+    )
+    print(
+        "\n  O OTIMO NAO E 'TODOS': volume e custo, e os mercados marginais\n"
+        "  sao os de muito volume e pouca receita. Passar dele PIORA."
+    )
+
+
 def criterio_1_12(
-    pools: dict[str, Any] | None, markout: dict[str, Any] | None
+    pools: dict[str, Any] | None,
+    markout: dict[str, Any] | None,
+    conta: dict[str, Any] | None = None,
 ) -> str:
     _titulo("1.12 — EXISTE RECORTE ONDE A ROTA MAKER SE PAGA (§2f)")
 
@@ -217,14 +268,18 @@ def criterio_1_12(
     veredito = _julgar(ok)
     print(f"\n  >> 1.12 {veredito} — os três itens são CONJUNÇÃO.")
     print(
-        "\n  A CONTA, com os dois lados no MESMO regime pela primeira vez:\n"
+        "\n  Os dois lados no MESMO regime, pela primeira vez:\n"
         f"    receita  {receita:+.4f} USDC/h somados (pelo mínimo das amostras)\n"
-        f"    markout  {custo:+.4f} c/share em 5s, sobre {n_exec} execuções\n"
-        "\n  Os dois NÃO se somam direto: a receita é por hora e por carteira, o\n"
-        "  markout é por share EXECUTADA. Fechar a conta exige quantas shares\n"
-        "  nossas seriam varridas — o mesmo dado que falta no 1.6, e que não\n"
-        "  depende de fila: depende do livro no tempo."
+        f"    markout  {custo:+.4f} c/share em 5s, sobre {n_exec} execuções"
     )
+    if conta is not None:
+        _conta_fechada(conta)
+    else:
+        print(
+            "\n  Os dois NÃO se somam direto: a receita é por hora e por\n"
+            "  carteira, o markout é por share EXECUTADA. Passe --conta\n"
+            "  (scripts/conta_do_maker_nos_pools.py) para fechar."
+        )
     return veredito
 
 
@@ -243,10 +298,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--soma", default=None)
     parser.add_argument("--pools", default=None)
     parser.add_argument("--markout", default=None)
+    parser.add_argument("--conta", default=None)
     args = parser.parse_args(argv)
 
     v11 = criterio_1_11(_carregar(args.soma))
-    v12 = criterio_1_12(_carregar(args.pools), _carregar(args.markout))
+    v12 = criterio_1_12(
+        _carregar(args.pools), _carregar(args.markout), _carregar(args.conta)
+    )
 
     _titulo("AS DUAS ROTAS QUE NÃO DEPENDEM DO PREDITOR")
     print(f"  1.11 soma-dos-lados : {v11}")
