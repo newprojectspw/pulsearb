@@ -198,10 +198,64 @@ def test_1_12_e_nao_avaliavel_sem_o_markout_deste_regime() -> None:
     assert rotas.criterio_1_12(_relatorio_de_pools(), None) == rotas.NAO_AVALIAVEL
 
 
-def test_1_12_passa_com_os_tres_itens() -> None:
+def _relatorio_da_conta(liquido_com_saida: float | None, ausente: bool = False) -> dict:
+    """O que o conta_do_maker_nos_pools publica desde 2026-09-14."""
+    return {
+        "markout_usado": {"centavos_por_share_adverso": 0.06},
+        "custo_de_saida": {"ausente": ausente},
+        "por_recorte": {
+            "top_10": {
+                "mercados": 10,
+                "receita_usdc_por_hora": 44.0,
+                "custo_maximo_usdc_por_hora": 1.0,
+                "liquido_no_pior_caso_usdc_por_hora": 43.0,
+                "liquido_com_custo_de_saida_usdc_por_hora": 5.0,
+            },
+            "top_95": {
+                "mercados": 95,
+                "receita_usdc_por_hora": 152.0,
+                "custo_maximo_usdc_por_hora": 4.0,
+                "liquido_no_pior_caso_usdc_por_hora": 148.0,  # o ÓTIMO
+                "liquido_com_custo_de_saida_usdc_por_hora": liquido_com_saida,
+            },
+        },
+        "mercados": [],
+    }
+
+
+def test_1_12_sem_conta_e_nao_avaliavel_desde_o_custo_de_saida() -> None:
+    """Até 2026-09-14 três itens fechavam o 1.12. O quarto — custo de saída —
+    é o que o critério não media; sem ele, NAO AVALIAVEL, jamais PASSA."""
     assert (
         rotas.criterio_1_12(_relatorio_de_pools(), _relatorio_de_markout())
+        == rotas.NAO_AVALIAVEL
+    )
+    ausente = _relatorio_da_conta(148.0, ausente=True)
+    assert (
+        rotas.criterio_1_12(_relatorio_de_pools(), _relatorio_de_markout(), ausente)
+        == rotas.NAO_AVALIAVEL
+    )
+
+
+def test_1_12_passa_com_os_quatro_itens() -> None:
+    assert (
+        rotas.criterio_1_12(
+            _relatorio_de_pools(), _relatorio_de_markout(), _relatorio_da_conta(+12.5)
+        )
         == rotas.PASSA
+    )
+
+
+def test_1_12_reprova_se_o_custo_de_saida_come_o_otimo() -> None:
+    """Receita boa, markout de 5 s pequeno, e ainda assim REPROVA: o líquido
+    com custo de saída é negativo no recorte que era o ótimo (top_95), mesmo
+    que um recorte menor (top_10) continue positivo — o critério é 'nos
+    mesmos mercados', não 'em algum recorte'."""
+    assert (
+        rotas.criterio_1_12(
+            _relatorio_de_pools(), _relatorio_de_markout(), _relatorio_da_conta(-30.0)
+        )
+        == rotas.REPROVA
     )
 
 
@@ -213,7 +267,10 @@ def test_1_12_reprova_com_receita_abaixo_do_minimo() -> None:
     """
     pools = _relatorio_de_pools()
     pools["receita_somada_usdc_por_hora"]["pelo_minimo"] = 0.5
-    assert rotas.criterio_1_12(pools, _relatorio_de_markout()) == rotas.REPROVA
+    assert (
+        rotas.criterio_1_12(pools, _relatorio_de_markout(), _relatorio_da_conta(+12.5))
+        == rotas.REPROVA
+    )
 
 
 def test_a_receita_consolidada_usa_o_MINIMO_e_nao_a_media() -> None:
