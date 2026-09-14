@@ -533,6 +533,28 @@ class ProcessoShadow:
             token_id, agora_ns=agora_ns, silencio_s=SILENCIO_DO_LIVRO_DE_POOL_S
         )
 
+    async def _dormir_medindo_markout(self, cadencia: float, deadline: float) -> None:
+        """Dorme a cadência do maker, fechando o markout a cada segundo.
+
+        O markout do 4.2 é a 5 s (`HORIZONTE_DE_MARKOUT_S`), o mesmo do
+        1.12(c) — mas fechá-lo só na passada seguinte do laço, a cada 15 s,
+        media a **23 s** em média (r7, 2026-09-14), e 23 s não é o
+        instrumento com que o regime foi avaliado. Entre passadas, a caixa
+        olha o livro a cada segundo e fecha o que já passou do horizonte;
+        sem execução pendente é um `if` por segundo, e a decisão de cotar
+        segue na cadência de 15 s, pela razão escrita em `laco_de_cotacao`.
+        """
+        fim = min(time.monotonic() + cadencia, deadline)
+        while True:
+            restante = fim - time.monotonic()
+            if restante <= 0:
+                return
+            await asyncio.sleep(min(1.0, restante))
+            if self.laco_maker is not None and self.laco_maker.caixa._pendentes:
+                self.laco_maker.caixa.medir_markout(
+                    self._livro_para_o_maker, agora_ns=time.time_ns()
+                )
+
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None
     ) -> None:
@@ -547,7 +569,7 @@ class ProcessoShadow:
             log.info("laco maker nao subiu: sem caminho de diario")
             return
         while not prazo_vencido(deadline, deadline_de_parede):
-            await _dormir_ate(CADENCIA_DO_MAKER_S, deadline)
+            await self._dormir_medindo_markout(CADENCIA_DO_MAKER_S, deadline)
             if time.monotonic() >= deadline:
                 return
             try:

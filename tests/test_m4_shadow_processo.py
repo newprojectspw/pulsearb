@@ -1662,3 +1662,72 @@ class TestOSensorDeVigilia:
                 "dormiu_s",
                 "ciclo_de_trabalho",
             }
+
+
+class TestOMarkoutFechaEntreAsPassadas:
+    """O horizonte do markout é 5 s, e o laço do maker anda de 15 em 15 s.
+
+    Na r7 (2026-09-14) o markout só fechava na passada seguinte e saiu a
+    23,4 s em média — não é o instrumento do 1.12(c). Entre passadas, a caixa
+    é chamada a cada segundo enquanto houver execução pendente; sem pendente,
+    o sono é só sono.
+    """
+
+    def _processo(self, tmp_path, *, pendentes):
+        settings = _settings(tmp_path)
+        ciclo = _CicloFalso()
+        processo = ProcessoShadow(settings, ciclo)
+        chamadas: list[int] = []
+
+        def medir_markout(livro_de, *, agora_ns):
+            chamadas.append(agora_ns)
+            assert livro_de == processo._livro_para_o_maker
+            return 0
+
+        processo.laco_maker = SimpleNamespace(
+            caixa=SimpleNamespace(_pendentes=pendentes, medir_markout=medir_markout)
+        )
+        return processo, chamadas
+
+    def test_com_execucao_pendente_mede_a_cada_segundo(self, tmp_path, monkeypatch):
+        processo, chamadas = self._processo(tmp_path, pendentes=[object()])
+        sonos: list[float] = []
+
+        async def _sleep(s):
+            sonos.append(s)
+            relogio[0] += s
+
+        relogio = [100.0]
+        monkeypatch.setattr("pulsearb.live.shadow.asyncio.sleep", _sleep)
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: relogio[0])
+        asyncio.run(processo._dormir_medindo_markout(3.5, deadline=1_000.0))
+        # 1 + 1 + 1 + 0,5: a cadência inteira, em passos de no máximo 1 s.
+        assert sonos == [1.0, 1.0, 1.0, 0.5]
+        assert len(chamadas) == 4
+
+    def test_sem_pendente_nao_incomoda_a_caixa(self, tmp_path, monkeypatch):
+        processo, chamadas = self._processo(tmp_path, pendentes=[])
+        relogio = [100.0]
+
+        async def _sleep(s):
+            relogio[0] += s
+
+        monkeypatch.setattr("pulsearb.live.shadow.asyncio.sleep", _sleep)
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: relogio[0])
+        asyncio.run(processo._dormir_medindo_markout(2.0, deadline=1_000.0))
+        assert chamadas == []
+        assert relogio[0] == pytest.approx(102.0)
+
+    def test_o_prazo_do_run_manda_mais_que_a_cadencia(self, tmp_path, monkeypatch):
+        processo, _ = self._processo(tmp_path, pendentes=[])
+        relogio = [100.0]
+        sonos: list[float] = []
+
+        async def _sleep(s):
+            sonos.append(s)
+            relogio[0] += s
+
+        monkeypatch.setattr("pulsearb.live.shadow.asyncio.sleep", _sleep)
+        monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: relogio[0])
+        asyncio.run(processo._dormir_medindo_markout(15.0, deadline=101.3))
+        assert sonos == [1.0, pytest.approx(0.3)]
