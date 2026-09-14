@@ -20,6 +20,8 @@ from pulsearb.analysis.measurements import conta_do_maker, medir_markout
 from pulsearb.analysis.rewards import (
     OrdemHipotetica,
     ParametrosDeReward,
+    combinar_lados,
+    denominador_pessimista,
     fatia_do_pool,
     score_da_ordem,
     score_de_nivel,
@@ -388,7 +390,13 @@ def test_fatia_do_pool_e_pro_rata():
     assert fatia_do_pool(nosso_score=0, score_do_mercado=150) == 0.0
 
 
-def test_ordem_hipotetica_pontua_dos_dois_lados():
+def test_ordem_de_um_lado_vale_um_terco_dentro_da_faixa():
+    """§15.3: `Q_min = max(min(a, b), max(a, b) / 3)` — não `a + b`.
+
+    Este teste dizia `dois == 2 × um` até 2026-09-14. Era a soma encodada
+    como se fosse a fórmula, e passava porque o código somava também. É o
+    "teste que encoda a suposição" do CLAUDE.md, pego pela leitura do §15.3.
+    """
     livro = OrderBook(
         asset_id="tok",
         bids=[(0.49, 500.0)],
@@ -400,7 +408,81 @@ def test_ordem_hipotetica_pontua_dos_dois_lados():
     um = score_da_ordem(
         OrdemHipotetica(tamanho=100, distancia_ticks=1, dois_lados=False), livro, PARAMS
     )
-    assert dois == pytest.approx(2 * um)
+    # Simétrica: cada lado a 0,02 do meio, v = 0,03 → (1/3)² × 100 = 11,11.
+    # Dois lados valem UM lado (min dos dois iguais), não o dobro.
+    um_lado = (1 / 3) ** 2 * 100
+    assert dois == pytest.approx(um_lado)
+    assert um == pytest.approx(um_lado / 3)
+    assert dois == pytest.approx(3 * um)
+
+
+def test_ordem_de_um_lado_vale_zero_fora_da_faixa():
+    """Fora de [0,10, 0,90] a doc EXIGE dois lados: `Q_min = min(a, b)`."""
+    # Meio em 0,95 — o regime dos mercados "antes de 2027" onde o pool está.
+    livro = OrderBook(asset_id="tok", bids=[(0.94, 500.0)], asks=[(0.96, 500.0)])
+    dois = score_da_ordem(
+        OrdemHipotetica(tamanho=100, distancia_ticks=1, dois_lados=True), livro, PARAMS
+    )
+    um = score_da_ordem(
+        OrdemHipotetica(tamanho=100, distancia_ticks=1, dois_lados=False), livro, PARAMS
+    )
+    assert dois > 0
+    assert um == 0.0
+
+
+def test_combinar_lados_segue_a_doc_ponto_a_ponto():
+    # dentro da faixa
+    assert combinar_lados(10, 10, meio=0.5) == 10
+    assert combinar_lados(10, 0, meio=0.5) == pytest.approx(10 / 3)
+    assert combinar_lados(3, 12, meio=0.5) == pytest.approx(4)   # max/3 vence min
+    assert combinar_lados(6, 12, meio=0.5) == pytest.approx(6)   # min vence max/3
+    # bordas INCLUSIVAS da faixa
+    assert combinar_lados(10, 0, meio=0.10) == pytest.approx(10 / 3)
+    assert combinar_lados(10, 0, meio=0.90) == pytest.approx(10 / 3)
+    # fora
+    assert combinar_lados(10, 0, meio=0.05) == 0.0
+    assert combinar_lados(10, 0, meio=0.95) == 0.0
+    assert combinar_lados(10, 4, meio=0.95) == 4
+    # sem meio: recusa, não chuta
+    assert combinar_lados(10, 10, meio=None) == 0.0
+
+
+@pytest.mark.parametrize("meio", [0.5, 0.10, 0.90, 0.05, 0.95])
+@pytest.mark.parametrize("fracao", [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0])
+def test_q_min_nunca_passa_da_metade_da_soma(meio, fracao):
+    """A prova do `denominador_pessimista`: para qualquer divisão de S entre
+    os lados, `Q_min ≤ S/2`, com igualdade só em a = b. Vale dentro e fora."""
+    soma = 100.0
+    a, b = soma * fracao, soma * (1 - fracao)
+    q = combinar_lados(a, b, meio=meio)
+    assert q <= soma / 2 + 1e-9
+    if fracao == 0.5:
+        assert q == pytest.approx(soma / 2)
+
+
+def test_denominador_pessimista_e_metade_do_livro():
+    livro = OrderBook(asset_id="tok", bids=[(0.49, 100.0)], asks=[(0.51, 100.0)])
+    assert denominador_pessimista(livro, PARAMS) == pytest.approx(
+        score_do_livro(livro, PARAMS) / 2
+    )
+
+
+def test_cotacao_simetrica_nao_muda_de_fatia_com_a_correcao():
+    """O que já foi publicado com cotação simétrica (1.12) continua valendo.
+
+    Antes: numerador a+b (2S) sobre denominador Σ(a+b). Agora: S sobre
+    Σ(a+b)/2. Mesma fatia — o cancelamento era acidental, agora é provado.
+    """
+    livro = OrderBook(asset_id="tok", bids=[(0.49, 300.0)], asks=[(0.51, 300.0)])
+    ordem = OrdemHipotetica(tamanho=100, distancia_ticks=1, dois_lados=True)
+    # a conta antiga, reproduzida à mão
+    nosso_antigo = 2 * score_de_nivel(0.48, 100, meio=0.50, params=PARAMS)
+    fatia_antiga = fatia_do_pool(nosso_antigo, score_do_livro(livro, PARAMS))
+    # a conta nova
+    fatia_nova = fatia_do_pool(
+        score_da_ordem(ordem, livro, PARAMS), denominador_pessimista(livro, PARAMS)
+    )
+    assert fatia_nova == pytest.approx(fatia_antiga)
 
 
 def test_score_do_livro_soma_os_dois_lados():
