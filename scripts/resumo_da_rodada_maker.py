@@ -332,6 +332,16 @@ def relato_da_rodada(relatos: list[dict]) -> dict[str, Any]:
     for campo in CAMPOS_QUE_SOMAM:
         parcelas = [_ler(u, campo) for u in ultimos]
         if any(p is None for p in parcelas):
+            # PARCELA QUE FALTA ZERA O CAMPO, não deixa o valor do último
+            # trecho. Deixar era um buraco de verdade (revisão do Codex,
+            # #131): um trecho de 13 dias em que o maker não subiu, mais um
+            # dia medido, somava 14 dias de `parede_s` e ficava com os
+            # rewards e o markout DO ÚLTIMO DIA — 14 dias no relógio, um dia
+            # na conta, veredito PASSA.
+            #
+            # `None` cai no `campo_ausente` do `_julgar`, que é o que a
+            # situação é: a rodada não tem esse número.
+            _escrever(somado, campo, None)
             continue
         _escrever(somado, campo, sum(parcelas))
 

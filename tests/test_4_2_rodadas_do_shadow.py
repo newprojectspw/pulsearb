@@ -29,6 +29,18 @@ RAIZ = Path(__file__).resolve().parents[1]
 RODADAS = RAIZ / "deploy" / "rodadas"
 UNIT = RAIZ / "deploy" / "pulsearb-shadow-maker@.service"
 
+#: O perfil do ensaio, igual nas quatro. Não é uma rodada: é o que elas
+#: compartilham, e mora em arquivo de ambiente porque `EnvironmentFile` vence
+#: `Environment=` SEMPRE — na unit, o `.env` da máquina o silenciaria.
+COMUM = "comum"
+
+#: O que o perfil compartilhado tem de produzir. Um `.env` de máquina que o
+#: vencesse mudaria o ensaio das quatro instâncias por 14 dias.
+PERFIL: dict[str, object] = {
+    "tamanho_da_cotacao_maker_shares": 1000.0,
+    "top_de_pools_de_reward": 60,
+}
+
 #: Qual regra cada rodada mede, e com que valor. O que está aqui é a INTENÇÃO
 #: declarada; o teste confere que o arquivo produz exatamente isso.
 ESPERADO: dict[str, dict[str, object]] = {
@@ -145,16 +157,16 @@ class TestAUnitTemplate:
     def test_as_tres_coisas_proprias_da_instancia_usam_o_nome_dela(self):
         """Diário, registro e arquivo de regra têm de trazer `%i`.
 
-        Um `%i` esquecido no registro faz as quatro rodadas escreverem o mesmo
-        `.tmp` e o rename atômico publicar uma mistura; esquecido no diário,
-        as quatro somam no mesmo arquivo; esquecido no `EnvironmentFile`, as
-        quatro rodam a mesma regra.
+        Um `%i` esquecido no diário faz as quatro somarem no mesmo arquivo;
+        esquecido no `EnvironmentFile`, as quatro rodam a mesma regra. O
+        registro de risco saiu daqui para os arquivos das rodadas (na unit
+        ele era `Environment=`, que qualquer `.env` de máquina vencia) e tem
+        teste próprio em `test_cada_rodada_tem_registro_de_risco_PROPRIO`.
         """
         texto = UNIT.read_text(encoding="utf-8")
 
         for trecho in (
             "--diario data/diarios/shadow-maker-%i.jsonl",
-            "PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_%i.json",
             "EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env",
         ):
             assert trecho in texto, f"a unit não traz: {trecho}"
@@ -178,6 +190,9 @@ class TestAUnitTemplate:
         `PULSEARB_CONFIRM_LIVE` num comentário justamente para dizer que ela
         não está lá, e um teste que casasse o texto inteiro proibiria
         explicar a decisão.
+
+        `PULSEARB_MODE=SHADOW` não está mais na unit — mora no perfil
+        versionado, porque na unit um `.env` de máquina o venceria.
         """
         diretivas = [
             linha.strip()
@@ -185,11 +200,19 @@ class TestAUnitTemplate:
             if linha.strip() and not linha.strip().startswith("#")
         ]
 
-        assert "Environment=PULSEARB_MODE=SHADOW" in diretivas
+        perfil = _ler_env(RODADAS / f"{COMUM}.env")
+
+        assert perfil.get("PULSEARB_MODE") == "SHADOW"
+        assert "PULSEARB_CONFIRM_LIVE" not in perfil
         for linha in diretivas:
             assert "PULSEARB_CONFIRM_LIVE" not in linha, linha
             assert "EU ACEITO O RISCO" not in linha, linha
             assert "PULSEARB_MODE=LIVE" not in linha, linha
+        for rodada in ESPERADO:
+            valores = _ler_env(RODADAS / f"{rodada}.env")
+
+            assert "PULSEARB_CONFIRM_LIVE" not in valores, rodada
+            assert valores.get("PULSEARB_MODE") in (None, "SHADOW"), rodada
 
     def test_o_arquivo_da_rodada_e_o_ULTIMO_EnvironmentFile(self):
         """A ordem é a regra, e ela é invisível lendo o arquivo de cima.
@@ -230,13 +253,80 @@ class TestAUnitTemplate:
         for rodada in ESPERADO:
             assert (RODADAS / f"{rodada}.env").is_file(), rodada
 
+    def test_o_perfil_comum_vem_DEPOIS_do_env_da_maquina(self):
+        """`EnvironmentFile` vence `Environment=` sempre, não por ordem.
+
+        Enquanto o perfil morava em linhas `Environment=` da unit, um `.env`
+        de máquina com um teto de risco, o `TOP_DE_POOLS` ou até o
+        `PULSEARB_MODE` o vencia nas quatro instâncias, por 14 dias. A ordem
+        aqui é: segredo, perfil versionado, rodada.
+        """
+        arquivos = [
+            linha.strip()
+            for linha in UNIT.read_text(encoding="utf-8").splitlines()
+            if linha.strip().startswith("EnvironmentFile=")
+        ]
+
+        assert arquivos == [
+            "EnvironmentFile=-/opt/pulsearb/.env",
+            f"EnvironmentFile=/opt/pulsearb/deploy/rodadas/{COMUM}.env",
+            "EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env",
+        ]
+
+    def test_a_unit_nao_define_perfil_em_Environment(self):
+        """Só `Environment=` nenhum resolve — qualquer linha aqui é
+        silenciável por um `.env` de máquina."""
+        diretivas = [
+            linha.strip()
+            for linha in UNIT.read_text(encoding="utf-8").splitlines()
+            if linha.strip().startswith("Environment=")
+        ]
+
+        assert diretivas == [], f"perfil ainda na unit: {diretivas}"
+
+    def test_o_perfil_comum_produz_o_ensaio_das_r4_r8(self, monkeypatch):
+        for chave, valor in _ler_env(RODADAS / f"{COMUM}.env").items():
+            monkeypatch.setenv(chave, valor)
+
+        settings = Settings()
+
+        for campo, esperado in PERFIL.items():
+            assert getattr(settings, campo) == esperado, campo
+        assert settings.mode.value == "SHADOW"
+
+    def test_o_perfil_comum_NAO_liga_regra_experimental(self):
+        """Se ligasse, ligaria nas quatro e nenhuma mediria a sua."""
+        escritas = set(_ler_env(RODADAS / f"{COMUM}.env"))
+
+        assert not [
+            c for c in escritas if c.startswith("PULSEARB_MAKER_")
+        ], "o perfil comum não escreve regra — regra é da rodada"
+
+    def test_cada_rodada_tem_registro_de_risco_PROPRIO(self):
+        """Na unit ele era `Environment=` e um `.env` daria o mesmo a todas.
+
+        E registro compartilhado não é arrumação: o `_gravar` do portão monta
+        o `.tmp` a partir deste caminho, então duas rodadas no mesmo registro
+        escrevem o mesmo temporário e o rename atômico pode publicar uma
+        mistura das duas.
+        """
+        caminhos = {}
+        for rodada in ESPERADO:
+            valores = _ler_env(RODADAS / f"{rodada}.env")
+            chave = "PULSEARB_RISK__CAMINHO_DO_REGISTRO"
+
+            assert chave in valores, f"{rodada}.env não define o registro"
+            caminhos[rodada] = valores[chave]
+
+        assert len(set(caminhos.values())) == len(ESPERADO), caminhos
+
     def test_todo_arquivo_de_rodada_esta_declarado(self):
         """Um `.env` a mais na pasta é uma rodada que ninguém confere.
 
         Ela subiria com `systemctl enable pulsearb-shadow-maker@qualquer` e
         nenhum teste diria que regra ela liga.
         """
-        na_pasta = {p.stem for p in RODADAS.glob("*.env")}
+        na_pasta = {p.stem for p in RODADAS.glob("*.env")} - {COMUM}
 
         assert na_pasta == set(ESPERADO), (
             f"na pasta e não declaradas: {sorted(na_pasta - set(ESPERADO))}; "

@@ -60,35 +60,18 @@ WorkingDirectory=/opt/pulsearb
 ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios /opt/pulsearb/data/risco
 ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
 
-Environment=PULSEARB_MODE=SHADOW
-Environment=PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true
-
-# O PERFIL DO ENSAIO, escrito aqui de propósito e IGUAL nas quatro rodadas.
-# Os defaults do projeto são os do taker (5 shares, 5/15/50 USDC, spread 0,04)
-# e com eles esta rota não cota NADA: a descoberta descarta todo pool cujo
-# rewards_min_size passa de 5, e o portão de risco recusa uma cotação de 1.000
-# shares. O bot não sobe os tetos sozinho (quadro, 4.0 (c)); quem sobe é o
-# operador, e este arquivo é o operador escrevendo. São os valores das rodadas
-# r4–r8 de 2026-09-14. Vale SÓ em SHADOW — nenhum destes números autoriza
-# dinheiro. Igual nas quatro porque o que se compara entre elas é a REGRA:
-# mudar o perfil de uma delas transformaria a comparação em outra coisa.
-Environment=PULSEARB_TAMANHO_DA_COTACAO_MAKER_SHARES=1000
-Environment=PULSEARB_TOP_DE_POOLS_DE_REWARD=60
-Environment=PULSEARB_RISK__STAKE_MAX_POR_TRADE_USDC=1000
-Environment=PULSEARB_RISK__STAKE_MAX_POR_JANELA_USDC=2000
-Environment=PULSEARB_RISK__EXPOSICAO_MAX_USDC=120000
-Environment=PULSEARB_RISK__POSICOES_MAX_ABERTAS=120
-Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
-
-# Registro de risco PRÓPRIO DA INSTÂNCIA, e isto não é arrumação: o `_gravar`
-# do portão monta o arquivo temporário a partir do caminho do registro, então
-# duas rodadas no MESMO registro escrevem o mesmo `.tmp` e o rename atômico
-# pode publicar uma mistura das duas. Separado também do registro do taker,
-# que em SHADOW carrega perdas sintéticas que armam o disjuntor e pausam o
-# portão compartilhado (achados das rodadas r2 e r6). O modo sufixa o nome
-# (`.shadow.json`).
-Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_%i.json
-
+# NENHUMA LINHA `Environment=` PARA O PERFIL DO ENSAIO, e isto é o conserto,
+# não arrumação. O `systemd.exec(5)` diz que valores de `EnvironmentFile=`
+# vencem os de `Environment=` SEMPRE — não é questão de ordem. Enquanto o
+# perfil morava aqui, um `/opt/pulsearb/.env` de máquina que definisse
+# `PULSEARB_TOP_DE_POOLS_DE_REWARD`, um teto de risco, o caminho do registro
+# ou até `PULSEARB_MODE` vencia o arquivo versionado, nas quatro instâncias,
+# por 14 dias (revisão do Codex, #131). Tudo que precisa ser a palavra final
+# mora agora em arquivos de ambiente carregados DEPOIS do `.env`:
+#
+#   deploy/rodadas/comum.env  — o perfil, igual nas quatro
+#   deploy/rodadas/%i.env     — o registro de risco desta rodada, e a REGRA
+#
 # Segredos da máquina, e ele vem ANTES do arquivo da rodada. A ORDEM É A
 # REGRA: o `systemd.exec(5)` diz que, entre `EnvironmentFile=`, o ÚLTIMO
 # vence — e que qualquer `EnvironmentFile=` vence as linhas `Environment=`
@@ -101,7 +84,10 @@ Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_%i.json
 # ele vem de arquivo 0600, nunca da unit (que é legível por todos).
 EnvironmentFile=-/opt/pulsearb/.env
 
-# A REGRA desta rodada, POR ÚLTIMO, para ser a palavra final sobre o perfil.
+# O perfil do ensaio, VERSIONADO, depois do `.env` para vencê-lo.
+EnvironmentFile=/opt/pulsearb/deploy/rodadas/comum.env
+
+# A REGRA desta rodada e o registro dela, POR ÚLTIMO de todos.
 # E SEM o `-`: arquivo ausente tem de derrubar a unit. Com `-`, o systemd
 # ignoraria o arquivo que falta em silêncio e a instância subiria como rodada
 # BASE — quatro rodadas-base correndo em paralelo por 14 dias, todas verdes,

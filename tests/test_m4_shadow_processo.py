@@ -1753,3 +1753,104 @@ class TestOMarkoutFechaEntreAsPassadas:
         monkeypatch.setattr("pulsearb.live.shadow.time.monotonic", lambda: relogio[0])
         asyncio.run(processo._dormir_medindo_markout(15.0, deadline=101.3))
         assert sonos == [1.0, pytest.approx(0.3)]
+
+
+def _com_maker(tmp_path):
+    """Um processo com o laço maker de pé: ele só sobe com caminho de diário.
+
+    O ciclo falso ganha o mínimo que `laco_de_cotacao` lê ANTES de chamar
+    `passo` — sem isso a exceção nasceria ao montar os argumentos, e o teste
+    passaria por um caminho que não é o que ele diz testar.
+    """
+    ciclo = _CicloFalso()
+    ciclo.motor = SimpleNamespace(
+        rastreador=SimpleNamespace(abertas=lambda **_: []),
+        livros=SimpleNamespace(negocios_desde=lambda *_a, **_k: []),
+    )
+    ciclo.feeds_saudaveis = lambda **_: True
+    return ProcessoShadow(
+        _settings(tmp_path), ciclo, caminho_do_diario=tmp_path / "diario.jsonl"
+    )
+
+
+class TestOLacoMakerQueAborta:
+    """O comentário antigo aqui era FALSO, e a unit passou a depender dele.
+
+    Ele dizia "o maker não derruba a rodada; ela segue sem cotar". Mas `run`
+    espera as tarefas com `FIRST_COMPLETED`, então a tarefa do maker voltando
+    encerra a rodada INTEIRA. A rodada não seguia sem cotar: ela acabava.
+
+    Com `Restart=on-failure` na unit (que é o certo — rodada que terminou
+    fica terminada) isso virava pior: `falhou` continuava `None`, o processo
+    saía com 0, e o systemd entendia "terminou bem". As duas semanas paravam
+    por uma exceção transitória no maker e ninguém voltava (revisão do Codex,
+    #131).
+    """
+
+    async def test_excecao_no_passo_do_maker_marca_a_rodada_como_FALHA(
+        self, tmp_path, monkeypatch
+    ):
+        """Marcar conserta as três leituras de uma vez: código de saída 1,
+        `on-failure` devolve a rodada, e o leitor recusa com
+        `processo_falhou` em vez de julgar um trecho cortado."""
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DO_MAKER_S", 0.001)
+        processo = _com_maker(tmp_path)
+        assert processo.laco_maker is not None
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("cotacao em formato novo")
+
+        monkeypatch.setattr(processo.laco_maker, "passo", explode)
+
+        await asyncio.wait_for(
+            processo.laco_de_cotacao(_time.monotonic() + 0.05), timeout=2.0
+        )
+
+        assert processo.falhou is not None
+        assert "laco_maker" in processo.falhou
+        assert "RuntimeError" in processo.falhou
+
+    async def test_o_erro_do_maker_nao_sobe_como_excecao(self, tmp_path, monkeypatch):
+        """Ele encerra a rodada pelo caminho normal, com estado final e tudo.
+
+        Deixar subir pularia o `log.info(..., fim_da_rodada=True)` do `main`,
+        e o leitor veria `rodada_nao_terminou` num caso que na verdade tem
+        causa nomeada.
+        """
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DO_MAKER_S", 0.001)
+        processo = _com_maker(tmp_path)
+
+        async def explode(*_args, **_kwargs):
+            raise RuntimeError("qualquer")
+
+        monkeypatch.setattr(processo.laco_maker, "passo", explode)
+
+        # Não levanta: volta normalmente.
+        await asyncio.wait_for(
+            processo.laco_de_cotacao(_time.monotonic() + 0.05), timeout=2.0
+        )
+
+    async def test_OSError_do_diario_continua_SUBINDO(self, tmp_path, monkeypatch):
+        """A distinção antiga não pode ter sido perdida no conserto: I/O do
+        diário é a saída da rodada sumindo, e sobe."""
+        import time as _time
+
+        monkeypatch.setattr("pulsearb.live.shadow.CADENCIA_DO_MAKER_S", 0.001)
+        processo = _com_maker(tmp_path)
+
+        async def sem_disco(*_args, **_kwargs):
+            raise OSError("disco cheio")
+
+        monkeypatch.setattr(processo.laco_maker, "passo", sem_disco)
+
+        with pytest.raises(OSError):
+            await asyncio.wait_for(
+                processo.laco_de_cotacao(_time.monotonic() + 0.05), timeout=2.0
+            )
+
+        assert processo.falhou is not None
+        assert "io_do_diario_maker" in processo.falhou

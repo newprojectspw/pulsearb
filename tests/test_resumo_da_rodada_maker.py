@@ -775,6 +775,36 @@ class TestASomaDosTrechos:
         assert "O PROCESSO VOLTOU 1x" in saida
         assert "SOMA de 2 trechos" in saida
 
+    def test_trecho_SEM_o_campo_nao_herda_o_valor_do_ultimo(self):
+        """13 dias sem maker + 1 dia medido não são 14 dias de medida.
+
+        `parede_s` somava os dois trechos e o líquido ficava o do ÚLTIMO —
+        14 dias no relógio, um dia na conta, veredito PASSA (revisão do
+        Codex, #131). Parcela que falta zera o campo, e `None` cai no
+        `campo_ausente`, que é o que a situação é: a rodada não tem esse
+        número.
+        """
+        treze_dias = resumo.PAREDE_EXIGIDA_S * 13 / 14
+        sem_conta, medido = _relato(), _relato()
+        del sem_conta["fim_da_rodada"]
+        sem_conta["vigilia"]["da_rodada"]["parede_s"] = treze_dias
+        del sem_conta["maker"]["caixa"]["liquido_pro_rata_usdc"]
+        medido["vigilia"]["da_rodada"]["parede_s"] = resumo.PAREDE_EXIGIDA_S / 14
+        volta = deepcopy(medido)
+        volta["vigilia"]["da_rodada"]["parede_s"] = 60.0
+
+        veredito, motivo, _ = resumo._julgar([sem_conta, volta, medido])
+
+        assert (veredito, motivo) == (resumo.NAO_AVALIAVEL, "campo_ausente")
+
+    def test_com_todas_as_parcelas_o_campo_soma_normalmente(self):
+        """A recusa acima não pode ter engolido o caminho comum."""
+        a, b = self._dois_trechos()
+
+        somado = resumo.relato_da_rodada(self._fluxo(a, b))
+
+        assert somado["maker"]["caixa"]["liquido_pro_rata_usdc"] == 150.0
+
 
 class TestAUnitNaoReiniciaDepoisDoSucesso:
     """`Restart=always` fazia a rodada recomeçar sozinha, para sempre.

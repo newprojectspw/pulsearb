@@ -625,11 +625,26 @@ class ProcessoShadow:
                 self.falhou = f"io_do_diario_maker: {erro}"
                 raise
             except Exception as erro:
-                # O maker NÃO derruba a rodada. O taker é o caminho medido e
-                # aprovado; a rota maker é o ensaio novo, e um defeito nela
-                # não pode custar as 24 h do outro.
+                # O COMENTÁRIO ANTIGO AQUI ERA FALSO, e a revisão do Codex
+                # (#131) mostrou onde. Ele dizia "o maker não derruba a
+                # rodada; a rodada segue sem cotar" — mas `run` espera as
+                # tarefas com `FIRST_COMPLETED`, então esta tarefa voltando
+                # encerra a rodada INTEIRA, cancela as outras e emite o
+                # estado final. A rodada não seguia sem cotar: ela acabava.
+                #
+                # E com a unit em `Restart=on-failure` (que é o certo: rodada
+                # que terminou fica terminada) isso virava pior — `falhou`
+                # continuava `None`, o processo saía com 0, e o systemd
+                # entendia "terminou bem". As duas semanas paravam por uma
+                # exceção transitória no maker e ninguém voltava.
+                #
+                # Marcar `falhou` conserta as três leituras de uma vez: o
+                # código de saída passa a ser 1, o `on-failure` devolve a
+                # rodada, e o leitor recusa com `processo_falhou` em vez de
+                # julgar um trecho cortado como se fosse a rodada.
+                self.falhou = f"laco_maker: {type(erro).__name__}: {erro}"
                 log.error(
-                    "laco maker falhou; a rodada segue sem cotar",
+                    "laco maker falhou; a rodada encerra e o systemd devolve",
                     erro=f"{type(erro).__name__}: {erro}",
                 )
                 return

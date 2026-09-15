@@ -916,7 +916,16 @@ parecer regra ausente por esquecimento.
 |---|---|
 | diário `data/diarios/shadow-maker-%i.jsonl` | duas rodadas no mesmo arquivo somam — é o que o `caminho_do_diario_da_rodada` já fecha com `O_EXCL` |
 | registro `data/risco/registro_maker_%i.json` | o `_gravar` do portão monta o `.tmp` a partir do caminho do registro: duas rodadas no MESMO registro escrevem o mesmo temporário, e o rename atômico pode publicar uma mistura |
-| `deploy/rodadas/%i.env` | a regra. **Sem o `-` no `EnvironmentFile`**: arquivo ausente derruba a unit, porque com `-` o systemd o ignoraria em silêncio e as quatro subiriam como rodada BASE, todas verdes, por 14 dias |
+| `deploy/rodadas/%i.env` | a regra **e o registro de risco**. **Sem o `-` no `EnvironmentFile`**: arquivo ausente derruba a unit, porque com `-` o systemd o ignoraria em silêncio e as quatro subiriam como rodada BASE, todas verdes, por 14 dias |
+
+**E a unit não tem nenhuma linha `Environment=`.** O `systemd.exec(5)` diz que
+`EnvironmentFile=` vence `Environment=` **sempre**, não por ordem: qualquer
+valor do ensaio escrito na unit seria silenciável por um `/opt/pulsearb/.env`
+de máquina, nas quatro instâncias, por 14 dias. Tudo que precisa ser a palavra
+final mora em arquivo de ambiente carregado depois do `.env` —
+`deploy/rodadas/comum.env` para o perfil (igual nas quatro) e
+`deploy/rodadas/%i.env` para o registro e a regra. **Se precisar mudar o
+perfil do ensaio, mude o `comum.env` e não a unit.**
 
 O `KILL` é **compartilhado de propósito** — a chave existe para parar tudo.
 
