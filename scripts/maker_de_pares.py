@@ -144,21 +144,6 @@ def _numero(valor: Any) -> float | None:
     return None
 
 
-def _microprice(book: OrderBook) -> float | None:
-    """Microprice de um nível: o meio ponderado pelo tamanho do OUTRO lado.
-
-    É o estimador de valor justo do `poly-maker` (`strategy/quoting.py`)
-    reduzido ao topo do livro: com bid grande e ask pequeno, o preço justo
-    está perto do ask, e é para lá que o livro anda.
-    """
-    if not book.bids or not book.asks:
-        return None
-    (pb, sb), (pa, sa) = book.bids[0], book.asks[0]
-    if sb + sa <= 0:
-        return None
-    return (pb * sa + pa * sb) / (sb + sa)
-
-
 def _tamanho_no_nivel(book: OrderBook, preco: float) -> float:
     for p, s in book.bids:
         if abs(p - preco) < EPS:
@@ -435,7 +420,7 @@ class MakerDePares(RecordingIndex):
                 if topo_do_ask is not None:
                     alvo = min(alvo, topo_do_ask - janela.tick)
             if estrategia.delta_do_microprice is not None:
-                micro = _microprice(book)
+                micro = book.microprice
                 if micro is None:
                     continue
                 # Nunca MELHORA o topo: o alvo é o menor dos dois.

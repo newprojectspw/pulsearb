@@ -219,6 +219,20 @@ class Settings(BaseSettings):
     #: ficar custou −583,54 USDC em 4 h, recolher −31,87. Desligada por
     #: padrão para as rodadas em curso não mudarem; a rota de pools liga.
     maker_recolhe_quando_o_livro_anda: bool = False
+    #: Teto da cotação em ticks ABAIXO do microprice (`None` = sem âncora, o
+    #: comportamento de sempre). O microprice é o meio ponderado pelo tamanho
+    #: do outro lado — para onde o livro vai —, e o `maker_de_pares` mediu
+    #: sobre a gravação de 2026-09-13 que cotar 1 tick abaixo dele vira o
+    #: sinal do termo determinístico (−34,67 → +30,68 no lote 20), com a soma
+    #: paga do par caindo de 1,015 para 0,995. 3 ticks matam o fill.
+    #: `docs/OUTROS_BOTS.md` §6, item 6. Desligado por padrão: ele MUDA o
+    #: preço enviado, e a linha de base das rodadas em curso tem de continuar
+    #: a mesma.
+    #: Validado AQUI, e não só na `AncoraDoMicroprice`: o laço maker roda como
+    #: tarefa própria e um defeito nele sai no log sem derrubar a rodada — um
+    #: valor negativo no ambiente mataria em silêncio a rota inteira por 14
+    #: dias, com o processo vivo. O lugar de recusar é o carregamento.
+    maker_ticks_abaixo_do_microprice: int | None = Field(default=None, ge=0)
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"

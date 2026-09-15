@@ -65,6 +65,51 @@ MARKOUT_CENTAVOS_POR_SHARE = -0.1974
 
 
 @dataclass(frozen=True, slots=True)
+class AncoraDoMicroprice:
+    """Até onde o microprice deixa a cotação chegar, em coordenadas do livro
+    do Up: `bid` é o microprice do Up, `ask` é o do Down espelhado
+    (`1 − microprice do Down`), e `ticks` é a folga exigida de cada um.
+
+    A âncora só APERTA: o bid nunca fica acima de `bid − ticks`, o ask nunca
+    abaixo de `ask + ticks`. Nunca afrouxa o que a distância do meio decidiu —
+    é a regra dos três bots públicos, que nunca melhoram o topo
+    (`docs/OUTROS_BOTS.md` §6, item 6).
+
+    Perna sem microprice entra como `None` e não ancora aquela perna; quem
+    liga a regra decide se isso autoriza cotar (o laço NÃO autoriza).
+    """
+
+    bid: float | None = None
+    ask: float | None = None
+    ticks: int = 1
+
+    def __post_init__(self) -> None:
+        if self.ticks < 0:
+            # Falha na CONSTRUÇÃO, não no envio: `ticks` negativo mandaria a
+            # cotação para CIMA do microprice — o oposto do que a âncora
+            # existe para fazer, e em silêncio. Mesma escolha do
+            # `tipo_de_ordem` desconhecido no cliente (3.5).
+            raise ValueError(f"ticks da ancora nao pode ser negativo: {self.ticks}")
+
+    def limite(self, tick_size: float, *, do_lado_bid: bool) -> float | None:
+        """O preço-limite que esta âncora impõe ao lado pedido, ou `None`."""
+        micro = self.bid if do_lado_bid else self.ask
+        if micro is None:
+            return None
+        folga = self.ticks * tick_size
+        return micro - folga if do_lado_bid else micro + folga
+
+    def no_livro_do_down(self) -> AncoraDoMicroprice:
+        """A mesma âncora vista do livro do DOWN, onde a segunda perna é um
+        bid: o bid de lá é o ask daqui espelhado. É o mesmo espelho que o
+        `meio` e o portão já usam, e é o que mantém o preço avaliado e o
+        preço enviado idênticos."""
+        return AncoraDoMicroprice(
+            bid=None if self.ask is None else 1.0 - self.ask, ticks=self.ticks
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Cotacao:
     """Uma cotação maker candidata: onde repousar, e de quanto."""
 
@@ -72,7 +117,14 @@ class Cotacao:
     tamanho: float
     dois_lados: bool = True
 
-    def preco(self, meio: float, tick_size: float, *, do_lado_bid: bool) -> float:
+    def preco(
+        self,
+        meio: float,
+        tick_size: float,
+        *,
+        do_lado_bid: bool,
+        ancora: AncoraDoMicroprice | None = None,
+    ) -> float:
         """O preço da cotação, JÁ na grade do tick. Bid fica ABAIXO do meio;
         ask, acima.
 
@@ -83,9 +135,19 @@ class Cotacao:
         a ordem fica a pelo menos `distancia_ticks` do meio, nunca mais perto.
         É aqui, e não em quem envia, para que o score estimado
         (`estimar_retorno`) e a ordem colocada olhem o MESMO preço.
+
+        `ancora`, quando vem, é o microprice: o preço só pode RECUAR dele,
+        nunca avançar. É por isso que ela entra aqui dentro — o score e a
+        ordem têm de ver o mesmo recuo, senão a cotação seria escolhida por um
+        preço e enviada por outro (o modo de falha do §6.1b).
         """
         recuo = self.distancia_ticks * tick_size
         bruto = meio - recuo if do_lado_bid else meio + recuo
+        if ancora is not None:
+            limite = ancora.limite(tick_size, do_lado_bid=do_lado_bid)
+            if limite is not None:
+                # A âncora só aperta: o lado conservador de cada perna.
+                bruto = min(bruto, limite) if do_lado_bid else max(bruto, limite)
         # O epsilon segura o erro binário (0,50 − 0,01 = 0,48999…) que faria o
         # `floor` descer um tick a mais do que o pedido.
         passos = bruto / tick_size
@@ -128,6 +190,7 @@ def estimar_retorno(
     horas: float,
     fator_de_captura: float = FATOR_DE_CAPTURA_PADRAO,
     markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
+    ancora: AncoraDoMicroprice | None = None,
 ) -> RetornoEstimado | None:
     """Quanto esta cotação renderia, em USDC, no período dado.
 
@@ -148,7 +211,9 @@ def estimar_retorno(
     precos = [0.0, 0.0]
     tamanhos = [0.0, 0.0]
     for i, do_lado_bid in enumerate((True, False)[:lados]):
-        precos[i] = cotacao.preco(meio, params.tick_size, do_lado_bid=do_lado_bid)
+        precos[i] = cotacao.preco(
+            meio, params.tick_size, do_lado_bid=do_lado_bid, ancora=ancora
+        )
         tamanhos[i] = cotacao.tamanho
     return _retorno_a_precos(
         cotacao,
@@ -282,6 +347,7 @@ def escolher_cotacao(
     horas: float,
     fator_de_captura: float = FATOR_DE_CAPTURA_PADRAO,
     markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
+    ancora: AncoraDoMicroprice | None = None,
 ) -> RetornoEstimado | None:
     """A melhor candidata pelo líquido, ou `None` se nenhuma pontua.
 
@@ -292,7 +358,13 @@ def escolher_cotacao(
 
     Empate resolve pela cotação mais LONGE do meio: mesmo líquido com menos
     exposição a execução adversa é a mesma aposta com menos risco, e o
-    markout é medido enquanto a fila é hipótese.
+    markout é medido enquanto a fila é hipótese. Com âncora, várias candidatas
+    podem colapsar no MESMO preço (todas presas ao microprice) — aí o empate
+    é real e o desempate não muda a ordem que sai.
+
+    **Nenhuma pontuando devolve `None`, também com âncora.** Se o microprice
+    empurrar a cotação para fora da faixa de reward, o certo é não cotar: a
+    cotação que não pontua paga risco de execução por zero.
     """
     avaliadas = [
         r
@@ -305,6 +377,7 @@ def escolher_cotacao(
                 horas=horas,
                 fator_de_captura=fator_de_captura,
                 markout_centavos=markout_centavos,
+                ancora=ancora,
             )
         )
         is not None

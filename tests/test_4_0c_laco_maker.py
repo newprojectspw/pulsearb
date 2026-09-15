@@ -12,12 +12,14 @@ uma é testada sozinha:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from pulsearb.backtest.book import OrderBook
 from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
+from pulsearb.live.cotacao import AncoraDoMicroprice, Cotacao
 from pulsearb.live.execucao_maker import ResultadoDaAcao
 from pulsearb.live.laco_maker import LacoMaker
 from pulsearb.live.rastreador import JanelaAoVivo
@@ -234,6 +236,29 @@ class TestOPortao:
         assert laco.cliente.repousadas == {}
         assert laco.motivos.get("portao:kill_acionado") == 1
 
+    async def test_o_motivo_da_recusa_conta_UMA_vez_quando_ha_cotacao_repousando(
+        self, tmp_path
+    ):
+        """`_sair` já conta o motivo com que sai, e contar antes dele punha o
+        mesmo motivo DUAS vezes no relato — justamente quando a trava faz o
+        que mais importa, tirar uma cotação que já estava no livro. O relato
+        de 60 s é a métrica que diz quantas vezes cada trava agiu."""
+        portao = _PortaoDuble()
+        laco = _laco(tmp_path, portao=portao)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+
+        # o disjuntor arma no meio da rodada, com a cotação repousando
+        portao.decisao = SimpleNamespace(pode=False, motivo="kill_acionado")
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1015.0, agora_ns=2
+        )
+
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["portao:kill_acionado"] == 1
+
     async def test_SEM_portao_NAO_cota_falha_fechada(self, tmp_path):
         """Um laço que cotasse 'porque ninguém passou trava' seria o oposto do
         que a trava serve."""
@@ -397,6 +422,341 @@ class TestOPrecoSegueOMeioDoLivro:
 
 
 # ═══════════════ recolher quando o livro anda contra — a regra dos leaderboards
+
+
+class TestAncoraDoMicroprice:
+    """O microprice como teto da cotação, no laço inteiro.
+
+    A medida está em `docs/OUTROS_BOTS.md` §6 item 6; aqui se trava o que a
+    porta para o caminho ao vivo garante: o preço ENVIADO recua, a linha de
+    base (knob desligado) não muda, e não se cota sob uma regra que não se
+    conseguiu avaliar.
+    """
+
+    def _livros(self, *, tamanho_do_bid, tamanho_do_ask):
+        """Up desequilibrado e Down no espelho exato dele."""
+        up = OrderBook(
+            asset_id="tok-up",
+            bids=[(0.49, tamanho_do_bid)],
+            asks=[(0.51, tamanho_do_ask)],
+        )
+        down = OrderBook(
+            asset_id="tok-down",
+            bids=[(0.49, tamanho_do_ask)],
+            asks=[(0.51, tamanho_do_bid)],
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return down if token_id == "tok-down" else up
+
+        return livro_de, up
+
+    async def test_o_microprice_abaixo_do_meio_recua_o_bid_enviado(self, tmp_path):
+        """Ask grande e bid pequeno: o microprice fica ABAIXO do meio (0,492),
+        e o bid recua de 0,49 para 0,48. É o preço que VAI PARA O DIÁRIO que
+        muda — não só o que a conta imagina."""
+        livro_de, up = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        assert up.microprice < up.mid
+
+        base = _laco(tmp_path)
+        await base.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert base.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+        (tmp_path / "b").mkdir()
+        ancorado = _laco(tmp_path / "b", ticks_abaixo_do_microprice=1)
+        await ancorado.passo(
+            [_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1
+        )
+        aberta = ancorado.abertas["btc-updown-4h-1"]
+        assert aberta.preco_up == pytest.approx(0.48)
+        # e é o preço que foi de fato enviado, não só o registrado
+        precos = sorted(r.ordem.preco_limite for r in ancorado.cliente.repousadas.values())
+        assert precos[0] == pytest.approx(0.48)
+
+    async def test_microprice_acima_do_meio_nao_puxa_a_cotacao_para_perto(self, tmp_path):
+        """A âncora só APERTA: com o microprice acima do meio, a perna do Up
+        fica onde a distância do meio a pôs."""
+        livro_de, up = self._livros(tamanho_do_bid=900.0, tamanho_do_ask=100.0)
+        assert up.microprice > up.mid
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    async def test_a_perna_down_e_ancorada_pelo_microprice_DELA(self, tmp_path):
+        """Os dois livros são independentes (revisão do #126): aqui o do Up
+        pende para cima e o do Down para baixo, então quem recua é a perna
+        Down. Ela é um BID no livro dela, e a âncora vai ESPELHADA — usar a
+        do Up faria a conta avaliar um preço e o laço enviar outro."""
+        up = OrderBook(asset_id="tok-up", bids=[(0.49, 900.0)], asks=[(0.51, 100.0)])
+        down = OrderBook(asset_id="tok-down", bids=[(0.49, 100.0)], asks=[(0.51, 900.0)])
+
+        def livro_de(token_id, *, agora_ns):
+            return down if token_id == "tok-down" else up
+
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        aberta = laco.abertas["btc-updown-4h-1"]
+        assert aberta.preco_up == pytest.approx(0.49)  # o Up não foi apertado
+        assert aberta.preco_down == pytest.approx(0.48)  # o Down foi
+        # e o preço avaliado pela conta (a perna Down é o ask do livro do Up)
+        # é o MESMO número que saiu para o fio
+        avaliado = Cotacao(distancia_ticks=1, tamanho=50.0).preco(
+            0.50,
+            0.01,
+            do_lado_bid=False,
+            ancora=AncoraDoMicroprice(bid=up.microprice, ask=1.0 - down.microprice),
+        )
+        assert 1.0 - aberta.preco_down == pytest.approx(avaliado)
+
+    async def test_perder_folga_NAO_e_emergencia(self, tmp_path):
+        """A ordem continua ABAIXO do microprice, só com menos folga do que se
+        pediu. Isso não pode furar a histerese.
+
+        Foi o meu defeito: tratar a folga de `ticks` como se fosse o limite
+        duro punha a ordem acima do 'teto' a cada passo de 1 tick do meio, e
+        como a trava vence a histerese, o maker trocava a cotação em 39 de 40
+        passadas — todas antes do repouso mínimo, contra 2,05 com a regra
+        desligada. Reposicionar custa a fila, e nem a simulação do
+        `maker_de_pares` nem o SHADOW enxergam esse custo."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(500.0, 500.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+        # topo vira para 100/900: microprice 0,492 — a ordem a 0,49 perdeu
+        # folga (o teto virou 0,482), mas segue ABAIXO do microprice
+        efeitos = await laco.passo(
+            [_janela()], livro_de=self._com_topos(100.0, 900.0),
+            agora_epoch=1010.0, agora_ns=2,
+        )
+
+        assert efeitos == []
+        assert laco.motivos.get("acima_do_microprice", 0) == 0
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    async def test_nenhuma_troca_antes_do_repouso_minimo_num_passeio_do_meio(
+        self, tmp_path
+    ):
+        """A regressão de churn, travada: o meio passeando 1 tick a cada
+        passada de 15 s não pode produzir NENHUMA troca antes dos 30 s de
+        repouso mínimo. Com a folga tratada como limite duro eram 39 em 40."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        meio, trocas_cedo = 0.50, 0
+        for i in range(40):
+            up = OrderBook(
+                asset_id="tok-up",
+                bids=[(round(meio - 0.01, 4), 500.0)],
+                asks=[(round(meio + 0.01, 4), 500.0)],
+            )
+            down = OrderBook(
+                asset_id="tok-down",
+                bids=[(round(1 - meio - 0.01, 4), 500.0)],
+                asks=[(round(1 - meio + 0.01, 4), 500.0)],
+            )
+            antes = laco.abertas.get("btc-updown-4h-1")
+            agora = 1000.0 + i * 15.0
+            await laco.passo(
+                [_janela(fechamento=100_000.0)],
+                livro_de=lambda t, *, agora_ns, u=up, d=down: d if t == "tok-down" else u,
+                agora_epoch=agora,
+                agora_ns=i + 1,
+            )
+            depois = laco.abertas.get("btc-updown-4h-1")
+            trocou = antes is not None and (
+                depois is None or depois.desde_epoch != antes.desde_epoch
+            )
+            if trocou and agora - antes.desde_epoch < 30.0:
+                trocas_cedo += 1
+            meio = round(0.50 + 0.01 * ((i % 4) - 1), 4)
+
+        assert trocas_cedo == 0
+
+    async def test_sem_ancora_a_mesma_troca_de_topo_nao_mexe_na_ordem(self, tmp_path):
+        """A linha de base não muda: sem a âncora, `Cotacao` igual é preço
+        igual, e não reagir é o que preserva a fila."""
+        entrando, _ = self._livros(tamanho_do_bid=900.0, tamanho_do_ask=100.0)
+        laco = _laco(tmp_path)
+        await laco.passo([_janela()], livro_de=entrando, agora_epoch=1000.0, agora_ns=1)
+        virou, _ = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        efeitos = await laco.passo(
+            [_janela()], livro_de=virou, agora_epoch=1100.0, agora_ns=2
+        )
+        assert efeitos == []
+        assert laco.motivos["estavel"] >= 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    def _com_topos(self, tamanho_do_bid, tamanho_do_ask):
+        """Livros com topo de tamanho escolhido — é o tamanho que move o
+        microprice, com o meio parado em 0,50."""
+        up = OrderBook(
+            asset_id="tok-up",
+            bids=[(0.49, tamanho_do_bid), (0.48, 500.0)],
+            asks=[(0.51, tamanho_do_ask), (0.52, 500.0)],
+        )
+        down = OrderBook(
+            asset_id="tok-down",
+            bids=[(0.49, tamanho_do_ask), (0.48, 500.0)],
+            asks=[(0.51, tamanho_do_bid), (0.52, 500.0)],
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return down if token_id == "tok-down" else up
+
+        return livro_de
+
+    async def test_o_teto_que_AFROUXA_tira_a_ordem_do_preco_de_fora(self, tmp_path):
+        """A catraca: o teto aperta, a ordem vai para fora, e quando o topo
+        engorda de novo ela NÃO volta — a mesma `Cotacao` vence, o atalho do
+        `estavel` a dá como igual, e ela fica no preço de fora pontuando menos
+        para sempre. Não é risco, é oportunidade: quem decide são a histerese
+        e o piso de ganho, mas o atalho nem os deixava opinar (revisão do
+        Codex, #127; caso achado por busca sobre o próprio código)."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        # topo magro do lado do bid: microprice 0,494, teto 0,484 → 0,48
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(5.0, 20.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        aberta = laco.abertas["btc-updown-4h-1"]
+        assert aberta.preco_up == pytest.approx(0.48)
+        assert aberta.cotacao.distancia_ticks == 1
+
+        # o topo equilibra: microprice 0,50, teto 0,49 — a MESMA cotação de 1
+        # tick agora caberia a 0,49, e a ordem a 0,48 não está acima do teto
+        efeitos = await laco.passo(
+            [_janela()], livro_de=self._com_topos(5.0, 5.0),
+            agora_epoch=1200.0, agora_ns=2,
+        )
+
+        # o atalho não fecha mais a porta: quem decide passa a ser o piso de
+        # ganho, e neste pool pequeno ele segura — o que é a política certa
+        assert laco.motivos.get("estavel", 0) == 0
+        assert laco.motivos["ganho_abaixo_do_piso"] == 1
+        assert efeitos == []
+
+    async def test_com_pool_que_paga_o_teto_que_afrouxa_reposiciona_de_fato(
+        self, tmp_path
+    ):
+        """O mesmo caso com um pool que paga: aí o ganho vence o piso e a
+        ordem volta para perto do meio. É o que a catraca impedia."""
+        janela = replace(_janela(), reward_daily_rate=1_000.0)
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo(
+            [janela], livro_de=self._com_topos(5.0, 20.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.48)
+
+        efeitos = await laco.passo(
+            [janela], livro_de=self._com_topos(5.0, 5.0),
+            agora_epoch=1200.0, agora_ns=2,
+        )
+
+        assert len(efeitos) == 1
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+    async def test_sem_candidata_que_pontue_o_teto_ainda_tira_a_ordem(self, tmp_path):
+        """O livro ALARGA com o meio parado: toda a grade ancorada cai fora da
+        faixa de reward e nenhuma candidata pontua. A que repousa continua
+        pontuando — então `atual_nao_pontua_mais` não a pega — e sem o teto
+        ela ficaria acima dele para sempre. É justamente quando o teto mais
+        importa, e era quando ele não existia (revisão do Codex, #127)."""
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo(
+            [_janela()], livro_de=self._com_topos(500.0, 500.0),
+            agora_epoch=1000.0, agora_ns=1,
+        )
+        assert laco.abertas["btc-updown-4h-1"].preco_up == pytest.approx(0.49)
+
+        # 0,40/0,60 com o ask pesado nos DOIS livros (eles são independentes):
+        # microprice ~0,40 em cada um, então o bid ancorado desce para 0,39 e
+        # o ask sobe para 0,61 — a grade inteira sai da faixa de 3 ¢, e nenhuma
+        # candidata pontua. A ordem a 0,49 continua pontuando.
+        largo_up = OrderBook(
+            asset_id="tok-up", bids=[(0.40, 5.0)], asks=[(0.60, 5_000.0)]
+        )
+        largo_down = OrderBook(
+            asset_id="tok-down", bids=[(0.40, 5.0)], asks=[(0.60, 5_000.0)]
+        )
+
+        def livro_de(token_id, *, agora_ns):
+            return largo_down if token_id == "tok-down" else largo_up
+
+        assert largo_up.mid == pytest.approx(0.50)  # o MEIO não andou
+        efeitos = await laco.passo(
+            [_janela()], livro_de=livro_de, agora_epoch=1200.0, agora_ns=2
+        )
+
+        assert laco.motivos["acima_do_microprice"] == 1
+        assert len(efeitos) == 1
+        assert laco.abertas == {}
+
+    async def test_desligada_por_padrao(self, tmp_path):
+        laco = _laco(tmp_path)
+        assert laco.ticks_abaixo_do_microprice is None
+
+    async def test_sem_microprice_a_caixa_conta_e_o_portao_ainda_tira_do_livro(
+        self, tmp_path
+    ):
+        """Faltar o microprice impede COTAR, e só. A passada tem de seguir: a
+        caixa conta o repouso (senão a falta trunca em silêncio a medida que
+        a rodada existe para fazer) e o portão tem de poder tirar do livro o
+        que já está lá — um disjuntor que armasse durante a falta não a
+        tiraria. É a propriedade que o 4.0 registra ter custado caro para
+        achar (revisão do Codex, #127)."""
+        livro_de, _ = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        portao = _PortaoDuble()
+        laco = _laco(tmp_path, portao=portao, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert len(laco.abertas) == 1
+
+        up = OrderBook(asset_id="tok-up", bids=[(0.49, 100.0)], asks=[(0.51, 900.0)])
+        so_bids = OrderBook(asset_id="tok-down", bids=[(0.49, 900.0)], asks=[])
+
+        def sem_o_ask_do_down(token_id, *, agora_ns):
+            return so_bids if token_id == "tok-down" else up
+
+        # com o portão aberto: não cota, conta o motivo, e a caixa acerta o
+        # tempo repousado
+        await laco.passo(
+            [_janela()], livro_de=sem_o_ask_do_down, agora_epoch=1015.0, agora_ns=2
+        )
+        assert laco.motivos["sem_microprice"] == 1
+        assert len(laco.abertas) == 1
+        assert laco.caixa.acertos == 1
+        assert laco.caixa.segundos_repousando == pytest.approx(15.0)
+
+        # o disjuntor arma DURANTE a falta: a ordem sai
+        portao.decisao = SimpleNamespace(pode=False, motivo="kill_acionado")
+        efeitos = await laco.passo(
+            [_janela()], livro_de=sem_o_ask_do_down, agora_epoch=1030.0, agora_ns=3
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["portao:kill_acionado"] == 1
+
+    async def test_sem_microprice_nao_cota_e_nao_cancela_o_que_repousa(self, tmp_path):
+        """Com a âncora ligada e o livro do Down de um lado só, não há como
+        avaliar a regra — e cotar sob uma regra que não se aplicou é o que a
+        falha fechada existe para impedir. O que já repousa FICA: é falta de
+        dado nosso, como o `livro_indisponivel`."""
+        livro_de, _ = self._livros(tamanho_do_bid=100.0, tamanho_do_ask=900.0)
+        laco = _laco(tmp_path, ticks_abaixo_do_microprice=1)
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        assert len(laco.abertas) == 1
+
+        up = OrderBook(asset_id="tok-up", bids=[(0.49, 100.0)], asks=[(0.51, 900.0)])
+        so_bids = OrderBook(asset_id="tok-down", bids=[(0.49, 900.0)], asks=[])
+
+        def sem_o_ask_do_down(token_id, *, agora_ns):
+            return so_bids if token_id == "tok-down" else up
+
+        await laco.passo(
+            [_janela()], livro_de=sem_o_ask_do_down, agora_epoch=1015.0, agora_ns=2
+        )
+        assert laco.motivos["sem_microprice"] == 1
+        assert len(laco.abertas) == 1
 
 
 def _livro_com_bids(*bids, asks=((0.51, 500.0), (0.52, 500.0))):

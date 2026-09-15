@@ -36,6 +36,31 @@ class OrderBook:
         return self.asks[0][0] if self.asks else None
 
     @property
+    def microprice(self) -> float | None:
+        """O meio ponderado pelo tamanho do OUTRO lado — para onde o livro vai.
+
+        Com bid grande e ask pequeno o preço justo está perto do ASK, e é para
+        lá que o livro anda: quem quer comprar em volume já está na fila, e o
+        pouco que resta do outro lado é o que vai ser levado. É o estimador de
+        valor justo do `poly-maker` (`strategy/quoting.py`) reduzido ao topo
+        do livro, e o `maker_de_pares` mediu sobre a gravação que cotar a
+        partir dele é o que vira o sinal do termo determinístico
+        (`docs/OUTROS_BOTS.md` §6, item 6).
+
+        `None` quando falta um dos lados ou os dois topos têm tamanho zero —
+        sem os dois lados não há para onde ponderar, e inventar um meio aqui
+        produziria âncora para um livro que não se sabe onde está.
+        """
+        if not self.bids or not self.asks:
+            return None
+        (preco_bid, tamanho_bid), (preco_ask, tamanho_ask) = self.bids[0], self.asks[0]
+        if tamanho_bid + tamanho_ask <= 0:
+            return None
+        return (preco_bid * tamanho_ask + preco_ask * tamanho_bid) / (
+            tamanho_bid + tamanho_ask
+        )
+
+    @property
     def spread(self) -> float | None:
         if self.best_bid is None or self.best_ask is None:
             return None

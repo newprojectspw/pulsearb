@@ -114,7 +114,89 @@ MOTIVOS = (
     "ganho_abaixo_do_piso",
     "ganho_justifica_perder_a_fila",
     "estavel",
+    #: Só com a âncora do microprice ligada (4.0 (f)).
+    "acima_do_microprice",
 )
+
+
+#: Tolerância de preço (o nosso preço vem da grade do tick; o do livro, de
+#: decimal em string).
+_EPS_PRECO = 1e-9
+
+
+@dataclass(frozen=True, slots=True)
+class AncoraEmVigor:
+    """O que a âncora do microprice impõe a ESTA passada, em duas metades que
+    NÃO são a mesma coisa.
+
+    `microprice` é o de cada perna, no preço DELA: é o **limite duro** —
+    repousar acima do microprice é ser a opção grátis que o taker leva, e é o
+    estado que a âncora existe para não produzir. `precos` é onde a candidata
+    repousaria, `ticks` abaixo dele: é a **preferência de colocação**, e
+    perder folga não é emergência nenhuma.
+
+    Separar as duas foi o conserto de um defeito meu: tratar a folga como se
+    fosse o limite duro punha a ordem acima do "teto" a CADA passo de 1 tick
+    do meio, e como essa trava vence a histerese, o maker trocava a cotação
+    em 39 de 40 passadas de 15 min — todas antes do repouso mínimo, contra
+    2,05 com a regra desligada (medido, `/tmp/churn.py`). Reposicionar custa a
+    fila, e nem a simulação do `maker_de_pares` nem o SHADOW enxergam esse
+    custo: seria pagá-lo às cegas.
+    """
+
+    microprice: tuple[float, float]
+    precos: tuple[float, float] | None = None
+
+
+def _acima_do_microprice(
+    ancora: AncoraEmVigor | None, aberta: CotacaoAberta
+) -> bool:
+    """A ordem que repousa ficou ACIMA do microprice — o limite duro?
+
+    Sem âncora isto é sempre falso e nada muda.
+
+    Acima do microprice a ordem é a opção grátis: o livro está indo para lá, e
+    quem nos executa leva o movimento. Continua pontuando — logo
+    `atual_nao_pontua_mais` não a pega — e a candidata ancorada pontua MENOS
+    que ela, então o piso de ganho jamais aprovaria a troca. Por isso esta
+    trava vence a histerese, como o "não pontua mais": deixá-la para o piso
+    seria deixá-la nunca (revisão do Codex, #127).
+
+    O que ela NÃO faz é vigiar a folga de `ticks`: uma ordem 1 tick menos
+    folgada do que se queria continua abaixo do microprice, e tratá-la como
+    emergência era o que fazia o maker trocar a cotação a cada tick do meio.
+    """
+    if ancora is None:
+        return False
+    return (
+        aberta.preco_up > ancora.microprice[0] + _EPS_PRECO
+        or aberta.preco_down > ancora.microprice[1] + _EPS_PRECO
+    )
+
+
+def _a_ancora_mudou_o_preco(
+    ancora: AncoraEmVigor | None, aberta: CotacaoAberta
+) -> bool:
+    """A MESMA cotação repousaria hoje noutro preço?
+
+    O caso inverso do `_acima_do_teto`: o teto AFROUXA (o topo do livro
+    engorda de novo), a ordem que repousa continua abaixo dele — então não há
+    risco a corrigir — mas a candidata volta a caber mais perto do meio. Sem
+    isto o atalho do `estavel` daria a mesma `Cotacao` como igual e a ordem
+    ficaria presa no preço de fora para sempre: uma catraca que só anda para
+    longe do meio, pontuando menos a cada aperto (revisão do Codex, #127;
+    caso achado por busca sobre o próprio código, 186 combinações de topo).
+
+    Isto só ABRE o caminho. Aqui não há risco, só oportunidade — então quem
+    decide são a histerese de tempo e o piso de ganho, como em qualquer outra
+    troca.
+    """
+    if ancora is None or ancora.precos is None:
+        return False
+    return (
+        abs(ancora.precos[0] - aberta.preco_up) > _EPS_PRECO
+        or abs(ancora.precos[1] - aberta.preco_down) > _EPS_PRECO
+    )
 
 
 def decidir(
@@ -125,6 +207,7 @@ def decidir(
     agora_epoch: float,
     ganho_minimo_usdc: float = GANHO_MINIMO_USDC,
     segundos_minimos: float = SEGUNDOS_MINIMOS_REPOUSADA,
+    ancora: AncoraEmVigor | None = None,
 ) -> Decisao:
     """Mexer na cotação que está no livro, ou deixar?
 
@@ -138,6 +221,11 @@ def decidir(
     de histerese entram na ordem em que aparecem no corpo — e a ordem importa:
     "não pontua mais" precisa vencer "repousada há pouco tempo", senão uma
     cotação morta fica presa pelo tempo mínimo.
+
+    `ancora` é o que a âncora do microprice impõe a esta passada — o limite
+    duro de cada perna e o preço em que a candidata repousaria —, e só vem
+    quando ela está ligada. Ver `_acima_do_microprice` e
+    `_a_ancora_mudou_o_preco`.
     """
     if aberta is None:
         if melhor_agora is None:
@@ -163,11 +251,29 @@ def decidir(
             ganho_estimado_usdc=melhor_agora.liquido_usdc,
         )
 
+    # A âncora é regra de SEGURANÇA, não de ganho: uma ordem ACIMA do
+    # microprice é a opção grátis que ela existe para não dar. Vence a
+    # histerese e o piso, como o "não pontua mais" logo acima, e pela mesma
+    # razão de ordem — deixá-la para o piso de ganho seria deixá-la nunca,
+    # porque a candidata ancorada pontua menos que a que já repousa. A FOLGA
+    # de `ticks` não entra aqui: ver `_acima_do_microprice`.
+    if _acima_do_microprice(ancora, aberta):
+        if melhor_agora is None:
+            return Decisao(AcaoNaCotacao.CANCELAR, "acima_do_microprice")
+        return Decisao(
+            AcaoNaCotacao.REPOSICIONAR,
+            "acima_do_microprice",
+            nova=melhor_agora.cotacao,
+            ganho_estimado_usdc=melhor_agora.liquido_usdc,
+        )
+
     if melhor_agora is None:
         # A atual pontua e não há candidata melhor calculada: ficar é o certo.
         return Decisao(AcaoNaCotacao.MANTER, "estavel")
 
-    if melhor_agora.cotacao == aberta.cotacao:
+    if melhor_agora.cotacao == aberta.cotacao and not _a_ancora_mudou_o_preco(
+        ancora, aberta
+    ):
         return Decisao(AcaoNaCotacao.MANTER, "estavel")
 
     if agora_epoch - aberta.desde_epoch < segundos_minimos:
