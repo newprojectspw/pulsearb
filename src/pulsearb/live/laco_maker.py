@@ -673,61 +673,106 @@ class LacoMaker:
             tokens = self._tokens.get(slug)
             if tokens is None:
                 continue
-            chave = (slug, int(aberta.desde_epoch * 1e6))
-            pernas = ((0, tokens[0], aberta.preco_up), (1, tokens[1], aberta.preco_down))
-            livros = [livro_de(token_id, agora_ns=agora_ns) for _, token_id, _ in pernas]
-            referencias = list(self._referencia_do_recolher.get(chave, (None, None)))
-            for i, _, preco in pernas:
-                if preco <= 0.0 or livros[i] is None:
-                    continue
-                if referencias[i] is None:
-                    # Perna sem referência (o livro dela não estava à mão na
-                    # colocação): marca agora, do livro DELA, e não decide.
-                    # Em LIVE a nossa ordem já está nele — sai da conta.
-                    referencias[i] = _referencia(
-                        livros[i],
-                        preco,
-                        excluir=(preco, aberta.cotacao.tamanho)
-                        if self.nossa_ordem_esta_no_livro
-                        else None,
+            livros = [livro_de(token_id, agora_ns=agora_ns) for token_id in tokens]
+            if self._o_mercado_andou_contra(slug, aberta, tokens, livros):
+                efeitos.append(
+                    await self._recolher(
+                        slug, aberta, tokens, livros,
+                        livro_de=livro_de, agora_ns=agora_ns,
                     )
-                    self._referencia_do_recolher[chave] = (referencias[0], referencias[1])
-                    continue
-                if _o_livro_andou_contra(
-                    livros[i], referencias[i],
-                    preco_nosso=preco, tamanho=aberta.cotacao.tamanho,
-                    nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
-                ):
-                    if self._negocios_desde is not None:
-                        self.caixa.conferir_prints(
-                            slug, aberta, token_up=tokens[0], token_down=tokens[1],
-                            negocios_desde=self._negocios_desde, agora_ns=agora_ns,
-                            livro_de=livro_de, params=self._params.get(slug),
-                        )
-                    # O último intervalo de reward, ANTES de sair: `_sair`
-                    # apaga o relógio da cotação, e uma que repousou 14 s e
-                    # foi recolhida contribuiria zero — o experimento
-                    # compara reward com execução, e recolher muito
-                    # empurraria o reward para baixo por construção.
-                    # A caixa conta no livro do Up. Se foi o Down que
-                    # disparou e o do Up não está à mão, o do Down serve:
-                    # o Up é o seu espelho (bid = 1 − ask), e é o mesmo
-                    # espelho que a colocação e o portão usam. Sem nenhum
-                    # dos dois não há como disparar — o laço acima só chega
-                    # aqui com o livro da perna que andou.
-                    params = self._params.get(slug)
-                    livro_up = (
-                        livros[0]
-                        if livros[0] is not None
-                        else espelho_do_livro(livros[1], asset_id=tokens[0])
-                    )
-                    if params is not None:
-                        self.caixa.acertar(
-                            slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
-                        )
-                    efeitos.append(await self._sair(slug, motivo="livro_andou_contra"))
-                    break
+                )
         return efeitos
+
+    def _o_mercado_andou_contra(
+        self,
+        slug: str,
+        aberta: CotacaoAberta,
+        tokens: tuple[str, str],
+        livros: list[OrderBook | None],
+    ) -> bool:
+        """Alguma perna desta cotação ficou exposta? Basta UMA, porque as
+        pernas entram e saem juntas.
+
+        Tem um efeito colateral declarado: a perna cujo livro não estava à mão
+        na colocação ganha a referência AQUI, do livro dela — e nessa passada
+        ela não decide, porque comparar o livro consigo mesmo nunca acusa
+        movimento nenhum.
+        """
+        chave = (slug, int(aberta.desde_epoch * 1e6))
+        referencias = list(self._referencia_do_recolher.get(chave, (None, None)))
+        pernas = ((0, aberta.preco_up), (1, aberta.preco_down))
+        for i, preco in pernas:
+            livro = livros[i]
+            if preco <= 0.0 or livro is None:
+                continue
+            if referencias[i] is None:
+                # Em LIVE a nossa ordem já está no livro: sai da conta, senão
+                # a referência seria ela mesma.
+                referencias[i] = _referencia(
+                    livro,
+                    preco,
+                    excluir=(preco, aberta.cotacao.tamanho)
+                    if self.nossa_ordem_esta_no_livro
+                    else None,
+                )
+                self._referencia_do_recolher[chave] = (referencias[0], referencias[1])
+                continue
+            if _o_livro_andou_contra(
+                livro,
+                referencias[i],
+                preco_nosso=preco,
+                tamanho=aberta.cotacao.tamanho,
+                nossa_ordem_no_livro=self.nossa_ordem_esta_no_livro,
+            ):
+                return True
+        return False
+
+    async def _recolher(
+        self,
+        slug: str,
+        aberta: CotacaoAberta,
+        tokens: tuple[str, str],
+        livros: list[OrderBook | None],
+        *,
+        livro_de,
+        agora_ns: int,
+    ) -> Efeito:
+        """Tira a cotação do livro — e fecha a conta dela ANTES de sair.
+
+        A ordem das três coisas importa, e cada uma custou uma revisão:
+
+        1. **os prints do intervalo**, senão `_sair` apaga o cursor da caixa e
+           a execução que aconteceu entre a passada e o recolher some,
+           subcontando justamente a métrica que esta regra quer melhorar;
+        2. **o último intervalo de reward**, senão uma cotação que repousou
+           14 s e foi recolhida contribuiria zero — o experimento compara
+           reward com execução, e recolher muito empurraria o reward para
+           baixo por construção. A caixa conta no livro do Up; se foi o Down
+           que disparou e o do Up não está à mão, o do Down serve pelo mesmo
+           espelho que a colocação e o portão usam (bid = 1 − ask), e sem
+           nenhum dos dois não se chega aqui;
+        3. **sair**, com o motivo nomeado.
+        """
+        if self._negocios_desde is not None:
+            self.caixa.conferir_prints(
+                slug,
+                aberta,
+                token_up=tokens[0],
+                token_down=tokens[1],
+                negocios_desde=self._negocios_desde,
+                agora_ns=agora_ns,
+                livro_de=livro_de,
+                params=self._params.get(slug),
+            )
+        params = self._params.get(slug)
+        if params is not None:
+            livro_up = livros[0]
+            if livro_up is None:
+                livro_up = espelho_do_livro(livros[1], asset_id=tokens[0])
+            self.caixa.acertar(
+                slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
+            )
+        return await self._sair(slug, motivo="livro_andou_contra")
 
     async def _recusar(self, slug: str, motivo: str) -> Efeito | None:
         """Não cotar por `motivo` — e tirar do livro o que já repousava.

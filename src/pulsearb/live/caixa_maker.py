@@ -276,37 +276,16 @@ class CaixaDoMaker:
             (1, token_down, False, aberta.preco_down),
         )
         novas = 0
-        # As DUAS pernas juntas, em ordem de tempo: perna a perna, um print
-        # do Down anterior ao do Up seria visto DEPOIS dele, o relógio do
-        # acerto já teria avançado, e o Down pareceria aberto até o print do
-        # Up (revisão do Codex, #126). A ordem estável preserva a ordem de
-        # chegada entre prints do mesmo instante.
-        prints = sorted(
-            (
-                (negocio, indice, token_id, lado_up, preco_nosso)
-                for indice, token_id, lado_up, preco_nosso in pernas
-                if preco_nosso > 0.0
-                for negocio in negocios_desde(token_id, ts_ns=desde_ns)
-            ),
-            key=lambda item: item[0].ts_ns,
-        )
-        for negocio, indice, token_id, lado_up, preco_nosso in prints:
+        for negocio, indice, token_id, lado_up, preco_nosso in _prints_em_ordem(
+            pernas, negocios_desde, desde_ns=desde_ns
+        ):
             self.prints_vistos += 1
             if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
                 continue
             if restante[indice] <= 0.0:
                 self.prints_em_perna_consumida += 1
                 continue
-            if negocio.preco < preco_nosso - EPS:
-                tipo = "atravessada"
-                shares = restante[indice]
-                self.execucoes_atravessadas += 1
-                self.shares_atravessadas += shares
-            else:
-                tipo = "no_nivel"
-                shares = min(negocio.tamanho, restante[indice])
-                self.execucoes_no_nivel += 1
-                self.shares_no_nivel += shares
+            tipo, shares = self._classificar(negocio, restante[indice], preco_nosso)
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
                     slug, aberta, params,
@@ -314,10 +293,7 @@ class CaixaDoMaker:
                     livro_de=livro_de, agora_ns=agora_ns, ts_ns=negocio.ts_ns,
                 )
             restante[indice] -= shares
-            meio_no_fill = None
-            if livro_de is not None:
-                livro_do_fill = livro_de(token_id, agora_ns=agora_ns)
-                meio_no_fill = livro_do_fill.mid if livro_do_fill is not None else None
+            meio_no_fill = _meio_do_fill(livro_de, token_id, agora_ns=agora_ns)
             self._pendentes.append(
                 ExecucaoPossivel(
                     slug=slug,
@@ -381,6 +357,25 @@ class CaixaDoMaker:
             medidas += 1
         self._pendentes = restantes
         return medidas
+
+    def _classificar(
+        self, negocio: Negocio, restante: float, preco_nosso: float
+    ) -> tuple[str, float]:
+        """Como este print nos pegaria, e por quanto — contando a execução.
+
+        Print ABAIXO do nosso preço atravessou o nível: leva o que resta da
+        perna. Print NO nosso preço leva o mínimo entre ele e o que resta —
+        não dá para supor que a fila inteira era nossa.
+        """
+        if negocio.preco < preco_nosso - EPS:
+            shares = restante
+            self.execucoes_atravessadas += 1
+            self.shares_atravessadas += shares
+            return "atravessada", shares
+        shares = min(negocio.tamanho, restante)
+        self.execucoes_no_nivel += 1
+        self.shares_no_nivel += shares
+        return "no_nivel", shares
 
     def _acertar_no_print(
         self,
@@ -486,4 +481,43 @@ def espelho_do_livro(livro: OrderBook, *, asset_id: str) -> OrderBook:
         bids=[(1.0 - preco, tamanho) for preco, tamanho in livro.asks],
         asks=[(1.0 - preco, tamanho) for preco, tamanho in livro.bids],
         ts_ns=livro.ts_ns,
+    )
+
+
+def _meio_do_fill(
+    livro_de: Callable[..., OrderBook | None] | None, token_id: str, *, agora_ns: int
+) -> float | None:
+    """O meio do token no instante do fill, para o markout ser meio-a-meio.
+
+    `None` sem livro à mão — e sem ele a execução é contada mas NÃO medida
+    (`markout_sem_referencia`), nunca aproximada pelo nosso preço, o que
+    creditaria a distância ao meio como ganho.
+    """
+    if livro_de is None:
+        return None
+    livro = livro_de(token_id, agora_ns=agora_ns)
+    return livro.mid if livro is not None else None
+
+
+def _prints_em_ordem(
+    pernas: tuple[tuple[int, str, bool, float], ...],
+    negocios_desde: Callable[..., list[Negocio]],
+    *,
+    desde_ns: int,
+) -> list[tuple[Negocio, int, str, bool, float]]:
+    """Os prints das DUAS pernas juntos, em ordem de tempo.
+
+    Perna a perna, um print do Down anterior ao do Up seria visto DEPOIS dele:
+    o relógio do acerto já teria avançado, e o Down pareceria aberto até o
+    print do Up (revisão do Codex, #126). A ordenação é estável, então prints
+    do mesmo instante preservam a ordem de chegada.
+    """
+    return sorted(
+        (
+            (negocio, indice, token_id, lado_up, preco_nosso)
+            for indice, token_id, lado_up, preco_nosso in pernas
+            if preco_nosso > 0.0
+            for negocio in negocios_desde(token_id, ts_ns=desde_ns)
+        ),
+        key=lambda item: item[0].ts_ns,
     )

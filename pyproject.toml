@@ -65,13 +65,30 @@ target-version = "py312"
 src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "RUF"]
+select = ["E", "F", "W", "I", "UP", "B", "ASYNC", "RUF", "C901"]
 # RUF002/RUF003: docstrings e comentários em português usam notação
 # matemática (−, ×, ≥, σ) de propósito. Trocar por ASCII pioraria a leitura
 # das fórmulas de fee e do modelo TWAP.
 ignore = ["RUF002", "RUF003"]
 
+# C901: função complexa demais. Entrou em 2026-09-15 porque a complexidade do
+# `_passo_da_janela` reprovou o portão de qualidade do SonarCloud no #127 — e
+# o Sonar é ilegível da sessão da nuvem (403 no túnel), então o defeito só
+# aparecia DEPOIS do push, uma volta inteira de CI por vez. Agora aparece no
+# `make check`. O limite é 12 porque é onde o projeto inteiro já estava, fora
+# das três exceções nomeadas abaixo: a trava é contra PIORAR, não uma dívida
+# nova. Não é a mesma métrica do Sonar (que usa complexidade cognitiva, com
+# peso por aninhamento), mas anda junto o bastante para avisar antes.
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
 [tool.ruff.lint.per-file-ignores]
+# C901 herdado, de antes da regra. Nenhuma é do caminho ao vivo do maker:
+# `_cotar`/`_passo` do simulador de pares e `medir_markout` da análise são
+# laços de medição sobre gravação, e reescrevê-los mudaria número publicado
+# sem ninguém pedir. Fica a dívida nomeada, não um limite frouxo para todos.
+"scripts/maker_de_pares.py" = ["C901"]
+"src/pulsearb/analysis/measurements.py" = ["C901"]
 # Scripts standalone: rodam FORA do projeto (Colab/VPS recém-criada), com
 # stdlib pura e Python antigo. UP017 (datetime.UTC) exige 3.11+ e UP035/UP006
 # modernizam para sintaxe que 3.9/3.10 não aceitam — ignorar aqui é o que
