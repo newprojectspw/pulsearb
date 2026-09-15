@@ -311,7 +311,31 @@ def estrategias_dos_pools() -> tuple[Estrategia, ...]:
     Então a grade varre 1/2/4 ticks do meio, mais a variante que junta ao
     topo (a do regime Up/Down), e cruza isso com recolher e com o teto de
     fill (`atravessada`).
+
+    Sobre a célula que o maker ao vivo usa (1 tick do meio, recolher na
+    latência medida desta máquina, 245 ms), entram as peças que a grade dos
+    bots mediu no Up/Down — microprice, pausa depois do fill atravessado,
+    reprice de 4 ticks, histerese — porque aqui cada recolhida também CUSTA
+    reward: a receita só conta com as duas pernas descansando.
     """
+    base = dict(
+        melhorar_ticks=0,
+        modo="pessimista",
+        parar_antes_s=0,
+        recolher_ms=245.0,
+        trava_do_par=False,
+        salto_bps=None,
+        colchao_x=0.0,
+        distancia_ticks_do_meio=1,
+    )
+    pecas = (
+        Estrategia(**base),
+        Estrategia(**base, delta_do_microprice=1),
+        Estrategia(**base, pausa_apos_fill_s=30.0),
+        Estrategia(**base, reprice_ticks=4),
+        Estrategia(**base, histerese_ticks=2),
+        Estrategia(**base, pausa_apos_fill_s=30.0, reprice_ticks=4),
+    )
     return tuple(
         Estrategia(
             melhorar_ticks=0,
@@ -329,7 +353,7 @@ def estrategias_dos_pools() -> tuple[Estrategia, ...]:
             (None, 100.0),
             ("perna_inteira", "tamanho_do_print"),
         )
-    )
+    ) + pecas
 
 
 def main(argv: list[str] | None = None) -> int:

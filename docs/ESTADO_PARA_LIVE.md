@@ -840,10 +840,16 @@ por estar no livro, resolução em dias. `scripts/markout_dos_pools.py
 --gravar` passou a guardar os eventos crus no formato do recorder (com um
 registro `pools_snapshot` que diz quais dois tokens formam cada par, mais
 `rewards_max_spread` e `rewards_min_size` do instante da coleta — eles mudam
-ao vivo), e `scripts/maker_de_pares_nos_pools.py` (13 testes) roda o MESMO
+ao vivo), e `scripts/maker_de_pares_nos_pools.py` (14 testes) roda o MESMO
 motor sobre essa gravação, com três diferenças que não podiam ser
 escondidas:
 
+- **a grade traz as peças que a grade dos bots mediu no Up/Down** sobre a
+  célula do laço ao vivo (1 tick do meio, recolher a 245 ms): microprice,
+  pausa de 30 s depois do fill atravessado, reprice de 4 ticks, histerese
+  de 2 ticks, e pausa + reprice — porque aqui cada recolhida também CUSTA
+  reward (a receita só conta com as duas pernas descansando), e o número
+  do Up/Down não vale para os pools sem medir;
 - **a perna solta é marcada a preço de saída** (melhor bid do fim, menos o
   fee de taker): marcar a resultado num mercado que não resolveu seria
   inventar o resultado. Sem bid no fim, a janela sai do P&L;

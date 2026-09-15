@@ -61,7 +61,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_relogio_do_servidor.py": (20, "3.10 — relógio do servidor"),
     "test_m4_travas_que_faltavam.py": (27, "3.12 — travas novas"),
     "test_maker_de_pares.py": (35, "1.6 — o maker de pares"),
-    "test_maker_de_pares_nos_pools.py": (13, "1.12 — o maker de pares nos pools"),
+    "test_maker_de_pares_nos_pools.py": (14, "1.12 — o maker de pares nos pools"),
 }
 
 #: O 3.12 publica a SOMA destes quatro. Somar na mão já saiu errado em

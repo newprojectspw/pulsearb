@@ -196,6 +196,26 @@ def test_a_grade_dos_pools_nao_tem_eixo_de_salto() -> None:
     assert len({e.nome for e in grade}) == len(grade)
 
 
+def test_as_pecas_dos_bots_entram_na_celula_do_maker_vivo() -> None:
+    from dataclasses import asdict
+
+    grade = mpp.estrategias_dos_pools()
+    pecas = grade[-6:]
+    base = asdict(pecas[0])
+    # A célula do laço ao vivo: 1 tick do meio, recolher na latência medida.
+    assert base["distancia_ticks_do_meio"] == 1 and base["recolher_ms"] == 245.0
+    diferencas = [
+        {k for k, v in asdict(e).items() if v != base[k]} for e in pecas[1:]
+    ]
+    assert diferencas == [
+        {"delta_do_microprice"},
+        {"pausa_apos_fill_s"},
+        {"reprice_ticks"},
+        {"histerese_ticks"},
+        {"pausa_apos_fill_s", "reprice_ticks"},
+    ]
+
+
 class TestORewardEntraPeloCaminhoDoBotVivo:
     """A receita é integrada por `estimar_retorno`, a função do `laco_maker`.
 
