@@ -200,6 +200,19 @@ class Estrategia:
     #: recoloca mais fundo se o alvo caiu mais que isto abaixo da ordem.
     #: 0 = recoloca a qualquer descida (o que a grade focada mediu).
     histerese_ticks: int = 0
+    #: ONDE cotar. A focada mostrou que, com o microprice, o total das
+    #: janelas de 5 min e o do BTC saem negativos em TODAS as configurações
+    #: (lote 5/20/100, skew 0/2) e as de 1 h e o ETH positivos. Isto é o
+    #: filtro que deixa medir o termo determinístico só onde a estrutura
+    #: rende: janelas mais curtas que `duracao_min_s` e ativos em
+    #: `sem_ativos` não recebem cotação.
+    duracao_min_s: int = 0
+    sem_ativos: tuple[str, ...] = ()
+
+    def cota(self, janela: Janela) -> bool:
+        if self.duracao_min_s and duracao_do_slug(janela.slug) < self.duracao_min_s:
+            return False
+        return janela.asset not in self.sem_ativos
 
     @property
     def nome(self) -> str:
@@ -217,6 +230,8 @@ class Estrategia:
             + (f"_fluxo-{self.fluxo_ticks:g}t" if self.fluxo_ticks else "")
             + (f"_reprice-{self.reprice_ticks}t" if self.reprice_ticks is not None else "")
             + (f"_hist-{self.histerese_ticks}t" if self.histerese_ticks else "")
+            + (f"_dur-{self.duracao_min_s}s" if self.duracao_min_s else "")
+            + (f"_sem-{'-'.join(self.sem_ativos)}" if self.sem_ativos else "")
         )
 
 
@@ -460,6 +475,8 @@ class MakerDePares(RecordingIndex):
         )
         z_do_fluxo = self._z_do_fluxo(token, ts_ns) if self._usa_fluxo else 0.0
         for estrategia in self.estrategias:
+            if not estrategia.cota(janela):
+                continue
             perna = janela.pernas.setdefault((estrategia, token), Perna())
             fim_cotacao_ns = janela.fim_ns - estrategia.parar_antes_s * 10**9
             if ts_ns >= fim_cotacao_ns:
@@ -803,9 +820,12 @@ class MakerDePares(RecordingIndex):
                 "fluxo_ticks": estrategia.fluxo_ticks,
                 "reprice_ticks": estrategia.reprice_ticks,
                 "histerese_ticks": estrategia.histerese_ticks,
+                "duracao_min_s": estrategia.duracao_min_s,
+                "sem_ativos": list(estrategia.sem_ativos),
             },
             "janelas": {
-                "cotadas": len(linhas),
+                "cotadas": sum(1 for j in self.janelas_cotadas.values() if estrategia.cota(j)),
+                "existentes": len(linhas),
                 "com_execucao": len(com_fill),
                 "com_par": len(com_par),
                 "so_uma_perna": len(so_uma),
@@ -918,11 +938,16 @@ def _quebra(linhas: list[dict[str, Any]], chave: str) -> dict[str, Any]:
     saida: dict[str, Any] = {}
     for valor, grupo in sorted(grupos.items(), key=lambda kv: str(kv[0])):
         total = sum(r["travado"] + r["residual"] + r["rebate"] for r in grupo)
+        # O termo sem a aposta da perna solta, por grupo: é ele que diz se um
+        # filtro de duração ou de ativo vale, porque o total carrega o
+        # cara-ou-coroa da perna solta.
+        deterministico = sum(r["travado"] + r["rebate"] for r in grupo)
         saida[str(valor)] = {
             "janelas_contadas": len(grupo),
             "com_par": sum(1 for r in grupo if r["pares"] > EPS),
             "pnl_com_rebate": round(total, 4),
             "por_janela_cents": round(100 * total / len(grupo), 3),
+            "sem_a_aposta_travado_mais_rebate": round(deterministico, 4),
         }
     return saida
 
@@ -1019,6 +1044,41 @@ def estrategias_dos_bots() -> tuple[Estrategia, ...]:
     return tuple(grade)
 
 
+def estrategias_de_onde_cotar() -> tuple[Estrategia, ...]:
+    """ONDE cotar, sobre a mesma base da grade dos bots.
+
+    A focada quebrou o total por duração e por ativo e o sinal foi o mesmo
+    em seis configurações: 5 min e BTC negativos, 1 h e ETH positivos. O
+    total carrega a perna solta; esta grade mede o termo determinístico com
+    o filtro ligado, sozinho e junto das duas peças que a hora de fumaça
+    apontou (pausa de 30 s, reprice de 4 ticks).
+    """
+    base = dict(
+        melhorar_ticks=0,
+        modo="pessimista",
+        parar_antes_s=180,
+        recolher_ms=245.0,
+        trava_do_par=False,
+        salto_bps=3.0,
+        colchao_x=0.0,
+        tamanho=20.0,
+        delta_do_microprice=1,
+    )
+    filtros = (
+        dict(),
+        dict(duracao_min_s=900),
+        dict(sem_ativos=("btc",)),
+        dict(duracao_min_s=900, sem_ativos=("btc",)),
+        dict(duracao_min_s=3600),
+    )
+    grade = [Estrategia(**base, **f) for f in filtros]
+    grade += [
+        Estrategia(**base, pausa_apos_fill_s=30.0, reprice_ticks=4, **f)
+        for f in filtros[1:]
+    ]
+    return tuple(grade)
+
+
 def estrategias_padrao() -> tuple[Estrategia, ...]:
     base = [
         Estrategia(
@@ -1066,7 +1126,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--detalhe", action="store_true")
     parser.add_argument(
         "--grade",
-        choices=("ampla", "focada", "latencia", "bots"),
+        choices=("ampla", "focada", "latencia", "bots", "onde"),
         default="ampla",
         help=(
             "ampla: recolher/trava/salto/colchão. focada: lote, viés e "
@@ -1092,7 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
         estrategias={
             "focada": estrategias_focadas,
             "latencia": estrategias_de_latencia,
-            "bots": estrategias_dos_bots,
+            "bots": estrategias_dos_bots, "onde": estrategias_de_onde_cotar,
             "ampla": estrategias_padrao,
         }[args.grade](),
     )

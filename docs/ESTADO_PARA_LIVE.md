@@ -937,6 +937,26 @@ outra — 500 mil registros a cada 15–20 min de relógio de parede, contra 25
 mil por segundo acordado. `caffeinate -dimsu` não segura o sono na bateria.
 O que reproduz o número é o Mac na tomada.
 
+**ONDE cotar é um eixo, e a focada já diz para onde ele aponta.** A quebra
+por duração e por ativo do `PARES_FOCADA_20260913.json` (total com rebate e
+com a perna solta, USDC no dia), na melhor configuração (microprice 1 tick,
+lote 20, recolher 100 ms): 5 min **−37,14** (178 janelas), 15 min +24,07
+(109), 1 h **+58,42** (39), 4 h +6,76 (11); btc **−134,86** (198 janelas),
+eth **+128,54** (100), bitcoin +32,35 (24), ethereum +26,07 (15). O sinal é
+o mesmo nas SEIS configurações com microprice (lote 5/20/100 × skew 0/2):
+5 min e btc negativos em todas, 1 h e eth positivos em todas — e os
+leaderboards dizem que quem ganha nas janelas curtas de BTC tem latência
+<100 ms, que esta máquina não tem (p50 = 245 ms). Como o total carrega o
+cara-ou-coroa da perna solta, o número que fecha o filtro é o termo
+determinístico com ele LIGADO: `Estrategia.duracao_min_s` e
+`Estrategia.sem_ativos` (3 testes em `tests/test_maker_de_pares.py`,
+classe `TestOndeCotar`; a quebra por grupo agora traz
+`sem_a_aposta_travado_mais_rebate`), grade `--grade onde` (base dos bots ×
+{sem filtro, ≥15 min, sem btc, ≥15 min sem btc, ≥1 h} e os quatro filtros
+com pausa 30 s + reprice 4). ⬜ falta o número do dia
+(`relatorios/PARES_ONDE_20260913.json`, em curso em paralelo com a grade
+dos bots).
+
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na

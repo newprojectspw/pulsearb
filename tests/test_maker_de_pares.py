@@ -556,6 +556,49 @@ class TestOQueFaltavaDoPolyMaker:
         assert abs(pernas[(descansa, UP)].ordem.preco - 0.60) < 1e-9
 
 
+class TestOndeCotar:
+    """O filtro de duração/ativo: a janela filtrada não recebe cotação NEM
+    entra na contagem de cotadas — o resto continua igual."""
+
+    def test_janela_de_5_min_do_btc_fica_fora_pelo_filtro_de_duracao(self) -> None:
+        cota, filtra = _estrategia(), _estrategia(duracao_min_s=900)
+        i = _indice(cota, filtra)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert pernas[(cota, UP)].ordem is not None
+        assert (filtra, UP) not in pernas
+        # E um print que executaria a cotação não executa o que não existe.
+        i._on_poly_book(_rec(T0 + 11 * S, _print(UP, 0.58, 5)))
+        assert pernas[(cota, UP)].executado == 20.0
+        assert (filtra, UP) not in pernas
+        assert i._resumo_da_estrategia(cota, detalhe=False)["janelas"]["cotadas"] == 1
+        assert i._resumo_da_estrategia(filtra, detalhe=False)["janelas"]["cotadas"] == 0
+
+    def test_o_filtro_de_ativo_le_o_asset_da_janela(self) -> None:
+        sem_btc, sem_eth = _estrategia(sem_ativos=("btc",)), _estrategia(sem_ativos=("eth",))
+        i = _indice(sem_btc, sem_eth)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert (sem_btc, UP) not in pernas
+        assert pernas[(sem_eth, UP)].ordem is not None
+        assert sem_btc.nome.endswith("_sem-btc")
+        assert "_dur-" not in sem_eth.nome
+
+    def test_a_grade_de_onde_cotar_muda_so_o_filtro_sobre_a_base_dos_bots(self) -> None:
+        from dataclasses import asdict
+
+        grade = mp.estrategias_de_onde_cotar()
+        base = asdict(mp.estrategias_dos_bots()[0])
+        assert asdict(grade[0]) == base
+        assert len({e.nome for e in grade}) == len(grade)
+        filtros = {"duracao_min_s", "sem_ativos"}
+        for e in grade[1:5]:
+            assert {k for k, v in asdict(e).items() if v != base[k]} <= filtros
+        for e in grade[5:]:
+            fora = {k for k, v in asdict(e).items() if v != base[k]}
+            assert fora - filtros == {"pausa_apos_fill_s", "reprice_ticks"}
+
+
 def test_a_grade_dos_bots_isola_cada_peca_sobre_a_mesma_base() -> None:
     from dataclasses import asdict
 
