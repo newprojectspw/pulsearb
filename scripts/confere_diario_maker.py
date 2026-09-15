@@ -26,20 +26,23 @@ from pathlib import Path
 import httpx
 
 from pulsearb.backtest.book import OrderBook
+from pulsearb.caminhos import caminho_de_diario_lido
 from pulsearb.markets.http import fazer_http_get_json
 from pulsearb.settings import Settings
 
-#: Onde o SHADOW grava os diários. O caminho da linha de comando tem de cair
-#: aqui dentro: o script só lê diário, e um argumento que apontasse para
-#: fora (`../../...`) seria erro de quem chamou, não pedido a atender.
-PASTA_DOS_DIARIOS = Path("data/shadow").resolve()
-
 
 def _caminho_do_diario(arg: str) -> Path:
-    caminho = Path(arg).resolve()
-    if PASTA_DOS_DIARIOS not in caminho.parents or caminho.suffix != ".jsonl":
-        raise SystemExit(f"esperava um diário .jsonl dentro de {PASTA_DOS_DIARIOS}: {arg}")
-    return caminho
+    """A contenção mora em `pulsearb.caminhos`, e cobre as DUAS pastas.
+
+    Até 2026-09-15 este script conhecia só `data/shadow` — e a rodada de 14
+    dias do 4.2 grava em `data/diarios` (a unit passa `--diario`). Quem
+    apontasse para o diário que importa recebia uma recusa sobre pasta
+    errada, e a verificação do achado r4 não alcançava a rodada nenhuma.
+    """
+    try:
+        return caminho_de_diario_lido(arg)
+    except ValueError as erro:
+        raise SystemExit(str(erro)) from erro
 
 
 def _ler_colocadas(caminho: Path) -> list[dict]:

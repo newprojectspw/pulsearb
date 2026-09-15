@@ -827,6 +827,36 @@ nenhum destes números serve sem decisão nova, com capital real conferido.
 | `maker.motivos.sem_microprice` | **ausente** nesta rodada — a âncora do microprice (4.0 (f)) está desligada aqui de propósito | aparecer quer dizer que alguém ligou `MAKER_TICKS_ABAIXO_DO_MICROPRICE` sem desligar o recolher: as duas na mesma rodada não se distinguem, e a rodada não mede nenhuma das duas. A rodada da âncora troca uma pela outra — `MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=false` na mesma edição |
 | id das ordens no diário | todo id com prefixo `sombra-` | qualquer id sem `sombra-` é **PARAR AGORA**: `systemctl stop` e abrir issue — significaria ordem real |
 
+### 10.1b. E o mesmo relato lido por um programa
+
+A tabela acima é para a primeira hora, a olho. Para a rodada inteira — e no
+fim dela — quem responde é o leitor, que soma o que o motor publicou e diz o
+veredito do 4.2:
+
+```bash
+journalctl -u pulsearb-shadow-maker -o cat \
+    | grep '"msg":"shadow"' > relatorios/RELATOS_4_2.jsonl
+
+.venv/bin/python scripts/resumo_da_rodada_maker.py \
+    --relatos relatorios/RELATOS_4_2.jsonl \
+    --diario data/diarios/shadow-maker-4-2.jsonl
+```
+
+**Rode isso na primeira hora também, e não só no dia 14.** Ele confere de
+uma vez as quatro maneiras de a rodada não valer nada — e três delas não
+aparecem em nenhuma linha da tabela acima:
+
+| recusa | o que aconteceu |
+|---|---|
+| `rodada_confundida` | duas regras experimentais ligadas juntas (a linha `maker.regras` da tabela, virada conta) |
+| `regras_mudaram_no_meio` | alguém editou a unit e reiniciou. A unit **anexa ao mesmo diário de propósito**, então isso mistura duas regras nos mesmos 14 dias e o último relato sozinho parece uma rodada limpa |
+| `rodada_dormiu` | ciclo de trabalho abaixo de 0,99 (item 3.16) |
+| `relato_sem_maker` | o laço maker não subiu; a rodada segue viva, relatando, medindo nada |
+
+O leitor **não recalcula** rewards nem markout: os números são os que o motor
+publicou. E ele confere, a cada leitura, o que a última linha da tabela acima
+pede a olho — todo `order_id` do diário começando com `sombra-`.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** não medido. Meça na primeira hora

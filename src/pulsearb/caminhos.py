@@ -140,7 +140,9 @@ def caminho_de_escrita(bruto: str, *, extensoes: tuple[str, ...] = (".json",)) -
     return resolvido
 
 
-def caminho_de_relatorio_lido(bruto: str) -> Path:
+def caminho_de_relatorio_lido(
+    bruto: str, *, extensoes: tuple[str, ...] = (".json",)
+) -> Path:
     """Monta o caminho de um relatório de ENTRADA a partir da raiz permitida.
 
     Espelho do `caminho_de_escrita`, e pelo mesmo motivo: o argumento de
@@ -159,6 +161,12 @@ def caminho_de_relatorio_lido(bruto: str) -> Path:
     diferentes porque são dois tipos de entrada diferentes, e juntá-las
     afrouxaria a mais estrita.
 
+    `extensoes` espelha o do `caminho_de_escrita`, e pela mesma razão: o
+    relato de 60 s do SHADOW é `.jsonl`, uma linha por relato, e o leitor da
+    rodada (`scripts/resumo_da_rodada_maker.py`) o recebe da linha de comando
+    exatamente como o backtest recebe o `--json`. O default mantém os
+    chamadores antigos idênticos.
+
     A contenção está na forma canônica que a análise de fluxo reconhece como
     sanitização de S2083 — validar ANTES contra o padrão fixo, montar a
     partir da raiz confiável, e conferir o prefixo depois de resolver. Vale
@@ -166,10 +174,11 @@ def caminho_de_relatorio_lido(bruto: str) -> Path:
     mesma conta e o motor de taint não o conhece.
     """
     relativo = bruto.strip().removeprefix("./")
-    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(".json"):
+    if not PADRAO_SAIDA.fullmatch(relativo) or not relativo.endswith(extensoes):
+        esperadas = " ou ".join(extensoes)
         raise ValueError(
             f"nome de entrada inválido: {bruto!r}\n"
-            "esperado: caminho relativo terminando em .json, com letras, "
+            f"esperado: caminho relativo terminando em {esperadas}, com letras, "
             "dígitos, '-', '_' e '.' (ex.: relatorios/VARIANCIA_23AGO.json).\n"
             f"para ler de outra raiz, defina {ENV_RAIZ_DE_LEITURA}."
         )
@@ -184,4 +193,59 @@ def caminho_de_relatorio_lido(bruto: str) -> Path:
         raise ValueError(f"entrada fora da raiz permitida: {resolvido}")
     if not resolvido.is_file():
         raise ValueError(f"arquivo de entrada não existe: {resolvido}")
+    return resolvido
+
+
+#: Onde os diários do SHADOW moram. **Duas pastas, e não uma.**
+#:
+#: `data/shadow` é o default do `caminho_do_diario_da_rodada`; `data/diarios`
+#: é o que a unit do 4.2 passa em `--diario`. O
+#: `scripts/confere_diario_maker.py` conhecia só a primeira até 2026-09-15 —
+#: e a primeira é justamente a que a rodada de 14 dias NÃO usa. O leitor
+#: recusava o diário que importa, com uma mensagem sobre pasta errada.
+PASTAS_DE_DIARIO = ("data/shadow", "data/diarios")
+
+
+def caminho_de_diario_lido(bruto: str) -> Path:
+    """Monta o caminho de um diário do SHADOW a partir do diretório de trabalho.
+
+    Mesma contenção do `caminho_de_relatorio_lido`, com duas diferenças que
+    vêm do que um diário é:
+
+    - a raiz é o diretório de trabalho e **não** se amplia por variável de
+      ambiente. O diário é escrito pelo processo que roda ali (a unit tem
+      `WorkingDirectory=/opt/pulsearb`), então não há o caso "copiado de
+      outra máquina" que motivou o `PULSEARB_RELATORIOS_INPUT_ROOT`;
+    - o caminho tem de começar em uma das `PASTAS_DE_DIARIO`. O script só lê
+      diário, e um argumento apontando para fora seria erro de quem chamou —
+      não pedido a atender.
+    """
+    relativo = bruto.strip().removeprefix("./")
+    permitida = any(
+        relativo == pasta or relativo.startswith(f"{pasta}/")
+        for pasta in PASTAS_DE_DIARIO
+    )
+    if (
+        not PADRAO_SAIDA.fullmatch(relativo)
+        or not relativo.endswith(".jsonl")
+        or not permitida
+    ):
+        esperadas = " ou ".join(PASTAS_DE_DIARIO)
+        raise ValueError(
+            f"nome de diário inválido: {bruto!r}\n"
+            f"esperado: caminho relativo dentro de {esperadas}, terminando em "
+            ".jsonl (ex.: data/diarios/shadow-maker-4-2.jsonl)."
+        )
+    raiz = Path.cwd().resolve()
+    caminho = raiz / relativo
+    # Mesma forma canônica do `caminho_de_escrita` — ver a nota longa lá sobre
+    # por que não é `Path.is_relative_to`.
+    resolvido = caminho.resolve(strict=False)
+    prefixo = str(raiz)
+    if not prefixo.endswith(os.sep):
+        prefixo += os.sep
+    if not str(resolvido).startswith(prefixo):
+        raise ValueError(f"diário fora da raiz permitida: {resolvido}")
+    if not resolvido.is_file():
+        raise ValueError(f"diário não existe: {resolvido}")
     return resolvido
