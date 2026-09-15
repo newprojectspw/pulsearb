@@ -520,6 +520,28 @@ class TestOQueFaltavaDoPolyMaker:
         ordem = j.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
         assert ordem is not None and abs(ordem.preco - 0.60) < 1e-9
 
+    def test_a_histerese_segura_a_ordem_quando_o_alvo_desce_pouco(self) -> None:
+        reage = _estrategia(delta_do_microprice=3)
+        descansa = _estrategia(delta_do_microprice=3, histerese_ticks=2)
+        i = _indice(reage, descansa, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 900)], [(0.66, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.60) < 1e-9
+        # Microprice 0,606 − 3 ticks = 0,576 → piso 0,57: o alvo caiu 3
+        # ticks. Sem histerese recoloca; com histerese de 2 também (3 > 2).
+        i._on_poly_book(_rec(t + S, _book(UP, [(0.60, 100)], [(0.66, 900)])))
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.57) < 1e-9
+        assert abs(pernas[(descansa, UP)].ordem.preco - 0.57) < 1e-9
+        # Topo a 0,58 e microprice 0,582: alvo 0,55, 2 ticks abaixo da ordem.
+        # Sem histerese recoloca; com histerese de 2 ticks NÃO (2 não é
+        # maior que 2) — a ordem fica onde está, com a fila que já tem.
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.58, 100)], [(0.60, 900)])))
+        assert pernas[(reage, UP)].ordem is not None
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.55) < 1e-9
+        assert abs(pernas[(descansa, UP)].ordem.preco - 0.57) < 1e-9
+        assert pernas[(descansa, UP)].recolocacoes < pernas[(reage, UP)].recolocacoes
+
     def test_o_reprice_da_estrategia_sobrescreve_o_global(self) -> None:
         reage = _estrategia(reprice_ticks=1)
         descansa = _estrategia(reprice_ticks=4)
@@ -546,5 +568,5 @@ def test_a_grade_dos_bots_isola_cada_peca_sobre_a_mesma_base() -> None:
     diferencas = [
         sum(1 for k, v in asdict(e).items() if v != base[k]) for e in grade[1:]
     ]
-    assert diferencas[:-3] == [1] * (len(grade) - 4)
-    assert diferencas[-3:] == [2, 2, 3]
+    assert diferencas[:-5] == [1] * (len(grade) - 6)
+    assert diferencas[-5:] == [2, 2, 2, 3, 3]

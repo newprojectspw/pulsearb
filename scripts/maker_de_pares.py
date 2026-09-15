@@ -196,6 +196,10 @@ class Estrategia:
     fluxo_ticks: float = 0.0
     #: Sobrescreve o `--reprice-ticks` global ("descansar > reagir").
     reprice_ticks: int | None = None
+    #: Histerese do reconciler do poly-maker no sentido de DESCIDA: só
+    #: recoloca mais fundo se o alvo caiu mais que isto abaixo da ordem.
+    #: 0 = recoloca a qualquer descida (o que a grade focada mediu).
+    histerese_ticks: int = 0
 
     @property
     def nome(self) -> str:
@@ -212,6 +216,7 @@ class Estrategia:
             + (f"_vol-{self.vol_x:g}x" if self.vol_x else "")
             + (f"_fluxo-{self.fluxo_ticks:g}t" if self.fluxo_ticks else "")
             + (f"_reprice-{self.reprice_ticks}t" if self.reprice_ticks is not None else "")
+            + (f"_hist-{self.histerese_ticks}t" if self.histerese_ticks else "")
         )
 
 
@@ -560,9 +565,15 @@ class MakerDePares(RecordingIndex):
                         ordem.cancela_em_ns = ts_ns + int(estrategia.recolher_ms * 1e6)
                         perna.recolhidas += 1
                         continue
-                elif ordem.preco > teto + EPS or ordem.preco > alvo + EPS:
+                elif (
+                    ordem.preco > teto + EPS
+                    or ordem.preco - alvo > estrategia.histerese_ticks * janela.tick + EPS
+                ):
                     # O alvo desceu SEM o topo cair: trava do par, viés de
-                    # inventário ou microprice. A ordem no livro ficou cara.
+                    # inventário, microprice, vol ou fluxo. A ordem no livro
+                    # ficou cara. A trava é imediata; o resto respeita a
+                    # histerese, porque reposicionar a cada tremida do alvo
+                    # perde a fila (é o `reprice_ticks` do reconciler deles).
                     perna.recolocacoes += 1
                     perna.ordem = ordem = None
                 elif (
@@ -787,6 +798,11 @@ class MakerDePares(RecordingIndex):
                 "lote": estrategia.tamanho or self.tamanho,
                 "skew_ticks": estrategia.skew_ticks,
                 "delta_do_microprice": estrategia.delta_do_microprice,
+                "pausa_apos_fill_s": estrategia.pausa_apos_fill_s,
+                "vol_x": estrategia.vol_x,
+                "fluxo_ticks": estrategia.fluxo_ticks,
+                "reprice_ticks": estrategia.reprice_ticks,
+                "histerese_ticks": estrategia.histerese_ticks,
             },
             "janelas": {
                 "cotadas": len(linhas),
@@ -988,12 +1004,17 @@ def estrategias_dos_bots() -> tuple[Estrategia, ...]:
     grade += [Estrategia(**base, vol_x=v) for v in VOLS_X if v > 0]
     grade += [Estrategia(**base, fluxo_ticks=f) for f in FLUXOS_TICKS if f > 0]
     grade += [Estrategia(**base, reprice_ticks=r) for r in (1, 4)]
+    grade += [Estrategia(**base, histerese_ticks=2)]
     grade += [Estrategia(**base, atravessada="tamanho_do_print")]
-    # As combinações que o poly-maker de fato roda juntas.
+    # As combinações que o poly-maker de fato roda juntas. A vol entra com
+    # histerese: sem ela, a amplitude muda a cada evento e a ordem é
+    # recolocada a cada evento (7,4 milhões de recolocações numa hora).
     grade += [
-        Estrategia(**base, pausa_apos_fill_s=30.0, vol_x=0.5),
-        Estrategia(**base, pausa_apos_fill_s=30.0, fluxo_ticks=1.0),
-        Estrategia(**base, pausa_apos_fill_s=30.0, vol_x=0.5, fluxo_ticks=1.0),
+        Estrategia(**base, vol_x=0.5, histerese_ticks=2),
+        Estrategia(**base, pausa_apos_fill_s=30.0, histerese_ticks=2),
+        Estrategia(**base, pausa_apos_fill_s=30.0, reprice_ticks=4),
+        Estrategia(**base, pausa_apos_fill_s=30.0, vol_x=0.5, histerese_ticks=2),
+        Estrategia(**base, pausa_apos_fill_s=30.0, fluxo_ticks=1.0, histerese_ticks=2),
     ]
     return tuple(grade)
 

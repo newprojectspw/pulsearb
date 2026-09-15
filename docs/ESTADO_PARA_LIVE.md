@@ -909,17 +909,33 @@ depois de um fill atravessado a janela inteira fica 30 ou 90 s sem cotação
 10 s, em ticks; (3) **`flow_z`** — o alvo anda com o fluxo assinado dos
 prints dos últimos 10 s, nunca acima do topo; (4) **`reprice_ticks` por
 estratégia** (1 e 4, "descansar > reagir"); mais a sensibilidade de
-`atravessada = tamanho_do_print` e as três combinações que o `poly-maker`
-roda juntas. Os mecanismos estão presos em 6 testes novos
+`atravessada = tamanho_do_print`, (5) a **histerese do reconciler** deles
+(só recolocar mais fundo se o alvo caiu mais que 2 ticks) e as combinações
+que o `poly-maker` roda juntas. Os mecanismos estão presos em 7 testes novos
 (`tests/test_maker_de_pares.py`, `TestOQueFaltavaDoPolyMaker`): a pausa
 recolhe as DUAS pernas e volta depois; fill no nível não pausa; a vol
-esvazia passado o horizonte; fluxo comprador não melhora o topo; e o reprice
-da estratégia sobrescreve o global. ⬜ falta o número do dia
-(`relatorios/PARES_BOTS_20260913.json`): a rodada da grade de latência e
-esta ficaram presas porque o Mac está NA BATERIA (27 %) e dormindo entre
-uma leitura e outra — 500 mil registros a cada 15–20 min de relógio de
-parede, contra 25 mil por segundo acordado. `caffeinate -dimsu` não segura
-o sono na bateria. O que reproduz o número é o Mac na tomada.
+esvazia passado o horizonte; fluxo comprador não melhora o topo; o reprice
+da estratégia sobrescreve o global; a histerese segura a ordem numa descida
+de 2 ticks e solta numa de 3.
+
+**Uma hora de fumaça já diz a ordem** (`relatorios/PARES_BOTS_SMOKE.json`,
+2026-09-13 12:00–13:00 UTC, 160 janelas, termo determinístico; não é o dia):
+base micro-1 a 245 ms **+14,24** (20 pares, soma paga 0,980); **pausa de 30 s
++18,42** (soma 0,966) e de 90 s −0,52 (mata o fill); **reprice 4 +18,29**
+(menos recolocações, mesma soma); **atravessada por tamanho do print
++24,54** — a hipótese da perna inteira é pessimista aqui, como escrito;
+**fluxo PIORA** (1 tick −7,30; 2 ticks −34,23, soma 1,049: inclinar o alvo
+para o lado do fluxo comprador devolve a ordem ao topo e desfaz o desconto
+do microprice); **vol como estava não cota** (0,34 com 120 shares e 7,4
+MILHÕES de recolocações na hora: a amplitude muda a cada evento, o alvo
+com ela, e a ordem é recolocada a cada evento — o reconciler deles tem
+histerese justamente para isso, e ela virou o eixo (5), com a vol agora
+medida com histerese). ⬜ falta o número do dia
+(`relatorios/PARES_BOTS_20260913.json`, em curso): a rodada anterior ficou
+presa porque o Mac está NA BATERIA (26 %) e dormindo entre uma leitura e
+outra — 500 mil registros a cada 15–20 min de relógio de parede, contra 25
+mil por segundo acordado. `caffeinate -dimsu` não segura o sono na bateria.
+O que reproduz o número é o Mac na tomada.
 
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
