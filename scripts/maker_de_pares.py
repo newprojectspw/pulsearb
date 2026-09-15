@@ -65,7 +65,7 @@ import argparse
 import json
 import sys
 from bisect import bisect_left, bisect_right
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import product
@@ -129,6 +129,21 @@ SKEWS: tuple[int, ...] = (0, 2)
 #: que este projeto fazia. O alvo final é sempre o MENOR dos dois: nunca
 #: melhorar o topo continua valendo.
 DELTAS_DO_MICROPRICE: tuple[int | None, ...] = (None, 1, 3)
+#: Regime "tóxico" do poly-maker reduzido ao gatilho mais direto: depois de um
+#: fill ATRAVESSADO (o taker passou pelo nosso preço — o mercado sabia algo),
+#: a janela inteira fica sem cotação por este tempo. É o EVENT deles com
+#: cooloff de 30–90 s, disparado pelo nosso próprio fill em vez do salto.
+PAUSAS_APOS_FILL_S: tuple[float, ...] = (0.0, 30.0, 90.0)
+#: `c_vol · σ` do poly-maker: o meio-spread cresce com a volatilidade curta.
+#: σ aqui é a AMPLITUDE do meio (máx − mín, em ticks) nos últimos
+#: HORIZONTE_DA_VOL_S — o estimador mais barato que dá o mesmo sinal.
+HORIZONTE_DA_VOL_S = 10.0
+VOLS_X: tuple[float, ...] = (0.0, 0.5, 1.0)
+#: `0,5 · flow_z · tick` do poly-maker: o valor justo inclina para o lado do
+#: fluxo de negócios recente. `z` = (compras − vendas) / (compras + vendas)
+#: dos prints dos últimos HORIZONTE_DO_FLUXO_S, em [−1, 1].
+HORIZONTE_DO_FLUXO_S = 10.0
+FLUXOS_TICKS: tuple[float, ...] = (0.0, 1.0, 2.0)
 
 
 def _numero(valor: Any) -> float | None:
@@ -188,6 +203,14 @@ class Estrategia:
     distancia_ticks_do_meio: int | None = None
     skew_ticks: int = 0
     delta_do_microprice: int | None = None
+    #: Segundos sem cotar a janela depois de um fill atravessado (0 = nunca).
+    pausa_apos_fill_s: float = 0.0
+    #: O alvo desce `vol_x × amplitude do meio (ticks)` dos últimos 10 s.
+    vol_x: float = 0.0
+    #: O alvo anda `fluxo_ticks × z` ticks com o fluxo de prints (z ∈ [−1, 1]).
+    fluxo_ticks: float = 0.0
+    #: Sobrescreve o `--reprice-ticks` global ("descansar > reagir").
+    reprice_ticks: int | None = None
 
     @property
     def nome(self) -> str:
@@ -200,6 +223,10 @@ class Estrategia:
             f"atrav-{self.atravessada}_lote-{self.tamanho or 0:g}_"
             f"skew-{self.skew_ticks}_micro-{self.delta_do_microprice}_"
             f"meio-{self.distancia_ticks_do_meio}"
+            + (f"_pausa-{self.pausa_apos_fill_s:g}s" if self.pausa_apos_fill_s else "")
+            + (f"_vol-{self.vol_x:g}x" if self.vol_x else "")
+            + (f"_fluxo-{self.fluxo_ticks:g}t" if self.fluxo_ticks else "")
+            + (f"_reprice-{self.reprice_ticks}t" if self.reprice_ticks is not None else "")
         )
 
 
@@ -232,6 +259,7 @@ class Perna:
     recolhidas_por_salto: int = 0
     recolhidas_por_colchao: int = 0
     execucoes_durante_o_recolher: int = 0
+    recolhidas_por_pausa: int = 0
 
     @property
     def preco_medio(self) -> float:
@@ -285,6 +313,16 @@ class MakerDePares(RecordingIndex):
         self.spot_ts: dict[str, list[int]] = defaultdict(list)
         self.spot_px: dict[str, list[float]] = defaultdict(list)
         self.bloqueado_ate_ns: dict[tuple[Estrategia, str], int] = {}
+        # Pausa por fill atravessado, por (estratégia, janela).
+        self.pausado_ate_ns: dict[tuple[Estrategia, str], int] = {}
+        self._usa_vol = any(e.vol_x > 0 for e in estrategias)
+        self._usa_fluxo = any(e.fluxo_ticks > 0 for e in estrategias)
+        # Meio recente por token (ts_ns, meio) e fluxo de prints por token
+        # (ts_ns, tamanho assinado: + compra do taker, − venda do taker).
+        self.meios_max: dict[str, deque[tuple[int, float]]] = defaultdict(deque)
+        self.meios_min: dict[str, deque[tuple[int, float]]] = defaultdict(deque)
+        self.fluxo: dict[str, deque[tuple[int, float]]] = defaultdict(deque)
+        self.fluxo_soma: dict[str, tuple[float, float]] = defaultdict(lambda: (0.0, 0.0))
         self.prints_vistos = 0
         self.prints_sell = 0
         self.eventos_sem_bid = 0
@@ -317,6 +355,45 @@ class MakerDePares(RecordingIndex):
             if desvio > pior:
                 pior = desvio
         return pior
+
+    def _amplitude_do_meio_ticks(self, token: str, book: OrderBook, ts_ns: int, tick: float) -> float:
+        """Máx − mín do meio nos últimos HORIZONTE_DA_VOL_S, em ticks.
+
+        Janela deslizante com duas filas monotônicas (máximo e mínimo), O(1)
+        amortizado por evento — um token ativo tem milhares de eventos por
+        janela, e varrer a fila a cada um deixava a passada 2 vinte vezes
+        mais lenta.
+        """
+        meio = book.mid
+        if meio is None:
+            return 0.0
+        limite = ts_ns - int(HORIZONTE_DA_VOL_S * 1e9)
+        maximos, minimos = self.meios_max[token], self.meios_min[token]
+        while maximos and maximos[-1][1] <= meio:
+            maximos.pop()
+        maximos.append((ts_ns, meio))
+        while minimos and minimos[-1][1] >= meio:
+            minimos.pop()
+        minimos.append((ts_ns, meio))
+        while maximos[0][0] < limite:
+            maximos.popleft()
+        while minimos[0][0] < limite:
+            minimos.popleft()
+        return (maximos[0][1] - minimos[0][1]) / tick
+
+    def _z_do_fluxo(self, token: str, ts_ns: int) -> float:
+        """(compras − vendas) / (compras + vendas) dos prints recentes, em [−1, 1]."""
+        fila = self.fluxo[token]
+        limite = ts_ns - int(HORIZONTE_DO_FLUXO_S * 1e9)
+        soma, total = self.fluxo_soma[token]
+        while fila and fila[0][0] < limite:
+            _, q = fila.popleft()
+            soma -= q
+            total -= abs(q)
+        self.fluxo_soma[token] = (soma, total)
+        if total <= EPS:
+            return 0.0
+        return max(-1.0, min(1.0, soma / total))
 
     def _marcar_tokens_de_interesse(self) -> None:
         super()._marcar_tokens_de_interesse()
@@ -388,6 +465,10 @@ class MakerDePares(RecordingIndex):
             return
         outro_token = janela.token_down if token == janela.token_up else janela.token_up
         salto = self._salto_bps(janela.asset, ts_ns) if self._usa_salto else 0.0
+        amplitude_ticks = (
+            self._amplitude_do_meio_ticks(token, book, ts_ns, janela.tick) if self._usa_vol else 0.0
+        )
+        z_do_fluxo = self._z_do_fluxo(token, ts_ns) if self._usa_fluxo else 0.0
         for estrategia in self.estrategias:
             perna = janela.pernas.setdefault((estrategia, token), Perna())
             fim_cotacao_ns = janela.fim_ns - estrategia.parar_antes_s * 10**9
@@ -411,6 +492,14 @@ class MakerDePares(RecordingIndex):
                         ordem.cancela_em_ns = ts_ns + int((estrategia.recolher_ms or 0.0) * 1e6)
                         perna.recolhidas += 1
                         perna.recolhidas_por_salto += 1
+                    continue
+            if estrategia.pausa_apos_fill_s > 0:
+                pausa = self.pausado_ate_ns.get((estrategia, janela.slug), 0)
+                if ts_ns < pausa:
+                    if ordem is not None and ordem.cancela_em_ns is None:
+                        ordem.cancela_em_ns = ts_ns + int((estrategia.recolher_ms or 0.0) * 1e6)
+                        perna.recolhidas += 1
+                        perna.recolhidas_por_pausa += 1
                     continue
             if not book.bids:
                 self.eventos_sem_bid += 1
@@ -440,6 +529,13 @@ class MakerDePares(RecordingIndex):
                     continue
                 # Nunca MELHORA o topo: o alvo é o menor dos dois.
                 alvo = min(alvo, micro - estrategia.delta_do_microprice * janela.tick)
+            if estrategia.vol_x > 0:
+                alvo -= estrategia.vol_x * amplitude_ticks * janela.tick
+            if estrategia.fluxo_ticks > 0:
+                # Fluxo vendedor (z < 0) puxa o valor justo para baixo; fluxo
+                # comprador puxa para cima — mas o piso no tick e o `min` com
+                # o topo garantem que nunca MELHORAMOS o melhor bid por isso.
+                alvo = min(melhor, alvo + estrategia.fluxo_ticks * z_do_fluxo * janela.tick)
             if estrategia.skew_ticks and perna.executado > EPS:
                 # Já estamos comprados deste lado: desce o bid na proporção
                 # do lote que já foi.
@@ -460,7 +556,12 @@ class MakerDePares(RecordingIndex):
             if ordem is not None:
                 if ordem.cancela_em_ns is not None:
                     continue
-                if melhor - ordem.preco > self.reprice_ticks * janela.tick + EPS:
+                reprice_ticks = (
+                    self.reprice_ticks
+                    if estrategia.reprice_ticks is None
+                    else estrategia.reprice_ticks
+                )
+                if melhor - ordem.preco > reprice_ticks * janela.tick + EPS:
                     # Melhor bid subiu demais: cancela e junta de novo (perde a fila).
                     perna.recolocacoes += 1
                     perna.ordem = ordem = None
@@ -516,13 +617,19 @@ class MakerDePares(RecordingIndex):
         if not isinstance(token, str) or token not in self.janela_do_token:
             return
         self.prints_vistos += 1
-        if str(evento.get("side", "")).upper() != "SELL":
-            return
-        self.prints_sell += 1
+        lado = str(evento.get("side", "")).upper()
         preco = _numero(evento.get("price"))
         tamanho = _numero(evento.get("size")) or 0.0
         if preco is None or tamanho <= 0:
             return
+        if self._usa_fluxo and lado in ("BUY", "SELL"):
+            assinado = tamanho if lado == "BUY" else -tamanho
+            self.fluxo[token].append((ts_ns, assinado))
+            soma, total = self.fluxo_soma[token]
+            self.fluxo_soma[token] = (soma + assinado, total + tamanho)
+        if lado != "SELL":
+            return
+        self.prints_sell += 1
         janela = self.janela_do_token[token]
         for estrategia in self.estrategias:
             perna = janela.pernas.get((estrategia, token))
@@ -545,6 +652,10 @@ class MakerDePares(RecordingIndex):
                     else min(tamanho, ordem.restante)
                 )
                 perna.execucoes_atravessadas += 1
+                if estrategia.pausa_apos_fill_s > 0:
+                    self.pausado_ate_ns[(estrategia, janela.slug)] = ts_ns + int(
+                        estrategia.pausa_apos_fill_s * 1e9
+                    )
             else:
                 sobra = tamanho - ordem.fila_a_frente
                 ordem.fila_a_frente = max(0.0, ordem.fila_a_frente - tamanho)
@@ -635,6 +746,7 @@ class MakerDePares(RecordingIndex):
             "recolhidas": up.recolhidas + down.recolhidas,
             "recolhidas_por_salto": up.recolhidas_por_salto + down.recolhidas_por_salto,
             "recolhidas_por_colchao": up.recolhidas_por_colchao + down.recolhidas_por_colchao,
+            "recolhidas_por_pausa": up.recolhidas_por_pausa + down.recolhidas_por_pausa,
             "execucoes_durante_o_recolher": up.execucoes_durante_o_recolher
             + down.execucoes_durante_o_recolher,
             "atravessadas": up.execucoes_atravessadas + down.execucoes_atravessadas,
@@ -749,6 +861,7 @@ class MakerDePares(RecordingIndex):
             "recolhidas": sum(r["recolhidas"] for r in linhas),
             "recolhidas_por_salto": sum(r["recolhidas_por_salto"] for r in linhas),
             "recolhidas_por_colchao": sum(r["recolhidas_por_colchao"] for r in linhas),
+            "recolhidas_por_pausa": sum(r["recolhidas_por_pausa"] for r in linhas),
             "por_duracao": _quebra(contadas, "duracao_s"),
             "por_ativo": _quebra(contadas, "asset"),
             "execucoes": {
@@ -864,6 +977,42 @@ def estrategias_focadas() -> tuple[Estrategia, ...]:
     return tuple(grade)
 
 
+def estrategias_dos_bots() -> tuple[Estrategia, ...]:
+    """A melhor configuração medida × o que faltava medir do `poly-maker`.
+
+    A focada fechou a conta do microprice (1 tick abaixo, lote 20, recolher
+    100 ms, salto 3 bps). Sobre ESSA base, cada peça restante do bot que
+    publica resultado entra sozinha, e as duas melhores se combinam no fim —
+    uma grade que soma efeitos sem poder separar quem fez o quê não serve.
+    A latência de recolher é a MEDIDA desta máquina (p50 = 245 ms), não os
+    100 ms da hipótese.
+    """
+    base = dict(
+        melhorar_ticks=0,
+        modo="pessimista",
+        parar_antes_s=180,
+        recolher_ms=245.0,
+        trava_do_par=False,
+        salto_bps=3.0,
+        colchao_x=0.0,
+        tamanho=20.0,
+        delta_do_microprice=1,
+    )
+    grade = [Estrategia(**base)]
+    grade += [Estrategia(**base, pausa_apos_fill_s=p) for p in PAUSAS_APOS_FILL_S if p > 0]
+    grade += [Estrategia(**base, vol_x=v) for v in VOLS_X if v > 0]
+    grade += [Estrategia(**base, fluxo_ticks=f) for f in FLUXOS_TICKS if f > 0]
+    grade += [Estrategia(**base, reprice_ticks=r) for r in (1, 4)]
+    grade += [Estrategia(**base, atravessada="tamanho_do_print")]
+    # As combinações que o poly-maker de fato roda juntas.
+    grade += [
+        Estrategia(**base, pausa_apos_fill_s=30.0, vol_x=0.5),
+        Estrategia(**base, pausa_apos_fill_s=30.0, fluxo_ticks=1.0),
+        Estrategia(**base, pausa_apos_fill_s=30.0, vol_x=0.5, fluxo_ticks=1.0),
+    ]
+    return tuple(grade)
+
+
 def estrategias_padrao() -> tuple[Estrategia, ...]:
     base = [
         Estrategia(
@@ -911,11 +1060,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--detalhe", action="store_true")
     parser.add_argument(
         "--grade",
-        choices=("ampla", "focada", "latencia"),
+        choices=("ampla", "focada", "latencia", "bots"),
         default="ampla",
         help=(
             "ampla: recolher/trava/salto/colchão. focada: lote, viés e "
-            "microprice. latencia: a melhor configuracao de 100 a 1000 ms."
+            "microprice. latencia: a melhor configuracao de 100 a 1000 ms. "
+            "bots: pausa por fill toxico, vol, fluxo e reprice sobre a melhor."
         ),
     )
     args = parser.parse_args(argv)
@@ -936,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         estrategias={
             "focada": estrategias_focadas,
             "latencia": estrategias_de_latencia,
+            "bots": estrategias_dos_bots,
             "ampla": estrategias_padrao,
         }[args.grade](),
     )

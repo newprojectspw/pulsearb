@@ -879,6 +879,29 @@ latência real, e é isso que falta. Uma VPS perto do CLOB muda esse número;
 a decisão de onde hospedar passa a ter um efeito medido em USDC, não só em
 milissegundos.
 
+**O que faltava do `poly-maker` agora tem eixo, teste e grade — e falta o
+número.** Sobre a melhor configuração medida (microprice −1 tick, lote 20,
+salto 3 bps) e na latência REAL desta máquina (recolher a 245 ms),
+`scripts/maker_de_pares.py --grade bots` isola cada peça que o estudo
+apontou e ainda não tinha sido separada: (1) **pausa por fill tóxico** —
+depois de um fill atravessado a janela inteira fica 30 ou 90 s sem cotação
+(o regime EVENT deles disparado pelo NOSSO fill, não pelo salto); (2)
+**`c_vol · σ`** — o alvo desce `vol_x ×` a amplitude do meio dos últimos
+10 s, em ticks; (3) **`flow_z`** — o alvo anda com o fluxo assinado dos
+prints dos últimos 10 s, nunca acima do topo; (4) **`reprice_ticks` por
+estratégia** (1 e 4, "descansar > reagir"); mais a sensibilidade de
+`atravessada = tamanho_do_print` e as três combinações que o `poly-maker`
+roda juntas. Os mecanismos estão presos em 6 testes novos
+(`tests/test_maker_de_pares.py`, `TestOQueFaltavaDoPolyMaker`): a pausa
+recolhe as DUAS pernas e volta depois; fill no nível não pausa; a vol
+esvazia passado o horizonte; fluxo comprador não melhora o topo; e o reprice
+da estratégia sobrescreve o global. ⬜ falta o número do dia
+(`relatorios/PARES_BOTS_20260913.json`): a rodada da grade de latência e
+esta ficaram presas porque o Mac está NA BATERIA (27 %) e dormindo entre
+uma leitura e outra — 500 mil registros a cada 15–20 min de relógio de
+parede, contra 25 mil por segundo acordado. `caffeinate -dimsu` não segura
+o sono na bateria. O que reproduz o número é o Mac na tomada.
+
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
 1.12 — que são outro regime (markout 4,7× menor) e onde o reward entra na
