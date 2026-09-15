@@ -268,6 +268,38 @@ class Settings(BaseSettings):
     def _mode_upper(cls, value: Any) -> Any:
         return value.upper() if isinstance(value, str) else value
 
+    @field_validator(
+        "maker_ticks_abaixo_do_microprice",
+        "maker_pausa_apos_fill_toxico_s",
+        mode="before",
+    )
+    @classmethod
+    def _vazio_e_desligado(cls, value: Any) -> Any:
+        """`VAR=` numa unit do systemd quer dizer DESLIGADO, não erro.
+
+        Sem isto, `PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE=` derruba o
+        processo na subida com um `int_parsing` do pydantic — e a linha existe
+        justamente para o operador escrever, em cada rodada do 4.2, as TRÊS
+        regras experimentais, inclusive as duas desligadas. Sem a forma de
+        escrever "desligada", a alternativa é omitir a linha, e aí regra
+        ausente por decisão fica idêntica a regra ausente por esquecimento.
+        É a diferença que `deploy/rodadas/*.env` existe para manter.
+
+        Só vale para estes dois, e só para a string vazia: eles são opcionais
+        (`None` é o valor desligado) e a string vazia não tem outro
+        significado possível num arquivo de ambiente. `0` continua sendo um
+        valor LIGADO válido nos dois — âncora no microprice exato, pausa de
+        duração zero —, e é por isso que "desligado" precisava de uma grafia
+        própria em vez de aproveitar o zero.
+
+        Espaço em branco entra junto porque `VAR= ` no arquivo chega como
+        `" "`, e recusar a rodada inteira por um espaço seria recusar pelo
+        motivo errado.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @property
     def all_price_assets(self) -> list[str]:
         """Ativos cujo preço é assinado/gravado: operáveis + extras, sem duplicata."""

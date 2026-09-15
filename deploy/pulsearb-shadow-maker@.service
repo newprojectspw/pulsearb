@@ -1,0 +1,104 @@
+# PULSEARB SHADOW da rota MAKER — UMA rodada do 4.2 por instância.
+#
+#   sudo cp deploy/pulsearb-shadow-maker@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pulsearb-shadow-maker@base
+#   sudo systemctl enable --now pulsearb-shadow-maker@recolher
+#   sudo systemctl enable --now pulsearb-shadow-maker@ancora
+#   sudo systemctl enable --now pulsearb-shadow-maker@pausa
+#
+# O nome depois do @ é o nome do arquivo em deploy/rodadas/, e é o que dá à
+# instância o diário, o registro de risco e a REGRA da rodada.
+#
+# POR QUE QUATRO JUNTAS E NÃO UMA DE CADA VEZ. São três regras experimentais
+# (4.0 e/f/g) mais a base, e cada uma precisa da sua rodada porque juntas não
+# se distinguem — uma muda QUANDO a ordem sai, outra o PREÇO, outra QUANDO ela
+# volta. Em sequência isso custaria 56 dias, mas o tempo é o menor dos dois
+# problemas: quatro rodadas em semanas diferentes comparam REGRA com MERCADO.
+# A liquidez, a volatilidade e o próprio conjunto de pools mudam de semana
+# para semana, e essa diferença entraria no resultado com o nome da regra. É a
+# mesma confusão que a unit recusa DENTRO de uma rodada, espalhada no tempo,
+# onde é mais difícil de ver. Quatro processos sobre o mesmo mercado, nos
+# mesmos 14 dias, comparam a regra com a base e só isso.
+#
+# O que esta unit faz, e o que ela NÃO faz: decide e anota; não envia ordem.
+# MODE=SHADOW troca o cliente de ordens pelo sombra (`ClienteSombraDeOrdens`,
+# todo id com prefixo `sombra-`), e a trava tripla do LIVE (risk/autorizacao.py)
+# continua fechada — não há PULSEARB_CONFIRM_LIVE aqui, e não deve haver.
+#
+# Restart=always pelo mesmo motivo do recorder: duas semanas não podem
+# terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
+# --diario), então um restart continua a mesma rodada em vez de abrir outra.
+
+[Unit]
+Description=PULSEARB SHADOW maker (4.2) — rodada %i, cota nos pools, nao envia
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pulsearb
+Group=pulsearb
+WorkingDirectory=/opt/pulsearb
+
+# Mesma razão do recorder: ProtectSystem=strict exige a pasta existente ANTES
+# de o Python subir (226/NAMESPACE se não existir).
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios /opt/pulsearb/data/risco
+ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
+
+Environment=PULSEARB_MODE=SHADOW
+Environment=PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true
+
+# O PERFIL DO ENSAIO, escrito aqui de propósito e IGUAL nas quatro rodadas.
+# Os defaults do projeto são os do taker (5 shares, 5/15/50 USDC, spread 0,04)
+# e com eles esta rota não cota NADA: a descoberta descarta todo pool cujo
+# rewards_min_size passa de 5, e o portão de risco recusa uma cotação de 1.000
+# shares. O bot não sobe os tetos sozinho (quadro, 4.0 (c)); quem sobe é o
+# operador, e este arquivo é o operador escrevendo. São os valores das rodadas
+# r4–r8 de 2026-09-14. Vale SÓ em SHADOW — nenhum destes números autoriza
+# dinheiro. Igual nas quatro porque o que se compara entre elas é a REGRA:
+# mudar o perfil de uma delas transformaria a comparação em outra coisa.
+Environment=PULSEARB_TAMANHO_DA_COTACAO_MAKER_SHARES=1000
+Environment=PULSEARB_TOP_DE_POOLS_DE_REWARD=60
+Environment=PULSEARB_RISK__STAKE_MAX_POR_TRADE_USDC=1000
+Environment=PULSEARB_RISK__STAKE_MAX_POR_JANELA_USDC=2000
+Environment=PULSEARB_RISK__EXPOSICAO_MAX_USDC=120000
+Environment=PULSEARB_RISK__POSICOES_MAX_ABERTAS=120
+Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
+
+# Registro de risco PRÓPRIO DA INSTÂNCIA, e isto não é arrumação: o `_gravar`
+# do portão monta o arquivo temporário a partir do caminho do registro, então
+# duas rodadas no MESMO registro escrevem o mesmo `.tmp` e o rename atômico
+# pode publicar uma mistura das duas. Separado também do registro do taker,
+# que em SHADOW carrega perdas sintéticas que armam o disjuntor e pausam o
+# portão compartilhado (achados das rodadas r2 e r6). O modo sufixa o nome
+# (`.shadow.json`).
+Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_%i.json
+
+# A REGRA desta rodada. SEM o `-`: arquivo ausente tem de derrubar a unit.
+# Com `-`, o systemd ignoraria o arquivo que falta em silêncio e a instância
+# subiria como rodada BASE — quatro rodadas-base correndo em paralelo por 14
+# dias, todas verdes, medindo a mesma coisa.
+EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env
+
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-%i.jsonl
+
+# Opcional. Se um dia houver segredo aqui, ele vem de arquivo 0600, nunca da
+# unit (que é legível por todos).
+EnvironmentFile=-/opt/pulsearb/.env
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/opt/pulsearb/data
+
+[Install]
+WantedBy=multi-user.target

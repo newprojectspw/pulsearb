@@ -857,6 +857,50 @@ O leitor **não recalcula** rewards nem markout: os números são os que o motor
 publicou. E ele confere, a cada leitura, o que a última linha da tabela acima
 pede a olho — todo `order_id` do diário começando com `sombra-`.
 
+### 10.1c. As quatro rodadas correm JUNTAS, não uma depois da outra
+
+São três regras experimentais (quadro 4.0 e/f/g) mais a base, e cada uma
+precisa da sua rodada porque juntas não se distinguem. Em sequência isso
+custa **56 dias** — mas o tempo é o menor dos dois problemas.
+
+O grande é que **quatro rodadas em semanas diferentes comparam regra com
+mercado.** A liquidez, a volatilidade e o próprio conjunto de pools de reward
+mudam de semana para semana, e essa diferença entraria no resultado com o
+nome da regra. É a mesma confusão que a unit já recusa dentro de uma rodada,
+espalhada no tempo — onde é mais difícil de ver, porque cada rodada, sozinha,
+parece limpa.
+
+```bash
+sudo cp deploy/pulsearb-shadow-maker@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+for r in base recolher ancora pausa; do
+    sudo systemctl enable --now pulsearb-shadow-maker@$r
+done
+```
+
+O nome depois do `@` é o arquivo em `deploy/rodadas/`, e é ele que dá à
+instância o diário, o registro de risco e **a regra**. Cada `.env` escreve as
+três regras, inclusive as duas desligadas: regra ausente por decisão não pode
+parecer regra ausente por esquecimento.
+
+**O que é próprio de cada instância, e por quê:**
+
+| coisa | por quê |
+|---|---|
+| diário `data/diarios/shadow-maker-%i.jsonl` | duas rodadas no mesmo arquivo somam — é o que o `caminho_do_diario_da_rodada` já fecha com `O_EXCL` |
+| registro `data/risco/registro_maker_%i.json` | o `_gravar` do portão monta o `.tmp` a partir do caminho do registro: duas rodadas no MESMO registro escrevem o mesmo temporário, e o rename atômico pode publicar uma mistura |
+| `deploy/rodadas/%i.env` | a regra. **Sem o `-` no `EnvironmentFile`**: arquivo ausente derruba a unit, porque com `-` o systemd o ignoraria em silêncio e as quatro subiriam como rodada BASE, todas verdes, por 14 dias |
+
+O `KILL` é **compartilhado de propósito** — a chave existe para parar tudo.
+
+**O que NÃO está medido aqui, e a primeira hora mede:** se a VPS carrega
+quatro processos. Disco do diário já era o item em aberto do §10.2 com um
+processo; com quatro, meça `du -sh data/diarios/` na primeira hora e
+multiplique por 336 antes de deixar rodando. Memória, CPU e o limite de
+conexões WS do CLOB com quatro assinantes também não estão medidos. Se não
+couber, a saída não é voltar para 56 dias em sequência: é rodar **base +
+uma** por vez, que preserva a comparação contra o mesmo mercado.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** não medido. Meça na primeira hora

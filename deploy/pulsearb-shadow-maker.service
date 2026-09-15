@@ -1,5 +1,14 @@
 # PULSEARB SHADOW da rota MAKER nos pools de reward — o relógio do 4.2.
 #
+# ESTA É A FORMA DE UMA RODADA SÓ. Para as quatro do 4.2 (base + as três
+# regras experimentais), use `pulsearb-shadow-maker@.service`, que é template:
+# as quatro correm sobre o MESMO mercado, nos mesmos 14 dias, em vez de em
+# semanas diferentes — quatro rodadas em semanas diferentes comparam a regra
+# com o mercado, não com a base. Ver RUNBOOK §10.1c.
+#
+# Não rode as duas: esta unit já liga o recolher, e correria em duplicata com
+# a instância `@recolher`.
+#
 #   sudo cp deploy/pulsearb-shadow-maker.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now pulsearb-shadow-maker
