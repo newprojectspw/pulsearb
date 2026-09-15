@@ -872,12 +872,31 @@ respondeu sem assinatura ativa — fica anotado que a melhor aproximação de
 decisão→ack ainda é o REST quente.
 
 Ou seja: **cancelar leva ~245 ms no p50 e ~350 ms no p99 daqui**, não os
-100 ms que a rodada do dia usou. A grade de 4 h mediu os três: −31,87 (100
-ms), −53,07 (300 ms), −56,55 (1000 ms) contra −583,54 parado — o recolher
-continua valendo a 300 ms, mas o número do dia inteiro tem de ser refeito na
-latência real, e é isso que falta. Uma VPS perto do CLOB muda esse número;
-a decisão de onde hospedar passa a ter um efeito medido em USDC, não só em
-milissegundos.
+100 ms que a rodada do dia usou. **O dia inteiro na latência real
+(`relatorios/PARES_LATENCIA_20260913.json`, `--grade latencia`, 1.000
+janelas, lote 20, juntando ao topo, salto 3 bps, termo determinístico
+`travado + rebate`):**
+
+| recolher | determinístico | travado | rebate | soma paga do par | pares |
+|---|---|---|---|---|---|
+| parado | −2.573,00 | −2.665,60 | 92,59 | 1,198 | 683 |
+| 100 ms | −34,67 | −80,21 | 45,53 | 1,015 | 334 |
+| **245 ms (p50 daqui)** | **−144,70** | −196,84 | 52,14 | 1,028 | 362 |
+| 350 ms (p99 daqui) | −183,05 | −237,85 | 54,80 | 1,033 | 370 |
+| 600 ms | −229,17 | −286,04 | 56,87 | 1,041 | 383 |
+| 1000 ms | −315,48 | −376,79 | 61,31 | 1,048 | 409 |
+
+Cada 100 ms a mais de latência custa **30–40 USDC por dia** neste lote: o
+que a ordem parada perde (−2.573) o recolher recupera quase inteiro a 100 ms
+e só 94 % a 245 ms — e os 6 % que sobram são o dobro do rebate do dia. A
+soma paga do par sobe com a latência (1,015 → 1,028 → 1,048) porque os
+pares a mais que entram são justamente os que o taker fecha contra nós
+enquanto o cancelamento viaja. A perna solta fica ruído em todas as linhas
+(sigma 137–149; residual de +199,95 a −111,93 sem ordem). Uma VPS perto do
+CLOB vale, medido, da ordem de 110 USDC/dia neste lote em relação a esta
+casa — a decisão de onde hospedar tem efeito em USDC, não só em
+milissegundos. O que a latência faz à configuração do MICROPRICE (a que
+vira o termo positivo) é a linha-base da grade `bots`, abaixo.
 
 **O que faltava do `poly-maker` agora tem eixo, teste e grade — e falta o
 número.** Sobre a melhor configuração medida (microprice −1 tick, lote 20,
