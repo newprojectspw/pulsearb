@@ -94,9 +94,26 @@ EnvironmentFile=/opt/pulsearb/deploy/rodadas/comum.env
 # medindo a mesma coisa.
 EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env
 
-ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-%i.jsonl
+# `--ate`, e NÃO `--duration`. Um prazo relativo reexecutado pelo restart no
+# dia 13 dá outros 14 dias: a rodada passaria a observar 27 e terminaria 13
+# dias depois das irmãs, e aí os rewards e o markout dela não cobrem mais o
+# MESMO intervalo de mercado que as quatro existem para comparar (revisão do
+# Codex, #131). O instante absoluto sobrevive ao restart sem persistir nada,
+# e como ele mora no `comum.env` as quatro terminam juntas por construção.
+#
+# `PULSEARB_RODADA_TERMINA_EM` é escrito no `comum.env` ANTES de subir; sem
+# ele a unit não sobe, que é o que se quer — uma rodada sem prazo combinado
+# não é uma das quatro.
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --ate ${PULSEARB_RODADA_TERMINA_EM} --diario data/diarios/shadow-maker-%i.jsonl
 
 Restart=on-failure
+# Saída 2 é ERRO DO OPERADOR, não rodada que caiu: o `main` devolve 2 quando
+# pedem LIVE a este processo e quando o `--ate` não é um instante válido (a
+# variável vazia no `comum.env` chega aqui). Reerguer nesses casos seria um
+# laço de restart a cada 10 s para sempre, sem nunca consertar nada — e com
+# `StartLimitIntervalSec=0` nem o limite de partidas o seguraria. Saída 1
+# (rodada que falhou) continua reerguendo, que é o ponto do `on-failure`.
+RestartPreventExitStatus=2
 RestartSec=10
 
 StandardOutput=journal

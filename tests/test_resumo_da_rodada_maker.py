@@ -912,3 +912,36 @@ class TestOQueOFimDaRodadaNaoMEDIU:
         assert somado["maker"]["caixa"]["execucoes_possiveis"][
             "pendentes_de_markout"
         ] == 3
+
+
+class TestTrechoSemRegras:
+    """Trecho sem `maker.regras` RECUSA, em vez de ser filtrado fora.
+
+    Filtrar era um buraco (revisão do Codex, #131): um trecho de versão
+    antiga, ou um em que o maker não subiu, sumia da conferência de regras —
+    e a soma dos trechos levava os rewards e o markout dele assim mesmo, com
+    o veredito validando só a configuração do trecho que TINHA a informação.
+    Medida de regra desconhecida entrava num PASSA.
+    """
+
+    def test_um_trecho_sem_regras_derruba_a_conferencia(self):
+        antes, depois = _relato(), _relato(regras={"recolhe_quando_o_livro_anda": True})
+        del antes["maker"]["regras"]
+
+        assert resumo.regras_da_rodada([antes, depois])[1] == "campo_ausente"
+
+    def test_e_o_veredito_RECUSA_em_vez_de_somar_o_trecho_desconhecido(self):
+        antes = _relato()
+        antes["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
+        del antes["fim_da_rodada"]
+        del antes["maker"]["regras"]
+        volta = deepcopy(_relato())
+        volta["vigilia"]["da_rodada"]["parede_s"] = 60.0
+
+        assert resumo._julgar([antes, volta, _relato()])[:2] == (
+            resumo.NAO_AVALIAVEL, "campo_ausente"
+        )
+
+    def test_todos_os_trechos_com_regras_seguem_normalmente(self):
+        """A recusa não pode ter engolido o caminho comum."""
+        assert resumo.regras_da_rodada([_relato(), _relato()])[1] is None

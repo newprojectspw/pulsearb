@@ -869,6 +869,38 @@ class ProcessoShadow:
         return self.estado()
 
 
+def segundos_ate(instante: str) -> float:
+    """Quanto falta, em segundos, para um instante ABSOLUTO em UTC.
+
+    Existe por causa do restart. `--duration 14d` reexecutado no dia 13 dá
+    outros 14 dias: a rodada passa a observar 27 e termina 13 dias depois das
+    irmãs, então os rewards e o markout dela deixam de cobrir o MESMO
+    intervalo de mercado que as quatro rodadas paralelas existem para
+    comparar (revisão do Codex, #131). Um instante absoluto sobrevive ao
+    restart sem persistir nada — e, escrito no `comum.env`, faz as quatro
+    terminarem juntas por construção.
+
+    Aceita o `Z` do RFC3339, que o `fromisoformat` só passou a entender no
+    3.11 e que é a forma que o runbook escreve. Sem fuso é recusado: um
+    instante sem fuso seria lido como hora local da VPS, e a rodada acabaria
+    na hora errada em silêncio.
+    """
+    try:
+        quando = datetime.fromisoformat(instante.strip().replace("Z", "+00:00"))
+    except ValueError as erro:
+        raise ValueError(
+            f"--ate não é um instante RFC3339: {instante!r} "
+            "(ex.: 2026-09-29T00:00:00Z)"
+        ) from erro
+    if quando.tzinfo is None:
+        raise ValueError(
+            f"--ate sem fuso horário: {instante!r}. Escreva em UTC, com o Z "
+            "(ex.: 2026-09-29T00:00:00Z) — sem fuso, o instante seria lido "
+            "como hora local da máquina e a rodada acabaria na hora errada."
+        )
+    return quando.timestamp() - time.time()
+
+
 def prazo_vencido(deadline: float, deadline_de_parede: float | None = None) -> bool:
     """Venceu QUALQUER um dos dois relógios? — item 3.14.
 
@@ -937,6 +969,18 @@ def main(argv: list[str] | None = None) -> int:
         type=parse_duration,
         default="1h",
         help="90s, 30m, 24h, 7d — sem sufixo, horas",
+    )
+    parser.add_argument(
+        "--ate",
+        default=None,
+        help=(
+            "instante ABSOLUTO em que a rodada termina (RFC3339 em UTC, "
+            "ex.: 2026-09-29T00:00:00Z). Vence o --duration. Existe por "
+            "causa do restart: `--duration 14d` reexecutado no dia 13 dá "
+            "outros 14 dias, e a rodada passa a observar 27 — em quatro "
+            "rodadas paralelas isso desalinha o intervalo de mercado que "
+            "elas existem para comparar"
+        ),
     )
     parser.add_argument(
         "--diario",
@@ -1020,7 +1064,22 @@ def main(argv: list[str] | None = None) -> int:
     processo = ProcessoShadow(
         settings, ciclo, caminho_do_diario=caminho_do_diario
     )
-    estado = asyncio.run(processo.run(args.duration))
+    duracao = args.duration
+    if args.ate is not None:
+        try:
+            duracao = segundos_ate(args.ate)
+        except ValueError as erro:
+            print(str(erro), file=sys.stderr)
+            return 2
+        if duracao <= 0.0:
+            # Prazo já vencido é rodada TERMINADA, não erro: um restart
+            # depois do fim tem de encerrar de novo, e com saída 0, senão o
+            # `on-failure` reergue para sempre.
+            log.info("shadow", **processo.estado(), fim_da_rodada=True)
+            print(json.dumps(processo.estado(), indent=2, ensure_ascii=False,
+                             default=str))
+            return 0
+    estado = asyncio.run(processo.run(duracao))
     # O ESTADO FINAL TAMBÉM VAI PELO LOG, e não só pelo `print` abaixo.
     #
     # Achado da revisão do Codex no #131, e ele quebrava por completo o leitor

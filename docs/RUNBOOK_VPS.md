@@ -897,13 +897,34 @@ nome da regra. É a mesma confusão que a unit já recusa dentro de uma rodada,
 espalhada no tempo — onde é mais difícil de ver, porque cada rodada, sozinha,
 parece limpa.
 
+**Primeiro pare a unit de uma rodada só**, se o §10 acima já a subiu. Ela
+liga o perfil do `recolher`, então deixá-la no ar deixaria **cinco** processos
+rodando, com o `@recolher` em duplicata — um assinante de feed a mais que a
+medida de capacidade desta seção não contou.
+
 ```bash
+sudo systemctl disable --now pulsearb-shadow-maker    # a de uma rodada só
 sudo cp deploy/pulsearb-shadow-maker@.service /etc/systemd/system/
+
+# O PRAZO, e ele é o mesmo para as quatro: é o que faz elas cobrirem o mesmo
+# intervalo de mercado. Sem ele a unit não sobe (sai com 2, e o
+# `RestartPreventExitStatus=2` impede o laço de restart).
+FIM=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)
+sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
+    /opt/pulsearb/deploy/rodadas/comum.env
+
 sudo systemctl daemon-reload
 for r in base recolher ancora pausa; do
     sudo systemctl enable --now pulsearb-shadow-maker@$r
 done
 ```
+
+**Por que prazo absoluto e não `--duration 14d`:** o `Restart=on-failure`
+reexecuta o comando, e um prazo relativo daria 14 dias NOVOS. Uma instância
+que caísse no dia 13 observaria 27 dias e terminaria 13 dias depois das
+irmãs — os rewards e o markout dela deixariam de cobrir o mesmo intervalo de
+mercado que a comparação exige. O instante absoluto sobrevive ao restart sem
+persistir nada.
 
 O nome depois do `@` é o arquivo em `deploy/rodadas/`, e é ele que dá à
 instância o diário, o registro de risco e **a regra**. Cada `.env` escreve as

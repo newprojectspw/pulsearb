@@ -19,6 +19,7 @@ antes.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -382,3 +383,98 @@ class TestVazioEDesligado:
 
         with pytest.raises(ValueError):
             Settings()
+
+
+class TestOPrazoEAbsoluto:
+    """`--duration 14d` reexecutado pelo restart dá outros 14 dias.
+
+    Uma instância que caísse no dia 13 observaria 27 dias e terminaria 13
+    dias depois das irmãs: os rewards e o markout dela deixariam de cobrir o
+    MESMO intervalo de mercado que as quatro existem para comparar (revisão
+    do Codex, #131). O instante absoluto sobrevive ao restart sem persistir
+    nada, e escrito no perfil comum faz as quatro terminarem juntas por
+    construção.
+    """
+
+    def test_a_unit_usa_prazo_ABSOLUTO_e_nao_duration(self):
+        texto = UNIT.read_text(encoding="utf-8")
+        execstart = next(
+            linha for linha in texto.splitlines()
+            if linha.startswith("ExecStart=")
+        )
+
+        assert "--ate ${PULSEARB_RODADA_TERMINA_EM}" in execstart
+        assert "--duration" not in execstart
+
+    def test_o_prazo_mora_no_perfil_COMUM_e_nao_na_rodada(self):
+        """No `%i.env` cada rodada teria o seu, e elas desalinhariam."""
+        assert "PULSEARB_RODADA_TERMINA_EM" in _ler_env(RODADAS / f"{COMUM}.env")
+        for rodada in ESPERADO:
+            assert "PULSEARB_RODADA_TERMINA_EM" not in _ler_env(
+                RODADAS / f"{rodada}.env"
+            ), rodada
+
+    def test_o_prazo_nasce_VAZIO_para_o_operador_escrever(self):
+        """Um instante versionado seria um prazo que venceu no passado e
+        ninguém notaria; vazio a unit não sobe, que é o que se quer."""
+        assert _ler_env(RODADAS / f"{COMUM}.env")["PULSEARB_RODADA_TERMINA_EM"] == ""
+
+    def test_saida_2_NAO_reergue(self):
+        """`--ate` vazio sai com 2, e reerguer seria laço de restart eterno.
+
+        `StartLimitIntervalSec=0` desliga o limite de partidas, então nada
+        mais seguraria. Saída 1 (rodada que caiu) continua reerguendo.
+        """
+        for unit in (
+            RAIZ / "deploy" / "pulsearb-shadow-maker.service",
+            UNIT,
+        ):
+            diretivas = [
+                linha.strip()
+                for linha in unit.read_text(encoding="utf-8").splitlines()
+                if linha.strip().startswith(("Restart=", "RestartPreventExitStatus="))
+            ]
+
+            assert "RestartPreventExitStatus=2" in diretivas, unit.name
+            assert "Restart=on-failure" in diretivas, unit.name
+
+
+class TestSegundosAte:
+    """A conversão do instante absoluto, e o que ela recusa."""
+
+    def test_instante_futuro_vira_os_segundos_que_faltam(self):
+        import time as _time
+
+        from pulsearb.live.shadow import segundos_ate
+
+        daqui = datetime.fromtimestamp(_time.time() + 3600, tz=UTC)
+
+        assert segundos_ate(daqui.isoformat()) == pytest.approx(3600, abs=5)
+
+    def test_o_Z_do_RFC3339_e_aceito(self):
+        """É a forma que o runbook escreve (`date -u ... +%Y-%m-%dT%H:%M:%SZ`)."""
+        from pulsearb.live.shadow import segundos_ate
+
+        assert isinstance(segundos_ate("2099-01-01T00:00:00Z"), float)
+
+    def test_instante_SEM_FUSO_e_recusado(self):
+        """Sem fuso seria lido como hora local da VPS, e a rodada acabaria na
+        hora errada em silêncio — que é pior que não subir."""
+        from pulsearb.live.shadow import segundos_ate
+
+        with pytest.raises(ValueError, match="sem fuso"):
+            segundos_ate("2099-01-01T00:00:00")
+
+    def test_texto_que_nao_e_instante_e_recusado(self):
+        from pulsearb.live.shadow import segundos_ate
+
+        with pytest.raises(ValueError, match="RFC3339"):
+            segundos_ate("14d")
+
+    def test_instante_JA_VENCIDO_da_negativo_e_nao_erro(self):
+        """Prazo vencido é rodada TERMINADA: um restart depois do fim tem de
+        encerrar de novo, e com saída 0, senão o `on-failure` reergue para
+        sempre."""
+        from pulsearb.live.shadow import segundos_ate
+
+        assert segundos_ate("2000-01-01T00:00:00Z") < 0

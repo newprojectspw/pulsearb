@@ -181,8 +181,14 @@ def regras_da_rodada(relatos: list[dict]) -> tuple[dict[str, Any] | None, str | 
     primeiro e o último relato (restart com a unit editada — a unit anexa ao
     mesmo diário de propósito, então isso não deixa rastro nenhum hoje).
     """
-    vistas = [r for r in (_ler(x, CAMPO_DAS_REGRAS) for x in relatos) if r is not None]
-    if not vistas:
+    vistas = [_ler(x, CAMPO_DAS_REGRAS) for x in relatos]
+    if not vistas or any(r is None for r in vistas):
+        # RELATO SEM `regras` RECUSA, em vez de ser filtrado fora. Filtrar era
+        # um buraco (revisão do Codex, #131): um trecho de versão antiga, ou
+        # um trecho em que o maker não subiu, sumia da conferência — e o
+        # `relato_da_rodada` somava os rewards e o markout dele assim mesmo,
+        # com o veredito validando só a configuração do trecho que TINHA a
+        # informação. Medida de regra desconhecida entrava num PASSA.
         return None, "campo_ausente"
     primeira = vistas[0]
     if any(atual != primeira for atual in vistas):

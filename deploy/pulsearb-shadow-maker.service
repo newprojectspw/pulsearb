@@ -112,6 +112,13 @@ ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d 
 EnvironmentFile=-/opt/pulsearb/.env
 
 Restart=on-failure
+# Saída 2 é ERRO DO OPERADOR, não rodada que caiu: o `main` devolve 2 quando
+# pedem LIVE a este processo e quando o `--ate` não é um instante válido (a
+# variável vazia no `comum.env` chega aqui). Reerguer nesses casos seria um
+# laço de restart a cada 10 s para sempre, sem nunca consertar nada — e com
+# `StartLimitIntervalSec=0` nem o limite de partidas o seguraria. Saída 1
+# (rodada que falhou) continua reerguendo, que é o ponto do `on-failure`.
+RestartPreventExitStatus=2
 RestartSec=10
 
 StandardOutput=journal

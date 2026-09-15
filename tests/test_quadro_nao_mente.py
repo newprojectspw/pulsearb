@@ -62,8 +62,8 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_m4_travas_que_faltavam.py": (27, "3.12 — travas novas"),
     "test_maker_de_pares.py": (35, "1.6 — o maker de pares"),
     "test_maker_de_pares_nos_pools.py": (14, "1.12 — o maker de pares nos pools"),
-    "test_resumo_da_rodada_maker.py": (71, "4.2 — o leitor da rodada"),
-    "test_4_2_rodadas_do_shadow.py": (30, "4.2 — as quatro rodadas"),
+    "test_resumo_da_rodada_maker.py": (74, "4.2 — o leitor da rodada"),
+    "test_4_2_rodadas_do_shadow.py": (39, "4.2 — as quatro rodadas"),
 }
 
 #: O 3.12 publica a SOMA destes quatro. Somar na mão já saiu errado em
