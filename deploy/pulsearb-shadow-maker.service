@@ -25,7 +25,15 @@
 #
 # Restart=always pelo mesmo motivo do recorder: duas semanas não podem
 # terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
-# --diario), então um restart continua a mesma rodada em vez de abrir outra.
+# --diario), então um restart continua a MESMA rodada em vez de abrir outra.
+#
+# MAS O DIÁRIO É A ÚNICA COISA QUE CONTINUA, e isto precisa estar escrito: a
+# `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então um
+# restart joga fora os rewards e o markout acumulados e reinicia o relógio
+# dos 14 dias. O calendário na parede segue dizendo 14 dias e nada no relato
+# denuncia. `scripts/resumo_da_rodada_maker.py` detecta (`parede_s` caindo
+# entre relatos) e diz; a saída é recomeçar a rodada limpa, porque esperar
+# não recupera o que foi perdido.
 
 [Unit]
 Description=PULSEARB SHADOW maker (4.2) — cota nos pools, nao envia
@@ -89,6 +97,13 @@ ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d 
 
 # Opcional. Se um dia houver segredo aqui, ele vem de arquivo 0600, nunca da
 # unit (que é legível por todos).
+#
+# AQUI O RISCO É MAIOR QUE NO TEMPLATE, e vale escrever: o `systemd.exec(5)`
+# diz que QUALQUER `EnvironmentFile=` vence as linhas `Environment=`. Todo o
+# perfil do ensaio acima é `Environment=`, então um `.env` de máquina que
+# definisse uma regra do maker ou um teto de risco venceria o arquivo
+# versionado — e a rodada mediria outro perfil por 14 dias, em silêncio
+# (revisão do Codex, #131). Este arquivo carrega SEGREDO, e só.
 EnvironmentFile=-/opt/pulsearb/.env
 
 Restart=always

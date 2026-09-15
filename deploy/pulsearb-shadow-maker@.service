@@ -28,7 +28,15 @@
 #
 # Restart=always pelo mesmo motivo do recorder: duas semanas não podem
 # terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
-# --diario), então um restart continua a mesma rodada em vez de abrir outra.
+# --diario), então um restart continua a MESMA rodada em vez de abrir outra.
+#
+# MAS O DIÁRIO É A ÚNICA COISA QUE CONTINUA, e isto precisa estar escrito: a
+# `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então um
+# restart joga fora os rewards e o markout acumulados e reinicia o relógio
+# dos 14 dias. O calendário na parede segue dizendo 14 dias e nada no relato
+# denuncia. `scripts/resumo_da_rodada_maker.py` detecta (`parede_s` caindo
+# entre relatos) e diz; a saída é recomeçar a rodada limpa, porque esperar
+# não recupera o que foi perdido.
 
 [Unit]
 Description=PULSEARB SHADOW maker (4.2) — rodada %i, cota nos pools, nao envia
@@ -76,17 +84,26 @@ Environment=PULSEARB_RISK__SPREAD_MAXIMO=0.06
 # (`.shadow.json`).
 Environment=PULSEARB_RISK__CAMINHO_DO_REGISTRO=data/risco/registro_maker_%i.json
 
-# A REGRA desta rodada. SEM o `-`: arquivo ausente tem de derrubar a unit.
-# Com `-`, o systemd ignoraria o arquivo que falta em silêncio e a instância
-# subiria como rodada BASE — quatro rodadas-base correndo em paralelo por 14
-# dias, todas verdes, medindo a mesma coisa.
+# Segredos da máquina, e ele vem ANTES do arquivo da rodada. A ORDEM É A
+# REGRA: o `systemd.exec(5)` diz que, entre `EnvironmentFile=`, o ÚLTIMO
+# vence — e que qualquer `EnvironmentFile=` vence as linhas `Environment=`
+# acima. Com este arquivo por último, um `.env` de máquina que definisse
+# qualquer variável do ensaio (uma regra do maker, o caminho do registro, um
+# teto de stake) silenciaria o arquivo da rodada nas QUATRO instâncias, por
+# 14 dias, sem nada denunciar (revisão do Codex, #131).
+#
+# Opcional (`-`) porque ele pode não existir. Se um dia houver segredo aqui,
+# ele vem de arquivo 0600, nunca da unit (que é legível por todos).
+EnvironmentFile=-/opt/pulsearb/.env
+
+# A REGRA desta rodada, POR ÚLTIMO, para ser a palavra final sobre o perfil.
+# E SEM o `-`: arquivo ausente tem de derrubar a unit. Com `-`, o systemd
+# ignoraria o arquivo que falta em silêncio e a instância subiria como rodada
+# BASE — quatro rodadas-base correndo em paralelo por 14 dias, todas verdes,
+# medindo a mesma coisa.
 EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env
 
 ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d --diario data/diarios/shadow-maker-%i.jsonl
-
-# Opcional. Se um dia houver segredo aqui, ele vem de arquivo 0600, nunca da
-# unit (que é legível por todos).
-EnvironmentFile=-/opt/pulsearb/.env
 
 Restart=always
 RestartSec=10

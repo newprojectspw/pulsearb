@@ -191,6 +191,41 @@ class TestAUnitTemplate:
             assert "EU ACEITO O RISCO" not in linha, linha
             assert "PULSEARB_MODE=LIVE" not in linha, linha
 
+    def test_o_arquivo_da_rodada_e_o_ULTIMO_EnvironmentFile(self):
+        """A ordem é a regra, e ela é invisível lendo o arquivo de cima.
+
+        `systemd.exec(5)`: entre `EnvironmentFile=`, o ÚLTIMO vence — e
+        qualquer `EnvironmentFile=` vence as linhas `Environment=`. Com o
+        `.env` da máquina por último, um `.env` que definisse qualquer
+        variável do ensaio (uma regra do maker, o caminho do registro, um
+        teto de stake) silenciaria o arquivo versionado nas QUATRO
+        instâncias, por 14 dias, sem nada denunciar.
+
+        Achado na revisão do Codex (#131): eu tinha posto o `.env` depois.
+        """
+        arquivos = [
+            linha.strip()
+            for linha in UNIT.read_text(encoding="utf-8").splitlines()
+            if linha.strip().startswith("EnvironmentFile=")
+        ]
+
+        assert arquivos, "a unit não carrega EnvironmentFile nenhum"
+        assert arquivos[-1] == "EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env", (
+            f"o último EnvironmentFile é {arquivos[-1]!r} — o perfil da rodada "
+            "tem de ser a palavra final"
+        )
+
+    def test_o_env_da_maquina_vem_antes_e_e_o_unico_opcional(self):
+        arquivos = [
+            linha.strip()
+            for linha in UNIT.read_text(encoding="utf-8").splitlines()
+            if linha.strip().startswith("EnvironmentFile=")
+        ]
+        opcionais = [a for a in arquivos if a.startswith("EnvironmentFile=-")]
+
+        assert opcionais == ["EnvironmentFile=-/opt/pulsearb/.env"]
+        assert arquivos.index(opcionais[0]) < len(arquivos) - 1
+
     def test_toda_rodada_declarada_tem_arquivo(self):
         for rodada in ESPERADO:
             assert (RODADAS / f"{rodada}.env").is_file(), rodada
