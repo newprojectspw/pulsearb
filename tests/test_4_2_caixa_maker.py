@@ -28,6 +28,7 @@ from pulsearb.live.caixa_maker import (
     INTERVALO_MAXIMO_POR_PASSADA_S,
     CaixaDoMaker,
     _atraso_do_print_s,
+    identidade_do_negocio,
 )
 from pulsearb.live.cotacao import FATOR_DE_CAPTURA_PADRAO, Cotacao, estimar_retorno
 from pulsearb.live.livros import LivrosAoVivo, Negocio
@@ -129,11 +130,13 @@ class TestRewardsIntegradosNoTempo:
         assert caixa.segundos_repousando == pytest.approx(25.0)
 
 
-def _n(ts_s, preco, tamanho, lado, perna="tok-up"):
+def _n(ts_s, preco, tamanho, lado, perna="tok-up", *, servidor_s=None, hash_=None):
     """Um print com o token junto, para o dublê de `negocios_desde` filtrar
     (o `LivrosAoVivo` de verdade guarda por token; aqui a lista é uma só)."""
     return SimpleNamespace(
-        ts_ns=int(ts_s * 1e9), preco=preco, tamanho=tamanho, lado=lado, token=perna
+        ts_ns=int(ts_s * 1e9), preco=preco, tamanho=tamanho, lado=lado, token=perna,
+        ts_servidor_ms=None if servidor_s is None else int(servidor_s * 1000),
+        transaction_hash=hash_,
     )
 
 
@@ -382,6 +385,54 @@ class TestLivrosGuardamOsPrints:
         assert livros.negocios_desde("tok", ts_ns=0)[0] == Negocio(5, 0.49, 7.0, "SELL")
         assert livros.resumo(agora_ns=10)["negocios_recebidos"] == 2
 
+    def test_o_transaction_hash_do_WIRE_chega_ao_negocio(self):
+        """A desduplicação de reenvio depende deste campo existir aqui.
+
+        E o teste precisa ser SOBRE O WIRE: os testes da caixa usam um dublê
+        de print, então o `livros.py` podia parar de ler `transaction_hash` e
+        todos eles continuariam verdes — a desduplicação viraria um `None`
+        silencioso, que DEIXA PASSAR, e o reenvio voltaria a contar duas
+        vezes sem nada falhar. Verificado por mutação: tirando o campo da
+        construção do `Negocio`, só este teste cai.
+
+        `transaction_hash` está no payload do `last_trade_price` (§6.1a,
+        `[VERIFICADO]`), não é campo suposto.
+        """
+        livros = LivrosAoVivo()
+        livros.aplicar(
+            {"event_type": "book", "asset_id": "tok", "bids": [], "asks": []}, ts_ns=1
+        )
+        com = _print("tok", "0.49", "7", "SELL") | {"transaction_hash": "0xdeadbeef"}
+        livros.aplicar(com, ts_ns=5)
+        livros.aplicar(_print("tok", "0.49", "7", "SELL"), ts_ns=9)
+
+        guardados = livros.negocios_desde("tok", ts_ns=0)
+
+        assert guardados[0].transaction_hash == "0xdeadbeef"
+        # Ausente é `None`, e não string vazia: `None` quer dizer "não dá
+        # para reconhecer", e quem não reconhece deixa passar.
+        assert guardados[1].transaction_hash is None
+
+    def test_a_identidade_do_negocio_sai_do_que_o_wire_trouxe(self):
+        """Ponta a ponta: wire → `Negocio` → chave de desduplicação.
+
+        Sem este, o `livros.py` e a `caixa_maker.py` podiam divergir sobre o
+        nome do campo sem nenhum teste falhar.
+        """
+        livros = LivrosAoVivo()
+        livros.aplicar(
+            {"event_type": "book", "asset_id": "tok", "bids": [], "asks": []}, ts_ns=1
+        )
+        livros.aplicar(
+            _print("tok", "0.49", "7", "SELL") | {"transaction_hash": "0xabc"}, ts_ns=5
+        )
+
+        negocio = livros.negocios_desde("tok", ts_ns=0)[0]
+
+        assert identidade_do_negocio("tok", negocio) == (
+            "tok", "0xabc", 0.49, 7.0, "SELL"
+        )
+
     def test_o_carimbo_do_servidor_fica_guardado_quando_vem(self):
         # §6.1a: `timestamp` em ms, como string. Sem ele, `None` — e não zero,
         # que pareceria um print de 1970 com atraso de décadas.
@@ -477,3 +528,102 @@ class TestOLacoLigaACaixa:
         assert laco.abertas == {}
         assert "btc-updown-4h-1" not in laco.caixa._ultimo_acerto_epoch
         assert laco.caixa.segundos_repousando == pytest.approx(15.0)
+
+
+class TestOReenvioDeDEPOISDaCotacao:
+    """Reconexão manda o MESMO negócio outra vez, e ele passava duas vezes.
+
+    O filtro do carimbo do servidor pega o reenvio de um negócio ANTERIOR à
+    cotação. Não pega o de DEPOIS: ele aconteceu mesmo, com a cotação no
+    livro, e volta com carimbo de chegada novo e o mesmo carimbo de servidor.
+    Sem identidade, ele consumia a perna outra vez e registrava markout em
+    dobro — e ao longo de 14 dias cada reconexão inflava execuções e custo
+    (revisão do Codex, #131).
+    """
+
+    def _conferir(self, caixa, aberta, *negocios, agora_s):
+        return caixa.conferir_prints(
+            "j", aberta,
+            token_up="tok-up", token_down="tok-down",
+            negocios_desde=_negocios(*negocios),
+            agora_ns=int(agora_s * 1e9),
+        )
+
+    def test_o_MESMO_negocio_reenviado_nao_conta_duas_vezes(self):
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+        print_ = _n(1005.0, 0.49, 7.0, "SELL", servidor_s=1005.0, hash_="0xabc")
+        # Mesmo negócio, chegando depois: `ts_ns` novo, servidor e hash iguais.
+        reenvio = _n(1020.0, 0.49, 7.0, "SELL", servidor_s=1005.0, hash_="0xabc")
+
+        self._conferir(caixa, aberta, print_, agora_s=1010.0)
+        depois_do_primeiro = caixa.shares_no_nivel
+        self._conferir(caixa, aberta, reenvio, agora_s=1030.0)
+
+        assert depois_do_primeiro == 7.0
+        assert caixa.shares_no_nivel == 7.0
+        assert caixa.prints_reenviados == 1
+
+    def test_dois_negocios_DIFERENTES_no_mesmo_preco_contam_os_dois(self):
+        """Hash diferente é negócio diferente, por igual que o resto seja."""
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+
+        self._conferir(
+            caixa, aberta,
+            _n(1005.0, 0.49, 7.0, "SELL", servidor_s=1005.0, hash_="0xaaa"),
+            _n(1006.0, 0.49, 7.0, "SELL", servidor_s=1006.0, hash_="0xbbb"),
+            agora_s=1010.0,
+        )
+
+        assert caixa.shares_no_nivel == 14.0
+        assert caixa.prints_reenviados == 0
+
+    def test_a_VARREDURA_de_varios_niveis_nao_e_desduplicada_pelo_hash(self):
+        """Uma transação pode render vários eventos, com preços diferentes.
+
+        Desduplicar pelo hash sozinho descartaria a segunda perna da
+        varredura, que é execução legítima nossa — por isso a identidade
+        inclui preço, tamanho e lado.
+        """
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+
+        self._conferir(
+            caixa, aberta,
+            _n(1005.0, 0.49, 7.0, "SELL", servidor_s=1005.0, hash_="0xsweep"),
+            _n(1005.0, 0.48, 9.0, "SELL", servidor_s=1005.0, hash_="0xsweep"),
+            agora_s=1010.0,
+        )
+
+        assert caixa.prints_reenviados == 0
+        assert caixa.execucoes_atravessadas == 1
+
+    def test_print_SEM_hash_passa_em_vez_de_ser_descartado(self):
+        """Quem não reconhece DEIXA PASSAR: os dois erros não são simétricos.
+
+        Contar de novo infla o custo (erra CONTRA a rota); descartar um print
+        legítimo tira custo (erra a FAVOR dela). Só o primeiro é aceitável
+        por omissão.
+        """
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+
+        self._conferir(
+            caixa, aberta,
+            _n(1005.0, 0.49, 7.0, "SELL", servidor_s=1005.0),
+            agora_s=1010.0,
+        )
+
+        assert caixa.shares_no_nivel == 7.0
+        assert caixa.prints_reenviados == 0
+
+    def test_a_cotacao_SEGUINTE_nao_herda_o_que_a_anterior_contou(self):
+        """`esquecer` limpa: a próxima ordem é outra, e um negócio da
+        anterior não a executa — mas também não pode ficar bloqueado."""
+        caixa = CaixaDoMaker()
+        caixa._negocios_contados["j"].add(("tok-up", "0xabc", 0.49, 7.0, "SELL"))
+
+        caixa.esquecer("j")
+
+        assert "j" not in caixa._negocios_contados

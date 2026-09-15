@@ -827,6 +827,137 @@ nenhum destes números serve sem decisão nova, com capital real conferido.
 | `maker.motivos.sem_microprice` | **ausente** nesta rodada — a âncora do microprice (4.0 (f)) está desligada aqui de propósito | aparecer quer dizer que alguém ligou `MAKER_TICKS_ABAIXO_DO_MICROPRICE` sem desligar o recolher: as duas na mesma rodada não se distinguem, e a rodada não mede nenhuma das duas. A rodada da âncora troca uma pela outra — `MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=false` na mesma edição |
 | id das ordens no diário | todo id com prefixo `sombra-` | qualquer id sem `sombra-` é **PARAR AGORA**: `systemctl stop` e abrir issue — significaria ordem real |
 
+### 10.1b. E o mesmo relato lido por um programa
+
+A tabela acima é para a primeira hora, a olho. Para a rodada inteira — e no
+fim dela — quem responde é o leitor, que soma o que o motor publicou e diz o
+veredito do 4.2:
+
+```bash
+journalctl -u pulsearb-shadow-maker -o cat \
+    | grep '"msg":"shadow"' > relatorios/RELATOS_4_2.jsonl
+
+.venv/bin/python scripts/resumo_da_rodada_maker.py \
+    --relatos relatorios/RELATOS_4_2.jsonl \
+    --diario data/diarios/shadow-maker-4-2.jsonl
+```
+
+**Rode isso na primeira hora também, e não só no dia 14.** Ele confere de
+uma vez as quatro maneiras de a rodada não valer nada — e três delas não
+aparecem em nenhuma linha da tabela acima:
+
+| recusa | o que aconteceu |
+|---|---|
+| `rodada_confundida` | duas regras experimentais ligadas juntas (a linha `maker.regras` da tabela, virada conta) |
+| `regras_mudaram_no_meio` | alguém editou a unit e reiniciou. A unit **anexa ao mesmo diário de propósito**, então isso mistura duas regras nos mesmos 14 dias e o último relato sozinho parece uma rodada limpa |
+| `rodada_dormiu` | ciclo de trabalho abaixo de 0,99 (item 3.16) |
+| `relato_sem_maker` | o laço maker não subiu; a rodada segue viva, relatando, medindo nada |
+
+O leitor **não recalcula** rewards nem markout: os números são os que o motor
+publicou. E o `order_id` sem `sombra-` — a última linha da tabela acima, hoje
+conferida a olho — **derruba o veredito**, não vira aviso: um ensaio que pode
+ter mandado ordem real não é um SHADOW válido.
+
+**`rodada_nao_terminou` no meio da rodada é o esperado, não defeito.** O
+relato de 60 s sai sempre antes do prazo vencer; o tempo de parede completo
+só existe na linha que o processo emite ao encerrar, marcada com
+`fim_da_rodada`. Rodando no dia 3, o leitor diz `rodada_nao_terminou` e está
+certo — é assim que ele distingue rodada em curso de processo morto pelo
+systemd.
+
+**Se ele disser que o PROCESSO VOLTOU, a conta já vem somada.** A
+`CaixaDoMaker` não persiste nada e o `run` refaz o relógio, então cada subida
+conta do zero — mas os campos da caixa são cumulativos desde a subida, e o
+leitor corta o fluxo onde `parede_s` cai e soma os trechos. O que não entra é
+o tempo fora do ar: ele não foi observado, e por isso **a rodada leva mais de
+14 dias de calendário para fechar 14 dias de medida**. Não recomece a rodada
+por causa disso; espere o tempo medido chegar.
+
+**Capture o journal inteiro, não só o fim.** A soma reconstrói a rodada a
+partir dos relatos, então um `--since` que corte trechos antigos perde a
+medida deles. Se o journal rotacionar durante as duas semanas
+(`journalctl --vacuum-*`, `SystemMaxUse`), o trecho rotacionado some com ele:
+vale exportar `relatorios/RELATOS_<rodada>.jsonl` de tempos em tempos e
+concatenar, em vez de contar com o journal no dia 14.
+
+**E a unit é `Restart=on-failure`, não `always`.** Uma rodada que terminou
+fica terminada: com `always`, ela reiniciava 10 s depois de encerrar bem e
+começava outra sozinha, anexando ao mesmo diário, para sempre.
+
+### 10.1c. As quatro rodadas correm JUNTAS, não uma depois da outra
+
+São três regras experimentais (quadro 4.0 e/f/g) mais a base, e cada uma
+precisa da sua rodada porque juntas não se distinguem. Em sequência isso
+custa **56 dias** — mas o tempo é o menor dos dois problemas.
+
+O grande é que **quatro rodadas em semanas diferentes comparam regra com
+mercado.** A liquidez, a volatilidade e o próprio conjunto de pools de reward
+mudam de semana para semana, e essa diferença entraria no resultado com o
+nome da regra. É a mesma confusão que a unit já recusa dentro de uma rodada,
+espalhada no tempo — onde é mais difícil de ver, porque cada rodada, sozinha,
+parece limpa.
+
+**Primeiro pare a unit de uma rodada só**, se o §10 acima já a subiu. Ela
+liga o perfil do `recolher`, então deixá-la no ar deixaria **cinco** processos
+rodando, com o `@recolher` em duplicata — um assinante de feed a mais que a
+medida de capacidade desta seção não contou.
+
+```bash
+sudo systemctl disable --now pulsearb-shadow-maker    # a de uma rodada só
+sudo cp deploy/pulsearb-shadow-maker@.service /etc/systemd/system/
+
+# O PRAZO, e ele é o mesmo para as quatro: é o que faz elas cobrirem o mesmo
+# intervalo de mercado. Sem ele a unit não sobe (sai com 2, e o
+# `RestartPreventExitStatus=2` impede o laço de restart).
+FIM=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)
+sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
+    /opt/pulsearb/deploy/rodadas/comum.env
+
+sudo systemctl daemon-reload
+for r in base recolher ancora pausa; do
+    sudo systemctl enable --now pulsearb-shadow-maker@$r
+done
+```
+
+**Por que prazo absoluto e não `--duration 14d`:** o `Restart=on-failure`
+reexecuta o comando, e um prazo relativo daria 14 dias NOVOS. Uma instância
+que caísse no dia 13 observaria 27 dias e terminaria 13 dias depois das
+irmãs — os rewards e o markout dela deixariam de cobrir o mesmo intervalo de
+mercado que a comparação exige. O instante absoluto sobrevive ao restart sem
+persistir nada.
+
+O nome depois do `@` é o arquivo em `deploy/rodadas/`, e é ele que dá à
+instância o diário, o registro de risco e **a regra**. Cada `.env` escreve as
+três regras, inclusive as duas desligadas: regra ausente por decisão não pode
+parecer regra ausente por esquecimento.
+
+**O que é próprio de cada instância, e por quê:**
+
+| coisa | por quê |
+|---|---|
+| diário `data/diarios/shadow-maker-%i.jsonl` | duas rodadas no mesmo arquivo somam — é o que o `caminho_do_diario_da_rodada` já fecha com `O_EXCL` |
+| registro `data/risco/registro_maker_%i.json` | o `_gravar` do portão monta o `.tmp` a partir do caminho do registro: duas rodadas no MESMO registro escrevem o mesmo temporário, e o rename atômico pode publicar uma mistura |
+| `deploy/rodadas/%i.env` | a regra **e o registro de risco**. **Sem o `-` no `EnvironmentFile`**: arquivo ausente derruba a unit, porque com `-` o systemd o ignoraria em silêncio e as quatro subiriam como rodada BASE, todas verdes, por 14 dias |
+
+**E a unit não tem nenhuma linha `Environment=`.** O `systemd.exec(5)` diz que
+`EnvironmentFile=` vence `Environment=` **sempre**, não por ordem: qualquer
+valor do ensaio escrito na unit seria silenciável por um `/opt/pulsearb/.env`
+de máquina, nas quatro instâncias, por 14 dias. Tudo que precisa ser a palavra
+final mora em arquivo de ambiente carregado depois do `.env` —
+`deploy/rodadas/comum.env` para o perfil (igual nas quatro) e
+`deploy/rodadas/%i.env` para o registro e a regra. **Se precisar mudar o
+perfil do ensaio, mude o `comum.env` e não a unit.**
+
+O `KILL` é **compartilhado de propósito** — a chave existe para parar tudo.
+
+**O que NÃO está medido aqui, e a primeira hora mede:** se a VPS carrega
+quatro processos. Disco do diário já era o item em aberto do §10.2 com um
+processo; com quatro, meça `du -sh data/diarios/` na primeira hora e
+multiplique por 336 antes de deixar rodando. Memória, CPU e o limite de
+conexões WS do CLOB com quatro assinantes também não estão medidos. Se não
+couber, a saída não é voltar para 56 dias em sequência: é rodar **base +
+uma** por vez, que preserva a comparação contra o mesmo mercado.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** não medido. Meça na primeira hora

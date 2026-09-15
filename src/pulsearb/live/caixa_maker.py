@@ -54,6 +54,7 @@ começar a contar.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -112,6 +113,41 @@ class ExecucaoPossivel:
     meio_no_fill: float | None = None
 
 
+def identidade_do_negocio(token_id: str, negocio: Any) -> tuple | None:
+    """O que faz deste negócio ELE, e não outro igual.
+
+    `transaction_hash` vem no `last_trade_price` (§6.1a, `[VERIFICADO]`) e é a
+    identidade de verdade — mas **não sozinho**: uma transação pode varrer
+    vários níveis e render mais de um evento com o mesmo hash e preços
+    diferentes. Desduplicar só pelo hash descartaria a segunda perna de uma
+    varredura, que é execução legítima nossa.
+
+    `None` quando o hash não veio: aí não há como reconhecer, e quem não
+    reconhece DEIXA PASSAR. Os dois erros não são simétricos — contar um
+    print de novo infla o custo (erra contra a rota), descartar um print
+    legítimo tira custo (erra a favor dela), e o único dos dois que este
+    projeto aceita por omissão é o primeiro.
+    """
+    transacao = getattr(negocio, "transaction_hash", None)
+    if not transacao:
+        return None
+    return (token_id, transacao, negocio.preco, negocio.tamanho, negocio.lado)
+
+
+def _quando_o_negocio_aconteceu_ns(negocio: Any) -> int:
+    """Quando o negócio ACONTECEU, em ns: o carimbo do servidor se houver,
+    senão a chegada.
+
+    A diferença entre os dois é o que separa "alguém negociou agora contra a
+    nossa ordem" de "a reassinatura reenviou um negócio antigo" — e só o
+    primeiro é motivo para tirar a cotação do livro.
+    """
+    servidor_ms = getattr(negocio, "ts_servidor_ms", None)
+    if servidor_ms is None:
+        return int(negocio.ts_ns)
+    return int(servidor_ms) * 1_000_000
+
+
 def _atraso_do_print_s(negocio: Any, agora_ns: int) -> float | None:
     """Quanto tempo depois do carimbo DO SERVIDOR o print foi lido aqui.
 
@@ -140,6 +176,10 @@ class CaixaDoMaker:
     acertos: int = 0
     intervalos_truncados: int = 0
 
+    #: Quando cada slug levou o último fill ATRAVESSADO, em ns do print.
+    #: Sobrevive ao `esquecer`: a pausa por fill tóxico existe justamente
+    #: para valer DEPOIS de a cotação sair do livro.
+    ultimo_fill_toxico_ns: dict[str, int] = field(default_factory=dict)
     execucoes_atravessadas: int = 0
     execucoes_no_nivel: int = 0
     shares_atravessadas: float = 0.0
@@ -155,6 +195,10 @@ class CaixaDoMaker:
     #: e contados. Uma perna executada saiu do livro; contá-la de novo a cada
     #: print multiplicava execuções, shares e custo pelo número de prints.
     prints_em_perna_consumida: int = 0
+    #: Prints cujo carimbo do SERVIDOR é anterior à cotação: reenvio de
+    #: reassinatura, não execução nossa. Contado para o relato mostrar quanto
+    #: disso o feed manda — o número nunca tinha sido publicado.
+    prints_reenviados: int = 0
     #: Passadas em que as duas pernas já estavam consumidas: tempo que NÃO é
     #: repouso, e reward que NÃO se ganha.
     acertos_apos_execucao: int = 0
@@ -165,6 +209,13 @@ class CaixaDoMaker:
 
     _ultimo_acerto_epoch: dict[str, float] = field(default_factory=dict)
     _ultimo_print_ns: dict[str, int] = field(default_factory=dict)
+    #: Identidade dos negócios já contados nesta cotação, por slug. Uma
+    #: reconexão reenvia o mesmo `last_trade_price`, e sem isto ele consumia a
+    #: perna e registrava markout OUTRA VEZ. Some no `esquecer`: a cotação
+    #: seguinte é outra ordem, e um negócio da anterior não a executa.
+    _negocios_contados: defaultdict[str, set[tuple]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
     _pendentes: list[ExecucaoPossivel] = field(default_factory=list)
     #: Quanto de cada perna ainda repousa, por slug: (desde_epoch, [up, down]).
     #: `desde_epoch` diferente = cotação nova (reposicionada) = pernas cheias.
@@ -282,10 +333,50 @@ class CaixaDoMaker:
             self.prints_vistos += 1
             if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
                 continue
+            if _quando_o_negocio_aconteceu_ns(negocio) < int(aberta.desde_epoch * 1e9):
+                # O negócio aconteceu ANTES de esta cotação entrar no livro:
+                # ela não estava lá para ser executada. O filtro de cima é
+                # pela CHEGADA, e uma reassinatura reenvia `last_trade_price`
+                # antigo — que entrava aqui como execução nossa, consumia a
+                # perna e fazia o fill seguinte, real, ser descartado como
+                # perna consumida (revisão do Codex, #131).
+                self.prints_reenviados += 1
+                continue
+            identidade = identidade_do_negocio(token_id, negocio)
+            if identidade is not None and identidade in self._negocios_contados[slug]:
+                # MESMO negócio, chegando de novo. Uma reconexão reenvia o
+                # `last_trade_price` de DEPOIS da colocação: carimbo de
+                # chegada novo, mesmo `transaction_hash` e mesmo preço — o
+                # filtro de cima (que olha o carimbo do SERVIDOR contra a
+                # colocação) deixa passar, porque este negócio de fato
+                # aconteceu com a cotação no livro. Sem identidade ele
+                # consumia a perna OUTRA VEZ e registrava markout em dobro,
+                # e ao longo de 14 dias cada reconexão inflava execuções e
+                # custo (revisão do Codex, #131).
+                self.prints_reenviados += 1
+                continue
             if restante[indice] <= 0.0:
                 self.prints_em_perna_consumida += 1
                 continue
+            if identidade is not None:
+                self._negocios_contados[slug].add(identidade)
             tipo, shares = self._classificar(negocio, restante[indice], preco_nosso)
+            if tipo == "atravessada":
+                # O relógio da pausa por fill tóxico (o regime EVENT do
+                # `poly-maker`, disparado pelo NOSSO fill e não pelo salto).
+                # Guardado sempre, custe ou não — quem decide se pausa é o
+                # laço, e a caixa não sabe de regra de operação.
+                #
+                # Pelo carimbo do SERVIDOR quando ele existe: `ts_ns` é a
+                # CHEGADA, e um `last_trade_price` reenviado depois de
+                # reassinatura chega agora carregando um negócio de minutos
+                # atrás. Armar a pausa por ele tiraria do livro uma cotação
+                # contra a qual ninguém negociou (revisão do Codex, #131).
+                # Sem carimbo do servidor vale a chegada, que é o que há.
+                self.ultimo_fill_toxico_ns[slug] = max(
+                    self.ultimo_fill_toxico_ns.get(slug, 0),
+                    _quando_o_negocio_aconteceu_ns(negocio),
+                )
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
                     slug, aberta, params,
@@ -402,6 +493,7 @@ class CaixaDoMaker:
         self._ultimo_acerto_epoch.pop(slug, None)
         self._ultimo_print_ns.pop(slug, None)
         self._restante.pop(slug, None)
+        self._negocios_contados.pop(slug, None)
 
     # ─────────────────────────────────────────────────────────────── relato
     @property
@@ -434,6 +526,7 @@ class CaixaDoMaker:
             "prints_vistos": self.prints_vistos,
             "prints_em_perna_consumida": self.prints_em_perna_consumida,
             "execucoes_possiveis": {
+                "reenviados": self.prints_reenviados,
                 "atravessadas": self.execucoes_atravessadas,
                 "no_nivel": self.execucoes_no_nivel,
                 "shares_atravessadas": round(self.shares_atravessadas, 2),

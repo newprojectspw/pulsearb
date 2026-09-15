@@ -71,6 +71,19 @@ class Negocio:
     tamanho: float
     lado: str
     ts_servidor_ms: int | None = None
+    #: `transaction_hash` do evento (§6.1a) — a IDENTIDADE do negócio.
+    #:
+    #: Existe porque reconexão reenvia: um print de DEPOIS da colocação da
+    #: cotação volta com `ts_ns` novo e o mesmo carimbo de servidor, e sem
+    #: identidade ele é contado outra vez — consome a perna de novo e registra
+    #: markout em dobro. Ao longo de 14 dias, cada reconexão inflava execuções
+    #: e custo (revisão do Codex, #131).
+    #:
+    #: Uma transação pode varrer VÁRIOS níveis e render mais de um evento, com
+    #: preços diferentes e o mesmo hash — por isso quem desduplica usa o hash
+    #: JUNTO com preço, tamanho e lado, nunca o hash sozinho. Ver
+    #: `CaixaDoMaker.identidade_do_negocio`.
+    transaction_hash: str | None = None
 
 
 @dataclass
@@ -210,6 +223,13 @@ class LivrosAoVivo:
             servidor_ms = int(evento["timestamp"]) if "timestamp" in evento else None
         except (TypeError, ValueError):
             servidor_ms = None
+        # `transaction_hash` está no payload do `last_trade_price` e é
+        # `[VERIFICADO]` no §6.1a — não é campo suposto. Ausente vira `None`,
+        # e quem desduplica trata `None` como "não dá para reconhecer", que é
+        # deixar passar: contar um print de novo erra a favor do custo, e
+        # descartar um print legítimo erra a favor da rota.
+        hash_bruto = evento.get("transaction_hash")
+        transacao = hash_bruto if isinstance(hash_bruto, str) and hash_bruto else None
         fila = self.negocios.get(token_id)
         if fila is None:
             fila = self.negocios[token_id] = deque(maxlen=PRINTS_GUARDADOS_POR_TOKEN)
@@ -220,6 +240,7 @@ class LivrosAoVivo:
                 tamanho=tamanho,
                 lado=lado,
                 ts_servidor_ms=servidor_ms,
+                transaction_hash=transacao,
             )
         )
         self.negocios_recebidos += 1

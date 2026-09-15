@@ -286,6 +286,7 @@ class ProcessoShadow:
                 tamanho_da_cotacao=settings.tamanho_da_cotacao_maker_shares,
                 recolhe_quando_o_livro_anda=settings.maker_recolhe_quando_o_livro_anda,
                 ticks_abaixo_do_microprice=settings.maker_ticks_abaixo_do_microprice,
+                pausa_apos_fill_toxico_s=settings.maker_pausa_apos_fill_toxico_s,
                 nossa_ordem_esta_no_livro=settings.mode is Mode.LIVE,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o
@@ -575,6 +576,26 @@ class ProcessoShadow:
                     raise
                 except Exception:
                     log.exception("recolher entre passadas falhou")
+            # OS PRINTS, A CADA SEGUNDO, EM TODA RODADA — e o `if` do knob
+            # saiu daqui de propósito. Enquanto esta chamada dependia da
+            # pausa, os prints eram vistos a cada segundo na rodada da pausa
+            # e só a cada 15 s nas outras três; a `CaixaDoMaker` carimba
+            # `meio_no_fill` com o livro do instante em que VÊ o print, então
+            # o instrumento de markout ficava diferente entre controle e
+            # tratamento, e a comparação de 14 dias mediria a diferença entre
+            # os instrumentos junto com a da regra (revisão do Codex, #131).
+            #
+            # Ver print não muda o que o bot faz — muda quando a conta fecha.
+            # Quem olha o knob é o cancelamento, dentro do método.
+            try:
+                await self.laco_maker.ver_prints_entre_passadas(
+                    self._livro_para_o_maker, agora_ns=time.time_ns()
+                )
+            except OSError as erro:
+                self.falhou = f"io_do_diario_maker: {erro}"
+                raise
+            except Exception:
+                log.exception("ver prints entre passadas falhou")
 
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None
@@ -610,11 +631,26 @@ class ProcessoShadow:
                 self.falhou = f"io_do_diario_maker: {erro}"
                 raise
             except Exception as erro:
-                # O maker NÃO derruba a rodada. O taker é o caminho medido e
-                # aprovado; a rota maker é o ensaio novo, e um defeito nela
-                # não pode custar as 24 h do outro.
+                # O COMENTÁRIO ANTIGO AQUI ERA FALSO, e a revisão do Codex
+                # (#131) mostrou onde. Ele dizia "o maker não derruba a
+                # rodada; a rodada segue sem cotar" — mas `run` espera as
+                # tarefas com `FIRST_COMPLETED`, então esta tarefa voltando
+                # encerra a rodada INTEIRA, cancela as outras e emite o
+                # estado final. A rodada não seguia sem cotar: ela acabava.
+                #
+                # E com a unit em `Restart=on-failure` (que é o certo: rodada
+                # que terminou fica terminada) isso virava pior — `falhou`
+                # continuava `None`, o processo saía com 0, e o systemd
+                # entendia "terminou bem". As duas semanas paravam por uma
+                # exceção transitória no maker e ninguém voltava.
+                #
+                # Marcar `falhou` conserta as três leituras de uma vez: o
+                # código de saída passa a ser 1, o `on-failure` devolve a
+                # rodada, e o leitor recusa com `processo_falhou` em vez de
+                # julgar um trecho cortado como se fosse a rodada.
+                self.falhou = f"laco_maker: {type(erro).__name__}: {erro}"
                 log.error(
-                    "laco maker falhou; a rodada segue sem cotar",
+                    "laco maker falhou; a rodada encerra e o systemd devolve",
                     erro=f"{type(erro).__name__}: {erro}",
                 )
                 return
@@ -839,6 +875,38 @@ class ProcessoShadow:
         return self.estado()
 
 
+def segundos_ate(instante: str) -> float:
+    """Quanto falta, em segundos, para um instante ABSOLUTO em UTC.
+
+    Existe por causa do restart. `--duration 14d` reexecutado no dia 13 dá
+    outros 14 dias: a rodada passa a observar 27 e termina 13 dias depois das
+    irmãs, então os rewards e o markout dela deixam de cobrir o MESMO
+    intervalo de mercado que as quatro rodadas paralelas existem para
+    comparar (revisão do Codex, #131). Um instante absoluto sobrevive ao
+    restart sem persistir nada — e, escrito no `comum.env`, faz as quatro
+    terminarem juntas por construção.
+
+    Aceita o `Z` do RFC3339, que o `fromisoformat` só passou a entender no
+    3.11 e que é a forma que o runbook escreve. Sem fuso é recusado: um
+    instante sem fuso seria lido como hora local da VPS, e a rodada acabaria
+    na hora errada em silêncio.
+    """
+    try:
+        quando = datetime.fromisoformat(instante.strip().replace("Z", "+00:00"))
+    except ValueError as erro:
+        raise ValueError(
+            f"--ate não é um instante RFC3339: {instante!r} "
+            "(ex.: 2026-09-29T00:00:00Z)"
+        ) from erro
+    if quando.tzinfo is None:
+        raise ValueError(
+            f"--ate sem fuso horário: {instante!r}. Escreva em UTC, com o Z "
+            "(ex.: 2026-09-29T00:00:00Z) — sem fuso, o instante seria lido "
+            "como hora local da máquina e a rodada acabaria na hora errada."
+        )
+    return quando.timestamp() - time.time()
+
+
 def prazo_vencido(deadline: float, deadline_de_parede: float | None = None) -> bool:
     """Venceu QUALQUER um dos dois relógios? — item 3.14.
 
@@ -907,6 +975,18 @@ def main(argv: list[str] | None = None) -> int:
         type=parse_duration,
         default="1h",
         help="90s, 30m, 24h, 7d — sem sufixo, horas",
+    )
+    parser.add_argument(
+        "--ate",
+        default=None,
+        help=(
+            "instante ABSOLUTO em que a rodada termina (RFC3339 em UTC, "
+            "ex.: 2026-09-29T00:00:00Z). Vence o --duration. Existe por "
+            "causa do restart: `--duration 14d` reexecutado no dia 13 dá "
+            "outros 14 dias, e a rodada passa a observar 27 — em quatro "
+            "rodadas paralelas isso desalinha o intervalo de mercado que "
+            "elas existem para comparar"
+        ),
     )
     parser.add_argument(
         "--diario",
@@ -990,7 +1070,37 @@ def main(argv: list[str] | None = None) -> int:
     processo = ProcessoShadow(
         settings, ciclo, caminho_do_diario=caminho_do_diario
     )
-    estado = asyncio.run(processo.run(args.duration))
+    duracao = args.duration
+    if args.ate is not None:
+        try:
+            duracao = segundos_ate(args.ate)
+        except ValueError as erro:
+            print(str(erro), file=sys.stderr)
+            return 2
+        if duracao <= 0.0:
+            # Prazo já vencido é rodada TERMINADA, não erro: um restart
+            # depois do fim tem de encerrar de novo, e com saída 0, senão o
+            # `on-failure` reergue para sempre.
+            log.info("shadow", **processo.estado(), fim_da_rodada=True)
+            print(json.dumps(processo.estado(), indent=2, ensure_ascii=False,
+                             default=str))
+            return 0
+    estado = asyncio.run(processo.run(duracao))
+    # O ESTADO FINAL TAMBÉM VAI PELO LOG, e não só pelo `print` abaixo.
+    #
+    # Achado da revisão do Codex no #131, e ele quebrava por completo o leitor
+    # da rodada (`scripts/resumo_da_rodada_maker.py`): o `laco_de_relato`
+    # RETORNA quando o prazo vence, então o último relato de 60 s sai sempre
+    # ANTES do fim. O estado final saía só pelo `print`, em stdout, sem `msg`
+    # e com `indent=2` (várias linhas) — fora do fluxo de relatos por
+    # definição. O leitor então via `parede_s` sempre abaixo das duas semanas
+    # e classificava toda rodada de 14 dias BEM SUCEDIDA como `curta_demais`.
+    #
+    # `fim_da_rodada` marca esta linha e só ela. É o que separa três coisas
+    # que o resto do relato não separa: rodada que terminou, journal capturado
+    # no meio dela, e processo morto pelo systemd — as duas últimas não têm
+    # esta linha, e nenhuma delas é uma rodada de 14 dias.
+    log.info("shadow", **estado, fim_da_rodada=True)
     print(json.dumps(estado, indent=2, ensure_ascii=False, default=str))
     # Rodada sem saída NÃO é sucesso. Sair com 0 depois de 24 h que não
     # gravaram nada faria o systemd (e quem lê o log) tratar como bem

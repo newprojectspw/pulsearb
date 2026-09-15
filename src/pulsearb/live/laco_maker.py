@@ -180,6 +180,15 @@ class LacoMaker:
     #: vira o sinal do termo determinístico. A âncora só APERTA: nunca puxa a
     #: cotação para mais perto do meio do que a distância já escolhida.
     ticks_abaixo_do_microprice: int | None = None
+    #: Segundos sem cotar a janela depois de um fill ATRAVESSADO nela
+    #: (`None` = sem pausa, o comportamento de sempre). É o regime EVENT do
+    #: `poly-maker` disparado pelo NOSSO fill, e não pelo salto do livro: quem
+    #: nos atravessou sabia de algo, e o minuto seguinte é o pior momento para
+    #: estar no livro. O `maker_de_pares` mediu em 2026-09-13: base +14,24,
+    #: com 30 s **+18,42**, com 90 s −0,52 (mata o fill). E a r7 do SHADOW diz
+    #: o mesmo do outro lado: 2 execuções atravessadas de 12 dominaram o
+    #: markout (−22,85 USDC).
+    pausa_apos_fill_toxico_s: float | None = None
     #: Em SHADOW a nossa ordem NÃO está no livro, então `best_bid < preço` é
     #: o gatilho exato. Em LIVE ela está — e quando o mercado anda para
     #: baixo, ela VIRA o melhor bid: o gatilho passa a ser "somos o topo e
@@ -279,6 +288,15 @@ class LacoMaker:
         self._conferir_prints(
             janela, aberta, livro_de=livro_de, agora_ns=agora_ns, params=params
         )
+
+        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
+            # ANTES do portão de dados: cancelar não precisa de livro, e a
+            # pausa que esperasse o livro voltar poderia nunca acontecer
+            # (revisão do Codex, #131). Quem sai fecha a conta primeiro, pelo
+            # mesmo caminho do `livro_andou_contra`.
+            return await self._sair_por_fill_toxico(
+                janela.slug, livro_de=livro_de, agora_ns=agora_ns
+            )
 
         dados, recusa = self._dados_da_passada(
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
@@ -385,6 +403,92 @@ class LacoMaker:
             livro_de=livro_de,
             params=params,
         )
+
+    async def ver_prints_entre_passadas(self, livro_de, *, agora_ns: int) -> list[Efeito]:
+        """Entre passadas: vê os prints SEMPRE, e tira do livro quem levou um
+        fill atravessado SE a pausa estiver ligada.
+
+        **A separação entre esses dois "se" é o ponto, e ela custou uma
+        revisão.** Antes, o método inteiro só rodava com a pausa ligada — e
+        então os prints eram vistos a cada segundo na rodada da pausa e só a
+        cada 15 s nas outras três. A `CaixaDoMaker` carimba `meio_no_fill`
+        com o livro DO INSTANTE EM QUE VÊ o print, e mede o markout 5 s
+        depois do negócio: um fill logo após uma passada saía medido do
+        segundo 1 ao 5 na rodada da pausa, e do livro do segundo 15 até o 16
+        nas outras. **O instrumento de markout ficava diferente entre
+        controle e tratamento**, e a comparação de 14 dias mediria a
+        diferença entre os dois instrumentos junto com a da regra (revisão do
+        Codex, #131).
+
+        Ver print não muda nada do que o bot faz — só quando a conta é
+        fechada. Cancelar é que é a regra, e só essa parte olha o knob.
+
+        A cadência de 15 s ainda importa para o outro lado: um fill logo
+        depois de uma passada deixava a outra perna exposta quase uma
+        cadência inteira, e encurtava a pausa medida de 30 s para 15–30 s
+        efetivos. A decisão de COTAR segue nos 15 s.
+        """
+        efeitos: list[Efeito] = []
+        for slug, aberta in list(self.abertas.items()):
+            tokens = self._tokens.get(slug)
+            if tokens is None or self._negocios_desde is None:
+                continue
+            self.caixa.conferir_prints(
+                slug,
+                aberta,
+                token_up=tokens[0],
+                token_down=tokens[1],
+                negocios_desde=self._negocios_desde,
+                agora_ns=agora_ns,
+                livro_de=livro_de,
+                params=self._params.get(slug),
+            )
+            if (
+                self.pausa_apos_fill_toxico_s is not None
+                and self._em_pausa_por_fill_toxico(slug, agora_ns)
+            ):
+                saiu = await self._sair_por_fill_toxico(
+                    slug, livro_de=livro_de, agora_ns=agora_ns
+                )
+                if saiu is not None:
+                    efeitos.append(saiu)
+        return efeitos
+
+    async def _sair_por_fill_toxico(
+        self, slug: str, *, livro_de, agora_ns: int
+    ) -> Efeito | None:
+        """Fecha a conta e tira do livro, ou só conta o motivo se não havia
+        cotação — que é o caso de a pausa ainda estar valendo."""
+        aberta = self.abertas.get(slug)
+        tokens = self._tokens.get(slug)
+        if aberta is None or tokens is None:
+            self._contar("pausa_por_fill_toxico")
+            return None
+        livros = [livro_de(token_id, agora_ns=agora_ns) for token_id in tokens]
+        return await self._recolher(
+            slug, aberta, tokens, livros,
+            livro_de=livro_de, agora_ns=agora_ns, motivo="pausa_por_fill_toxico",
+        )
+
+    def _em_pausa_por_fill_toxico(self, slug: str, agora_ns: int) -> bool:
+        """Esta janela levou um fill ATRAVESSADO há pouco?
+
+        Quem atravessa a nossa cotação está pagando acima do nosso preço para
+        entrar AGORA — e normalmente sabe de algo que o livro ainda não
+        mostrou. Ficar cotando no minuto seguinte é oferecer a mesma opção de
+        graça outra vez. É o regime EVENT do `poly-maker`, disparado pelo
+        NOSSO fill em vez do salto do livro.
+
+        A pausa vale mesmo com a cotação já fora do livro: quem chama TIRA a
+        que estiver lá e não recoloca enquanto durar. Desligada devolve falso
+        sempre — a linha de base não muda.
+        """
+        if self.pausa_apos_fill_toxico_s is None:
+            return False
+        ultimo = self.caixa.ultimo_fill_toxico_ns.get(slug)
+        if ultimo is None:
+            return False
+        return agora_ns - ultimo < self.pausa_apos_fill_toxico_s * 1e9
 
     def _melhor_candidata(
         self, dados: _DadosDaPassada, params: ParametrosDeReward
@@ -679,6 +783,7 @@ class LacoMaker:
                     await self._recolher(
                         slug, aberta, tokens, livros,
                         livro_de=livro_de, agora_ns=agora_ns,
+                        motivo="livro_andou_contra",
                     )
                 )
         return efeitos
@@ -736,6 +841,7 @@ class LacoMaker:
         *,
         livro_de,
         agora_ns: int,
+        motivo: str,
     ) -> Efeito:
         """Tira a cotação do livro — e fecha a conta dela ANTES de sair.
 
@@ -751,7 +857,14 @@ class LacoMaker:
            que disparou e o do Up não está à mão, o do Down serve pelo mesmo
            espelho que a colocação e o portão usam (bid = 1 − ask), e sem
            nenhum dos dois não se chega aqui;
-        3. **sair**, com o motivo nomeado.
+        3. **sair**, com o motivo nomeado — `motivo` porque as DUAS regras
+           que tiram a cotação entre passadas (o livro andando contra e a
+           pausa por fill tóxico) precisam desta mesma ordem, e ter duas
+           cópias dela é como as duas divergem.
+
+        Sem nenhum dos dois livros à mão a conta não fecha — e ainda assim a
+        cotação SAI: a pausa por fill tóxico não depende de livro, porque
+        cancelar não depende (revisão do Codex, #131).
         """
         if self._negocios_desde is not None:
             self.caixa.conferir_prints(
@@ -765,14 +878,14 @@ class LacoMaker:
                 params=self._params.get(slug),
             )
         params = self._params.get(slug)
-        if params is not None:
-            livro_up = livros[0]
-            if livro_up is None:
-                livro_up = espelho_do_livro(livros[1], asset_id=tokens[0])
+        livro_up = livros[0]
+        if livro_up is None and livros[1] is not None:
+            livro_up = espelho_do_livro(livros[1], asset_id=tokens[0])
+        if params is not None and livro_up is not None:
             self.caixa.acertar(
                 slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
             )
-        return await self._sair(slug, motivo="livro_andou_contra")
+        return await self._sair(slug, motivo=motivo)
 
     async def _recusar(self, slug: str, motivo: str) -> Efeito | None:
         """Não cotar por `motivo` — e tirar do livro o que já repousava.
@@ -914,6 +1027,7 @@ class LacoMaker:
             "regras": {
                 "recolhe_quando_o_livro_anda": self.recolhe_quando_o_livro_anda,
                 "ticks_abaixo_do_microprice": self.ticks_abaixo_do_microprice,
+                "pausa_apos_fill_toxico_s": self.pausa_apos_fill_toxico_s,
             },
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),

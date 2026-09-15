@@ -1,0 +1,129 @@
+# PULSEARB SHADOW da rota MAKER — UMA rodada do 4.2 por instância.
+#
+#   sudo cp deploy/pulsearb-shadow-maker@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pulsearb-shadow-maker@base
+#   sudo systemctl enable --now pulsearb-shadow-maker@recolher
+#   sudo systemctl enable --now pulsearb-shadow-maker@ancora
+#   sudo systemctl enable --now pulsearb-shadow-maker@pausa
+#
+# O nome depois do @ é o nome do arquivo em deploy/rodadas/, e é o que dá à
+# instância o diário, o registro de risco e a REGRA da rodada.
+#
+# POR QUE QUATRO JUNTAS E NÃO UMA DE CADA VEZ. São três regras experimentais
+# (4.0 e/f/g) mais a base, e cada uma precisa da sua rodada porque juntas não
+# se distinguem — uma muda QUANDO a ordem sai, outra o PREÇO, outra QUANDO ela
+# volta. Em sequência isso custaria 56 dias, mas o tempo é o menor dos dois
+# problemas: quatro rodadas em semanas diferentes comparam REGRA com MERCADO.
+# A liquidez, a volatilidade e o próprio conjunto de pools mudam de semana
+# para semana, e essa diferença entraria no resultado com o nome da regra. É a
+# mesma confusão que a unit recusa DENTRO de uma rodada, espalhada no tempo,
+# onde é mais difícil de ver. Quatro processos sobre o mesmo mercado, nos
+# mesmos 14 dias, comparam a regra com a base e só isso.
+#
+# O que esta unit faz, e o que ela NÃO faz: decide e anota; não envia ordem.
+# MODE=SHADOW troca o cliente de ordens pelo sombra (`ClienteSombraDeOrdens`,
+# todo id com prefixo `sombra-`), e a trava tripla do LIVE (risk/autorizacao.py)
+# continua fechada — não há PULSEARB_CONFIRM_LIVE aqui, e não deve haver.
+#
+# Restart=ON-FAILURE, e NÃO `always`. O recorder roda para sempre; esta
+# rodada tem prazo. Com `always`, o systemd reiniciava o processo 10 s depois
+# de ele SAIR BEM — as duas semanas terminavam, o processo encerrava limpo, e
+# uma rodada NOVA começava sozinha, anexando ao mesmo diário, para sempre
+# (revisão do Codex, #131). O `main` já devolve 0 no sucesso e 1 quando a
+# rodada não produziu saída, então `on-failure` diz exatamente o que se
+# quer: rodada que terminou fica terminada, rodada que caiu volta.
+#
+# E o que `on-failure` NÃO resolve: um restart no MEIO da rodada. A
+# `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então
+# cada subida começa a contar do zero. O que salva a medida é o leitor:
+# `scripts/resumo_da_rodada_maker.py` corta o fluxo de relatos onde `parede_s`
+# cai e SOMA os trechos, porque os campos da caixa são cumulativos desde a
+# subida — o último relato de cada trecho é o total daquele trecho. O que se
+# perde são os segundos entre a queda e a volta, que não foram observados e
+# por isso não contam para as duas semanas.
+
+[Unit]
+Description=PULSEARB SHADOW maker (4.2) — rodada %i, cota nos pools, nao envia
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pulsearb
+Group=pulsearb
+WorkingDirectory=/opt/pulsearb
+
+# Mesma razão do recorder: ProtectSystem=strict exige a pasta existente ANTES
+# de o Python subir (226/NAMESPACE se não existir).
+ExecStartPre=+/bin/mkdir -p /opt/pulsearb/data/diarios /opt/pulsearb/data/risco
+ExecStartPre=+/bin/chown -R pulsearb:pulsearb /opt/pulsearb/data
+
+# NENHUMA LINHA `Environment=` PARA O PERFIL DO ENSAIO, e isto é o conserto,
+# não arrumação. O `systemd.exec(5)` diz que valores de `EnvironmentFile=`
+# vencem os de `Environment=` SEMPRE — não é questão de ordem. Enquanto o
+# perfil morava aqui, um `/opt/pulsearb/.env` de máquina que definisse
+# `PULSEARB_TOP_DE_POOLS_DE_REWARD`, um teto de risco, o caminho do registro
+# ou até `PULSEARB_MODE` vencia o arquivo versionado, nas quatro instâncias,
+# por 14 dias (revisão do Codex, #131). Tudo que precisa ser a palavra final
+# mora agora em arquivos de ambiente carregados DEPOIS do `.env`:
+#
+#   deploy/rodadas/comum.env  — o perfil, igual nas quatro
+#   deploy/rodadas/%i.env     — o registro de risco desta rodada, e a REGRA
+#
+# Segredos da máquina, e ele vem ANTES do arquivo da rodada. A ORDEM É A
+# REGRA: o `systemd.exec(5)` diz que, entre `EnvironmentFile=`, o ÚLTIMO
+# vence — e que qualquer `EnvironmentFile=` vence as linhas `Environment=`
+# acima. Com este arquivo por último, um `.env` de máquina que definisse
+# qualquer variável do ensaio (uma regra do maker, o caminho do registro, um
+# teto de stake) silenciaria o arquivo da rodada nas QUATRO instâncias, por
+# 14 dias, sem nada denunciar (revisão do Codex, #131).
+#
+# Opcional (`-`) porque ele pode não existir. Se um dia houver segredo aqui,
+# ele vem de arquivo 0600, nunca da unit (que é legível por todos).
+EnvironmentFile=-/opt/pulsearb/.env
+
+# O perfil do ensaio, VERSIONADO, depois do `.env` para vencê-lo.
+EnvironmentFile=/opt/pulsearb/deploy/rodadas/comum.env
+
+# A REGRA desta rodada e o registro dela, POR ÚLTIMO de todos.
+# E SEM o `-`: arquivo ausente tem de derrubar a unit. Com `-`, o systemd
+# ignoraria o arquivo que falta em silêncio e a instância subiria como rodada
+# BASE — quatro rodadas-base correndo em paralelo por 14 dias, todas verdes,
+# medindo a mesma coisa.
+EnvironmentFile=/opt/pulsearb/deploy/rodadas/%i.env
+
+# `--ate`, e NÃO `--duration`. Um prazo relativo reexecutado pelo restart no
+# dia 13 dá outros 14 dias: a rodada passaria a observar 27 e terminaria 13
+# dias depois das irmãs, e aí os rewards e o markout dela não cobrem mais o
+# MESMO intervalo de mercado que as quatro existem para comparar (revisão do
+# Codex, #131). O instante absoluto sobrevive ao restart sem persistir nada,
+# e como ele mora no `comum.env` as quatro terminam juntas por construção.
+#
+# `PULSEARB_RODADA_TERMINA_EM` é escrito no `comum.env` ANTES de subir; sem
+# ele a unit não sobe, que é o que se quer — uma rodada sem prazo combinado
+# não é uma das quatro.
+ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --ate ${PULSEARB_RODADA_TERMINA_EM} --diario data/diarios/shadow-maker-%i.jsonl
+
+Restart=on-failure
+# Saída 2 é ERRO DO OPERADOR, não rodada que caiu: o `main` devolve 2 quando
+# pedem LIVE a este processo e quando o `--ate` não é um instante válido (a
+# variável vazia no `comum.env` chega aqui). Reerguer nesses casos seria um
+# laço de restart a cada 10 s para sempre, sem nunca consertar nada — e com
+# `StartLimitIntervalSec=0` nem o limite de partidas o seguraria. Saída 1
+# (rodada que falhou) continua reerguendo, que é o ponto do `on-failure`.
+RestartPreventExitStatus=2
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/opt/pulsearb/data
+
+[Install]
+WantedBy=multi-user.target
