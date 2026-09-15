@@ -865,12 +865,24 @@ só existe na linha que o processo emite ao encerrar, marcada com
 certo — é assim que ele distingue rodada em curso de processo morto pelo
 systemd.
 
-**E se ele disser que a rodada RECOMEÇOU, a rodada não vale mais.** O
-`Restart=always` existe para a rede piscar sem matar as duas semanas, mas a
-`CaixaDoMaker` não persiste nada e o `run` refaz o relógio: o restart joga
-fora os rewards e o markout acumulados. O diário continua (é anexado) e o
-calendário na parede segue dizendo 14 dias. A saída é recomeçar a rodada
-limpa — esperar não recupera o que foi perdido.
+**Se ele disser que o PROCESSO VOLTOU, a conta já vem somada.** A
+`CaixaDoMaker` não persiste nada e o `run` refaz o relógio, então cada subida
+conta do zero — mas os campos da caixa são cumulativos desde a subida, e o
+leitor corta o fluxo onde `parede_s` cai e soma os trechos. O que não entra é
+o tempo fora do ar: ele não foi observado, e por isso **a rodada leva mais de
+14 dias de calendário para fechar 14 dias de medida**. Não recomece a rodada
+por causa disso; espere o tempo medido chegar.
+
+**Capture o journal inteiro, não só o fim.** A soma reconstrói a rodada a
+partir dos relatos, então um `--since` que corte trechos antigos perde a
+medida deles. Se o journal rotacionar durante as duas semanas
+(`journalctl --vacuum-*`, `SystemMaxUse`), o trecho rotacionado some com ele:
+vale exportar `relatorios/RELATOS_<rodada>.jsonl` de tempos em tempos e
+concatenar, em vez de contar com o journal no dia 14.
+
+**E a unit é `Restart=on-failure`, não `always`.** Uma rodada que terminou
+fica terminada: com `always`, ela reiniciava 10 s depois de encerrar bem e
+começava outra sozinha, anexando ao mesmo diário, para sempre.
 
 ### 10.1c. As quatro rodadas correm JUNTAS, não uma depois da outra
 

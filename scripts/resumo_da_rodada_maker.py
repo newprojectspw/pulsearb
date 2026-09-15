@@ -66,7 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from itertools import pairwise
+from copy import deepcopy
 from typing import Any
 
 from pulsearb.caminhos import caminho_de_diario_lido, caminho_de_relatorio_lido
@@ -268,6 +268,115 @@ def _percentil(ordenados: list[float], q: float) -> float | None:
     return round(ordenados[indice], 1)
 
 
+#: Campos CUMULATIVOS desde a subida do processo: o último relato de um
+#: trecho é o total daquele trecho, e a soma dos trechos é o total da rodada.
+CAMPOS_QUE_SOMAM = (
+    CAMPO_DOS_REWARDS, CAMPO_DO_MARKOUT_USDC, CAMPO_DAS_MEDIDAS,
+    CAMPO_DO_REPOUSO_S, CAMPO_DAS_ATRAVESSADAS, CAMPO_DAS_NO_NIVEL,
+    CAMPO_DOS_REENVIADOS, CAMPO_DO_LIQUIDO, CAMPO_DA_PAREDE, CAMPO_DO_SONO,
+)
+
+
+def segmentos(relatos: list[dict]) -> list[list[dict]]:
+    """Corta o fluxo onde `parede_s` CAI — cada trecho é uma subida do processo.
+
+    Dentro de um trecho `parede_s` só cresce; uma queda é o `run` refazendo
+    `inicio_parede`. É a assinatura do restart, e não há outra: nada mais no
+    relato muda quando o processo volta.
+    """
+    if not relatos:
+        return []
+    trechos: list[list[dict]] = [[relatos[0]]]
+    anterior = _ler(relatos[0], CAMPO_DA_PAREDE)
+    for relato in relatos[1:]:
+        atual = _ler(relato, CAMPO_DA_PAREDE)
+        if anterior is not None and atual is not None and atual < anterior:
+            trechos.append([])
+        trechos[-1].append(relato)
+        anterior = atual
+    return trechos
+
+
+def relato_da_rodada(relatos: list[dict]) -> dict[str, Any]:
+    """Os trechos somados num relato só, com a forma do original.
+
+    **Por que somar em vez de ler o último.** `Restart=on-failure` devolve a
+    rodada depois de uma queda de rede, mas a `CaixaDoMaker` não persiste
+    nada e cada subida conta do zero: ler só o último relato reportaria
+    apenas o trecho desde a última volta, como se fosse a rodada inteira.
+
+    **Por que isto não é uma segunda conta.** Nada aqui recalcula reward nem
+    markout: os totais de cada trecho são os que o motor publicou, e o que se
+    faz é somá-los. O markout em ¢/share e o ciclo de trabalho não somam —
+    são médias —, então entram ponderados pelo que o próprio motor publicou
+    ao lado deles (shares e tempo de parede).
+
+    **O que se perde, e é perda de verdade:** os segundos entre a queda e a
+    volta não foram observados, e por isso não contam para as duas semanas.
+    A rodada leva mais calendário do que 14 dias para fechar 14 dias de
+    medida — que é o número certo.
+    """
+    trechos = segmentos(relatos)
+    if len(trechos) <= 1:
+        return relatos[-1] if relatos else {}
+
+    ultimos = [t[-1] for t in trechos]
+    somado = deepcopy(ultimos[-1])
+
+    for campo in CAMPOS_QUE_SOMAM:
+        parcelas = [_ler(u, campo) for u in ultimos]
+        if any(p is None for p in parcelas):
+            continue
+        _escrever(somado, campo, sum(parcelas))
+
+    _escrever(somado, CAMPO_DO_MARKOUT_CS, _media_ponderada(
+        [(_ler(u, CAMPO_DO_MARKOUT_CS), _ler(u, "maker.caixa.markout.shares"))
+         for u in ultimos]
+    ))
+    _escrever(somado, CAMPO_DO_CICLO, _media_ponderada(
+        [(_ler(u, CAMPO_DO_CICLO), _ler(u, CAMPO_DA_PAREDE)) for u in ultimos]
+    ))
+    # `motivos` também é cumulativo por trecho, e é contagem: soma por chave.
+    motivos: dict[str, int] = {}
+    for ultimo in ultimos:
+        for nome, n in (_ler(ultimo, CAMPO_DOS_MOTIVOS) or {}).items():
+            motivos[nome] = motivos.get(nome, 0) + n
+    _escrever(somado, CAMPO_DOS_MOTIVOS, dict(sorted(motivos.items())))
+    return somado
+
+
+def _media_ponderada(pares: list[tuple[Any, Any]]) -> float | None:
+    """Média dos trechos, pelo peso que o motor publicou ao lado de cada uma.
+
+    Somar médias seria inventar número; e uma média simples daria o mesmo
+    peso a um trecho de 5 minutos e a um de 13 dias.
+    """
+    validos = [
+        (valor, peso) for valor, peso in pares
+        if valor is not None and isinstance(peso, int | float) and peso > 0
+    ]
+    if not validos:
+        return None
+    total = sum(peso for _, peso in validos)
+    return round(sum(valor * peso for valor, peso in validos) / total, 4)
+
+
+def _escrever(registro: dict, caminho: str, valor: Any) -> None:
+    """Grava num caminho pontilhado que JÁ EXISTE — não cria degrau.
+
+    Criar degrau esconderia o campo que sumiu do motor, que é exatamente o
+    que o `campo_ausente` existe para pegar.
+    """
+    passos = caminho.split(".")
+    atual = registro
+    for passo in passos[:-1]:
+        if not isinstance(atual, dict) or passo not in atual:
+            return
+        atual = atual[passo]
+    if isinstance(atual, dict) and passos[-1] in atual:
+        atual[passos[-1]] = valor
+
+
 def _julgar(
     relatos: list[dict], diario: dict[str, Any] | None = None
 ) -> tuple[str, str | None, dict[str, Any]]:
@@ -284,7 +393,9 @@ def _julgar(
         return NAO_AVALIAVEL, "ordem_sem_prefixo_de_sombra", {}
     if not relatos:
         return NAO_AVALIAVEL, "sem_relato", {}
-    ultimo = relatos[-1]
+    # O relato da RODADA, não o último trecho dela: `Restart=on-failure`
+    # devolve o processo depois de uma queda, e cada subida conta do zero.
+    ultimo = relato_da_rodada(relatos)
     lido = {campo: _ler(ultimo, campo) for campo in (
         CAMPO_DO_LIQUIDO, CAMPO_DOS_REWARDS, CAMPO_DO_MARKOUT_USDC,
         CAMPO_DO_MARKOUT_CS, CAMPO_DAS_MEDIDAS, CAMPO_DO_REPOUSO_S,
@@ -403,7 +514,9 @@ def _imprimir_tempo(lido: dict[str, Any]) -> None:
 
 
 def _imprimir_motivos(relatos: list[dict], quantos: int = 10) -> None:
-    motivos = _ler(relatos[-1], CAMPO_DOS_MOTIVOS) if relatos else None
+    # Do relato SOMADO: `motivos` é cumulativo desde a subida, então o último
+    # trecho sozinho contaria só as passadas desde a última volta.
+    motivos = _ler(relato_da_rodada(relatos), CAMPO_DOS_MOTIVOS) if relatos else None
     print("\nPOR QUE NÃO COTOU — acumulado desde o início da rodada")
     if not motivos:
         print("  — sem motivos no relato")
@@ -419,36 +532,30 @@ def _imprimir_motivos(relatos: list[dict], quantos: int = 10) -> None:
 
 
 def _imprimir_reinicios(relatos: list[dict]) -> None:
-    """Quantas vezes a rodada RECOMEÇOU, e por que isso muda o que se lê.
+    """Quantas vezes o processo voltou, e o que isso custou à medida.
 
-    `Restart=always` existe para duas semanas não terminarem porque a rede
-    piscou — mas o `run` refaz `inicio_parede` e a `CaixaDoMaker` **não
-    persiste nada**. Um restart, então, joga fora rewards e markout
-    acumulados e reinicia o relógio dos 14 dias; o diário continua (é
-    anexado), o calendário na parede diz 14 dias, e a conta abaixo cobre só
-    o último trecho.
+    `Restart=on-failure` devolve a rodada depois de uma queda de rede, mas a
+    `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`: cada
+    subida conta do zero. A conta acima já vem SOMADA por trecho, então os
+    rewards e o markout da rodada inteira estão lá — o que não está, e não
+    tem como estar, é o que aconteceu com o processo fora do ar.
 
-    O `curta_demais` já dá o veredito certo nesse caso — o que faltava era o
-    MOTIVO chegar a quem lê, para a saída ser "recomece a rodada limpa" e não
-    "o leitor está quebrado".
-
-    `parede_s` caindo entre dois relatos é a assinatura: dentro de um mesmo
-    trecho ele só cresce.
+    Por isso as duas semanas levam mais de 14 dias de calendário para fechar:
+    o que conta é tempo OBSERVADO.
     """
-    paredes = [_ler(r, CAMPO_DA_PAREDE) for r in relatos]
-    quedas = sum(
-        1
-        for antes, depois in pairwise(paredes)
-        if antes is not None and depois is not None and depois < antes
-    )
-    if not quedas:
+    trechos = segmentos(relatos)
+    if len(trechos) <= 1:
         return
+    paredes = [_ler(t[-1], CAMPO_DA_PAREDE) for t in trechos]
+    medidos = [f"{(p or 0) / 86400:.2f}" for p in paredes]
     print(
-        f"\n  A RODADA RECOMEÇOU {quedas}x (`parede_s` caiu entre relatos).\n"
-        "  A `CaixaDoMaker` não persiste nada e o `run` refaz o relógio: os\n"
-        "  rewards e o markout abaixo cobrem SÓ o trecho desde o último\n"
-        "  restart, não os 14 dias do calendário. A rodada precisa recomeçar\n"
-        "  limpa — esperar não recupera o que foi perdido."
+        f"\n  O PROCESSO VOLTOU {len(trechos) - 1}x — a conta acima é a SOMA de"
+        f" {len(trechos)} trechos.\n"
+        f"  medidos, em dias: {' + '.join(medidos)}\n"
+        "  A caixa não persiste, então cada subida conta do zero e o que se\n"
+        "  soma é o total publicado por trecho. O tempo fora do ar não foi\n"
+        "  observado e NÃO conta para as duas semanas — a rodada leva mais de\n"
+        "  14 dias de calendário para fechar 14 dias de medida."
     )
 
 

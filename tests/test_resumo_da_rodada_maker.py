@@ -27,6 +27,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -592,35 +593,6 @@ class TestOsAchadosDaRevisao:
 
         assert resumo._julgar([relato])[1] == "rodada_dormiu"
 
-    def test_restart_e_DITO_porque_a_caixa_nao_persiste(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        """`Restart=always` + caixa em memória = conta perdida, em silêncio.
-
-        O `run` refaz `inicio_parede` e a `CaixaDoMaker` não grava nada em
-        disco: um restart joga fora rewards e markout acumulados e reinicia o
-        relógio dos 14 dias. O diário continua (é anexado) e o calendário na
-        parede diz 14 dias, então nada denuncia.
-
-        O `curta_demais` já dá o veredito certo; o que faltava era o MOTIVO
-        chegar a quem lê, para a saída ser "recomece limpa" em vez de "o
-        leitor está quebrado".
-        """
-        monkeypatch.chdir(tmp_path)
-        antes, depois = _relato(), _relato()
-        antes["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
-        depois["vigilia"]["da_rodada"]["parede_s"] = 200.0
-        (tmp_path / "relatorios").mkdir()
-        (tmp_path / "relatorios" / "R.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in (antes, depois)) + "\n", encoding="utf-8"
-        )
-
-        resumo.main(["--relatos", "relatorios/R.jsonl"])
-        saida = capsys.readouterr().out
-
-        assert "A RODADA RECOMEÇOU 1x" in saida
-        assert "recomeçar" in saida
-
     def test_rodada_sem_restart_nao_diz_nada_sobre_restart(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -634,7 +606,7 @@ class TestOsAchadosDaRevisao:
 
         resumo.main(["--relatos", "relatorios/R.jsonl"])
 
-        assert "RECOMEÇOU" not in capsys.readouterr().out
+        assert "O PROCESSO VOLTOU" not in capsys.readouterr().out
 
     def test_todo_motivo_declarado_e_ALCANCAVEL(self):
         """Dois destes motivos estavam escritos em `MOTIVOS` e nunca eram
@@ -656,3 +628,191 @@ class TestOsAchadosDaRevisao:
         assert not nao_usados, (
             f"motivos declarados e nunca devolvidos: {nao_usados}"
         )
+
+
+class TestASomaDosTrechos:
+    """`Restart` devolve a rodada; a caixa não devolve a conta.
+
+    A `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então
+    cada subida conta do zero. Ler só o último relato reportaria o trecho
+    desde a última volta como se fosse a rodada inteira — e como os campos da
+    caixa são cumulativos DESDE A SUBIDA, o último relato de cada trecho é o
+    total daquele trecho e a soma deles é o total da rodada.
+    """
+
+    def _dois_trechos(self):
+        """Sete dias, queda, mais sete dias — cada um com metade da conta.
+
+        Devolve o ÚLTIMO relato de cada trecho: é ele que carrega o total do
+        trecho, porque os campos da caixa são cumulativos desde a subida.
+        """
+        metade = resumo.PAREDE_EXIGIDA_S / 2
+        a, b = _relato(), _relato()
+        del a["fim_da_rodada"]
+        for relato in (a, b):
+            relato["vigilia"]["da_rodada"]["parede_s"] = metade
+            relato["maker"]["caixa"]["rewards_pro_rata_usdc"] = 100.0
+            relato["maker"]["caixa"]["markout"]["resultado_usdc"] = -25.0
+            relato["maker"]["caixa"]["liquido_pro_rata_usdc"] = 75.0
+            relato["maker"]["caixa"]["markout"]["medidas"] = 26
+            relato["maker"]["motivos"] = {"repousada": 450}
+        return a, b
+
+    def _fluxo(self, a, b):
+        """O fluxo como o journal o traz: o primeiro relato do trecho 2 vem
+        com `parede_s` baixo, e é essa QUEDA que marca a subida nova."""
+        volta = deepcopy(b)
+        volta["vigilia"]["da_rodada"]["parede_s"] = 60.0
+        return [a, volta, b]
+
+    def test_a_queda_de_parede_s_corta_o_trecho(self):
+        a, b = self._dois_trechos()
+
+        assert len(resumo.segmentos(self._fluxo(a, b))) == 2
+        assert len(resumo.segmentos([a])) == 1
+
+    def test_dentro_de_um_trecho_parede_s_so_cresce_e_nao_corta(self):
+        antes, depois = _relato(), _relato()
+        antes["vigilia"]["da_rodada"]["parede_s"] = 100.0
+        depois["vigilia"]["da_rodada"]["parede_s"] = 200.0
+
+        assert len(resumo.segmentos([antes, depois])) == 1
+
+    def test_os_dois_trechos_SOMAM_e_fecham_as_duas_semanas(self):
+        """Sem somar, cada trecho tem 7 dias e a rodada sairia `curta_demais`.
+
+        Este é o custo real de ler só o último relato: 14 dias de medida
+        legítima jogados fora porque a rede piscou no meio.
+        """
+        a, b = self._dois_trechos()
+
+        veredito, motivo, lido = resumo._julgar(self._fluxo(a, b))
+
+        assert (veredito, motivo) == (resumo.PASSA, None)
+        assert lido[resumo.CAMPO_DA_PAREDE] == resumo.PAREDE_EXIGIDA_S
+        assert lido[resumo.CAMPO_DOS_REWARDS] == 200.0
+        assert lido[resumo.CAMPO_DO_LIQUIDO] == 150.0
+        assert lido[resumo.CAMPO_DAS_MEDIDAS] == 52
+
+    def test_um_trecho_so_devolve_o_relato_como_veio(self):
+        """Sem restart, nada é somado — o caminho comum não muda."""
+        relato = _relato()
+
+        assert resumo.relato_da_rodada([relato]) is relato
+
+    def test_o_markout_em_centavos_e_PONDERADO_pelas_shares(self):
+        """Somar médias inventaria número; média simples daria o mesmo peso a
+        um trecho de 5 min e a um de 13 dias."""
+        a, b = self._dois_trechos()
+        a["maker"]["caixa"]["markout"]["centavos_por_share"] = -1.0
+        a["maker"]["caixa"]["markout"]["shares"] = 1000.0
+        b["maker"]["caixa"]["markout"]["centavos_por_share"] = -0.2
+        b["maker"]["caixa"]["markout"]["shares"] = 3000.0
+
+        somado = resumo.relato_da_rodada(self._fluxo(a, b))
+
+        assert somado["maker"]["caixa"]["markout"]["centavos_por_share"] == -0.4
+
+    def test_o_ciclo_de_trabalho_e_PONDERADO_pelo_tempo_de_parede(self):
+        a, b = self._dois_trechos()
+        a["vigilia"]["da_rodada"]["parede_s"] = 3600.0
+        a["vigilia"]["da_rodada"]["ciclo_de_trabalho"] = 0.5
+        b["vigilia"]["da_rodada"]["parede_s"] = 3600.0 * 3
+        b["vigilia"]["da_rodada"]["ciclo_de_trabalho"] = 1.0
+
+        somado = resumo.relato_da_rodada(self._fluxo(a, b))
+
+        assert somado["vigilia"]["da_rodada"]["ciclo_de_trabalho"] == 0.875
+
+    def test_os_motivos_somam_por_chave(self):
+        """`motivos` é cumulativo desde a subida: o último trecho sozinho
+        contaria só as passadas desde a última volta."""
+        a, b = self._dois_trechos()
+        a["maker"]["motivos"] = {"repousada": 100, "sem_pool_de_reward": 7}
+        b["maker"]["motivos"] = {"repousada": 300, "manter": 5}
+
+        motivos = resumo.relato_da_rodada(self._fluxo(a, b))["maker"]["motivos"]
+
+        assert motivos == {"manter": 5, "repousada": 400, "sem_pool_de_reward": 7}
+
+    def test_o_tempo_FORA_DO_AR_nao_conta_para_as_duas_semanas(self):
+        """Somar `parede_s` dos trechos mede tempo OBSERVADO, não calendário.
+
+        É conservador de propósito: a rodada leva mais de 14 dias de
+        calendário para fechar 14 dias de medida, e é o número certo — o que
+        o processo não viu não vira observação.
+        """
+        a, b = self._dois_trechos()
+        a["vigilia"]["da_rodada"]["parede_s"] = resumo.PAREDE_EXIGIDA_S / 2
+        b["vigilia"]["da_rodada"]["parede_s"] = resumo.PAREDE_EXIGIDA_S / 2 - 3600
+
+        veredito, motivo, _ = resumo._julgar(self._fluxo(a, b))
+
+        assert (veredito, motivo) == (resumo.NAO_AVALIAVEL, "curta_demais")
+
+    def test_o_fim_da_rodada_vem_do_ULTIMO_trecho(self):
+        """Um trecho antigo que terminou não faz a rodada ter terminado."""
+        a, b = self._dois_trechos()
+        a["fim_da_rodada"] = True
+        del b["fim_da_rodada"]
+
+        assert resumo._julgar(self._fluxo(a, b))[1] == "rodada_nao_terminou"
+
+    def test_o_resumo_DIZ_quantas_vezes_o_processo_voltou(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        a, b = self._dois_trechos()
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in self._fluxo(a, b)) + "\n",
+            encoding="utf-8",
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+        saida = capsys.readouterr().out
+
+        assert "O PROCESSO VOLTOU 1x" in saida
+        assert "SOMA de 2 trechos" in saida
+
+
+class TestAUnitNaoReiniciaDepoisDoSucesso:
+    """`Restart=always` fazia a rodada recomeçar sozinha, para sempre.
+
+    Achado da revisão do Codex (#131): as duas semanas terminavam, o processo
+    saía limpo, e o systemd o reiniciava 10 s depois — uma rodada NOVA
+    começava sozinha, anexando ao mesmo diário. O `main` já devolve 0 no
+    sucesso e 1 quando a rodada não produziu saída, então `on-failure` diz
+    exatamente o que se quer.
+    """
+
+    def _units(self):
+        raiz = Path(__file__).resolve().parents[1] / "deploy"
+        return [
+            raiz / "pulsearb-shadow-maker.service",
+            raiz / "pulsearb-shadow-maker@.service",
+        ]
+
+    def test_as_duas_units_sao_on_failure(self):
+        for unit in self._units():
+            diretivas = [
+                linha.strip()
+                for linha in unit.read_text(encoding="utf-8").splitlines()
+                if linha.strip().startswith("Restart=")
+            ]
+
+            assert diretivas == ["Restart=on-failure"], f"{unit.name}: {diretivas}"
+
+    def test_o_shadow_sai_com_ZERO_no_sucesso(self):
+        """`on-failure` só funciona se o código de saída disser a verdade.
+
+        Percorrido no fonte: um `return 0` incondicional faria uma rodada
+        morta ficar morta, e um `return 1` sempre faria a rodada reiniciar
+        para sempre — os dois desfazem este conserto sem tocar na unit.
+        """
+        fonte = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "pulsearb" / "live" / "shadow.py"
+        ).read_text(encoding="utf-8")
+
+        assert "return 1 if processo.falhou else 0" in fonte

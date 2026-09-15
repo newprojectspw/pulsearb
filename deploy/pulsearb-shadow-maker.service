@@ -23,17 +23,22 @@
 # longo — os ~120 maiores pools (top_de_pools_de_reward). Sem ela a rodada é a
 # do taker, que está medida e reprovada.
 #
-# Restart=always pelo mesmo motivo do recorder: duas semanas não podem
-# terminar porque a rede piscou. O diário é ANEXADO (caminho explícito em
-# --diario), então um restart continua a MESMA rodada em vez de abrir outra.
+# Restart=ON-FAILURE, e NÃO `always`. O recorder roda para sempre; esta
+# rodada tem prazo. Com `always`, o systemd reiniciava o processo 10 s depois
+# de ele SAIR BEM — as duas semanas terminavam, o processo encerrava limpo, e
+# uma rodada NOVA começava sozinha, anexando ao mesmo diário, para sempre
+# (revisão do Codex, #131). O `main` já devolve 0 no sucesso e 1 quando a
+# rodada não produziu saída, então `on-failure` diz exatamente o que se
+# quer: rodada que terminou fica terminada, rodada que caiu volta.
 #
-# MAS O DIÁRIO É A ÚNICA COISA QUE CONTINUA, e isto precisa estar escrito: a
-# `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então um
-# restart joga fora os rewards e o markout acumulados e reinicia o relógio
-# dos 14 dias. O calendário na parede segue dizendo 14 dias e nada no relato
-# denuncia. `scripts/resumo_da_rodada_maker.py` detecta (`parede_s` caindo
-# entre relatos) e diz; a saída é recomeçar a rodada limpa, porque esperar
-# não recupera o que foi perdido.
+# E o que `on-failure` NÃO resolve: um restart no MEIO da rodada. A
+# `CaixaDoMaker` não persiste nada e o `run` refaz `inicio_parede`, então
+# cada subida começa a contar do zero. O que salva a medida é o leitor:
+# `scripts/resumo_da_rodada_maker.py` corta o fluxo de relatos onde `parede_s`
+# cai e SOMA os trechos, porque os campos da caixa são cumulativos desde a
+# subida — o último relato de cada trecho é o total daquele trecho. O que se
+# perde são os segundos entre a queda e a volta, que não foram observados e
+# por isso não contam para as duas semanas.
 
 [Unit]
 Description=PULSEARB SHADOW maker (4.2) — cota nos pools, nao envia
@@ -106,7 +111,7 @@ ExecStart=/opt/pulsearb/.venv/bin/python -m pulsearb.live.shadow --duration 14d 
 # (revisão do Codex, #131). Este arquivo carrega SEGREDO, e só.
 EnvironmentFile=-/opt/pulsearb/.env
 
-Restart=always
+Restart=on-failure
 RestartSec=10
 
 StandardOutput=journal
