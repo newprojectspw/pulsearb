@@ -439,3 +439,177 @@ class TestCotarAPartirDoMeio:
         i = _indice(e, tamanho=20.0)
         i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.40, 100)], [])))
         assert i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem is None
+
+
+class TestOQueFaltavaDoPolyMaker:
+    """Pausa por fill tóxico, `c_vol · σ`, `flow_z` e o reprice por estratégia.
+
+    As quatro peças do `poly-maker` que a grade focada ainda não tinha
+    separado. O que se prende aqui é o MECANISMO — quando cada uma age e
+    que ela nunca melhora o topo —, não o efeito sobre a gravação.
+    """
+
+    def test_fill_atravessado_pausa_a_janela_inteira_e_ela_volta_depois(self) -> None:
+        e = _estrategia(pausa_apos_fill_s=30.0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t, _book(DOWN, [(0.38, 100)], [(0.40, 100)])))
+        # O taker passa POR BAIXO do nosso bid do Up: fill atravessado.
+        i._on_poly_book(_rec(t + S, _print(UP, 0.55, 5)))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert pernas[(e, UP)].execucoes_atravessadas == 1
+        # O Down, que não executou, é recolhido na próxima leitura do livro
+        # (o cancelamento é mandado ali e vale na leitura seguinte).
+        i._on_poly_book(_rec(t + 2 * S, _book(DOWN, [(0.38, 100)], [(0.40, 100)])))
+        assert pernas[(e, DOWN)].ordem is not None
+        assert pernas[(e, DOWN)].ordem.cancela_em_ns == t + 2 * S
+        assert pernas[(e, DOWN)].recolhidas_por_pausa == 1
+        i._on_poly_book(_rec(t + 3 * S, _book(DOWN, [(0.38, 100)], [(0.40, 100)])))
+        assert pernas[(e, DOWN)].ordem is None
+        # Dentro da pausa não recoloca; passada a pausa, volta.
+        i._on_poly_book(_rec(t + 20 * S, _book(DOWN, [(0.38, 100)], [(0.40, 100)])))
+        assert pernas[(e, DOWN)].ordem is None
+        i._on_poly_book(_rec(t + 32 * S, _book(DOWN, [(0.38, 100)], [(0.40, 100)])))
+        assert pernas[(e, DOWN)].ordem is not None
+
+    def test_fill_no_nivel_nao_pausa(self) -> None:
+        e = _estrategia(pausa_apos_fill_s=30.0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _print(UP, 0.60, 110)))
+        assert i.pausado_ate_ns == {}
+
+    def test_a_volatilidade_curta_desce_o_alvo_na_amplitude_do_meio(self) -> None:
+        e = _estrategia(vol_x=1.0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        # Meio 0,61; depois 0,64 (3 ticks de amplitude em 10 s); o topo volta
+        # a 0,60 e o alvo fica 3 ticks abaixo dele.
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        i._on_poly_book(_rec(t + S, _book(UP, [(0.63, 100)], [(0.65, 100)])))
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and abs(ordem.preco - 0.57) < 1e-9
+        # Passado o horizonte, a amplitude esvazia e o alvo volta ao topo.
+        i._on_poly_book(_rec(t + 20 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and abs(ordem.preco - 0.60) < 1e-9
+
+    def test_fluxo_vendedor_desce_o_alvo_e_fluxo_comprador_nao_melhora_o_topo(self) -> None:
+        e = _estrategia(fluxo_ticks=2.0)
+        i = _indice(e, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        # Vendas do taker abaixo do nosso preço? Não: no ASK, para não
+        # executar contra nós — o que interessa é o SINAL do fluxo. Usa um
+        # print SELL acima do nosso bid (não executa) e mede o alvo.
+        i._on_poly_book(_rec(t + S, _print(UP, 0.61, 50)))
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        ordem = i.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        # z = −1 → 2 ticks abaixo do topo.
+        assert ordem is not None and abs(ordem.preco - 0.58) < 1e-9
+        # Agora, numa janela nova, compras do taker maiores que as vendas:
+        # z > 0 empurra o alvo para cima, mas ele é no máximo o topo.
+        j = _indice(e, tamanho=20.0)
+        j._on_poly_book(_rec(t, _print(UP, 0.62, 500, side="BUY")))
+        j._on_poly_book(_rec(t + S, _print(UP, 0.61, 50)))
+        j._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        assert abs(j._z_do_fluxo(UP, t + 2 * S) - (450 / 550)) < 1e-9
+        ordem = j.janelas_cotadas[SLUG].pernas[(e, UP)].ordem
+        assert ordem is not None and abs(ordem.preco - 0.60) < 1e-9
+
+    def test_a_histerese_segura_a_ordem_quando_o_alvo_desce_pouco(self) -> None:
+        reage = _estrategia(delta_do_microprice=3)
+        descansa = _estrategia(delta_do_microprice=3, histerese_ticks=2)
+        i = _indice(reage, descansa, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 900)], [(0.66, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.60) < 1e-9
+        # Microprice 0,606 − 3 ticks = 0,576 → piso 0,57: o alvo caiu 3
+        # ticks. Sem histerese recoloca; com histerese de 2 também (3 > 2).
+        i._on_poly_book(_rec(t + S, _book(UP, [(0.60, 100)], [(0.66, 900)])))
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.57) < 1e-9
+        assert abs(pernas[(descansa, UP)].ordem.preco - 0.57) < 1e-9
+        # Topo a 0,58 e microprice 0,582: alvo 0,55, 2 ticks abaixo da ordem.
+        # Sem histerese recoloca; com histerese de 2 ticks NÃO (2 não é
+        # maior que 2) — a ordem fica onde está, com a fila que já tem.
+        i._on_poly_book(_rec(t + 2 * S, _book(UP, [(0.58, 100)], [(0.60, 900)])))
+        assert pernas[(reage, UP)].ordem is not None
+        assert abs(pernas[(reage, UP)].ordem.preco - 0.55) < 1e-9
+        assert abs(pernas[(descansa, UP)].ordem.preco - 0.57) < 1e-9
+        assert pernas[(descansa, UP)].recolocacoes < pernas[(reage, UP)].recolocacoes
+
+    def test_o_reprice_da_estrategia_sobrescreve_o_global(self) -> None:
+        reage = _estrategia(reprice_ticks=1)
+        descansa = _estrategia(reprice_ticks=4)
+        i = _indice(reage, descansa, tamanho=20.0)
+        t = T0 + 10 * S
+        i._on_poly_book(_rec(t, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        # O topo sobe 2 ticks: com reprice 1 recoloca, com reprice 4 descansa.
+        i._on_poly_book(_rec(t + S, _book(UP, [(0.62, 100)], [(0.64, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert pernas[(reage, UP)].recolocacoes == 1
+        assert pernas[(descansa, UP)].recolocacoes == 0
+        assert abs(pernas[(descansa, UP)].ordem.preco - 0.60) < 1e-9
+
+
+class TestOndeCotar:
+    """O filtro de duração/ativo: a janela filtrada não recebe cotação NEM
+    entra na contagem de cotadas — o resto continua igual."""
+
+    def test_janela_de_5_min_do_btc_fica_fora_pelo_filtro_de_duracao(self) -> None:
+        cota, filtra = _estrategia(), _estrategia(duracao_min_s=900)
+        i = _indice(cota, filtra)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert pernas[(cota, UP)].ordem is not None
+        assert (filtra, UP) not in pernas
+        # E um print que executaria a cotação não executa o que não existe.
+        i._on_poly_book(_rec(T0 + 11 * S, _print(UP, 0.58, 5)))
+        assert pernas[(cota, UP)].executado == 20.0
+        assert (filtra, UP) not in pernas
+        assert i._resumo_da_estrategia(cota, detalhe=False)["janelas"]["cotadas"] == 1
+        assert i._resumo_da_estrategia(filtra, detalhe=False)["janelas"]["cotadas"] == 0
+
+    def test_o_filtro_de_ativo_le_o_asset_da_janela(self) -> None:
+        sem_btc, sem_eth = _estrategia(sem_ativos=("btc",)), _estrategia(sem_ativos=("eth",))
+        i = _indice(sem_btc, sem_eth)
+        i._on_poly_book(_rec(T0 + 10 * S, _book(UP, [(0.60, 100)], [(0.62, 100)])))
+        pernas = i.janelas_cotadas[SLUG].pernas
+        assert (sem_btc, UP) not in pernas
+        assert pernas[(sem_eth, UP)].ordem is not None
+        assert sem_btc.nome.endswith("_sem-btc")
+        assert "_dur-" not in sem_eth.nome
+
+    def test_a_grade_de_onde_cotar_muda_so_o_filtro_sobre_a_base_dos_bots(self) -> None:
+        from dataclasses import asdict
+
+        grade = mp.estrategias_de_onde_cotar()
+        base = asdict(mp.estrategias_dos_bots()[0])
+        assert asdict(grade[0]) == base
+        assert len({e.nome for e in grade}) == len(grade)
+        filtros = {"duracao_min_s", "sem_ativos"}
+        for e in grade[1:5]:
+            assert {k for k, v in asdict(e).items() if v != base[k]} <= filtros
+        for e in grade[5:]:
+            fora = {k for k, v in asdict(e).items() if v != base[k]}
+            assert fora - filtros == {"pausa_apos_fill_s", "reprice_ticks"}
+
+
+def test_a_grade_dos_bots_isola_cada_peca_sobre_a_mesma_base() -> None:
+    from dataclasses import asdict
+
+    grade = mp.estrategias_dos_bots()
+    assert len({e.nome for e in grade}) == len(grade)
+    base = asdict(grade[0])
+    assert base["delta_do_microprice"] == 1 and base["recolher_ms"] == 245.0
+    # Cada variante muda UMA coisa em relação à base — menos as três
+    # combinações declaradas no fim, que mudam duas ou três.
+    diferencas = [
+        sum(1 for k, v in asdict(e).items() if v != base[k]) for e in grade[1:]
+    ]
+    assert diferencas[:-5] == [1] * (len(grade) - 6)
+    assert diferencas[-5:] == [2, 2, 2, 3, 3]
