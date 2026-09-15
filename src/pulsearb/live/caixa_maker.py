@@ -173,6 +173,10 @@ class CaixaDoMaker:
     #: e contados. Uma perna executada saiu do livro; contá-la de novo a cada
     #: print multiplicava execuções, shares e custo pelo número de prints.
     prints_em_perna_consumida: int = 0
+    #: Prints cujo carimbo do SERVIDOR é anterior à cotação: reenvio de
+    #: reassinatura, não execução nossa. Contado para o relato mostrar quanto
+    #: disso o feed manda — o número nunca tinha sido publicado.
+    prints_reenviados: int = 0
     #: Passadas em que as duas pernas já estavam consumidas: tempo que NÃO é
     #: repouso, e reward que NÃO se ganha.
     acertos_apos_execucao: int = 0
@@ -300,6 +304,15 @@ class CaixaDoMaker:
             self.prints_vistos += 1
             if negocio.lado != "SELL" or negocio.preco > preco_nosso + EPS:
                 continue
+            if _quando_o_negocio_aconteceu_ns(negocio) < int(aberta.desde_epoch * 1e9):
+                # O negócio aconteceu ANTES de esta cotação entrar no livro:
+                # ela não estava lá para ser executada. O filtro de cima é
+                # pela CHEGADA, e uma reassinatura reenvia `last_trade_price`
+                # antigo — que entrava aqui como execução nossa, consumia a
+                # perna e fazia o fill seguinte, real, ser descartado como
+                # perna consumida (revisão do Codex, #131).
+                self.prints_reenviados += 1
+                continue
             if restante[indice] <= 0.0:
                 self.prints_em_perna_consumida += 1
                 continue
@@ -316,16 +329,10 @@ class CaixaDoMaker:
                 # atrás. Armar a pausa por ele tiraria do livro uma cotação
                 # contra a qual ninguém negociou (revisão do Codex, #131).
                 # Sem carimbo do servidor vale a chegada, que é o que há.
-                quando = _quando_o_negocio_aconteceu_ns(negocio)
-                # E só se o negócio aconteceu DEPOIS de a cotação entrar: um
-                # reenvio de 10 s atrás numa cotação de 5 s passa pelo filtro
-                # de chegada, é recente o bastante para a pausa valer, e teria
-                # tirado do livro uma ordem que aquele negócio não pôde ter
-                # executado — ela nem existia (revisão do Codex, #131).
-                if quando >= int(aberta.desde_epoch * 1e9):
-                    self.ultimo_fill_toxico_ns[slug] = max(
-                        self.ultimo_fill_toxico_ns.get(slug, 0), quando
-                    )
+                self.ultimo_fill_toxico_ns[slug] = max(
+                    self.ultimo_fill_toxico_ns.get(slug, 0),
+                    _quando_o_negocio_aconteceu_ns(negocio),
+                )
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
                     slug, aberta, params,
@@ -474,6 +481,7 @@ class CaixaDoMaker:
             "prints_vistos": self.prints_vistos,
             "prints_em_perna_consumida": self.prints_em_perna_consumida,
             "execucoes_possiveis": {
+                "reenviados": self.prints_reenviados,
                 "atravessadas": self.execucoes_atravessadas,
                 "no_nivel": self.execucoes_no_nivel,
                 "shares_atravessadas": round(self.shares_atravessadas, 2),

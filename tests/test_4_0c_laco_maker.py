@@ -922,14 +922,19 @@ class TestPausaPorFillToxico:
             agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
         )
 
-        assert laco.caixa.execucoes_atravessadas == 1  # a execução conta
-        assert efeitos == [] and len(laco.abertas) == 1  # a pausa não arma
+        # NÃO é execução nossa: a cotação não estava no livro quando aquele
+        # negócio aconteceu. Entra no relato como reenvio, com nome.
+        assert laco.caixa.execucoes_atravessadas == 0
+        assert laco.caixa.prints_reenviados == 1
+        assert efeitos == [] and len(laco.abertas) == 1
         assert "pausa_por_fill_toxico" not in laco.motivos
 
     async def test_reenvio_ANTERIOR_a_cotacao_nao_arma_a_pausa(self, tmp_path):
         """Um reenvio recente o bastante para a pausa valer, mas de um negócio
         ANTERIOR à cotação, tiraria do livro uma ordem que aquele negócio não
-        pôde ter executado — ela nem existia (revisão do Codex, #131)."""
+        pôde ter executado — ela nem existia. E não é só a pausa: contá-lo
+        como execução CONSUMIA a perna, e o fill real seguinte era descartado
+        como perna consumida (revisão do Codex, #131)."""
         laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
         aberta = laco.abertas["btc-updown-4h-1"]
         assert aberta.desde_epoch == 1000.0
@@ -948,7 +953,38 @@ class TestPausaPorFillToxico:
         )
 
         assert efeitos == [] and len(laco.abertas) == 1
+        assert laco.caixa.prints_reenviados == 1
+        assert laco.caixa.execucoes_atravessadas == 0
         assert "pausa_por_fill_toxico" not in laco.motivos
+
+    async def test_o_fill_REAL_depois_de_um_reenvio_ainda_arma_a_pausa(self, tmp_path):
+        """O que o reenvio contado como execução estragava: ele CONSUMIA a
+        perna, e o fill real seguinte era descartado como perna consumida —
+        a pausa nunca armava, justamente no caso em que ela deve armar."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        reenvio = SimpleNamespace(
+            ts_ns=int(1004e9), ts_servidor_ms=995_000,  # antes da cotação
+            preco=0.47, tamanho=50.0, lado="SELL", token="tok-up",
+        )
+        real = SimpleNamespace(
+            ts_ns=int(1006e9), ts_servidor_ms=1_006_000,  # depois dela
+            preco=0.47, tamanho=50.0, lado="SELL", token="tok-up",
+        )
+
+        def negocios(token_id, *, ts_ns):
+            if token_id != "tok-up":
+                return []
+            return [n for n in (reenvio, real) if n.ts_ns > ts_ns]
+
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1010.0, agora_ns=int(1010e9), negocios_desde=negocios,
+        )
+
+        assert laco.caixa.prints_reenviados == 1
+        assert laco.caixa.execucoes_atravessadas == 1
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 1
 
     async def test_fill_NO_NIVEL_nao_pausa(self, tmp_path):
         """A medida é sobre quem ATRAVESSA. Um print no nosso preço é a fila
