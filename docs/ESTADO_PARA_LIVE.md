@@ -840,10 +840,16 @@ por estar no livro, resolução em dias. `scripts/markout_dos_pools.py
 --gravar` passou a guardar os eventos crus no formato do recorder (com um
 registro `pools_snapshot` que diz quais dois tokens formam cada par, mais
 `rewards_max_spread` e `rewards_min_size` do instante da coleta — eles mudam
-ao vivo), e `scripts/maker_de_pares_nos_pools.py` (13 testes) roda o MESMO
+ao vivo), e `scripts/maker_de_pares_nos_pools.py` (14 testes) roda o MESMO
 motor sobre essa gravação, com três diferenças que não podiam ser
 escondidas:
 
+- **a grade traz as peças que a grade dos bots mediu no Up/Down** sobre a
+  célula do laço ao vivo (1 tick do meio, recolher a 245 ms): microprice,
+  pausa de 30 s depois do fill atravessado, reprice de 4 ticks, histerese
+  de 2 ticks, e pausa + reprice — porque aqui cada recolhida também CUSTA
+  reward (a receita só conta com as duas pernas descansando), e o número
+  do Up/Down não vale para os pools sem medir;
 - **a perna solta é marcada a preço de saída** (melhor bid do fim, menos o
   fee de taker): marcar a resultado num mercado que não resolveu seria
   inventar o resultado. Sem bid no fim, a janela sai do P&L;
@@ -872,12 +878,90 @@ respondeu sem assinatura ativa — fica anotado que a melhor aproximação de
 decisão→ack ainda é o REST quente.
 
 Ou seja: **cancelar leva ~245 ms no p50 e ~350 ms no p99 daqui**, não os
-100 ms que a rodada do dia usou. A grade de 4 h mediu os três: −31,87 (100
-ms), −53,07 (300 ms), −56,55 (1000 ms) contra −583,54 parado — o recolher
-continua valendo a 300 ms, mas o número do dia inteiro tem de ser refeito na
-latência real, e é isso que falta. Uma VPS perto do CLOB muda esse número;
-a decisão de onde hospedar passa a ter um efeito medido em USDC, não só em
-milissegundos.
+100 ms que a rodada do dia usou. **O dia inteiro na latência real
+(`relatorios/PARES_LATENCIA_20260913.json`, `--grade latencia`, 1.000
+janelas, lote 20, juntando ao topo, salto 3 bps, termo determinístico
+`travado + rebate`):**
+
+| recolher | determinístico | travado | rebate | soma paga do par | pares |
+|---|---|---|---|---|---|
+| parado | −2.573,00 | −2.665,60 | 92,59 | 1,198 | 683 |
+| 100 ms | −34,67 | −80,21 | 45,53 | 1,015 | 334 |
+| **245 ms (p50 daqui)** | **−144,70** | −196,84 | 52,14 | 1,028 | 362 |
+| 350 ms (p99 daqui) | −183,05 | −237,85 | 54,80 | 1,033 | 370 |
+| 600 ms | −229,17 | −286,04 | 56,87 | 1,041 | 383 |
+| 1000 ms | −315,48 | −376,79 | 61,31 | 1,048 | 409 |
+
+Cada 100 ms a mais de latência custa **30–40 USDC por dia** neste lote: o
+que a ordem parada perde (−2.573) o recolher recupera quase inteiro a 100 ms
+e só 94 % a 245 ms — e os 6 % que sobram são o dobro do rebate do dia. A
+soma paga do par sobe com a latência (1,015 → 1,028 → 1,048) porque os
+pares a mais que entram são justamente os que o taker fecha contra nós
+enquanto o cancelamento viaja. A perna solta fica ruído em todas as linhas
+(sigma 137–149; residual de +199,95 a −111,93 sem ordem). Uma VPS perto do
+CLOB vale, medido, da ordem de 110 USDC/dia neste lote em relação a esta
+casa — a decisão de onde hospedar tem efeito em USDC, não só em
+milissegundos. O que a latência faz à configuração do MICROPRICE (a que
+vira o termo positivo) é a linha-base da grade `bots`, abaixo.
+
+**O que faltava do `poly-maker` agora tem eixo, teste e grade — e falta o
+número.** Sobre a melhor configuração medida (microprice −1 tick, lote 20,
+salto 3 bps) e na latência REAL desta máquina (recolher a 245 ms),
+`scripts/maker_de_pares.py --grade bots` isola cada peça que o estudo
+apontou e ainda não tinha sido separada: (1) **pausa por fill tóxico** —
+depois de um fill atravessado a janela inteira fica 30 ou 90 s sem cotação
+(o regime EVENT deles disparado pelo NOSSO fill, não pelo salto); (2)
+**`c_vol · σ`** — o alvo desce `vol_x ×` a amplitude do meio dos últimos
+10 s, em ticks; (3) **`flow_z`** — o alvo anda com o fluxo assinado dos
+prints dos últimos 10 s, nunca acima do topo; (4) **`reprice_ticks` por
+estratégia** (1 e 4, "descansar > reagir"); mais a sensibilidade de
+`atravessada = tamanho_do_print`, (5) a **histerese do reconciler** deles
+(só recolocar mais fundo se o alvo caiu mais que 2 ticks) e as combinações
+que o `poly-maker` roda juntas. Os mecanismos estão presos em 7 testes novos
+(`tests/test_maker_de_pares.py`, `TestOQueFaltavaDoPolyMaker`): a pausa
+recolhe as DUAS pernas e volta depois; fill no nível não pausa; a vol
+esvazia passado o horizonte; fluxo comprador não melhora o topo; o reprice
+da estratégia sobrescreve o global; a histerese segura a ordem numa descida
+de 2 ticks e solta numa de 3.
+
+**Uma hora de fumaça já diz a ordem** (`relatorios/PARES_BOTS_SMOKE.json`,
+2026-09-13 12:00–13:00 UTC, 160 janelas, termo determinístico; não é o dia):
+base micro-1 a 245 ms **+14,24** (20 pares, soma paga 0,980); **pausa de 30 s
++18,42** (soma 0,966) e de 90 s −0,52 (mata o fill); **reprice 4 +18,29**
+(menos recolocações, mesma soma); **atravessada por tamanho do print
++24,54** — a hipótese da perna inteira é pessimista aqui, como escrito;
+**fluxo PIORA** (1 tick −7,30; 2 ticks −34,23, soma 1,049: inclinar o alvo
+para o lado do fluxo comprador devolve a ordem ao topo e desfaz o desconto
+do microprice); **vol como estava não cota** (0,34 com 120 shares e 7,4
+MILHÕES de recolocações na hora: a amplitude muda a cada evento, o alvo
+com ela, e a ordem é recolocada a cada evento — o reconciler deles tem
+histerese justamente para isso, e ela virou o eixo (5), com a vol agora
+medida com histerese). ⬜ falta o número do dia
+(`relatorios/PARES_BOTS_20260913.json`, em curso): a rodada anterior ficou
+presa porque o Mac está NA BATERIA (26 %) e dormindo entre uma leitura e
+outra — 500 mil registros a cada 15–20 min de relógio de parede, contra 25
+mil por segundo acordado. `caffeinate -dimsu` não segura o sono na bateria.
+O que reproduz o número é o Mac na tomada.
+
+**ONDE cotar é um eixo, e a focada já diz para onde ele aponta.** A quebra
+por duração e por ativo do `PARES_FOCADA_20260913.json` (total com rebate e
+com a perna solta, USDC no dia), na melhor configuração (microprice 1 tick,
+lote 20, recolher 100 ms): 5 min **−37,14** (178 janelas), 15 min +24,07
+(109), 1 h **+58,42** (39), 4 h +6,76 (11); btc **−134,86** (198 janelas),
+eth **+128,54** (100), bitcoin +32,35 (24), ethereum +26,07 (15). O sinal é
+o mesmo nas SEIS configurações com microprice (lote 5/20/100 × skew 0/2):
+5 min e btc negativos em todas, 1 h e eth positivos em todas — e os
+leaderboards dizem que quem ganha nas janelas curtas de BTC tem latência
+<100 ms, que esta máquina não tem (p50 = 245 ms). Como o total carrega o
+cara-ou-coroa da perna solta, o número que fecha o filtro é o termo
+determinístico com ele LIGADO: `Estrategia.duracao_min_s` e
+`Estrategia.sem_ativos` (3 testes em `tests/test_maker_de_pares.py`,
+classe `TestOndeCotar`; a quebra por grupo agora traz
+`sem_a_aposta_travado_mais_rebate`), grade `--grade onde` (base dos bots ×
+{sem filtro, ≥15 min, sem btc, ≥15 min sem btc, ≥1 h} e os quatro filtros
+com pausa 30 s + reprice 4). ⬜ falta o número do dia
+(`relatorios/PARES_ONDE_20260913.json`, em curso em paralelo com a grade
+dos bots).
 
 ⬜ **falta**: a rodada `--grade focada` (lote, viés, microprice), a
 sensibilidade do eixo `atravessada`, e o resultado da conta nos POOLS do
