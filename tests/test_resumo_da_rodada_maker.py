@@ -816,3 +816,69 @@ class TestAUnitNaoReiniciaDepoisDoSucesso:
         ).read_text(encoding="utf-8")
 
         assert "return 1 if processo.falhou else 0" in fonte
+
+
+class TestOQueOFimDaRodadaNaoMEDIU:
+    """O `run` devolve o estado em memória, e ele não está fechado.
+
+    Duas coisas ficam de fora, e as duas favorecem a rota: markouts cujo
+    horizonte de 5 s não passou, e os prints da última cadência de 15 s, que
+    o laço não chegou a olhar. Contra 14 dias é pouco, mas uma perna de 1.000
+    shares não é ruído — e um `PASSA` com custo omitido é o defeito que este
+    arquivo inteiro existe para não produzir (revisão do Codex, #131).
+
+    O conserto de verdade é o motor fechar a conta antes de sair. Enquanto
+    não existe, o número sai dito.
+    """
+
+    def _com_pendentes(self, quantos):
+        relato = _relato()
+        relato["maker"]["caixa"]["execucoes_possiveis"][
+            "pendentes_de_markout"
+        ] = quantos
+        return relato
+
+    def test_o_resumo_DIZ_quantas_execucoes_ficaram_sem_markout(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            json.dumps(self._com_pendentes(2)) + "\n", encoding="utf-8"
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+        saida = capsys.readouterr().out
+
+        assert "2 EXECUÇÃO(ÕES) SEM MARKOUT FECHADO" in saida
+        assert "LIMITE SUPERIOR" in saida
+
+    def test_sem_pendentes_o_resumo_nao_inventa_ressalva(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            json.dumps(self._com_pendentes(0)) + "\n", encoding="utf-8"
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+
+        assert "SEM MARKOUT FECHADO" not in capsys.readouterr().out
+
+    def test_pendentes_NAO_soma_entre_trechos(self):
+        """É instantâneo (`len(self._pendentes)`), não acumulado.
+
+        Somar contaria a mesma execução pendente uma vez por trecho.
+        """
+        a, b = self._com_pendentes(3), self._com_pendentes(3)
+        del a["fim_da_rodada"]
+        a["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
+        volta = deepcopy(b)
+        volta["vigilia"]["da_rodada"]["parede_s"] = 60.0
+
+        somado = resumo.relato_da_rodada([a, volta, b])
+
+        assert somado["maker"]["caixa"]["execucoes_possiveis"][
+            "pendentes_de_markout"
+        ] == 3

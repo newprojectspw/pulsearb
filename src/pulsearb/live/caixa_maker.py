@@ -54,6 +54,7 @@ começar a contar.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -110,6 +111,27 @@ class ExecucaoPossivel:
     #: meio como ganho (mercado parado dava +d ticks). `None` = sem livro no
     #: fill; a execução vai a `markout_sem_referencia`, nunca a um número.
     meio_no_fill: float | None = None
+
+
+def identidade_do_negocio(token_id: str, negocio: Any) -> tuple | None:
+    """O que faz deste negócio ELE, e não outro igual.
+
+    `transaction_hash` vem no `last_trade_price` (§6.1a, `[VERIFICADO]`) e é a
+    identidade de verdade — mas **não sozinho**: uma transação pode varrer
+    vários níveis e render mais de um evento com o mesmo hash e preços
+    diferentes. Desduplicar só pelo hash descartaria a segunda perna de uma
+    varredura, que é execução legítima nossa.
+
+    `None` quando o hash não veio: aí não há como reconhecer, e quem não
+    reconhece DEIXA PASSAR. Os dois erros não são simétricos — contar um
+    print de novo infla o custo (erra contra a rota), descartar um print
+    legítimo tira custo (erra a favor dela), e o único dos dois que este
+    projeto aceita por omissão é o primeiro.
+    """
+    transacao = getattr(negocio, "transaction_hash", None)
+    if not transacao:
+        return None
+    return (token_id, transacao, negocio.preco, negocio.tamanho, negocio.lado)
 
 
 def _quando_o_negocio_aconteceu_ns(negocio: Any) -> int:
@@ -187,6 +209,13 @@ class CaixaDoMaker:
 
     _ultimo_acerto_epoch: dict[str, float] = field(default_factory=dict)
     _ultimo_print_ns: dict[str, int] = field(default_factory=dict)
+    #: Identidade dos negócios já contados nesta cotação, por slug. Uma
+    #: reconexão reenvia o mesmo `last_trade_price`, e sem isto ele consumia a
+    #: perna e registrava markout OUTRA VEZ. Some no `esquecer`: a cotação
+    #: seguinte é outra ordem, e um negócio da anterior não a executa.
+    _negocios_contados: defaultdict[str, set[tuple]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
     _pendentes: list[ExecucaoPossivel] = field(default_factory=list)
     #: Quanto de cada perna ainda repousa, por slug: (desde_epoch, [up, down]).
     #: `desde_epoch` diferente = cotação nova (reposicionada) = pernas cheias.
@@ -313,9 +342,24 @@ class CaixaDoMaker:
                 # perna consumida (revisão do Codex, #131).
                 self.prints_reenviados += 1
                 continue
+            identidade = identidade_do_negocio(token_id, negocio)
+            if identidade is not None and identidade in self._negocios_contados[slug]:
+                # MESMO negócio, chegando de novo. Uma reconexão reenvia o
+                # `last_trade_price` de DEPOIS da colocação: carimbo de
+                # chegada novo, mesmo `transaction_hash` e mesmo preço — o
+                # filtro de cima (que olha o carimbo do SERVIDOR contra a
+                # colocação) deixa passar, porque este negócio de fato
+                # aconteceu com a cotação no livro. Sem identidade ele
+                # consumia a perna OUTRA VEZ e registrava markout em dobro,
+                # e ao longo de 14 dias cada reconexão inflava execuções e
+                # custo (revisão do Codex, #131).
+                self.prints_reenviados += 1
+                continue
             if restante[indice] <= 0.0:
                 self.prints_em_perna_consumida += 1
                 continue
+            if identidade is not None:
+                self._negocios_contados[slug].add(identidade)
             tipo, shares = self._classificar(negocio, restante[indice], preco_nosso)
             if tipo == "atravessada":
                 # O relógio da pausa por fill tóxico (o regime EVENT do
@@ -449,6 +493,7 @@ class CaixaDoMaker:
         self._ultimo_acerto_epoch.pop(slug, None)
         self._ultimo_print_ns.pop(slug, None)
         self._restante.pop(slug, None)
+        self._negocios_contados.pop(slug, None)
 
     # ─────────────────────────────────────────────────────────────── relato
     @property

@@ -90,6 +90,7 @@ CAMPO_DO_REPOUSO_S = "maker.caixa.segundos_repousando"
 CAMPO_DAS_ATRAVESSADAS = "maker.caixa.execucoes_possiveis.atravessadas"
 CAMPO_DAS_NO_NIVEL = "maker.caixa.execucoes_possiveis.no_nivel"
 CAMPO_DOS_REENVIADOS = "maker.caixa.execucoes_possiveis.reenviados"
+CAMPO_DOS_PENDENTES = "maker.caixa.execucoes_possiveis.pendentes_de_markout"
 
 CAMPO_DO_CICLO = "vigilia.da_rodada.ciclo_de_trabalho"
 CAMPO_DA_PAREDE = "vigilia.da_rodada.parede_s"
@@ -270,6 +271,11 @@ def _percentil(ordenados: list[float], q: float) -> float | None:
 
 #: Campos CUMULATIVOS desde a subida do processo: o último relato de um
 #: trecho é o total daquele trecho, e a soma dos trechos é o total da rodada.
+#:
+#: `pendentes_de_markout` NÃO está aqui de propósito: ele é instantâneo
+#: (`len(self._pendentes)`), não acumulado, e somá-lo contaria a mesma
+#: execução em cada trecho. Fica o valor do último trecho, que é o que o
+#: `deepcopy` já traz.
 CAMPOS_QUE_SOMAM = (
     CAMPO_DOS_REWARDS, CAMPO_DO_MARKOUT_USDC, CAMPO_DAS_MEDIDAS,
     CAMPO_DO_REPOUSO_S, CAMPO_DAS_ATRAVESSADAS, CAMPO_DAS_NO_NIVEL,
@@ -401,6 +407,7 @@ def _julgar(
         CAMPO_DO_MARKOUT_CS, CAMPO_DAS_MEDIDAS, CAMPO_DO_REPOUSO_S,
         CAMPO_DAS_ATRAVESSADAS, CAMPO_DAS_NO_NIVEL, CAMPO_DOS_REENVIADOS,
         CAMPO_DAS_REPOUSANDO, CAMPO_DO_CICLO, CAMPO_DA_PAREDE, CAMPO_DO_SONO,
+        CAMPO_DOS_PENDENTES,
     )}
 
     if _ler(ultimo, CAMPO_DO_MAKER) is None:
@@ -487,6 +494,19 @@ def _imprimir_conta(lido: dict[str, Any]) -> None:
         f" · no nível {lido.get(CAMPO_DAS_NO_NIVEL)}"
         f" · reenviados {lido.get(CAMPO_DOS_REENVIADOS)}"
     )
+    pendentes = lido.get(CAMPO_DOS_PENDENTES)
+    if pendentes:
+        print(
+            f"\n  {pendentes} EXECUÇÃO(ÕES) SEM MARKOUT FECHADO no fim da rodada.\n"
+            "  O markout fecha 5 s depois do fill; as que caíram no último\n"
+            "  intervalo não tiveram os 5 s. O custo delas NÃO está no líquido\n"
+            "  acima, então ele é um LIMITE SUPERIOR por exatamente essas — e\n"
+            "  uma perna de 1.000 shares não é ruído. O mesmo vale para a\n"
+            "  última cadência de 15 s, cujos prints o laço não chegou a olhar\n"
+            "  antes de o processo encerrar: essas execuções não aparecem nem\n"
+            "  como pendentes (revisão do Codex, #131 — o conserto de verdade\n"
+            "  é o motor fechar a conta antes de sair, e ele não está feito)."
+        )
     if not medidas:
         print(
             "\n  SEM MARKOUT MEDIDO o líquido é rewards puros, e rewards puros\n"
