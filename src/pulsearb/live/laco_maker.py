@@ -404,19 +404,30 @@ class LacoMaker:
             params=params,
         )
 
-    async def recolher_por_fill_toxico(self, livro_de, *, agora_ns: int) -> list[Efeito]:
-        """Entre passadas: vê os prints e tira do livro quem levou um fill
-        atravessado.
+    async def ver_prints_entre_passadas(self, livro_de, *, agora_ns: int) -> list[Efeito]:
+        """Entre passadas: vê os prints SEMPRE, e tira do livro quem levou um
+        fill atravessado SE a pausa estiver ligada.
 
-        A cadência do laço é de 15 s, e os prints só eram vistos nela: um
-        fill logo depois de uma passada deixava a outra perna exposta quase
-        uma cadência inteira, e encurtava a pausa medida de 30 s para 15–30 s
-        efetivos — seria medir OUTRA regra (revisão do Codex, #131). O sono
-        do processo já acorda a cada segundo para fechar markout; aqui ele
-        também olha os prints. A decisão de COTAR segue nos 15 s.
+        **A separação entre esses dois "se" é o ponto, e ela custou uma
+        revisão.** Antes, o método inteiro só rodava com a pausa ligada — e
+        então os prints eram vistos a cada segundo na rodada da pausa e só a
+        cada 15 s nas outras três. A `CaixaDoMaker` carimba `meio_no_fill`
+        com o livro DO INSTANTE EM QUE VÊ o print, e mede o markout 5 s
+        depois do negócio: um fill logo após uma passada saía medido do
+        segundo 1 ao 5 na rodada da pausa, e do livro do segundo 15 até o 16
+        nas outras. **O instrumento de markout ficava diferente entre
+        controle e tratamento**, e a comparação de 14 dias mediria a
+        diferença entre os dois instrumentos junto com a da regra (revisão do
+        Codex, #131).
+
+        Ver print não muda nada do que o bot faz — só quando a conta é
+        fechada. Cancelar é que é a regra, e só essa parte olha o knob.
+
+        A cadência de 15 s ainda importa para o outro lado: um fill logo
+        depois de uma passada deixava a outra perna exposta quase uma
+        cadência inteira, e encurtava a pausa medida de 30 s para 15–30 s
+        efetivos. A decisão de COTAR segue nos 15 s.
         """
-        if self.pausa_apos_fill_toxico_s is None:
-            return []
         efeitos: list[Efeito] = []
         for slug, aberta in list(self.abertas.items()):
             tokens = self._tokens.get(slug)
@@ -432,7 +443,10 @@ class LacoMaker:
                 livro_de=livro_de,
                 params=self._params.get(slug),
             )
-            if self._em_pausa_por_fill_toxico(slug, agora_ns):
+            if (
+                self.pausa_apos_fill_toxico_s is not None
+                and self._em_pausa_por_fill_toxico(slug, agora_ns)
+            ):
                 saiu = await self._sair_por_fill_toxico(
                     slug, livro_de=livro_de, agora_ns=agora_ns
                 )

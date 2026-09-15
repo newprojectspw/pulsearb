@@ -144,6 +144,8 @@ MOTIVOS = {
     "rodada_nao_terminou": "o fluxo não traz a linha de fim — rodada em curso, "
                            "journal capturado no meio, ou processo morto",
     "custo_nao_medido": "zero medidas de markout — o líquido é rewards puros",
+    "diario_ilegivel": "o diário foi pedido e não pôde ser lido — o prefixo "
+                       "`sombra-` ficou sem conferir",
 }
 
 
@@ -277,15 +279,20 @@ def _percentil(ordenados: list[float], q: float) -> float | None:
 
 #: Campos CUMULATIVOS desde a subida do processo: o último relato de um
 #: trecho é o total daquele trecho, e a soma dos trechos é o total da rodada.
-#:
-#: `pendentes_de_markout` NÃO está aqui de propósito: ele é instantâneo
-#: (`len(self._pendentes)`), não acumulado, e somá-lo contaria a mesma
-#: execução em cada trecho. Fica o valor do último trecho, que é o que o
-#: `deepcopy` já traz.
+
 CAMPOS_QUE_SOMAM = (
     CAMPO_DOS_REWARDS, CAMPO_DO_MARKOUT_USDC, CAMPO_DAS_MEDIDAS,
     CAMPO_DO_REPOUSO_S, CAMPO_DAS_ATRAVESSADAS, CAMPO_DAS_NO_NIVEL,
     CAMPO_DOS_REENVIADOS, CAMPO_DO_LIQUIDO, CAMPO_DA_PAREDE, CAMPO_DO_SONO,
+    # `pendentes_de_markout` TAMBÉM soma, e eu tinha argumentado o contrário.
+    # Ele é instantâneo dentro de um trecho — mas o que se lê aqui é o ÚLTIMO
+    # relato de cada trecho, e para um trecho que MORREU esse número são
+    # execuções cujo markout nunca vai fechar: a `CaixaDoMaker` some com o
+    # processo. Somar não conta duas vezes (cada trecho tem caixa própria) e
+    # é a única forma de o fill perdido num trecho antigo aparecer na
+    # ressalva quando o último trecho termina com zero (revisão do Codex,
+    # #131).
+    CAMPO_DOS_PENDENTES,
 )
 
 
@@ -632,14 +639,22 @@ def main(argv: list[str] | None = None) -> int:
     # O diário entra ANTES do julgamento: a conferência do prefixo `sombra-`
     # é recusa, não aviso, e uma recusa impressa depois do veredito seria um
     # veredito tomado sem ela.
-    diario = None
+    diario, diario_ilegivel = None, False
     if args.diario:
         try:
             diario = conferir_diario(args.diario)
         except ValueError as erro:
+            # Pediram o diário e ele não foi lido: isso NÃO é o mesmo que não
+            # ter pedido. Seguir sem ele pularia em silêncio a conferência do
+            # prefixo `sombra-` — o ensaio sairia declarado válido sem que
+            # ninguém tivesse olhado o artefato de segurança dele (revisão do
+            # Codex, #131).
             print(f"aviso: {erro}", file=sys.stderr)
+            diario_ilegivel = True
 
     veredito, motivo, lido = _julgar(relatos, diario)
+    if diario_ilegivel:
+        veredito, motivo = NAO_AVALIAVEL, "diario_ilegivel"
     if relatos:
         _imprimir_tempo(lido)
         _imprimir_reinicios(relatos)

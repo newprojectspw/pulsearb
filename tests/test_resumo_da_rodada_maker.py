@@ -896,12 +896,18 @@ class TestOQueOFimDaRodadaNaoMEDIU:
 
         assert "SEM MARKOUT FECHADO" not in capsys.readouterr().out
 
-    def test_pendentes_NAO_soma_entre_trechos(self):
-        """É instantâneo (`len(self._pendentes)`), não acumulado.
+    def test_pendentes_SOMA_entre_trechos(self):
+        """Eu tinha argumentado o contrário, e estava errado.
 
-        Somar contaria a mesma execução pendente uma vez por trecho.
+        Dentro de um trecho o número é instantâneo — mas o que se lê aqui é o
+        ÚLTIMO relato de CADA trecho, e para um trecho que MORREU esses são
+        fills cujo markout nunca vai fechar: a `CaixaDoMaker` some com o
+        processo. Não há dupla contagem (cada trecho tem caixa própria), e é
+        a única forma de o fill perdido num trecho antigo aparecer na
+        ressalva quando o último trecho termina com zero (revisão do Codex,
+        #131).
         """
-        a, b = self._com_pendentes(3), self._com_pendentes(3)
+        a, b = self._com_pendentes(3), self._com_pendentes(2)
         del a["fim_da_rodada"]
         a["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
         volta = deepcopy(b)
@@ -911,7 +917,27 @@ class TestOQueOFimDaRodadaNaoMEDIU:
 
         assert somado["maker"]["caixa"]["execucoes_possiveis"][
             "pendentes_de_markout"
-        ] == 3
+        ] == 5
+
+    def test_o_fill_perdido_num_trecho_ANTIGO_ainda_sai_na_ressalva(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """O caso que o `deepcopy` do último trecho escondia por completo."""
+        monkeypatch.chdir(tmp_path)
+        antes, ultimo = self._com_pendentes(4), self._com_pendentes(0)
+        del antes["fim_da_rodada"]
+        antes["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
+        volta = deepcopy(ultimo)
+        volta["vigilia"]["da_rodada"]["parede_s"] = 60.0
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in (antes, volta, ultimo)) + "\n",
+            encoding="utf-8",
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+
+        assert "4 EXECUÇÃO(ÕES) SEM MARKOUT FECHADO" in capsys.readouterr().out
 
 
 class TestTrechoSemRegras:
@@ -945,3 +971,57 @@ class TestTrechoSemRegras:
     def test_todos_os_trechos_com_regras_seguem_normalmente(self):
         """A recusa não pode ter engolido o caminho comum."""
         assert resumo.regras_da_rodada([_relato(), _relato()])[1] is None
+
+
+class TestODiarioPedidoENaoLido:
+    """Pedir o diário e não conseguir lê-lo NÃO é o mesmo que não pedir.
+
+    Seguir sem ele pularia em silêncio a conferência do prefixo `sombra-` —
+    o ensaio sairia declarado válido sem que ninguém tivesse olhado o
+    artefato de segurança dele (revisão do Codex, #131).
+    """
+
+    def _relatos_em(self, tmp_path):
+        (tmp_path / "relatorios").mkdir(exist_ok=True)
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            json.dumps(_relato()) + "\n", encoding="utf-8"
+        )
+
+    def test_caminho_de_diario_errado_RECUSA_em_vez_de_passar(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._relatos_em(tmp_path)
+
+        resumo.main([
+            "--relatos", "relatorios/R.jsonl",
+            "--diario", "data/diarios/nao-existe.jsonl",
+        ])
+        saida = capsys.readouterr().out
+
+        assert resumo.NAO_AVALIAVEL in saida
+        assert "diario_ilegivel" in saida
+        assert resumo.PASSA not in saida.split("4.2 —")[-1]
+
+    def test_diario_FORA_da_pasta_permitida_tambem_RECUSA(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._relatos_em(tmp_path)
+
+        resumo.main([
+            "--relatos", "relatorios/R.jsonl", "--diario", "outra/x.jsonl",
+        ])
+
+        assert "diario_ilegivel" in capsys.readouterr().out
+
+    def test_sem_pedir_diario_o_veredito_segue_normal(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A recusa é sobre o diário PEDIDO — não pedir continua válido."""
+        monkeypatch.chdir(tmp_path)
+        self._relatos_em(tmp_path)
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+
+        assert resumo.PASSA in capsys.readouterr().out

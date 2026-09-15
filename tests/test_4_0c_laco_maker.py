@@ -884,7 +884,7 @@ class TestPausaPorFillToxico:
         laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
         laco._negocios_desde = self._prints(0.47, 1001.0)
 
-        efeitos = await laco.recolher_por_fill_toxico(
+        efeitos = await laco.ver_prints_entre_passadas(
             _livro_de(_livro(0.50)), agora_ns=int(1002e9)
         )
 
@@ -894,13 +894,78 @@ class TestPausaPorFillToxico:
         # o segundo de repouso antes do fill não se perde
         assert laco.caixa.segundos_repousando == pytest.approx(2.0)
 
-    async def test_entre_passadas_desligada_nao_faz_nada(self, tmp_path):
+    async def test_entre_passadas_desligada_NAO_CANCELA_mas_VE_o_print(
+        self, tmp_path
+    ):
+        """O `if` do knob mudou de lugar, e é o ponto do conserto.
+
+        Enquanto o método inteiro dependia da pausa, os prints eram vistos a
+        cada segundo na rodada da pausa e só a cada 15 s nas outras três. A
+        `CaixaDoMaker` carimba `meio_no_fill` com o livro do instante em que
+        VÊ o print e mede 5 s depois do negócio: um fill logo após uma
+        passada saía medido do segundo 1 ao 5 na rodada da pausa, e do livro
+        do segundo 15 ao 16 nas outras. **O instrumento de markout ficava
+        diferente entre controle e tratamento**, e a comparação de 14 dias
+        mediria a diferença entre os instrumentos junto com a da regra
+        (revisão do Codex, #131).
+
+        Ver print não muda o que o bot faz — muda quando a conta fecha.
+        Cancelar é que é a regra, e só isso olha o knob.
+        """
         laco = await self._cotando(tmp_path)
         laco._negocios_desde = self._prints(0.47, 1001.0)
-        assert await laco.recolher_por_fill_toxico(
+
+        efeitos = await laco.ver_prints_entre_passadas(
             _livro_de(_livro(0.50)), agora_ns=int(1002e9)
-        ) == []
+        )
+
+        # Não cancela: a regra está desligada.
+        assert efeitos == []
         assert len(laco.abertas) == 1
+        assert "pausa_por_fill_toxico" not in laco.motivos
+        # Mas VIU o print, no mesmo segundo em que a rodada da pausa veria.
+        assert laco.caixa.execucoes_atravessadas == 1
+        # 1 s: o reward é acertado NO INSTANTE do print (t=1001), e o segundo
+        # seguinte fica para a passada. Na rodada da pausa são 2 s porque a
+        # saída fecha o intervalo — essa diferença É a regra, e não o
+        # instrumento.
+        assert laco.caixa.segundos_repousando == pytest.approx(1.0)
+
+    async def test_o_markout_da_rodada_BASE_fecha_no_mesmo_instante_da_pausa(
+        self, tmp_path
+    ):
+        """As quatro rodadas têm de medir com o MESMO instrumento.
+
+        É a propriedade que o conserto existe para garantir: o print visto no
+        mesmo segundo nas duas rodadas dá o mesmo `meio_no_fill` e o mesmo
+        horizonte, então a diferença entre elas é a regra e nada mais.
+        """
+        base = await self._cotando(tmp_path)
+        com_pausa = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+
+        for laco in (base, com_pausa):
+            laco._negocios_desde = self._prints(0.47, 1001.0)
+            await laco.ver_prints_entre_passadas(
+                _livro_de(_livro(0.50)), agora_ns=int(1002e9)
+            )
+
+        assert (
+            base.caixa.execucoes_atravessadas
+            == com_pausa.caixa.execucoes_atravessadas
+            == 1
+        )
+        assert base.caixa.shares_atravessadas == com_pausa.caixa.shares_atravessadas
+        # O INSTRUMENTO: a referência do markout é o meio do livro no instante
+        # em que o print foi VISTO. Mesmo instante nas duas rodadas, mesmo
+        # meio, mesmo horizonte — a diferença entre elas fica sendo a regra.
+        # (`segundos_repousando` difere de propósito: na rodada da pausa a
+        # saída fecha o último intervalo. Isso É efeito da regra.)
+        assert [p.meio_no_fill for p in base.caixa._pendentes] == [
+            p.meio_no_fill for p in com_pausa.caixa._pendentes
+        ]
+        assert [p.ts_ns for p in base.caixa._pendentes] == [
+            p.ts_ns for p in com_pausa.caixa._pendentes
+        ]
 
     async def test_negocio_REENVIADO_nao_arma_a_pausa(self, tmp_path):
         """`ts_ns` é a CHEGADA. Um `last_trade_price` reenviado depois de
