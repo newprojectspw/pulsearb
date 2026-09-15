@@ -759,6 +759,102 @@ class TestAncoraDoMicroprice:
         assert len(laco.abertas) == 1
 
 
+class TestPausaPorFillToxico:
+    """O regime EVENT do `poly-maker`, disparado pelo NOSSO fill.
+
+    Quem atravessa a cotação paga acima do nosso preço para entrar agora, e
+    normalmente sabe de algo. O `maker_de_pares` mediu: base +14,24, com 30 s
+    **+18,42**, com 90 s −0,52. E a r7 do SHADOW diz o mesmo do outro lado:
+    2 atravessadas de 12 execuções dominaram o markout.
+    """
+
+    def _sem_prints(self, token_id, *, ts_ns):
+        return []
+
+    def _prints(self, preco, ts_s):
+        """`negocios_desde` como o processo o passa — `passo` sobrescreve o
+        atributo com o argumento, então tem de vir por aqui."""
+        print_ = SimpleNamespace(
+            ts_ns=int(ts_s * 1e9), preco=preco, tamanho=10.0,
+            lado="SELL", token="tok-up",
+        )
+        return lambda token_id, *, ts_ns: (
+            [print_] if token_id == "tok-up" and print_.ts_ns > ts_ns else []
+        )
+
+    async def _cotando(self, tmp_path, **kw):
+        laco = _laco(tmp_path, **kw)
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1000.0, agora_ns=int(1000e9),
+        )
+        assert len(laco.abertas) == 1
+        return laco
+
+    async def test_desligada_por_padrao(self, tmp_path):
+        laco = await self._cotando(tmp_path)
+        assert laco.pausa_apos_fill_toxico_s is None
+        negocios = self._prints(0.47, 1005.0)
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+        assert len(laco.abertas) == 1
+        assert laco.caixa.execucoes_atravessadas == 1
+        assert "pausa_por_fill_toxico" not in laco.motivos
+
+    async def test_fill_atravessado_tira_a_cotacao_e_segura_a_janela(self, tmp_path):
+        """Sai do livro com motivo nomeado e NÃO recoloca enquanto dura —
+        ficar cotando no minuto seguinte é oferecer a mesma opção de graça."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        negocios = self._prints(0.47, 1005.0)
+
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 1
+
+        # ainda dentro dos 30 s: não volta, e conta de novo
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1030.0, agora_ns=int(1030e9), negocios_desde=self._sem_prints,
+        )
+        assert laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 2
+
+    async def test_passada_a_pausa_a_janela_volta_a_cotar(self, tmp_path):
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        negocios = self._prints(0.47, 1005.0)
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+        assert laco.abertas == {}
+
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1040.0, agora_ns=int(1040e9), negocios_desde=self._sem_prints,
+        )
+        assert len(laco.abertas) == 1
+
+    async def test_fill_NO_NIVEL_nao_pausa(self, tmp_path):
+        """A medida é sobre quem ATRAVESSA. Um print no nosso preço é a fila
+        andando — pausar nele tiraria a cotação do livro toda vez que ela
+        funcionasse."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        negocios = self._prints(0.49, 1005.0)
+        await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+        assert laco.caixa.execucoes_no_nivel == 1
+        assert laco.caixa.execucoes_atravessadas == 0
+        assert len(laco.abertas) == 1
+        assert "pausa_por_fill_toxico" not in laco.motivos
+
+
 def _livro_com_bids(*bids, asks=((0.51, 500.0), (0.52, 500.0))):
     return OrderBook(asset_id="tok-up", bids=list(bids), asks=list(asks))
 

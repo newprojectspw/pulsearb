@@ -180,6 +180,15 @@ class LacoMaker:
     #: vira o sinal do termo determinístico. A âncora só APERTA: nunca puxa a
     #: cotação para mais perto do meio do que a distância já escolhida.
     ticks_abaixo_do_microprice: int | None = None
+    #: Segundos sem cotar a janela depois de um fill ATRAVESSADO nela
+    #: (`None` = sem pausa, o comportamento de sempre). É o regime EVENT do
+    #: `poly-maker` disparado pelo NOSSO fill, e não pelo salto do livro: quem
+    #: nos atravessou sabia de algo, e o minuto seguinte é o pior momento para
+    #: estar no livro. O `maker_de_pares` mediu em 2026-09-13: base +14,24,
+    #: com 30 s **+18,42**, com 90 s −0,52 (mata o fill). E a r7 do SHADOW diz
+    #: o mesmo do outro lado: 2 execuções atravessadas de 12 dominaram o
+    #: markout (−22,85 USDC).
+    pausa_apos_fill_toxico_s: float | None = None
     #: Em SHADOW a nossa ordem NÃO está no livro, então `best_bid < preço` é
     #: o gatilho exato. Em LIVE ela está — e quando o mercado anda para
     #: baixo, ela VIRA o melhor bid: o gatilho passa a ser "somos o topo e
@@ -279,6 +288,9 @@ class LacoMaker:
         self._conferir_prints(
             janela, aberta, livro_de=livro_de, agora_ns=agora_ns, params=params
         )
+
+        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
+            return await self._recusar(janela.slug, "pausa_por_fill_toxico")
 
         dados, recusa = self._dados_da_passada(
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
@@ -385,6 +397,26 @@ class LacoMaker:
             livro_de=livro_de,
             params=params,
         )
+
+    def _em_pausa_por_fill_toxico(self, slug: str, agora_ns: int) -> bool:
+        """Esta janela levou um fill ATRAVESSADO há pouco?
+
+        Quem atravessa a nossa cotação está pagando acima do nosso preço para
+        entrar AGORA — e normalmente sabe de algo que o livro ainda não
+        mostrou. Ficar cotando no minuto seguinte é oferecer a mesma opção de
+        graça outra vez. É o regime EVENT do `poly-maker`, disparado pelo
+        NOSSO fill em vez do salto do livro.
+
+        A pausa vale mesmo com a cotação já fora do livro: quem chama TIRA a
+        que estiver lá e não recoloca enquanto durar. Desligada devolve falso
+        sempre — a linha de base não muda.
+        """
+        if self.pausa_apos_fill_toxico_s is None:
+            return False
+        ultimo = self.caixa.ultimo_fill_toxico_ns.get(slug)
+        if ultimo is None:
+            return False
+        return agora_ns - ultimo < self.pausa_apos_fill_toxico_s * 1e9
 
     def _melhor_candidata(
         self, dados: _DadosDaPassada, params: ParametrosDeReward
@@ -914,6 +946,7 @@ class LacoMaker:
             "regras": {
                 "recolhe_quando_o_livro_anda": self.recolhe_quando_o_livro_anda,
                 "ticks_abaixo_do_microprice": self.ticks_abaixo_do_microprice,
+                "pausa_apos_fill_toxico_s": self.pausa_apos_fill_toxico_s,
             },
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),

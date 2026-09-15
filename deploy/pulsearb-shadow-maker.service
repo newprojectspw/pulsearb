@@ -65,6 +65,11 @@ Environment=PULSEARB_MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=true
 # juntas — ligar só a de baixo deixaria as duas ligadas:
 #   PULSEARB_MAKER_RECOLHE_QUANDO_O_LIVRO_ANDA=false
 #   PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE=1
+# Pausa por fill tóxico (4.0 (g)): idem, uma rodada só dela, medida em 30 s
+# (90 s matam o fill). Também troca pela linha do recolher, não soma:
+#   PULSEARB_MAKER_PAUSA_APOS_FILL_TOXICO_S=30
+# O relato de 60 s publica `maker.regras`: mais de uma ligada = rodada
+# confundida, e nenhuma das regras fica medida.
 # Registro de risco PRÓPRIO: o registro do taker em SHADOW carrega perdas
 # sintéticas que armam o disjuntor e pausam o portão compartilhado — e o
 # maker entra pelo mesmo portão (achados das rodadas r2 e r6). O modo sufixa

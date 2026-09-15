@@ -286,6 +286,7 @@ class ProcessoShadow:
                 tamanho_da_cotacao=settings.tamanho_da_cotacao_maker_shares,
                 recolhe_quando_o_livro_anda=settings.maker_recolhe_quando_o_livro_anda,
                 ticks_abaixo_do_microprice=settings.maker_ticks_abaixo_do_microprice,
+                pausa_apos_fill_toxico_s=settings.maker_pausa_apos_fill_toxico_s,
                 nossa_ordem_esta_no_livro=settings.mode is Mode.LIVE,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o

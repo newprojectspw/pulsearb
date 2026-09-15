@@ -140,6 +140,10 @@ class CaixaDoMaker:
     acertos: int = 0
     intervalos_truncados: int = 0
 
+    #: Quando cada slug levou o último fill ATRAVESSADO, em ns do print.
+    #: Sobrevive ao `esquecer`: a pausa por fill tóxico existe justamente
+    #: para valer DEPOIS de a cotação sair do livro.
+    ultimo_fill_toxico_ns: dict[str, int] = field(default_factory=dict)
     execucoes_atravessadas: int = 0
     execucoes_no_nivel: int = 0
     shares_atravessadas: float = 0.0
@@ -286,6 +290,14 @@ class CaixaDoMaker:
                 self.prints_em_perna_consumida += 1
                 continue
             tipo, shares = self._classificar(negocio, restante[indice], preco_nosso)
+            if tipo == "atravessada":
+                # O relógio da pausa por fill tóxico (o regime EVENT do
+                # `poly-maker`, disparado pelo NOSSO fill e não pelo salto).
+                # Guardado sempre, custe ou não — quem decide se pausa é o
+                # laço, e a caixa não sabe de regra de operação.
+                self.ultimo_fill_toxico_ns[slug] = max(
+                    self.ultimo_fill_toxico_ns.get(slug, 0), negocio.ts_ns
+                )
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
                     slug, aberta, params,

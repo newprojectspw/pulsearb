@@ -233,6 +233,14 @@ class Settings(BaseSettings):
     #: valor negativo no ambiente mataria em silêncio a rota inteira por 14
     #: dias, com o processo vivo. O lugar de recusar é o carregamento.
     maker_ticks_abaixo_do_microprice: int | None = Field(default=None, ge=0)
+    #: Segundos sem cotar uma janela depois de um fill ATRAVESSADO nela
+    #: (`None` = sem pausa). O regime EVENT do `poly-maker` disparado pelo
+    #: NOSSO fill. Medido pelo `maker_de_pares` em 2026-09-13 sobre a hora de
+    #: fumaça: base +14,24 · 30 s **+18,42** · 90 s −0,52 (mata o fill). E a
+    #: r7 do SHADOW diz o mesmo do outro lado: 2 atravessadas de 12 execuções
+    #: dominaram o markout. Validado no carregamento pelo mesmo motivo do
+    #: knob acima — o laço maker é tarefa própria e não derruba a rodada.
+    maker_pausa_apos_fill_toxico_s: float | None = Field(default=None, ge=0)
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"
