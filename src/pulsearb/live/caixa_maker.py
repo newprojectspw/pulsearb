@@ -316,10 +316,16 @@ class CaixaDoMaker:
                 # atrás. Armar a pausa por ele tiraria do livro uma cotação
                 # contra a qual ninguém negociou (revisão do Codex, #131).
                 # Sem carimbo do servidor vale a chegada, que é o que há.
-                self.ultimo_fill_toxico_ns[slug] = max(
-                    self.ultimo_fill_toxico_ns.get(slug, 0),
-                    _quando_o_negocio_aconteceu_ns(negocio),
-                )
+                quando = _quando_o_negocio_aconteceu_ns(negocio)
+                # E só se o negócio aconteceu DEPOIS de a cotação entrar: um
+                # reenvio de 10 s atrás numa cotação de 5 s passa pelo filtro
+                # de chegada, é recente o bastante para a pausa valer, e teria
+                # tirado do livro uma ordem que aquele negócio não pôde ter
+                # executado — ela nem existia (revisão do Codex, #131).
+                if quando >= int(aberta.desde_epoch * 1e9):
+                    self.ultimo_fill_toxico_ns[slug] = max(
+                        self.ultimo_fill_toxico_ns.get(slug, 0), quando
+                    )
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
                     slug, aberta, params,

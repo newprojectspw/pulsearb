@@ -926,6 +926,30 @@ class TestPausaPorFillToxico:
         assert efeitos == [] and len(laco.abertas) == 1  # a pausa não arma
         assert "pausa_por_fill_toxico" not in laco.motivos
 
+    async def test_reenvio_ANTERIOR_a_cotacao_nao_arma_a_pausa(self, tmp_path):
+        """Um reenvio recente o bastante para a pausa valer, mas de um negócio
+        ANTERIOR à cotação, tiraria do livro uma ordem que aquele negócio não
+        pôde ter executado — ela nem existia (revisão do Codex, #131)."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        aberta = laco.abertas["btc-updown-4h-1"]
+        assert aberta.desde_epoch == 1000.0
+        anterior = SimpleNamespace(
+            ts_ns=int(1005e9),        # chegou agora
+            ts_servidor_ms=995_000,   # aconteceu 5 s ANTES de a cotação entrar
+            preco=0.47, tamanho=10.0, lado="SELL", token="tok-up",
+        )
+
+        def negocios(token_id, *, ts_ns):
+            return [anterior] if token_id == "tok-up" and anterior.ts_ns > ts_ns else []
+
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1010.0, agora_ns=int(1010e9), negocios_desde=negocios,
+        )
+
+        assert efeitos == [] and len(laco.abertas) == 1
+        assert "pausa_por_fill_toxico" not in laco.motivos
+
     async def test_fill_NO_NIVEL_nao_pausa(self, tmp_path):
         """A medida é sobre quem ATRAVESSA. Um print no nosso preço é a fila
         andando — pausar nele tiraria a cotação do livro toda vez que ela
