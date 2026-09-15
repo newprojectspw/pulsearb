@@ -839,6 +839,28 @@ class TestPausaPorFillToxico:
         )
         assert len(laco.abertas) == 1
 
+    async def test_o_intervalo_ate_a_pausa_e_contado_antes_de_sair(self, tmp_path):
+        """Um fill atravessado consome UMA perna; a outra segue no livro
+        ganhando reward de um lado só até esta passada. `_sair` apaga o
+        relógio da caixa, então sair antes de fechar o intervalo jogaria fora
+        até uma cadência inteira de reward LEGÍTIMO — e enviesaria o
+        experimento contra a própria regra que se quer medir (revisão do
+        Codex, #131)."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        negocios = self._prints(0.47, 1005.0)
+
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 1
+        # os 15 s inteiros contam: 5 s de dois lados até o print, e 10 s de um
+        # lado só entre o print e esta passada
+        assert laco.caixa.segundos_repousando == pytest.approx(15.0)
+        assert laco.caixa.acertos == 2
+
     async def test_fill_NO_NIVEL_nao_pausa(self, tmp_path):
         """A medida é sobre quem ATRAVESSA. Um print no nosso preço é a fila
         andando — pausar nele tiraria a cotação do livro toda vez que ela

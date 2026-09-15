@@ -289,9 +289,6 @@ class LacoMaker:
             janela, aberta, livro_de=livro_de, agora_ns=agora_ns, params=params
         )
 
-        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
-            return await self._recusar(janela.slug, "pausa_por_fill_toxico")
-
         dados, recusa = self._dados_da_passada(
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
         )
@@ -323,6 +320,16 @@ class LacoMaker:
             self.caixa.acertar(
                 janela.slug, aberta, livro, params, agora_epoch=agora_epoch
             )
+
+        # A pausa vem DEPOIS do acerto acima, de propósito. Um fill
+        # atravessado consome UMA perna; a outra segue no livro ganhando
+        # reward de um lado só até esta passada, e `_sair` apaga o relógio da
+        # caixa. Sair antes de fechar o intervalo jogaria fora até uma
+        # cadência inteira de reward legítimo — e enviesaria o experimento
+        # CONTRA a própria regra que se quer medir (revisão do Codex, #131).
+        # É a mesma ordem que o `livro_andou_contra` já seguia.
+        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
+            return await self._recusar(janela.slug, "pausa_por_fill_toxico")
 
         decisao = decidir(
             aberta,
