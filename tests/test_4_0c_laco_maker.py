@@ -861,6 +861,71 @@ class TestPausaPorFillToxico:
         assert laco.caixa.segundos_repousando == pytest.approx(15.0)
         assert laco.caixa.acertos == 2
 
+    async def test_sai_mesmo_sem_livro_para_decidir(self, tmp_path):
+        """Cancelar não precisa de livro. Com a pausa esperando o livro
+        voltar, uma falta mais longa que a pausa deixaria a cotação exposta o
+        intervalo tóxico inteiro — e possivelmente nunca a tiraria por este
+        fill (revisão do Codex, #131)."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        negocios = self._prints(0.47, 1005.0)
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(None),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 1
+
+    async def test_entre_passadas_o_fill_e_visto_no_segundo_em_que_acontece(
+        self, tmp_path
+    ):
+        """A cadência do laço é de 15 s. Se o fill só fosse visto nela, a
+        outra perna ficaria exposta quase uma cadência inteira e a pausa de
+        30 s viraria 15–30 s efetivos — seria medir outra regra."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        laco._negocios_desde = self._prints(0.47, 1001.0)
+
+        efeitos = await laco.recolher_por_fill_toxico(
+            _livro_de(_livro(0.50)), agora_ns=int(1002e9)
+        )
+
+        assert len(efeitos) == 1 and laco.abertas == {}
+        assert laco.motivos["pausa_por_fill_toxico"] == 1
+        assert laco.caixa.execucoes_atravessadas == 1
+        # o segundo de repouso antes do fill não se perde
+        assert laco.caixa.segundos_repousando == pytest.approx(2.0)
+
+    async def test_entre_passadas_desligada_nao_faz_nada(self, tmp_path):
+        laco = await self._cotando(tmp_path)
+        laco._negocios_desde = self._prints(0.47, 1001.0)
+        assert await laco.recolher_por_fill_toxico(
+            _livro_de(_livro(0.50)), agora_ns=int(1002e9)
+        ) == []
+        assert len(laco.abertas) == 1
+
+    async def test_negocio_REENVIADO_nao_arma_a_pausa(self, tmp_path):
+        """`ts_ns` é a CHEGADA. Um `last_trade_price` reenviado depois de
+        reassinatura chega agora carregando um negócio de minutos atrás —
+        armar a pausa por ele tiraria do livro uma cotação contra a qual
+        ninguém negociou (revisão do Codex, #131)."""
+        laco = await self._cotando(tmp_path, pausa_apos_fill_toxico_s=30.0)
+        antigo = SimpleNamespace(
+            ts_ns=int(1005e9),                 # chegou agora
+            ts_servidor_ms=900_000,             # aconteceu 105 s atrás
+            preco=0.47, tamanho=10.0, lado="SELL", token="tok-up",
+        )
+
+        def negocios(token_id, *, ts_ns):
+            return [antigo] if token_id == "tok-up" and antigo.ts_ns > ts_ns else []
+
+        efeitos = await laco.passo(
+            [_janela(fechamento=100_000.0)], livro_de=_livro_de(_livro(0.50)),
+            agora_epoch=1015.0, agora_ns=int(1015e9), negocios_desde=negocios,
+        )
+
+        assert laco.caixa.execucoes_atravessadas == 1  # a execução conta
+        assert efeitos == [] and len(laco.abertas) == 1  # a pausa não arma
+        assert "pausa_por_fill_toxico" not in laco.motivos
+
     async def test_fill_NO_NIVEL_nao_pausa(self, tmp_path):
         """A medida é sobre quem ATRAVESSA. Um print no nosso preço é a fila
         andando — pausar nele tiraria a cotação do livro toda vez que ela

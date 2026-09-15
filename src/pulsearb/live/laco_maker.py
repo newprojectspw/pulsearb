@@ -289,6 +289,15 @@ class LacoMaker:
             janela, aberta, livro_de=livro_de, agora_ns=agora_ns, params=params
         )
 
+        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
+            # ANTES do portão de dados: cancelar não precisa de livro, e a
+            # pausa que esperasse o livro voltar poderia nunca acontecer
+            # (revisão do Codex, #131). Quem sai fecha a conta primeiro, pelo
+            # mesmo caminho do `livro_andou_contra`.
+            return await self._sair_por_fill_toxico(
+                janela.slug, livro_de=livro_de, agora_ns=agora_ns
+            )
+
         dados, recusa = self._dados_da_passada(
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
         )
@@ -320,16 +329,6 @@ class LacoMaker:
             self.caixa.acertar(
                 janela.slug, aberta, livro, params, agora_epoch=agora_epoch
             )
-
-        # A pausa vem DEPOIS do acerto acima, de propósito. Um fill
-        # atravessado consome UMA perna; a outra segue no livro ganhando
-        # reward de um lado só até esta passada, e `_sair` apaga o relógio da
-        # caixa. Sair antes de fechar o intervalo jogaria fora até uma
-        # cadência inteira de reward legítimo — e enviesaria o experimento
-        # CONTRA a própria regra que se quer medir (revisão do Codex, #131).
-        # É a mesma ordem que o `livro_andou_contra` já seguia.
-        if self._em_pausa_por_fill_toxico(janela.slug, agora_ns):
-            return await self._recusar(janela.slug, "pausa_por_fill_toxico")
 
         decisao = decidir(
             aberta,
@@ -403,6 +402,58 @@ class LacoMaker:
             agora_ns=agora_ns,
             livro_de=livro_de,
             params=params,
+        )
+
+    async def recolher_por_fill_toxico(self, livro_de, *, agora_ns: int) -> list[Efeito]:
+        """Entre passadas: vê os prints e tira do livro quem levou um fill
+        atravessado.
+
+        A cadência do laço é de 15 s, e os prints só eram vistos nela: um
+        fill logo depois de uma passada deixava a outra perna exposta quase
+        uma cadência inteira, e encurtava a pausa medida de 30 s para 15–30 s
+        efetivos — seria medir OUTRA regra (revisão do Codex, #131). O sono
+        do processo já acorda a cada segundo para fechar markout; aqui ele
+        também olha os prints. A decisão de COTAR segue nos 15 s.
+        """
+        if self.pausa_apos_fill_toxico_s is None:
+            return []
+        efeitos: list[Efeito] = []
+        for slug, aberta in list(self.abertas.items()):
+            tokens = self._tokens.get(slug)
+            if tokens is None or self._negocios_desde is None:
+                continue
+            self.caixa.conferir_prints(
+                slug,
+                aberta,
+                token_up=tokens[0],
+                token_down=tokens[1],
+                negocios_desde=self._negocios_desde,
+                agora_ns=agora_ns,
+                livro_de=livro_de,
+                params=self._params.get(slug),
+            )
+            if self._em_pausa_por_fill_toxico(slug, agora_ns):
+                saiu = await self._sair_por_fill_toxico(
+                    slug, livro_de=livro_de, agora_ns=agora_ns
+                )
+                if saiu is not None:
+                    efeitos.append(saiu)
+        return efeitos
+
+    async def _sair_por_fill_toxico(
+        self, slug: str, *, livro_de, agora_ns: int
+    ) -> Efeito | None:
+        """Fecha a conta e tira do livro, ou só conta o motivo se não havia
+        cotação — que é o caso de a pausa ainda estar valendo."""
+        aberta = self.abertas.get(slug)
+        tokens = self._tokens.get(slug)
+        if aberta is None or tokens is None:
+            self._contar("pausa_por_fill_toxico")
+            return None
+        livros = [livro_de(token_id, agora_ns=agora_ns) for token_id in tokens]
+        return await self._recolher(
+            slug, aberta, tokens, livros,
+            livro_de=livro_de, agora_ns=agora_ns, motivo="pausa_por_fill_toxico",
         )
 
     def _em_pausa_por_fill_toxico(self, slug: str, agora_ns: int) -> bool:
@@ -718,6 +769,7 @@ class LacoMaker:
                     await self._recolher(
                         slug, aberta, tokens, livros,
                         livro_de=livro_de, agora_ns=agora_ns,
+                        motivo="livro_andou_contra",
                     )
                 )
         return efeitos
@@ -775,6 +827,7 @@ class LacoMaker:
         *,
         livro_de,
         agora_ns: int,
+        motivo: str,
     ) -> Efeito:
         """Tira a cotação do livro — e fecha a conta dela ANTES de sair.
 
@@ -790,7 +843,14 @@ class LacoMaker:
            que disparou e o do Up não está à mão, o do Down serve pelo mesmo
            espelho que a colocação e o portão usam (bid = 1 − ask), e sem
            nenhum dos dois não se chega aqui;
-        3. **sair**, com o motivo nomeado.
+        3. **sair**, com o motivo nomeado — `motivo` porque as DUAS regras
+           que tiram a cotação entre passadas (o livro andando contra e a
+           pausa por fill tóxico) precisam desta mesma ordem, e ter duas
+           cópias dela é como as duas divergem.
+
+        Sem nenhum dos dois livros à mão a conta não fecha — e ainda assim a
+        cotação SAI: a pausa por fill tóxico não depende de livro, porque
+        cancelar não depende (revisão do Codex, #131).
         """
         if self._negocios_desde is not None:
             self.caixa.conferir_prints(
@@ -804,14 +864,14 @@ class LacoMaker:
                 params=self._params.get(slug),
             )
         params = self._params.get(slug)
-        if params is not None:
-            livro_up = livros[0]
-            if livro_up is None:
-                livro_up = espelho_do_livro(livros[1], asset_id=tokens[0])
+        livro_up = livros[0]
+        if livro_up is None and livros[1] is not None:
+            livro_up = espelho_do_livro(livros[1], asset_id=tokens[0])
+        if params is not None and livro_up is not None:
             self.caixa.acertar(
                 slug, aberta, livro_up, params, agora_epoch=agora_ns / 1e9
             )
-        return await self._sair(slug, motivo="livro_andou_contra")
+        return await self._sair(slug, motivo=motivo)
 
     async def _recusar(self, slug: str, motivo: str) -> Efeito | None:
         """Não cotar por `motivo` — e tirar do livro o que já repousava.

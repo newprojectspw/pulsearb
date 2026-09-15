@@ -576,6 +576,20 @@ class ProcessoShadow:
                     raise
                 except Exception:
                     log.exception("recolher entre passadas falhou")
+            # A pausa por fill tóxico, também a cada segundo: os prints só
+            # eram vistos na passada de 15 s, e um fill logo depois dela
+            # deixava a outra perna exposta quase a cadência inteira — a
+            # pausa de 30 s medida virava 15–30 s efetivos.
+            if getattr(self.laco_maker, "pausa_apos_fill_toxico_s", None) is not None:
+                try:
+                    await self.laco_maker.recolher_por_fill_toxico(
+                        self._livro_para_o_maker, agora_ns=time.time_ns()
+                    )
+                except OSError as erro:
+                    self.falhou = f"io_do_diario_maker: {erro}"
+                    raise
+                except Exception:
+                    log.exception("pausa por fill toxico entre passadas falhou")
 
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None

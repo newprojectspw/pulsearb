@@ -112,6 +112,20 @@ class ExecucaoPossivel:
     meio_no_fill: float | None = None
 
 
+def _quando_o_negocio_aconteceu_ns(negocio: Any) -> int:
+    """Quando o negócio ACONTECEU, em ns: o carimbo do servidor se houver,
+    senão a chegada.
+
+    A diferença entre os dois é o que separa "alguém negociou agora contra a
+    nossa ordem" de "a reassinatura reenviou um negócio antigo" — e só o
+    primeiro é motivo para tirar a cotação do livro.
+    """
+    servidor_ms = getattr(negocio, "ts_servidor_ms", None)
+    if servidor_ms is None:
+        return int(negocio.ts_ns)
+    return int(servidor_ms) * 1_000_000
+
+
 def _atraso_do_print_s(negocio: Any, agora_ns: int) -> float | None:
     """Quanto tempo depois do carimbo DO SERVIDOR o print foi lido aqui.
 
@@ -295,8 +309,16 @@ class CaixaDoMaker:
                 # `poly-maker`, disparado pelo NOSSO fill e não pelo salto).
                 # Guardado sempre, custe ou não — quem decide se pausa é o
                 # laço, e a caixa não sabe de regra de operação.
+                #
+                # Pelo carimbo do SERVIDOR quando ele existe: `ts_ns` é a
+                # CHEGADA, e um `last_trade_price` reenviado depois de
+                # reassinatura chega agora carregando um negócio de minutos
+                # atrás. Armar a pausa por ele tiraria do livro uma cotação
+                # contra a qual ninguém negociou (revisão do Codex, #131).
+                # Sem carimbo do servidor vale a chegada, que é o que há.
                 self.ultimo_fill_toxico_ns[slug] = max(
-                    self.ultimo_fill_toxico_ns.get(slug, 0), negocio.ts_ns
+                    self.ultimo_fill_toxico_ns.get(slug, 0),
+                    _quando_o_negocio_aconteceu_ns(negocio),
                 )
             if params is not None and livro_de is not None:
                 self._acertar_no_print(
