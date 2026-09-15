@@ -143,6 +143,10 @@ def _relato(**mudancas) -> dict:
     base = {
         "msg": resumo.MSG_DO_RELATO,
         "falhou": None,
+        # A linha de FIM. Sem ela o relato é um corte do fluxo, e o padrão
+        # das fixtures aqui é a rodada que terminou — os cortes têm testes
+        # próprios em `TestAsQuatroManeirasDePerderQuatorzeDias`.
+        "fim_da_rodada": True,
         "vigilia": {
             "da_rodada": {
                 "parede_s": resumo.PAREDE_EXIGIDA_S + 60,
@@ -493,3 +497,162 @@ class TestASaida:
         saida = capsys.readouterr().out
         assert "5000.0 cotação-horas" in saida
         assert "208.33 d" not in saida
+
+
+class TestOsAchadosDaRevisao:
+    """Quatro defeitos do leitor, e o pior deles o quebrava por completo."""
+
+    def test_rodada_que_TERMINOU_e_a_unica_que_conta_as_duas_semanas(self):
+        """O defeito que tornava o leitor inútil (revisão do Codex, #131).
+
+        `laco_de_relato` RETORNA quando o prazo vence, então o último relato
+        de 60 s sai sempre ANTES do fim: `parede_s` do último relato é sempre
+        menor que as duas semanas. E o estado final saía só por `print`, em
+        stdout, sem `msg` e com `indent=2` — fora do fluxo de relatos por
+        definição, e fora do `grep` documentado.
+
+        Resultado: TODA rodada de 14 dias bem sucedida saía `curta_demais`.
+        O leitor jamais diria PASSA.
+        """
+        sem_fim = _relato()
+        del sem_fim["fim_da_rodada"]
+
+        assert resumo._julgar([sem_fim])[:2] == (
+            resumo.NAO_AVALIAVEL, "rodada_nao_terminou"
+        )
+        assert resumo._julgar([_relato()])[:2] == (resumo.PASSA, None)
+
+    def test_o_processo_de_verdade_EMITE_a_linha_de_fim(self, tmp_path):
+        """Percorrido no fonte do produtor, não presumido.
+
+        O conserto tem duas metades em dois arquivos, e a metade que falta
+        não dá erro: sem esta linha no `shadow.main`, o leitor passa a
+        recusar toda rodada com `rodada_nao_terminou` — o defeito trocado de
+        lugar, não consertado.
+        """
+        fonte = (
+            Path(__file__).resolve().parents[1]
+            / "src" / "pulsearb" / "live" / "shadow.py"
+        ).read_text(encoding="utf-8")
+
+        assert f'log.info("shadow", **estado, {resumo.CAMPO_DO_FIM}=True)' in fonte
+
+    def test_zero_medidas_de_markout_RECUSA_mesmo_com_liquido_positivo(self):
+        """Rewards puros não são a conta — e o aviso estava só no rodapé.
+
+        Com zero medidas, o líquido é rewards sem custo nenhum descontado, e
+        o custo da rota é justamente o markout. Zero medidas é `não observei
+        o custo`, não `o custo é zero` — mesma distinção do `sem_recortes` no
+        1.6. O veredito aprovava assim mesmo (revisão do Codex, #131).
+        """
+        relato = _relato()
+        relato["maker"]["caixa"]["markout"]["medidas"] = 0
+        relato["maker"]["caixa"]["markout"]["resultado_usdc"] = 0.0
+        relato["maker"]["caixa"]["liquido_pro_rata_usdc"] = 200.0
+
+        assert resumo._julgar([relato])[:2] == (
+            resumo.NAO_AVALIAVEL, "custo_nao_medido"
+        )
+
+    def test_id_sem_prefixo_de_sombra_DERRUBA_o_veredito(self):
+        """Um ensaio que pode ter mandado ordem REAL não é um SHADOW válido.
+
+        A conferência existia e era só impressa: o veredito saía PASSA com o
+        aviso logo acima (revisão do Codex, #131).
+        """
+        diario = {
+            "colocadas": 1, "encerradas": 0,
+            "repouso_s": {"p50": None, "p90": None, "max": None},
+            "ids_sem_prefixo_de_sombra": ["0xdeadbeef"],
+        }
+
+        assert resumo._julgar([_relato()], diario)[:2] == (
+            resumo.NAO_AVALIAVEL, "ordem_sem_prefixo_de_sombra"
+        )
+
+    def test_o_id_real_recusa_ATE_sem_relato_nenhum(self):
+        """Não é recusa sobre a medida — vale sem medida nenhuma."""
+        diario = {
+            "colocadas": 1, "encerradas": 0,
+            "repouso_s": {"p50": None, "p90": None, "max": None},
+            "ids_sem_prefixo_de_sombra": ["0xdeadbeef"],
+        }
+
+        assert resumo._julgar([], diario)[1] == "ordem_sem_prefixo_de_sombra"
+
+    def test_rodada_que_dormiu_vence_a_que_nao_terminou(self):
+        """Das duas recusas simultâneas, a acionável AGORA é a que sai.
+
+        "Não terminou" no meio de uma rodada de 14 dias é a notícia
+        esperada; "dormiu" é o que faz esperar não adiantar.
+        """
+        relato = _relato()
+        del relato["fim_da_rodada"]
+        relato["vigilia"]["da_rodada"]["ciclo_de_trabalho"] = 0.12
+
+        assert resumo._julgar([relato])[1] == "rodada_dormiu"
+
+    def test_restart_e_DITO_porque_a_caixa_nao_persiste(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`Restart=always` + caixa em memória = conta perdida, em silêncio.
+
+        O `run` refaz `inicio_parede` e a `CaixaDoMaker` não grava nada em
+        disco: um restart joga fora rewards e markout acumulados e reinicia o
+        relógio dos 14 dias. O diário continua (é anexado) e o calendário na
+        parede diz 14 dias, então nada denuncia.
+
+        O `curta_demais` já dá o veredito certo; o que faltava era o MOTIVO
+        chegar a quem lê, para a saída ser "recomece limpa" em vez de "o
+        leitor está quebrado".
+        """
+        monkeypatch.chdir(tmp_path)
+        antes, depois = _relato(), _relato()
+        antes["vigilia"]["da_rodada"]["parede_s"] = 700_000.0
+        depois["vigilia"]["da_rodada"]["parede_s"] = 200.0
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in (antes, depois)) + "\n", encoding="utf-8"
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+        saida = capsys.readouterr().out
+
+        assert "A RODADA RECOMEÇOU 1x" in saida
+        assert "recomeçar" in saida
+
+    def test_rodada_sem_restart_nao_diz_nada_sobre_restart(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        antes, depois = _relato(), _relato()
+        antes["vigilia"]["da_rodada"]["parede_s"] = 200.0
+        (tmp_path / "relatorios").mkdir()
+        (tmp_path / "relatorios" / "R.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in (antes, depois)) + "\n", encoding="utf-8"
+        )
+
+        resumo.main(["--relatos", "relatorios/R.jsonl"])
+
+        assert "RECOMEÇOU" not in capsys.readouterr().out
+
+    def test_todo_motivo_declarado_e_ALCANCAVEL(self):
+        """Dois destes motivos estavam escritos em `MOTIVOS` e nunca eram
+        devolvidos por `_julgar` — a recusa existia no papel e o veredito
+        aprovava assim mesmo. É o mesmo defeito do `limite_pessimista`, de
+        novo: o campo existia e não chegava a quem lê.
+        """
+        fonte = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "resumo_da_rodada_maker.py"
+        ).read_text(encoding="utf-8")
+        corpo = fonte.split("MOTIVOS = {", 1)[1].split("\n}\n", 1)[1]
+
+        nao_usados = [
+            nome for nome in resumo.MOTIVOS
+            if f'"{nome}"' not in corpo
+        ]
+
+        assert not nao_usados, (
+            f"motivos declarados e nunca devolvidos: {nao_usados}"
+        )

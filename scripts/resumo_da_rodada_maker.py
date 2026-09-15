@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from itertools import pairwise
 from typing import Any
 
 from pulsearb.caminhos import caminho_de_diario_lido, caminho_de_relatorio_lido
@@ -94,6 +95,13 @@ CAMPO_DO_CICLO = "vigilia.da_rodada.ciclo_de_trabalho"
 CAMPO_DA_PAREDE = "vigilia.da_rodada.parede_s"
 CAMPO_DO_SONO = "vigilia.da_rodada.dormiu_s"
 CAMPO_DO_FALHOU = "falhou"
+
+#: Marca a linha que o `pulsearb.live.shadow.main` emite DEPOIS de o `run`
+#: devolver — a única que traz o tempo de parede completo. O `laco_de_relato`
+#: retorna quando o prazo vence, então o último relato de 60 s sai sempre
+#: antes do fim: sem esta marca, toda rodada de 14 dias bem sucedida sairia
+#: `curta_demais` (revisão do Codex, #131).
+CAMPO_DO_FIM = "fim_da_rodada"
 
 #: Os três knobs experimentais, e como se lê "ligado" em cada um.
 #:
@@ -132,6 +140,9 @@ MOTIVOS = {
     "curta_demais": "ainda não completou as duas semanas",
     "campo_ausente": "o relato não traz o campo do veredito",
     "ordem_sem_prefixo_de_sombra": "id de ordem sem `sombra-` no diário",
+    "rodada_nao_terminou": "o fluxo não traz a linha de fim — rodada em curso, "
+                           "journal capturado no meio, ou processo morto",
+    "custo_nao_medido": "zero medidas de markout — o líquido é rewards puros",
 }
 
 
@@ -257,14 +268,20 @@ def _percentil(ordenados: list[float], q: float) -> float | None:
     return round(ordenados[indice], 1)
 
 
-def _julgar(relatos: list[dict]) -> tuple[str, str | None, dict[str, Any]]:
+def _julgar(
+    relatos: list[dict], diario: dict[str, Any] | None = None
+) -> tuple[str, str | None, dict[str, Any]]:
     """O veredito do 4.2, o motivo quando não há veredito, e o que foi lido.
 
-    A ordem das recusas é a ordem em que elas invalidam: primeiro as que
-    dizem que a rodada não é uma medida (sem relato, sem maker, confundida,
-    dormiu, falhou), e só então a conta. Uma rodada confundida com líquido
-    positivo não é um PASSA com ressalva — é um número sem item.
+    A ordem das recusas é a ordem em que elas invalidam. Primeiro a que não
+    é sobre a medida: id de ordem sem `sombra-` significaria ordem REAL, e
+    isso vale mesmo sem relato nenhum. Depois as que dizem que a rodada não é
+    uma medida (sem relato, sem maker, confundida, não terminou, dormiu,
+    falhou), e só então a conta. Uma rodada confundida com líquido positivo
+    não é um PASSA com ressalva — é um número sem item.
     """
+    if diario is not None and diario["ids_sem_prefixo_de_sombra"]:
+        return NAO_AVALIAVEL, "ordem_sem_prefixo_de_sombra", {}
     if not relatos:
         return NAO_AVALIAVEL, "sem_relato", {}
     ultimo = relatos[-1]
@@ -288,9 +305,27 @@ def _julgar(relatos: list[dict]) -> tuple[str, str | None, dict[str, Any]]:
     if ciclo is None or parede is None or liquido is None:
         return NAO_AVALIAVEL, "campo_ausente", lido
     if ciclo < CICLO_MINIMO:
+        # ANTES do `rodada_nao_terminou`, e de propósito: uma rodada em curso
+        # que está dormindo tem as duas recusas ao mesmo tempo, e só esta é
+        # acionável AGORA. "Não terminou" no meio de uma rodada de 14 dias é
+        # a notícia esperada; "dormiu" é o que faz esperar não adiantar.
         return NAO_AVALIAVEL, "rodada_dormiu", lido
+    if ultimo.get(CAMPO_DO_FIM) is not True:
+        # Sem a linha de fim, o que se tem é um corte do fluxo — e o tempo de
+        # parede do último relato de 60 s não é o da rodada. Vale para os
+        # três casos: rodada em curso, journal capturado no meio, e processo
+        # morto pelo systemd. Vem antes do `curta_demais` porque sem o fim da
+        # rodada não há tempo de rodada para comparar com as duas semanas.
+        return NAO_AVALIAVEL, "rodada_nao_terminou", lido
     if parede < PAREDE_EXIGIDA_S:
         return NAO_AVALIAVEL, "curta_demais", lido
+    if not lido[CAMPO_DAS_MEDIDAS]:
+        # Rewards puros nao sao a conta: o custo da rota e o markout de quem
+        # forneceu liquidez, e zero medidas quer dizer que ele NAO FOI
+        # OBSERVADO — que e diferente de ter sido observado zero. E a mesma
+        # distincao do `sem_recortes` no 1.6, e ela estava escrita no rodape
+        # da conta e ausente do veredito (revisao do Codex, #131).
+        return NAO_AVALIAVEL, "custo_nao_medido", lido
     return (PASSA if liquido > 0 else REPROVA), None, lido
 
 
@@ -383,6 +418,40 @@ def _imprimir_motivos(relatos: list[dict], quantos: int = 10) -> None:
         )
 
 
+def _imprimir_reinicios(relatos: list[dict]) -> None:
+    """Quantas vezes a rodada RECOMEÇOU, e por que isso muda o que se lê.
+
+    `Restart=always` existe para duas semanas não terminarem porque a rede
+    piscou — mas o `run` refaz `inicio_parede` e a `CaixaDoMaker` **não
+    persiste nada**. Um restart, então, joga fora rewards e markout
+    acumulados e reinicia o relógio dos 14 dias; o diário continua (é
+    anexado), o calendário na parede diz 14 dias, e a conta abaixo cobre só
+    o último trecho.
+
+    O `curta_demais` já dá o veredito certo nesse caso — o que faltava era o
+    MOTIVO chegar a quem lê, para a saída ser "recomece a rodada limpa" e não
+    "o leitor está quebrado".
+
+    `parede_s` caindo entre dois relatos é a assinatura: dentro de um mesmo
+    trecho ele só cresce.
+    """
+    paredes = [_ler(r, CAMPO_DA_PAREDE) for r in relatos]
+    quedas = sum(
+        1
+        for antes, depois in pairwise(paredes)
+        if antes is not None and depois is not None and depois < antes
+    )
+    if not quedas:
+        return
+    print(
+        f"\n  A RODADA RECOMEÇOU {quedas}x (`parede_s` caiu entre relatos).\n"
+        "  A `CaixaDoMaker` não persiste nada e o `run` refaz o relógio: os\n"
+        "  rewards e o markout abaixo cobrem SÓ o trecho desde o último\n"
+        "  restart, não os 14 dias do calendário. A rodada precisa recomeçar\n"
+        "  limpa — esperar não recupera o que foi perdido."
+    )
+
+
 def _imprimir_diario(diario: dict[str, Any]) -> None:
     print("\nO DIÁRIO — quantas cotações repousaram, e por quanto (§10.2)")
     print(f"  colocadas               {diario['colocadas']}")
@@ -417,17 +486,25 @@ def main(argv: list[str] | None = None) -> int:
     regras, _ = regras_da_rodada(relatos) if relatos else (None, None)
     _imprimir_regras(regras)
 
-    veredito, motivo, lido = _julgar(relatos)
+    # O diário entra ANTES do julgamento: a conferência do prefixo `sombra-`
+    # é recusa, não aviso, e uma recusa impressa depois do veredito seria um
+    # veredito tomado sem ela.
+    diario = None
+    if args.diario:
+        try:
+            diario = conferir_diario(args.diario)
+        except ValueError as erro:
+            print(f"aviso: {erro}", file=sys.stderr)
+
+    veredito, motivo, lido = _julgar(relatos, diario)
     if relatos:
         _imprimir_tempo(lido)
+        _imprimir_reinicios(relatos)
         _imprimir_motivos(relatos)
         _imprimir_conta(lido)
 
-    if args.diario:
-        try:
-            _imprimir_diario(conferir_diario(args.diario))
-        except ValueError as erro:
-            print(f"\naviso: {erro}", file=sys.stderr)
+    if diario is not None:
+        _imprimir_diario(diario)
 
     _titulo(f"4.2 — SHADOW >= {DIAS_EXIGIDOS} DIAS COM EDGE LIQUIDO MEDIDO")
     print(f"  {veredito}" + (f"   ({motivo}: {MOTIVOS[motivo]})" if motivo else ""))

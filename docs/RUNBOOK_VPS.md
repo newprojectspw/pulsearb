@@ -854,8 +854,23 @@ aparecem em nenhuma linha da tabela acima:
 | `relato_sem_maker` | o laço maker não subiu; a rodada segue viva, relatando, medindo nada |
 
 O leitor **não recalcula** rewards nem markout: os números são os que o motor
-publicou. E ele confere, a cada leitura, o que a última linha da tabela acima
-pede a olho — todo `order_id` do diário começando com `sombra-`.
+publicou. E o `order_id` sem `sombra-` — a última linha da tabela acima, hoje
+conferida a olho — **derruba o veredito**, não vira aviso: um ensaio que pode
+ter mandado ordem real não é um SHADOW válido.
+
+**`rodada_nao_terminou` no meio da rodada é o esperado, não defeito.** O
+relato de 60 s sai sempre antes do prazo vencer; o tempo de parede completo
+só existe na linha que o processo emite ao encerrar, marcada com
+`fim_da_rodada`. Rodando no dia 3, o leitor diz `rodada_nao_terminou` e está
+certo — é assim que ele distingue rodada em curso de processo morto pelo
+systemd.
+
+**E se ele disser que a rodada RECOMEÇOU, a rodada não vale mais.** O
+`Restart=always` existe para a rede piscar sem matar as duas semanas, mas a
+`CaixaDoMaker` não persiste nada e o `run` refaz o relógio: o restart joga
+fora os rewards e o markout acumulados. O diário continua (é anexado) e o
+calendário na parede segue dizendo 14 dias. A saída é recomeçar a rodada
+limpa — esperar não recupera o que foi perdido.
 
 ### 10.1c. As quatro rodadas correm JUNTAS, não uma depois da outra
 

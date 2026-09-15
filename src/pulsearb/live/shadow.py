@@ -1006,6 +1006,21 @@ def main(argv: list[str] | None = None) -> int:
         settings, ciclo, caminho_do_diario=caminho_do_diario
     )
     estado = asyncio.run(processo.run(args.duration))
+    # O ESTADO FINAL TAMBÉM VAI PELO LOG, e não só pelo `print` abaixo.
+    #
+    # Achado da revisão do Codex no #131, e ele quebrava por completo o leitor
+    # da rodada (`scripts/resumo_da_rodada_maker.py`): o `laco_de_relato`
+    # RETORNA quando o prazo vence, então o último relato de 60 s sai sempre
+    # ANTES do fim. O estado final saía só pelo `print`, em stdout, sem `msg`
+    # e com `indent=2` (várias linhas) — fora do fluxo de relatos por
+    # definição. O leitor então via `parede_s` sempre abaixo das duas semanas
+    # e classificava toda rodada de 14 dias BEM SUCEDIDA como `curta_demais`.
+    #
+    # `fim_da_rodada` marca esta linha e só ela. É o que separa três coisas
+    # que o resto do relato não separa: rodada que terminou, journal capturado
+    # no meio dela, e processo morto pelo systemd — as duas últimas não têm
+    # esta linha, e nenhuma delas é uma rodada de 14 dias.
+    log.info("shadow", **estado, fim_da_rodada=True)
     print(json.dumps(estado, indent=2, ensure_ascii=False, default=str))
     # Rodada sem saída NÃO é sucesso. Sair com 0 depois de 24 h que não
     # gravaram nada faria o systemd (e quem lê o log) tratar como bem
