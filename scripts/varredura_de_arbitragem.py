@@ -392,30 +392,73 @@ def _contabilizar(
             vistos[slug].append(achado["lucro_usdc"])
 
 
-async def _imprimir_cru(eventos: list[dict], quantos: int = 3) -> None:
-    """A forma dos eventos, para o `neg_risk` virar `[VERIFICADO]` no API_NOTES.
+async def _diagnosticar_fechado(get, base_gamma: str, m: dict) -> None:
+    """Por que ESTE resultado fechado não tem resolução legível.
 
-    Imprime os RECUSADOS primeiro: são eles que ninguém entendeu ainda. Roda
-    DEPOIS do `enriquecer_fechados`, senão mostraria a forma de antes da busca
-    e mandaria consertar o que já está consertado.
+    Existe porque o conserto de `enriquecer_fechados` NÃO destravou os 18
+    eventos, e há quatro explicações possíveis que a saída da varredura não
+    distingue: a busca falhou, o mercado cheio também não traz o par, não há
+    identificador para buscar, ou o nome do resultado não é "Yes". Este
+    diagnóstico percorre as quatro em ordem e diz em qual parou — em vez de
+    eu escolher uma e pedir mais uma rodada de 10 minutos.
     """
-    recusados = [e for e in eventos if not conjunto_e_exaustivo(e)[0]]
-    print(f"\n--- FORMA CRUA de {min(quantos, len(recusados))} evento(s) "
-          f"recusado(s), de {len(recusados)} ---")
+    ident = m.get("id") or m.get("slug")
+    print(f"    · id={m.get('id')!r} slug={m.get('slug')!r}")
+    # `closed` e `active: false` NÃO são a mesma coisa, e o `_falta_resolucao`
+    # trata as duas igual. Um mercado inativo pode nunca ter aberto — e aí não
+    # existe preço final para ler, nem vai existir. Saber qual das duas
+    # disparou muda o conserto.
+    print(f"      closed={m.get('closed')!r} active={m.get('active')!r} "
+          f"umaResolutionStatus={m.get('umaResolutionStatus')!r}")
+    print(f"      no evento: outcomes={m.get('outcomes')!r} "
+          f"outcomePrices={m.get('outcomePrices')!r}")
+    print(f"      resolveu_nao(evento) = {resolveu_nao(m)!r}")
+    if not isinstance(ident, str | int):
+        print("      >>> SEM IDENTIFICADOR: não há o que buscar")
+        return
+    rota = _rota_do_mercado(base_gamma, str(ident))
+    print(f"      buscando {rota}")
+    try:
+        cheio = await get(rota, {})
+    except Exception as erro:
+        print(f"      >>> A BUSCA FALHOU: {type(erro).__name__}: {erro}")
+        return
+    if not isinstance(cheio, dict):
+        print(f"      >>> RESPOSTA NÃO É OBJETO: {type(cheio).__name__} {cheio!r:.120}")
+        return
+    print(f"      chaves do mercado cheio: {sorted(cheio)}")
+    print(f"      cheio: outcomes={cheio.get('outcomes')!r} "
+          f"outcomePrices={cheio.get('outcomePrices')!r}")
+    print(f"      resolveu_nao(cheio) = {resolveu_nao(cheio)!r}")
+    if resolveu_nao(cheio) is None and cheio.get("outcomes"):
+        print("      >>> O PAR EXISTE mas o nome do resultado não bate com "
+              "'yes'/'sim' — é aqui que o casamento por nome falha")
+
+
+async def _imprimir_cru(get, base_gamma: str, eventos: list[dict],
+                        quantos: int = 2) -> None:
+    """A forma dos eventos recusados, e o PORQUÊ de cada fechado ilegível.
+
+    É assim que um fato de API entra neste projeto: olhando o que o servidor
+    manda. Foi ler campo "que parecia razoável" que produziu os dois defeitos
+    silenciosos do §6.1b e do §12.13.
+    """
+    recusados = [
+        e for e in eventos
+        if conjunto_e_exaustivo(e)[1] == "fechado_sem_resolucao_legivel"
+    ]
+    print(f"\n=== {len(recusados)} evento(s) com fechado ilegível; "
+          f"abrindo {min(quantos, len(recusados))} ===")
     for ev in recusados[:quantos]:
         mercados = [m for m in (ev.get("markets") or []) if isinstance(m, dict)]
         print(f"\n  slug={ev.get('slug')!r}  mercados={len(mercados)}")
         print(f"  chaves do evento: {sorted(ev)}")
-        for m in mercados[:6]:
-            estado = {
-                k: m.get(k) for k in
-                ("closed", "active", "enableOrderBook", "umaResolutionStatus",
-                 "outcomes", "outcomePrices", "groupItemTitle", "id", "slug")
-                if k in m
-            }
-            print(f"    - {estado}")
         if mercados:
             print(f"  chaves de um mercado: {sorted(mercados[0])}")
+        ilegiveis = [m for m in mercados if _falta_resolucao(m)]
+        print(f"  fechados ilegíveis: {len(ilegiveis)} de {len(mercados)}")
+        for m in ilegiveis[:3]:
+            await _diagnosticar_fechado(get, base_gamma, m)
 
 
 async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
@@ -458,7 +501,7 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
                 await enriquecer_fechados(
                     get, s.endpoints.gamma, ev, cache_de_fechados
                 )
-            await _imprimir_cru(eventos)
+            await _imprimir_cru(get, s.endpoints.gamma, eventos)
             return 0
         print(f"{len(eventos)} eventos neg-risk. Amostrando por {minutos:g} min…\n")
 
