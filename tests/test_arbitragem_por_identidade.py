@@ -277,3 +277,189 @@ def test_todo_motivo_declarado_e_ALCANCAVEL():
     nao_usados = [nome for nome in MOTIVOS if f'"{nome}"' not in corpo]
 
     assert not nao_usados, f"motivos declarados e nunca devolvidos: {nao_usados}"
+
+
+# ── o veredito da varredura ──────────────────────────────────────────────
+def _varredura():
+    """O script, importado por caminho — `scripts/` não é pacote instalado."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "varredura_de_arbitragem", raiz / "scripts" / "varredura_de_arbitragem.py"
+    )
+    assert spec is not None and spec.loader is not None
+    modulo = importlib.util.module_from_spec(spec)
+    sys.modules["varredura_de_arbitragem"] = modulo
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+class TestOVereditoNaoFalaDoQueNaoOLHOU:
+    """O defeito que a PRIMEIRA RODADA DE VERDADE expôs.
+
+    Na VPS, em 2026-09-16, a varredura fez 599 passadas e imprimiu **❌ para a
+    cesta neg-risk**. Mas as recusas diziam 11.980 `conjunto_incompleto`, que
+    dividido por 599 passadas são **20 eventos** — de 22. Só DOIS chegaram à
+    aritmética, e o script concluiu ❌ mesmo assim, três linhas depois de
+    imprimir que recusa não é "não há arbitragem".
+
+    É a distinção do `sem_recortes` no 1.6 — medida de ausência × ausência de
+    medida — violada dentro do arquivo que a cita.
+    """
+
+    def test_maioria_recusada_da_NAO_AVALIAVEL_e_nao_reprova(self, capsys):
+        v = _varredura()
+        por_evento = {f"e{i}": "conjunto_com_fechado" for i in range(20)}
+        por_evento.update({"e20": "avaliado", "e21": "avaliado"})
+
+        v._imprimir_veredito(599, {}, {}, por_evento)
+        saida = capsys.readouterr().out
+
+        assert "NÃO AVALIÁVEL" in saida
+        assert "2 de 22" in saida
+        # O ❌ aparece na frase que explica o que isto NÃO é; o que não pode
+        # existir é o VEREDITO ser ❌.
+        assert "Veredito: ❌" not in saida
+
+    def test_maioria_avaliada_e_sem_folga_da_REPROVA(self, capsys):
+        """Quando o universo FOI olhado, ❌ é veredito legítimo — e barato."""
+        v = _varredura()
+        por_evento = {f"e{i}": "avaliado" for i in range(20)}
+        por_evento["e20"] = "conjunto_com_fechado"
+
+        v._imprimir_veredito(599, {}, {}, por_evento)
+        saida = capsys.readouterr().out
+
+        assert "Veredito: ❌" in saida
+        assert "NÃO AVALIÁVEL" not in saida
+
+    def test_a_contagem_por_EVENTO_aparece_sempre(self, capsys):
+        """11.980 recusas escondiam que eram 20 eventos. O número que importa
+        é quantos eventos existem e quantos foram olhados."""
+        v = _varredura()
+
+        v._imprimir_veredito(10, {}, {}, {"a": "avaliado", "b": "conjunto_sem_livro"})
+
+        assert "1 avaliado(s) de 2" in capsys.readouterr().out
+
+
+class TestARecusaDIZOQueFazer:
+    """`conjunto_incompleto` não dizia o que destrava — fechado e sem-livro
+    pedem coisas diferentes."""
+
+    def test_fechado_que_resolveu_NAO_nao_mata_a_cesta(self):
+        """O conserto que destrava os 20 eventos da primeira rodada.
+
+        Um candidato eliminado é resultado fechado, e recusar o evento por
+        causa dele jogou fora 20 dos 22 eventos sem medir nada. A identidade
+        sobrevive: se todos os fechados resolveram NÃO, exatamente um dos
+        ABERTOS vence e a cesta sobre eles paga 1,00.
+        """
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True, "outcomes": '["Yes","No"]',
+             "outcomePrices": '["0","1"]'},
+            {}, {},
+        ]}
+
+        assert v.conjunto_e_exaustivo(evento) == (True, "")
+        assert len(v.mercados_da_cesta(evento)) == 2
+
+    def test_fechado_que_resolveu_SIM_encerra_o_evento(self):
+        """Aí os abertos valem ZERO, e a 'cesta' seria pagar por bilhete que
+        já perdeu."""
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True, "outcomes": '["Yes","No"]',
+             "outcomePrices": '["1","0"]'},
+            {}, {},
+        ]}
+
+        assert v.conjunto_e_exaustivo(evento) == (False, "evento_ja_decidido")
+
+    def test_fechado_ILEGIVEL_recusa_em_vez_de_presumir(self):
+        """Estado desconhecido é RECUSA, não 'provavelmente resolveu não'."""
+        v = _varredura()
+        evento = {"markets": [{"closed": True}, {}, {}]}
+
+        assert v.conjunto_e_exaustivo(evento) == (
+            False, "fechado_sem_resolucao_legivel"
+        )
+
+    def test_o_Yes_e_casado_pelo_NOME_e_nao_pela_posicao(self):
+        """Presumir que o índice 0 é o "Yes" é o campo assumido a partir do
+        que parecia razoável — o defeito do §6.1b e do §12.13."""
+        v = _varredura()
+        invertido = {"closed": True, "outcomes": '["No","Yes"]',
+                     "outcomePrices": '["1","0"]'}
+
+        assert v.resolveu_nao(invertido) is True
+
+    def test_cesta_compra_so_os_ABERTOS(self):
+        """Resultado que já resolveu NÃO custa zero e não se compra."""
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True, "outcomes": '["Yes","No"]',
+             "outcomePrices": '["0","1"]'},
+            {"id": "a"}, {"id": "b"},
+        ]}
+
+        assert [m["id"] for m in v.mercados_da_cesta(evento)] == ["a", "b"]
+
+    def test_resultado_sem_livro_tem_motivo_proprio(self):
+        v = _varredura()
+        evento = {"markets": [{"enableOrderBook": False}, {}]}
+
+        assert v.conjunto_e_exaustivo(evento) == (False, "conjunto_sem_livro")
+
+    def test_evento_de_um_resultado_so_tem_motivo_proprio(self):
+        v = _varredura()
+
+        assert v.conjunto_e_exaustivo({"markets": [{}]}) == (
+            False, "conjunto_pequeno_demais"
+        )
+
+    def test_evento_todo_aberto_passa(self):
+        v = _varredura()
+
+        assert v.conjunto_e_exaustivo({"markets": [{}, {}]}) == (True, "")
+
+    def test_todo_motivo_do_SCRIPT_e_alcancavel(self):
+        """Mesmo guarda do núcleo — e foi ele que achou o `--cru` fantasma:
+        a flag era citada numa mensagem e não existia no argparse."""
+        from pathlib import Path
+
+        v = _varredura()
+        fonte = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "varredura_de_arbitragem.py"
+        ).read_text(encoding="utf-8")
+        corpo = fonte.split("MOTIVOS = {", 1)[1].split("\n}\n", 1)[1]
+
+        # Aspas simples TAMBÉM contam: os motivos usados dentro de f-string
+        # saem como MOTIVOS['nome'], e procurar só aspas duplas acusaria
+        # motivo vivo como decorativo.
+        nao_usados = [
+            n for n in v.MOTIVOS
+            if f'"{n}"' not in corpo and f"'{n}'" not in corpo
+        ]
+
+        assert not nao_usados, f"motivos declarados e nunca devolvidos: {nao_usados}"
+
+    def test_a_flag_cru_que_a_mensagem_CITA_existe_de_verdade(self):
+        """Ela era citada e não existia — mandar rodar uma flag fantasma é
+        pior que não sugerir nada."""
+        v = _varredura()
+
+        assert v.main.__doc__ is None or True  # a checagem real é o parse:
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            v.main(["--help"])
+
+        assert "--cru" in buf.getvalue()

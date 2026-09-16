@@ -69,10 +69,25 @@ LATENCIAS_S = (0.3, 1.0, 5.0, 30.0)
 #: ordem); é onde a busca para de subir.
 TETO_DE_SHARES = 500.0
 
+#: Recusas que valem para o EVENTO inteiro, não para uma passada — elas não
+#: mudam de uma amostra para a outra, e contá-las por passada inflava o número
+#: até esconder quantos eventos existiam.
+RECUSAS_DE_CONJUNTO = frozenset({
+    "conjunto_pequeno_demais",
+    "conjunto_sem_livro",
+    "fechado_sem_resolucao_legivel",
+    "evento_ja_decidido",
+})
+
 MOTIVOS = {
     "sem_evento_negrisk": "a Gamma não devolveu evento neg-risk nenhum",
-    "conjunto_incompleto": "o evento não expõe todos os resultados — sem isso "
-                           "a cesta não paga 1,00 e a posição vira direcional",
+    "conjunto_pequeno_demais": "o evento tem menos de 2 resultados",
+    "fechado_sem_resolucao_legivel": "há resultado fechado cuja resolução não "
+                                    "dá para ler — não sei se ele resolveu SIM",
+    "evento_ja_decidido": "um resultado fechado resolveu SIM: o evento acabou "
+                          "e os abertos valem zero",
+    "conjunto_sem_livro": "há resultado sem livro de ofertas habilitado — não "
+                          "dá para comprar a perna dele",
     "perna_sem_taxa": "mercado sem fee legível não é operado (engine/fees.py)",
     "perna_sem_livro": "o CLOB não devolveu livro legível para alguma perna",
     "forma_desconhecida": "a resposta não tem os campos que esta varredura "
@@ -148,6 +163,43 @@ async def eventos_neg_risk(get, base_gamma: str, limite: int) -> list[dict]:
     return saida
 
 
+def resolveu_nao(mercado: dict) -> bool | None:
+    """Este resultado FECHADO resolveu NÃO? `None` = não deu para ler.
+
+    Lê o par `outcomes`/`outcomePrices` — o preço final do resultado "Yes" é
+    1 quando ele venceu e 0 quando perdeu. **Casado pelo nome, nunca pela
+    posição**: presumir que o índice 0 é o "Yes" é exatamente o campo assumido
+    a partir do que parecia razoável que produziu os defeitos do §6.1b e do
+    §12.13. Não achou o par, ou não achou "Yes" nele: devolve `None`, e quem
+    chama recusa.
+    """
+    nomes, precos = mercado.get("outcomes"), mercado.get("outcomePrices")
+    for bruto in (nomes, precos):
+        if not isinstance(bruto, str | list):
+            return None
+    if isinstance(nomes, str):
+        try:
+            nomes = json.loads(nomes)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(precos, str):
+        try:
+            precos = json.loads(precos)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(nomes, list) or not isinstance(precos, list):
+        return None
+    if len(nomes) != len(precos):
+        return None
+    for nome, preco in zip(nomes, precos, strict=True):
+        if str(nome).strip().lower() in ("yes", "sim"):
+            try:
+                return float(preco) < 0.5
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     """O evento cobre TODO o espaço de resultados?
 
@@ -162,13 +214,42 @@ def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     """
     mercados = [m for m in (evento.get("markets") or []) if isinstance(m, dict)]
     if len(mercados) < 2:
-        return False, "conjunto_incompleto"
-    for m in mercados:
-        if m.get("closed") or not m.get("active", True):
-            return False, "conjunto_incompleto"
-        if not m.get("enableOrderBook", True):
-            return False, "conjunto_incompleto"
+        return False, "conjunto_pequeno_demais"
+    # A ORDEM DAS CHECAGENS É A ORDEM DO QUE SE APRENDE COM ELAS. "Incompleto"
+    # foi o que a primeira rodada devolveu para 20 dos 22 eventos, e não dizia
+    # o que fazer: fechado e sem-livro pedem coisas diferentes.
+    # RESULTADO FECHADO NÃO MATA A CESTA — e recusar o evento por causa dele
+    # foi o que deixou 20 dos 22 eventos da primeira rodada sem medição.
+    # Se todos os fechados resolveram NÃO, exatamente um dos ABERTOS vai
+    # vencer, e a cesta sobre os abertos paga 1,00 do mesmo jeito.
+    #
+    # As duas saídas ruins ficam separadas porque pedem coisas diferentes: um
+    # fechado que resolveu SIM encerra o evento (os abertos valem zero), e um
+    # fechado ilegível é estado DESCONHECIDO — que aqui recusa, como em todo
+    # o resto do projeto.
+    fechados = [m for m in mercados if m.get("closed") or not m.get("active", True)]
+    for m in fechados:
+        resposta = resolveu_nao(m)
+        if resposta is None:
+            return False, "fechado_sem_resolucao_legivel"
+        if not resposta:
+            return False, "evento_ja_decidido"
+
+    abertos = [m for m in mercados if m not in fechados]
+    if len(abertos) < 2:
+        return False, "conjunto_pequeno_demais"
+    if any(not m.get("enableOrderBook", True) for m in abertos):
+        return False, "conjunto_sem_livro"
     return True, ""
+
+
+def mercados_da_cesta(evento: dict) -> list[dict]:
+    """Só os ABERTOS: um resultado que já resolveu NÃO custa zero e não se
+    compra. Comprá-lo seria pagar por um bilhete que já perdeu."""
+    return [
+        m for m in (evento.get("markets") or [])
+        if isinstance(m, dict) and not (m.get("closed") or not m.get("active", True))
+    ]
 
 
 async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
@@ -179,7 +260,7 @@ async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
         if not ok:
             achados.append({"evento": ev.get("slug"), "recusa": motivo})
             continue
-        mercados = [m for m in ev.get("markets") or [] if isinstance(m, dict)]
+        mercados = mercados_da_cesta(ev)
         livros: list[OrderBook] = []
         taxas: list[Taxa] = []
         falhou = None
@@ -215,10 +296,36 @@ async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
     return achados
 
 
-async def rodar(minutos: float, limite: int) -> int:
+async def _imprimir_cru(eventos: list[dict], quantos: int = 3) -> None:
+    """A forma dos eventos, para o `neg_risk` virar `[VERIFICADO]` no API_NOTES.
+
+    Imprime os RECUSADOS primeiro: são eles que ninguém entendeu ainda.
+    """
+    recusados = [e for e in eventos if not conjunto_e_exaustivo(e)[0]]
+    print(f"\n--- FORMA CRUA de {min(quantos, len(recusados))} evento(s) "
+          f"recusado(s), de {len(recusados)} ---")
+    for ev in recusados[:quantos]:
+        mercados = [m for m in (ev.get("markets") or []) if isinstance(m, dict)]
+        print(f"\n  slug={ev.get('slug')!r}  mercados={len(mercados)}")
+        print(f"  chaves do evento: {sorted(ev)}")
+        for m in mercados[:6]:
+            estado = {
+                k: m.get(k) for k in
+                ("closed", "active", "enableOrderBook", "umaResolutionStatus",
+                 "outcomePrices", "groupItemTitle", "question")
+                if k in m
+            }
+            print(f"    - {estado}")
+        if mercados:
+            print(f"  chaves de um mercado: {sorted(mercados[0])}")
+
+
+async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
     s = Settings()
     vistos: dict[str, list[float]] = defaultdict(list)
     recusas: dict[str, int] = defaultdict(int)
+    #: Um desfecho por EVENTO: "avaliado" ou o motivo que o tirou da conta.
+    por_evento: dict[str, str] = {}
     passadas = 0
     fim = time.monotonic() + minutos * 60
 
@@ -246,6 +353,9 @@ async def rodar(minutos: float, limite: int) -> int:
                 "concluir qualquer coisa."
             )
             return 1
+        if cru:
+            await _imprimir_cru(eventos)
+            return 0
         print(f"{len(eventos)} eventos neg-risk. Amostrando por {minutos:g} min…\n")
 
         while time.monotonic() < fim:
@@ -256,15 +366,23 @@ async def rodar(minutos: float, limite: int) -> int:
                 print(f"\nRECUSA: rede_indisponivel — {type(erro).__name__}: {erro}")
                 return 1
             for achado in achados:
+                slug = achado.get("evento") or "?"
+                if achado.get("recusa") in RECUSAS_DE_CONJUNTO:
+                    # RECUSA DE CONJUNTO é sobre o EVENTO, não sobre a passada:
+                    # contá-la por passada dava 11.980 onde havia 20 eventos, e
+                    # o número grande escondia que quase nada foi olhado.
+                    por_evento[slug] = achado["recusa"]
+                    continue
+                por_evento.setdefault(slug, "avaliado")
                 if achado.get("recusa"):
                     recusas[achado["recusa"]] += 1
                 elif achado.get("lucro_usdc"):
-                    vistos[achado["evento"]].append(achado["lucro_usdc"])
+                    vistos[slug].append(achado["lucro_usdc"])
             passadas += 1
             print(f"  passada {passadas}: {len(vistos)} evento(s) com folga", end="\r")
             await asyncio.sleep(max(0.0, 1.0 - (time.monotonic() - t0)))
 
-    _imprimir_veredito(passadas, recusas, vistos)
+    _imprimir_veredito(passadas, recusas, vistos, por_evento)
     return 0
 
 
@@ -277,18 +395,45 @@ def _imprimir_recusas(recusas: dict[str, int]) -> None:
 
 
 def _imprimir_veredito(
-    passadas: int, recusas: dict[str, int], vistos: dict[str, list[float]]
+    passadas: int,
+    recusas: dict[str, int],
+    vistos: dict[str, list[float]],
+    por_evento: dict[str, str],
 ) -> None:
     print("\n" + "=" * 70)
     print(f"VARREDURA DE ARBITRAGEM POR IDENTIDADE — {passadas} passadas")
     print("=" * 70)
     _imprimir_recusas(recusas)
+    avaliados = [e for e, d in por_evento.items() if d == "avaliado"]
+    print(f"\nEVENTOS: {len(avaliados)} avaliado(s) de {len(por_evento)}")
+    fora = defaultdict(int)
+    for desfecho in por_evento.values():
+        if desfecho != "avaliado":
+            fora[desfecho] += 1
+    for nome, n in sorted(fora.items(), key=lambda kv: -kv[1]):
+        print(f"  {n:>3} fora por {nome:<26} {MOTIVOS.get(nome, '')}")
+
     if not vistos:
-        print("\n  NENHUMA oportunidade em nenhuma passada.")
-        print("\n  Veredito: ❌ para a cesta neg-risk, e é um ❌ BARATO —")
-        print("  custou uma varredura, não 14 dias. A escada de limiares")
-        print("  continua por medir: ela precisa do agrupamento por ativo e")
-        print("  data, e a forma do slug dessas escadas não está verificada.")
+        # O VEREDITO OLHA QUANTOS FORAM AVALIADOS, e não só se houve lucro.
+        # A primeira rodada de verdade (VPS, 2026-09-16, 599 passadas) avaliou
+        # 2 de 22 eventos e este script imprimiu ❌ assim mesmo — depois de
+        # escrever, três linhas acima, que recusa não é 'não há arbitragem'.
+        # É a distinção do `sem_recortes` no 1.6 (medida de ausência × ausência
+        # de medida), e eu a violei no meu próprio arquivo.
+        if len(avaliados) * 2 < len(por_evento):
+            print(
+                f"\n  Veredito: NÃO AVALIÁVEL — só {len(avaliados)} de "
+                f"{len(por_evento)} eventos chegaram à conta.\n"
+                "  Isto NÃO é '❌ não há arbitragem'. É 'a maior parte do\n"
+                "  universo não foi olhada', e o que destrava está na tabela\n"
+                "  acima. Rode com --cru para ver a forma dos recusados."
+            )
+            return
+        print("\n  NENHUMA oportunidade, e a MAIORIA dos eventos foi avaliada.")
+        print("  Veredito: ❌ para a cesta neg-risk — e é um ❌ BARATO,")
+        print("  custou uma varredura e não 14 dias. A escada de limiares")
+        print("  continua por medir: precisa do agrupamento por ativo e data,")
+        print("  e a forma do slug dessas escadas não está verificada.")
         return
 
     print(f"\n{len(vistos)} evento(s) com folga em alguma passada:\n")
@@ -316,6 +461,15 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="varredura_de_arbitragem")
     p.add_argument("--minutos", type=float, default=5.0)
     p.add_argument("--eventos", type=int, default=40)
+    p.add_argument(
+        "--cru",
+        action="store_true",
+        help=(
+            "imprime a FORMA dos eventos recusados (chaves e estado de cada "
+            "resultado) e sai. É assim que um fato de API entra neste projeto: "
+            "olhando o que o servidor manda, não o que parecia razoável"
+        ),
+    )
     args = p.parse_args(argv)
     # VARREDURA QUE NÃO PRODUZIU VEREDITO NÃO É SUCESSO. Sair com 0 depois de
     # um erro faria quem lê (e qualquer automação) tratar como "olhei e não
@@ -323,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     # `live/shadow.py` já faz da rodada sem saída — e a primeira execução
     # deste script, com a rede bloqueada, saiu com 0 e um traceback.
     try:
-        return asyncio.run(rodar(args.minutos, args.eventos))
+        return asyncio.run(rodar(args.minutos, args.eventos, cru=args.cru))
     except KeyboardInterrupt:
         return 130
     except Exception as erro:
