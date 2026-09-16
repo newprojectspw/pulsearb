@@ -163,6 +163,16 @@ async def eventos_neg_risk(get, base_gamma: str, limite: int) -> list[dict]:
     return saida
 
 
+def _lista(bruto: Any) -> list | None:
+    """A lista que a Gamma manda ora como lista, ora como string JSON."""
+    if isinstance(bruto, str):
+        try:
+            bruto = json.loads(bruto)
+        except json.JSONDecodeError:
+            return None
+    return bruto if isinstance(bruto, list) else None
+
+
 def resolveu_nao(mercado: dict) -> bool | None:
     """Este resultado FECHADO resolveu NÃO? `None` = não deu para ler.
 
@@ -173,23 +183,9 @@ def resolveu_nao(mercado: dict) -> bool | None:
     §12.13. Não achou o par, ou não achou "Yes" nele: devolve `None`, e quem
     chama recusa.
     """
-    nomes, precos = mercado.get("outcomes"), mercado.get("outcomePrices")
-    for bruto in (nomes, precos):
-        if not isinstance(bruto, str | list):
-            return None
-    if isinstance(nomes, str):
-        try:
-            nomes = json.loads(nomes)
-        except json.JSONDecodeError:
-            return None
-    if isinstance(precos, str):
-        try:
-            precos = json.loads(precos)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(nomes, list) or not isinstance(precos, list):
-        return None
-    if len(nomes) != len(precos):
+    nomes = _lista(mercado.get("outcomes"))
+    precos = _lista(mercado.get("outcomePrices"))
+    if nomes is None or precos is None or len(nomes) != len(precos):
         return None
     for nome, preco in zip(nomes, precos, strict=True):
         if str(nome).strip().lower() in ("yes", "sim"):
@@ -198,6 +194,69 @@ def resolveu_nao(mercado: dict) -> bool | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _falta_resolucao(mercado: Any) -> bool:
+    """É um resultado FECHADO cuja resolução ainda não dá para ler?"""
+    if not isinstance(mercado, dict):
+        return False
+    fechado = mercado.get("closed") or not mercado.get("active", True)
+    return bool(fechado) and resolveu_nao(mercado) is None
+
+
+def _rota_do_mercado(base_gamma: str, ident: str) -> str:
+    """`/markets/{id}` para id numérico, `/markets/slug/{slug}` para slug.
+
+    As duas estão no §2; qual usar sai da forma do identificador, não de
+    tentativa e erro.
+    """
+    if ident.isdigit():
+        return f"{base_gamma}/markets/{ident}"
+    return f"{base_gamma}/markets/slug/{ident}"
+
+
+async def _mercado_cheio(get, base_gamma: str, ident: str, cache: dict) -> dict:
+    """O mercado completo, buscado UMA vez por identificador.
+
+    Resultado fechado não volta a abrir, então a resolução dele não muda —
+    o cache é da natureza do dado, não otimização. Sem ele seriam 18 buscas
+    por passada × 599 passadas.
+    """
+    if ident not in cache:
+        try:
+            cheio = await get(_rota_do_mercado(base_gamma, ident), {})
+        except Exception:
+            cheio = None
+        cache[ident] = cheio if isinstance(cheio, dict) else {}
+    return cache[ident]
+
+
+async def enriquecer_fechados(
+    get, base_gamma: str, evento: dict, cache: dict[str, dict]
+) -> None:
+    """Busca a resolução dos resultados FECHADOS que o evento não trouxe.
+
+    A rodada de 2026-09-16 na VPS mostrou o alvo: **18 dos 22 eventos** caíram
+    em `fechado_sem_resolucao_legivel`, e outros 2 resolveram limpo — ou seja,
+    a listagem `/events` traz `outcomes`/`outcomePrices` do mercado aninhado
+    ÀS VEZES. Quando não traz, o dado existe em `/markets/{id}` (§2), e pedir
+    por ele é uma requisição, não uma suposição.
+
+    Escreve no próprio dicionário do mercado, para o `conjunto_e_exaustivo`
+    continuar sendo uma função pura sobre o que está ali. Busca que falha
+    deixa o mercado como estava, e a recusa de pé: não achar a resolução é
+    estado DESCONHECIDO, nunca "provavelmente resolveu não".
+    """
+    for mercado in evento.get("markets") or []:
+        if not _falta_resolucao(mercado):
+            continue
+        ident = mercado.get("id") or mercado.get("slug")
+        if not isinstance(ident, str | int):
+            continue
+        cheio = await _mercado_cheio(get, base_gamma, str(ident), cache)
+        for campo in ("outcomes", "outcomePrices"):
+            if campo not in mercado and campo in cheio:
+                mercado[campo] = cheio[campo]
 
 
 def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
@@ -252,33 +311,45 @@ def mercados_da_cesta(evento: dict) -> list[dict]:
     ]
 
 
-async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
+async def _pernas_do_evento(
+    get, s: Settings, mercados: list[dict]
+) -> tuple[list[OrderBook], list[Taxa], str | None]:
+    """Livro e taxa de cada perna, ou o motivo de não dar para montar a cesta.
+
+    Sai na PRIMEIRA perna que falta: a cesta é tudo-ou-nada, e uma perna a
+    menos desfaz a identidade — o que sobra é posição direcional.
+    """
+    livros: list[OrderBook] = []
+    taxas: list[Taxa] = []
+    for m in mercados:
+        tokens = tokens_do_mercado(m)
+        if not tokens:
+            return livros, taxas, "forma_desconhecida"
+        taxa = taxa_do_mercado(m)
+        if taxa is None:
+            return livros, taxas, "perna_sem_taxa"
+        livro = await _livro(get, s.endpoints.clob, tokens[0])
+        if livro is None or not livro.asks:
+            return livros, taxas, "perna_sem_livro"
+        livros.append(livro)
+        taxas.append(taxa)
+    return livros, taxas, None
+
+
+async def varrer_uma_vez(
+    get, s: Settings, eventos: list[dict], cache_de_fechados: dict[str, dict]
+) -> list[dict]:
     """Uma passada: para cada evento, a maior cesta que ainda dá lucro."""
     achados = []
     for ev in eventos:
+        await enriquecer_fechados(get, s.endpoints.gamma, ev, cache_de_fechados)
         ok, motivo = conjunto_e_exaustivo(ev)
         if not ok:
             achados.append({"evento": ev.get("slug"), "recusa": motivo})
             continue
-        mercados = mercados_da_cesta(ev)
-        livros: list[OrderBook] = []
-        taxas: list[Taxa] = []
-        falhou = None
-        for m in mercados:
-            tokens = tokens_do_mercado(m)
-            if not tokens:
-                falhou = "forma_desconhecida"
-                break
-            taxa = taxa_do_mercado(m)
-            if taxa is None:
-                falhou = "perna_sem_taxa"
-                break
-            livro = await _livro(get, s.endpoints.clob, tokens[0])
-            if livro is None or not livro.asks:
-                falhou = "perna_sem_livro"
-                break
-            livros.append(livro)
-            taxas.append(taxa)
+        livros, taxas, falhou = await _pernas_do_evento(
+            get, s, mercados_da_cesta(ev)
+        )
         if falhou:
             achados.append({"evento": ev.get("slug"), "recusa": falhou})
             continue
@@ -296,10 +367,37 @@ async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
     return achados
 
 
+def _contabilizar(
+    achados: list[dict],
+    por_evento: dict[str, str],
+    recusas: dict[str, int],
+    vistos: dict[str, list[float]],
+) -> None:
+    """Onde cada achado de uma passada entra na conta.
+
+    **Recusa de CONJUNTO é sobre o evento, não sobre a passada.** Contá-la por
+    passada dava 11.980 onde havia 20 eventos, e o número grande escondia que
+    quase nada tinha sido olhado — foi o que fez a primeira rodada imprimir ❌
+    sobre 2 eventos de 22.
+    """
+    for achado in achados:
+        slug = achado.get("evento") or "?"
+        if achado.get("recusa") in RECUSAS_DE_CONJUNTO:
+            por_evento[slug] = achado["recusa"]
+            continue
+        por_evento.setdefault(slug, "avaliado")
+        if achado.get("recusa"):
+            recusas[achado["recusa"]] += 1
+        elif achado.get("lucro_usdc"):
+            vistos[slug].append(achado["lucro_usdc"])
+
+
 async def _imprimir_cru(eventos: list[dict], quantos: int = 3) -> None:
     """A forma dos eventos, para o `neg_risk` virar `[VERIFICADO]` no API_NOTES.
 
-    Imprime os RECUSADOS primeiro: são eles que ninguém entendeu ainda.
+    Imprime os RECUSADOS primeiro: são eles que ninguém entendeu ainda. Roda
+    DEPOIS do `enriquecer_fechados`, senão mostraria a forma de antes da busca
+    e mandaria consertar o que já está consertado.
     """
     recusados = [e for e in eventos if not conjunto_e_exaustivo(e)[0]]
     print(f"\n--- FORMA CRUA de {min(quantos, len(recusados))} evento(s) "
@@ -312,7 +410,7 @@ async def _imprimir_cru(eventos: list[dict], quantos: int = 3) -> None:
             estado = {
                 k: m.get(k) for k in
                 ("closed", "active", "enableOrderBook", "umaResolutionStatus",
-                 "outcomePrices", "groupItemTitle", "question")
+                 "outcomes", "outcomePrices", "groupItemTitle", "id", "slug")
                 if k in m
             }
             print(f"    - {estado}")
@@ -326,6 +424,8 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
     recusas: dict[str, int] = defaultdict(int)
     #: Um desfecho por EVENTO: "avaliado" ou o motivo que o tirou da conta.
     por_evento: dict[str, str] = {}
+    #: Resolução dos resultados fechados, buscada uma vez. Fechado não reabre.
+    cache_de_fechados: dict[str, dict] = {}
     passadas = 0
     fim = time.monotonic() + minutos * 60
 
@@ -354,6 +454,10 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
             )
             return 1
         if cru:
+            for ev in eventos:
+                await enriquecer_fechados(
+                    get, s.endpoints.gamma, ev, cache_de_fechados
+                )
             await _imprimir_cru(eventos)
             return 0
         print(f"{len(eventos)} eventos neg-risk. Amostrando por {minutos:g} min…\n")
@@ -361,23 +465,11 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
         while time.monotonic() < fim:
             t0 = time.monotonic()
             try:
-                achados = await varrer_uma_vez(get, s, eventos)
+                achados = await varrer_uma_vez(get, s, eventos, cache_de_fechados)
             except Exception as erro:
                 print(f"\nRECUSA: rede_indisponivel — {type(erro).__name__}: {erro}")
                 return 1
-            for achado in achados:
-                slug = achado.get("evento") or "?"
-                if achado.get("recusa") in RECUSAS_DE_CONJUNTO:
-                    # RECUSA DE CONJUNTO é sobre o EVENTO, não sobre a passada:
-                    # contá-la por passada dava 11.980 onde havia 20 eventos, e
-                    # o número grande escondia que quase nada foi olhado.
-                    por_evento[slug] = achado["recusa"]
-                    continue
-                por_evento.setdefault(slug, "avaliado")
-                if achado.get("recusa"):
-                    recusas[achado["recusa"]] += 1
-                elif achado.get("lucro_usdc"):
-                    vistos[slug].append(achado["lucro_usdc"])
+            _contabilizar(achados, por_evento, recusas, vistos)
             passadas += 1
             print(f"  passada {passadas}: {len(vistos)} evento(s) com folga", end="\r")
             await asyncio.sleep(max(0.0, 1.0 - (time.monotonic() - t0)))
@@ -394,6 +486,20 @@ def _imprimir_recusas(recusas: dict[str, int]) -> None:
         print(f"  {nome:<24} {n:>6}   {MOTIVOS.get(nome, '')}")
 
 
+def _imprimir_eventos(por_evento: dict[str, str]) -> list[str]:
+    """Quantos eventos existiam, quantos chegaram à conta, e por que os outros
+    não chegaram. É a linha que separa medir o mercado de medir o leitor."""
+    avaliados = [e for e, d in por_evento.items() if d == "avaliado"]
+    print(f"\nEVENTOS: {len(avaliados)} avaliado(s) de {len(por_evento)}")
+    fora: dict[str, int] = defaultdict(int)
+    for desfecho in por_evento.values():
+        if desfecho != "avaliado":
+            fora[desfecho] += 1
+    for nome, n in sorted(fora.items(), key=lambda kv: -kv[1]):
+        print(f"  {n:>3} fora por {nome:<30} {MOTIVOS.get(nome, '')}")
+    return avaliados
+
+
 def _imprimir_veredito(
     passadas: int,
     recusas: dict[str, int],
@@ -404,14 +510,7 @@ def _imprimir_veredito(
     print(f"VARREDURA DE ARBITRAGEM POR IDENTIDADE — {passadas} passadas")
     print("=" * 70)
     _imprimir_recusas(recusas)
-    avaliados = [e for e, d in por_evento.items() if d == "avaliado"]
-    print(f"\nEVENTOS: {len(avaliados)} avaliado(s) de {len(por_evento)}")
-    fora = defaultdict(int)
-    for desfecho in por_evento.values():
-        if desfecho != "avaliado":
-            fora[desfecho] += 1
-    for nome, n in sorted(fora.items(), key=lambda kv: -kv[1]):
-        print(f"  {n:>3} fora por {nome:<26} {MOTIVOS.get(nome, '')}")
+    avaliados = _imprimir_eventos(por_evento)
 
     if not vistos:
         # O VEREDITO OLHA QUANTOS FORAM AVALIADOS, e não só se houve lucro.
