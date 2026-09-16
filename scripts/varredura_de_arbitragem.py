@@ -200,6 +200,51 @@ def resolveu_nao(mercado: dict) -> bool | None:
     return None
 
 
+async def enriquecer_fechados(
+    get, base_gamma: str, evento: dict, cache: dict[str, dict]
+) -> None:
+    """Busca a resolução dos resultados FECHADOS que o evento não trouxe.
+
+    A rodada de 2026-09-16 na VPS mostrou o alvo: **18 dos 22 eventos** caíram
+    em `fechado_sem_resolucao_legivel`, e outros 2 resolveram limpo — ou seja,
+    a listagem `/events` traz `outcomes`/`outcomePrices` do mercado aninhado
+    ÀS VEZES. Quando não traz, o dado existe em `/markets/{id}` (§2), e pedir
+    por ele é uma requisição, não uma suposição.
+
+    **Cacheado para sempre, e isso é da natureza do dado:** resultado fechado
+    não volta a abrir, então a resolução dele não muda. Sem o cache seriam
+    18 buscas por passada × 599 passadas.
+
+    Escreve no próprio dicionário do mercado, para o `conjunto_e_exaustivo`
+    continuar sendo uma função pura sobre o que está ali.
+    """
+    for mercado in evento.get("markets") or []:
+        if not isinstance(mercado, dict):
+            continue
+        if not (mercado.get("closed") or not mercado.get("active", True)):
+            continue
+        if resolveu_nao(mercado) is not None:
+            continue
+        ident = mercado.get("id") or mercado.get("slug")
+        if not isinstance(ident, str | int):
+            continue
+        chave = str(ident)
+        if chave not in cache:
+            alvo = (
+                f"{base_gamma}/markets/{chave}"
+                if str(ident).isdigit()
+                else f"{base_gamma}/markets/slug/{chave}"
+            )
+            try:
+                cheio = await get(alvo, {})
+            except Exception:
+                cheio = None
+            cache[chave] = cheio if isinstance(cheio, dict) else {}
+        for campo in ("outcomes", "outcomePrices"):
+            if campo not in mercado and campo in cache[chave]:
+                mercado[campo] = cache[chave][campo]
+
+
 def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     """O evento cobre TODO o espaço de resultados?
 
@@ -252,10 +297,13 @@ def mercados_da_cesta(evento: dict) -> list[dict]:
     ]
 
 
-async def varrer_uma_vez(get, s: Settings, eventos: list[dict]) -> list[dict]:
+async def varrer_uma_vez(
+    get, s: Settings, eventos: list[dict], cache_de_fechados: dict[str, dict]
+) -> list[dict]:
     """Uma passada: para cada evento, a maior cesta que ainda dá lucro."""
     achados = []
     for ev in eventos:
+        await enriquecer_fechados(get, s.endpoints.gamma, ev, cache_de_fechados)
         ok, motivo = conjunto_e_exaustivo(ev)
         if not ok:
             achados.append({"evento": ev.get("slug"), "recusa": motivo})
@@ -326,6 +374,8 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
     recusas: dict[str, int] = defaultdict(int)
     #: Um desfecho por EVENTO: "avaliado" ou o motivo que o tirou da conta.
     por_evento: dict[str, str] = {}
+    #: Resolução dos resultados fechados, buscada uma vez. Fechado não reabre.
+    cache_de_fechados: dict[str, dict] = {}
     passadas = 0
     fim = time.monotonic() + minutos * 60
 
@@ -354,6 +404,10 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
             )
             return 1
         if cru:
+            for ev in eventos:
+                await enriquecer_fechados(
+                    get, s.endpoints.gamma, ev, cache_de_fechados
+                )
             await _imprimir_cru(eventos)
             return 0
         print(f"{len(eventos)} eventos neg-risk. Amostrando por {minutos:g} min…\n")
@@ -361,7 +415,7 @@ async def rodar(minutos: float, limite: int, *, cru: bool = False) -> int:
         while time.monotonic() < fim:
             t0 = time.monotonic()
             try:
-                achados = await varrer_uma_vez(get, s, eventos)
+                achados = await varrer_uma_vez(get, s, eventos, cache_de_fechados)
             except Exception as erro:
                 print(f"\nRECUSA: rede_indisponivel — {type(erro).__name__}: {erro}")
                 return 1

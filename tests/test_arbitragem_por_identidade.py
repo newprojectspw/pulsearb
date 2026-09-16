@@ -463,3 +463,116 @@ class TestARecusaDIZOQueFazer:
             v.main(["--help"])
 
         assert "--cru" in buf.getvalue()
+
+
+class TestBuscarAResolucaoQueOEventoNaoTROUXE:
+    """O alvo que a segunda rodada na VPS apontou.
+
+    2026-09-16, 599 passadas: **18 dos 22 eventos** caíram em
+    `fechado_sem_resolucao_legivel`, e outros 2 resolveram limpo — a listagem
+    `/events` traz `outcomes`/`outcomePrices` do mercado aninhado ÀS VEZES.
+    Quando não traz, o dado está em `/markets/{id}` (§2), e pedir por ele é
+    uma requisição, não uma suposição.
+    """
+
+    def _get_falso(self, respostas: dict, chamadas: list):
+        async def get(url, params):
+            chamadas.append(url)
+            for sufixo, corpo in respostas.items():
+                if url.endswith(sufixo):
+                    return corpo
+            raise RuntimeError(f"404 {url}")
+
+        return get
+
+    async def test_busca_o_mercado_e_o_evento_passa_a_ser_avaliavel(self):
+        v = _varredura()
+        evento = {"markets": [{"closed": True, "id": "777"}, {}, {}]}
+        chamadas: list[str] = []
+        get = self._get_falso(
+            {"/markets/777": {"outcomes": '["Yes","No"]',
+                              "outcomePrices": '["0","1"]'}},
+            chamadas,
+        )
+
+        assert v.conjunto_e_exaustivo(evento)[1] == "fechado_sem_resolucao_legivel"
+        await v.enriquecer_fechados(get, "https://g", evento, {})
+
+        assert v.conjunto_e_exaustivo(evento) == (True, "")
+        assert chamadas == ["https://g/markets/777"]
+
+    async def test_a_resolucao_do_fechado_e_buscada_UMA_vez(self):
+        """Fechado não reabre: a resolução dele não muda. Sem cache seriam 18
+        buscas por passada × 599 passadas."""
+        v = _varredura()
+        chamadas: list[str] = []
+        get = self._get_falso(
+            {"/markets/777": {"outcomes": '["Yes","No"]',
+                              "outcomePrices": '["0","1"]'}},
+            chamadas,
+        )
+        cache: dict = {}
+
+        for _ in range(5):
+            evento = {"markets": [{"closed": True, "id": "777"}, {}, {}]}
+            await v.enriquecer_fechados(get, "https://g", evento, cache)
+
+        assert len(chamadas) == 1
+
+    async def test_slug_em_vez_de_id_usa_a_outra_rota(self):
+        """§2 documenta `/markets/{id}` E `/markets/slug/{slug}`."""
+        v = _varredura()
+        evento = {"markets": [{"closed": True, "slug": "quem-ganha"}, {}, {}]}
+        chamadas: list[str] = []
+        get = self._get_falso(
+            {"/markets/slug/quem-ganha": {"outcomes": '["Yes","No"]',
+                                          "outcomePrices": '["0","1"]'}},
+            chamadas,
+        )
+
+        await v.enriquecer_fechados(get, "https://g", evento, {})
+
+        assert chamadas == ["https://g/markets/slug/quem-ganha"]
+        assert v.conjunto_e_exaustivo(evento) == (True, "")
+
+    async def test_busca_que_FALHA_deixa_a_recusa_de_pe(self):
+        """Não achar a resolução continua sendo estado desconhecido — recusa,
+        nunca 'provavelmente resolveu não'."""
+        v = _varredura()
+        evento = {"markets": [{"closed": True, "id": "999"}, {}, {}]}
+
+        await v.enriquecer_fechados(get=self._get_falso({}, []), base_gamma="https://g",
+                                    evento=evento, cache={})
+
+        assert v.conjunto_e_exaustivo(evento) == (
+            False, "fechado_sem_resolucao_legivel"
+        )
+
+    async def test_nao_busca_o_que_o_evento_JA_trouxe(self):
+        """Os 2 eventos que resolveram limpo não podem virar requisição."""
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True, "id": "1", "outcomes": '["Yes","No"]',
+             "outcomePrices": '["0","1"]'},
+            {}, {},
+        ]}
+        chamadas: list[str] = []
+
+        await v.enriquecer_fechados(
+            self._get_falso({}, chamadas), "https://g", evento, {}
+        )
+
+        assert chamadas == []
+
+    async def test_mercado_ABERTO_nunca_e_buscado(self):
+        """Só o fechado tem resolução; buscar aberto seria requisição à toa em
+        cima de 22 eventos."""
+        v = _varredura()
+        evento = {"markets": [{"id": "1"}, {"id": "2"}]}
+        chamadas: list[str] = []
+
+        await v.enriquecer_fechados(
+            self._get_falso({}, chamadas), "https://g", evento, {}
+        )
+
+        assert chamadas == []
