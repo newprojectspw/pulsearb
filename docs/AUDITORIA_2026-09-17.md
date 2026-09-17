@@ -397,7 +397,7 @@ Não entra em decisão.
 | # | o quê | onde roda | custo | fecha |
 |---|---|---|---|---|
 | 1 | verificar o `side` do `last_trade_price` contra o `price_change` do mesmo instante na M2_72H | Mac | 1 script, 1 tarde | 2.1 — e valida ou inverte todo markout do quadro. **Script pronto (2026-09-17): `scripts/verificar_side.py --recordings data/recordings --desde 2026-09-09T02:19Z --ate 2026-09-12T02:19Z --json relatorios/SIDE_M2_72H.json`** — falta rodar no Mac |
-| 2 | `anchor_sweep` com `window_seconds=30` vs `60` nas janelas de 5m da M2_72H; datar a nota do API_NOTES | Mac | 1 execução | 2.2 |
+| 2 | `anchor_sweep` com `window_seconds=30` vs `60` nas janelas de 5m da M2_72H; datar a nota do API_NOTES | Mac | 1 execução | 2.2 — **Script pronto (2026-09-17): `scripts/janela_do_twap.py ~/pulsearb-gravacao --desde 2026-09-09T02:19Z --ate 2026-09-12T02:19Z --json relatorios/JANELA_TWAP_M2_72H.json`** (mesmo `evaluate_hypotheses` do backtest, por duração, com 30 e 60 s; veredito com nome por duração) — falta rodar no Mac e datar a nota do §12.3 com o número |
 | 3 | ligar `reconciliar` + `cancelar_orfas` no arranque do SHADOW (a leitura é GET; a ação fica atrás de flag) e pôr no quadro como sub-item do 3.5 | nuvem | 1 PR | 2.3 — **✅ feito 2026-09-17** (`LacoMaker.reconciliar_no_arranque`, chamado por `ProcessoShadow.run`; 8 testes, fiação guardada) |
 | 4 | `_as_float` rejeita `bool` + 2 testes | nuvem | 1 PR pequeno | 2.4 — **✅ feito 2026-09-17** (5 testes, mutação verificada) |
 | 5 | `pulsearb/numeros.py` com `numero()` e `percentil()`; nove imports | nuvem | 1 PR | 2.5, 2.6 — **✅ feito 2026-09-17** (eram onze parsers e quatro percentis, não nove e três; 12 testes, mutações verificadas) |
