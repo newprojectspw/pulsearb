@@ -401,7 +401,7 @@ Não entra em decisão.
 | 3 | ligar `reconciliar` + `cancelar_orfas` no arranque do SHADOW (a leitura é GET; a ação fica atrás de flag) e pôr no quadro como sub-item do 3.5 | nuvem | 1 PR | 2.3 |
 | 4 | `_as_float` rejeita `bool` + 2 testes | nuvem | 1 PR pequeno | 2.4 — **✅ feito 2026-09-17** (5 testes, mutação verificada) |
 | 5 | `pulsearb/numeros.py` com `numero()` e `percentil()`; nove imports | nuvem | 1 PR | 2.5, 2.6 — **✅ feito 2026-09-17** (eram onze parsers e quatro percentis, não nove e três; 12 testes, mutações verificadas) |
-| 6 | `mypy` no `make check` com baseline; corrigir `decisao.py:17` | nuvem | 1 PR | 2.7 |
+| 6 | `mypy` no `make check` com baseline; corrigir `decisao.py:17` | nuvem | 1 PR | 2.7 — **✅ feito 2026-09-17** (baseline `ignore_errors` em 12 módulos, lista só encolhe; `decisao.py:17` fica na lista, a corrigir ao tirá-lo) |
 | 7 | 13 tetos `risk.*` explícitos no `config.yaml` + teste de presença | nuvem | 1 PR | 2.8 — **✅ feito 2026-09-17** (2 testes; mutação: apagar uma linha do yaml derruba) |
 | 8 | recorte de eventos reais como fixture dos parsers | Mac → commit | 1 PR | 2.9 |
 | 9 | docstrings de `autorizacao.py:29` e `executor.py:246` | nuvem | junto com 4 | 2.10 — **✅ feito 2026-09-17** |

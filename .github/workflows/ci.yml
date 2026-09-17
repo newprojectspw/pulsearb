@@ -41,6 +41,10 @@ jobs:
       - name: ruff
         run: |
           ruff check src/ tests/ scripts/
+      # Auditoria 2026-09-17 §2.7. Config e baseline em [tool.mypy] no
+      # pyproject: a lista de ignore_errors so encolhe.
+      - name: mypy
+        run: mypy
       - name: pytest
         run: pytest -q
 
