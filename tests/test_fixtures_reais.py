@@ -76,6 +76,19 @@ def _eventos(tipo: str, event_type: str) -> list[dict]:
 
 
 class TestRecorte:
+    def test_todo_arquivo_do_manifesto_esta_no_repositorio(self):
+        """`*.jsonl` está no .gitignore: sem a excepção, o `git add` leva só o
+        manifesto e a suíte inteira cai com FileNotFoundError. Aconteceu em
+        2026-09-17 (commit ce3cc37). A mensagem diz o que fazer."""
+        em_falta = [
+            e["arquivo"] for e in _manifesto()["tipos"].values()
+            if not (PASTA / e["arquivo"]).is_file()
+        ]
+        assert not em_falta, (
+            f"manifesto cita arquivos que não estão no repositório: {em_falta} — "
+            "`git add -f tests/fixtures/reais/*.jsonl` (ver .gitignore)"
+        )
+
     def test_nenhum_registro_do_fio_ficou_sem_classificar(self):
         """Um envelope que nenhum parser lê é o defeito, não ruído.
 
