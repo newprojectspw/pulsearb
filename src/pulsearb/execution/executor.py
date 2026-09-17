@@ -243,10 +243,12 @@ def escolher_executor(
         return ExecutorSombra(portao, caminho_do_diario=caminho_do_diario, modo=modo)
 
     licenca = autorizacao or autorizacao_para_live(modo)
-    # `cliente_de_ordens_existe` é False enquanto 3.2/3.5 não existirem, então
-    # esta autorização NUNCA sai positiva hoje. O caminho abaixo existe para
-    # que a trava tripla seja exercitada e testada desde já, em vez de ser
-    # escrita às pressas no dia em que o cliente chegar.
+    # `cliente_de_ordens_existe` fica False enquanto o 3.5 não fechar: o
+    # cliente EXISTE (`execution/cliente.py`), mas nenhuma ordem assinada
+    # recebeu resposta do CLOB ainda. Então esta autorização NUNCA sai
+    # positiva hoje, de propósito. O caminho abaixo existe para que a trava
+    # tripla seja exercitada e testada desde já, em vez de ser escrita às
+    # pressas no dia em que a primeira ordem for aceita.
     raise NotImplementedError(licenca.explicar())
 
 
