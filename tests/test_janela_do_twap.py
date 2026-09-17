@@ -108,6 +108,13 @@ class TestVeredito:
         assert rel["900"]["veredito"] == "JANELA_60"
 
 
+class TestHoraUtc:
+    def test_offset_explicito_e_convertido_e_nao_relabelado(self):
+        assert jt._hora_utc("2026-09-09T00:00-03:00").isoformat() == "2026-09-09T03:00:00+00:00"
+        assert jt._hora_utc("2026-09-09T02:19Z").isoformat() == "2026-09-09T02:19:00+00:00"
+        assert jt._hora_utc(None) is None
+
+
 class TestMain:
     def test_main_recusa_json_absoluto_e_janelas_invalidas(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)

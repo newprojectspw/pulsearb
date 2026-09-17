@@ -22,7 +22,7 @@ assert _spec is not None and _spec.loader is not None
 rf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rf)
 
-T0 = 1_757_400_000_000_000_000  # 2026-09-09 ~ UTC
+T0 = 1_788_920_340 * 10**9  # 2026-09-09T02:19Z
 TWAP = {"topic": "crypto_prices_twap_sixty", "payload": {"symbol": "btc/usd"}}
 
 
@@ -69,7 +69,11 @@ class TestRecorte:
         assert set(rec) == {
             "poly_ws/price_change", "poly_ws/book", "poly_ws/last_trade_price",
             "rtds/crypto_prices_twap_sixty", "rtds/crypto_prices",
+            "poly_ws/_nao_classificado", "rtds/_nao_classificado",
         }
+        # 41 (sem event_type) e 42 (nome inválido) ficam guardados, não descartados.
+        assert rec["poly_ws/_nao_classificado"]["vistos"] == 2
+        assert rec["rtds/_nao_classificado"]["vistos"] == 1
         assert len(rec["poly_ws/price_change"]["linhas"]) == 5
         assert rec["poly_ws/price_change"]["vistos"] == 5
         # O mesmo registro aparece nos dois tipos que carrega.
@@ -79,9 +83,19 @@ class TestRecorte:
         def tipos(fonte, payload):
             return rf.tipos_do_registro(_reader_record(_reg(1, fonte, payload)))
 
-        assert tipos("poly_ws", {"event_type": "../x"}) == set()
-        assert tipos("rtds", {"topic": "a b"}) == set()
+        assert tipos("poly_ws", {"event_type": "../x"}) == {"poly_ws/_nao_classificado"}
+        assert tipos("rtds", {"topic": "a b"}) == {"rtds/_nao_classificado"}
         assert tipos("poly_ws", {"event_type": "book"}) == {"poly_ws/book"}
+        assert tipos("binance_ws", {"e": "trade"}) == set()
+
+    def test_desde_e_ate_cortam_por_registro_e_nao_so_por_arquivo(self, tmp_path):
+        reader = RecordingReader(_gravar(tmp_path / "g", _registros()))
+        t = lambda i: T0 + i * 1_000_000  # noqa: E731
+        rec = rf.recortar(reader, desde_ns=t(11), ate_ns=t(13))
+        bloco = rec["poly_ws/price_change"]
+        assert bloco["vistos"] == 3
+        assert [json.loads(x)["ts_mono_ns"] for x in bloco["linhas"]] == [11, 12, 13]
+        assert "rtds/crypto_prices" not in rec
 
     def test_teto_por_tipo_guarda_os_primeiros_e_segue_contando_os_vistos(self, tmp_path):
         reader = RecordingReader(_gravar(tmp_path / "g", _registros(), gz=True))
@@ -101,6 +115,18 @@ class TestRecorte:
         rec = rf.recortar(reader)
         linha = json.loads(rec["rtds/crypto_prices_twap_sixty"]["linhas"][0])
         assert linha == _reg(30, "rtds", TWAP)
+
+
+class TestHoraUtc:
+    def test_offset_explicito_e_convertido_e_nao_relabelado(self):
+        assert jt_iso(rf._hora_utc("2026-09-09T00:00-03:00")) == "2026-09-09T03:00:00+00:00"
+        assert jt_iso(rf._hora_utc("2026-09-09T02:19Z")) == "2026-09-09T02:19:00+00:00"
+        assert jt_iso(rf._hora_utc("2026-09-09T02:19")) == "2026-09-09T02:19:00+00:00"
+        assert rf._hora_utc(None) is None
+
+
+def jt_iso(dt):
+    return dt.isoformat()
 
 
 class TestMain:
@@ -179,7 +205,7 @@ class TestConsumidorSobreRecorte:
         print_ = _reg(3, "poly_ws", {"event_type": "last_trade_price", "asset_id": TOK,
                                      "price": "0.51", "side": "BUY", "size": "5"})
         self._recorte(tmp_path, monkeypatch, [_price_change_gravado(1, 0.49, 0.51), book, print_])
-        fr.TestPolyWs().test_book_real_tem_forma_conhecida()
+        fr.TestPolyWs().test_book_real_tem_forma_conhecida_e_o_parser_de_producao_le_todos_os_niveis()
         fr.TestPolyWs().test_last_trade_price_real_tem_preco_e_side()
         fr.TestPolyWs().test_price_change_real_tem_forma_conhecida_e_topo_legivel()
         fr.TestPolyWs().test_todo_registro_poly_ws_rende_ao_menos_um_evento()
@@ -193,9 +219,19 @@ class TestConsumidorSobreRecorte:
         with pytest.raises(AssertionError, match="sem lista"):
             fr.TestPolyWs().test_price_change_real_tem_forma_conhecida_e_topo_legivel()
 
-    def test_salta_quando_o_tipo_nao_esta_no_recorte(self, tmp_path, monkeypatch):
+    def test_falha_quando_o_manifesto_commitado_nao_tem_o_tipo(self, tmp_path, monkeypatch):
         import pytest
 
         self._recorte(tmp_path, monkeypatch, [_price_change_gravado(1, 0.49, 0.51)])
-        with pytest.raises(pytest.skip.Exception, match="market_resolved"):
+        with pytest.raises(pytest.fail.Exception, match="market_resolved"):
             fr.TestPolyWs().test_market_resolved_real_e_lido_pelo_parser()
+
+    def test_falha_quando_ha_registro_do_fio_sem_classificar(self, tmp_path, monkeypatch):
+        import pytest
+
+        estranho = _reg(2, "poly_ws", {"_b64": "UE9ORw=="})
+        self._recorte(tmp_path, monkeypatch, [_price_change_gravado(1, 0.49, 0.51), estranho])
+        with pytest.raises(AssertionError, match="_nao_classificado"):
+            fr.TestRecorte().test_nenhum_registro_do_fio_ficou_sem_classificar()
+        # E o registro estranho está no recorte, para quem for ler.
+        assert (tmp_path / "reais" / "poly_ws___nao_classificado.jsonl").exists()
