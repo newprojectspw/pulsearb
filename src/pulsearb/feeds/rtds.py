@@ -101,6 +101,42 @@ def e18_do_evento(parsed: Any) -> int | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class ErroDoServidor:
+    """Resposta de ERRO do RTDS a um frame nosso — lida, contada, com nome.
+
+    Forma medida na gravação M2_72H (API_NOTES §6.2b), verbatim:
+    `{"body": {"message": "leger AddSubscriptions error: ..."}, "statusCode": 400}`.
+    Até 2026-09-17 ninguém lia isto: o feed reassinava, o servidor dizia
+    não, e o "não" ia para o disco como registro sem classificação. É a
+    causa concreta por trás de "reassinatura sem efeito" (0.5) e dos 83
+    silêncios com assinatura caducada (0.8).
+    """
+
+    status_code: int
+    mensagem: str
+
+    @property
+    def e_de_assinatura(self) -> bool:
+        """Recusa da nossa assinatura — nesse estado reassinar não adianta."""
+        texto = self.mensagem.lower()
+        return "addsubscriptions" in texto or "subscription" in texto
+
+
+def erro_do_servidor(parsed: Any) -> ErroDoServidor | None:
+    """Reconhece a resposta de erro do RTDS. None = não é uma."""
+    if not isinstance(parsed, dict):
+        return None
+    status = parsed.get("statusCode")
+    body = parsed.get("body")
+    if isinstance(status, bool) or not isinstance(status, int) or not isinstance(body, dict):
+        return None
+    mensagem = body.get("message")
+    return ErroDoServidor(
+        status_code=status, mensagem=mensagem if isinstance(mensagem, str) else ""
+    )
+
+
 def parse_rtds_event(parsed: Any, ts_mono_ns: int, ts_wall_ns: int) -> PriceTick | None:
     """Extrai um PriceTick de um evento do RTDS. None = não é evento de preço.
 
@@ -170,6 +206,11 @@ class RtdsFeed(ReconnectingFeed):
         self.assets = [a.lower() for a in assets]
         self.on_tick = on_tick
         self.last_tick_by_key: dict[tuple[str, str], PriceTick] = {}
+        #: Respostas de erro do servidor, lidas (API_NOTES §6.2b).
+        self.erros_do_servidor = 0
+        self.ultimo_erro_do_servidor: ErroDoServidor | None = None
+        #: Recusa de assinatura ainda não consumida pelo laço de reassinatura.
+        self._recusa_pendente: str | None = None
 
     def subscribe_frame(self) -> str:
         # Sem filtro de symbols: o RTDS aceita filtrar, mas receber todos e
@@ -283,7 +324,38 @@ class RtdsFeed(ReconnectingFeed):
                 idades[topico] = idade
         return {topico: round(idade, 3) for topico, idade in sorted(idades.items())}
 
+    def _recusa_de_assinatura(self) -> str | None:
+        """Entrega (e limpa) a recusa pendente. Ver `_loop_de_reassinatura`."""
+        recusa, self._recusa_pendente = self._recusa_pendente, None
+        return recusa
+
+    def _registrar_erro_do_servidor(self, erro: ErroDoServidor) -> None:
+        """Conta e nomeia. Recusa de assinatura vira pedido de derrubar.
+
+        A gravação M2_72H mostrou o servidor respondendo `statusCode 400 ...
+        violates foreign key constraint "connection_id_fk"`: o servidor já não
+        tem a NOSSA conexão na tabela de assinaturas. Reassinar por cima
+        disso é o que o 0.5 mediu 2.482 vezes sem efeito. O único frame que
+        ainda muda alguma coisa é o close — e a escalada do 0.6 esperava N
+        reassinaturas mudas para chegar lá; com a recusa lida, não espera.
+        """
+        self.erros_do_servidor += 1
+        self.ultimo_erro_do_servidor = erro
+        self.log.warning(
+            "RTDS respondeu com erro",
+            status_code=erro.status_code,
+            mensagem=erro.mensagem[:200],
+            de_assinatura=erro.e_de_assinatura,
+            total=self.erros_do_servidor,
+        )
+        if erro.e_de_assinatura:
+            self._recusa_pendente = f"statusCode {erro.status_code}: {erro.mensagem[:160]}"
+
     async def _handle_message(self, event: FeedEvent) -> None:
+        erro = erro_do_servidor(event.parsed)
+        if erro is not None:
+            self._registrar_erro_do_servidor(erro)
+            return
         tick = parse_rtds_event(event.parsed, event.ts_mono_ns, event.ts_wall_ns)
         if tick is None:
             return

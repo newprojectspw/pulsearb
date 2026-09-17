@@ -18,6 +18,7 @@ estrutural derivado do epoch do slug (grade alinhada, 12.1) — a captura
 original foi truncada antes desses campos.
 | `rtds_*.json` | Formato dos eventos do RTDS conforme o protocolo verificado no SDK oficial (API_NOTES seções 6.2 e 12.3) | **Sintético estrutural** — payloads montados a partir do protocolo verificado, não capturas de rede. Substituir por capturas reais na primeira rodada do recorder. |
 | `clob_ws_book.json` | Formato dos eventos do WS de mercado do CLOB | **Sintético estrutural** — idem. |
+| `rtds_recusas_reais.json` | RTDS, gravação M2_72H, 2026-09-09 02:19–03:19 UTC | **Real, verbatim**: as duas respostas de erro do servidor à nossa assinatura (`statusCode` 500 e 400) — API_NOTES §6.2b. Consumida por `test_rtds_parse.py` e `test_m27_saude_do_feed.py`. |
 
 Regra: fixture sintética nunca vira "prova" de comportamento do servidor.
 Elas provam apenas que o NOSSO parser aceita o formato documentado. A prova

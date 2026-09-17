@@ -130,6 +130,11 @@ class ReconnectingFeed:
         #: "não chega NADA", a escalada cobre "chega tudo menos o que eu
         #: assinei". Somar os dois esconderia qual defesa está trabalhando.
         self.reconexoes_por_escalada = 0
+        #: 2026-09-17: quedas provocadas por RECUSA explícita do servidor à
+        #: assinatura (API_NOTES §6.2b). Separado da escalada: aquela infere
+        #: pelo silêncio, esta lê a resposta. Se este contador anda e a
+        #: escalada não, o servidor está dizendo não em voz alta.
+        self.reconexoes_por_recusa = 0
 
     # ------------------------------------------------------------------ estado
     @property
@@ -338,6 +343,10 @@ class ReconnectingFeed:
         while True:
             await asyncio.sleep(passo)
             desde_a_ultima += passo
+            recusa = self._recusa_de_assinatura()
+            if recusa is not None:
+                await self._derrubar_por_recusa(ws, recusa)
+                return
             urgencia = self._reassinatura_urgente()
             if urgencia is None:
                 # O tópico voltou (ou nunca esteve mudo): a escalada zera.
@@ -406,6 +415,30 @@ class ReconnectingFeed:
         )
         await ws.close(code=1012, reason="topico mudo apos reassinaturas")
         return True
+
+    def _recusa_de_assinatura(self) -> str | None:
+        """O servidor RESPONDEU à assinatura dizendo não? Subclasse responde.
+
+        `None` = nenhuma recusa lida. A string é o motivo, e vai para o log e
+        para o frame de close. Diferente de `_reassinatura_urgente`, que
+        INFERE pelo silêncio: aqui o servidor falou. Derrubar na primeira é
+        o comportamento certo porque a recusa medida (`connection_id_fk`)
+        diz que a conexão já não existe para o servidor — reassinar sobre
+        ela é o que o 0.5 mediu 2.482 vezes sem efeito.
+        """
+        return None
+
+    async def _derrubar_por_recusa(
+        self, ws: websockets.ClientConnection, recusa: str
+    ) -> None:
+        self.reconexoes_por_recusa += 1
+        self.log.error(
+            "servidor recusou a assinatura: derrubando a conexão",
+            conexao=self.rotulo,
+            motivo=recusa,
+            total_por_recusa=self.reconexoes_por_recusa,
+        )
+        await ws.close(code=1012, reason="assinatura recusada pelo servidor")
 
     def _reassinatura_urgente(self) -> str | None:
         """Há motivo para reassinar AGORA, sem esperar o intervalo?

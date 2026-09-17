@@ -48,6 +48,7 @@ from typing import Any
 from pulsearb.backtest.__main__ import caminho_de_leitura
 from pulsearb.caminhos import caminho_de_escrita
 from pulsearb.feeds.poly_ws import eventos_do_payload
+from pulsearb.feeds.rtds import erro_do_servidor
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
 
 POR_TIPO_PADRAO = 100
@@ -63,6 +64,13 @@ NOME_DE_TIPO = re.compile(r"[a-z0-9_]+")
 #: desconhecido é EXATAMENTE o que a fixture existe para revelar, e o
 #: `tests/test_fixtures_reais.py` falha se esta categoria aparecer.
 NAO_CLASSIFICADO = "_nao_classificado"
+#: O que MAIS chega pelo fio, medido na M2_72H (API_NOTES §6.2b). Cada um
+#: tem categoria própria para o consumidor conferir a forma exata; o que
+#: não for nenhum destes cai em `_nao_classificado` e o consumidor falha.
+PONG = "_pong"                       # poly_ws: {"_b64": "UE9ORw=="} — "PONG"
+FRAME_VAZIO = "_frame_vazio"         # rtds: {"_b64": ""}
+ERRO_DO_SERVIDOR = "_erro_do_servidor"  # rtds: {"body": {"message": ...}, "statusCode": n}
+PONG_B64 = "UE9ORw=="
 
 
 def tipos_do_registro(record: ReplayRecord) -> set[str]:
@@ -72,15 +80,22 @@ def tipos_do_registro(record: ReplayRecord) -> set[str]:
     classifica vai para `fonte/_nao_classificado`, nunca para o lixo. Outras
     fontes (meta, binance_ws) devolvem vazio e ficam de fora do recorte.
     """
+    payload = record.payload
     if record.fonte == "poly_ws":
+        if payload == {"_b64": PONG_B64}:
+            return {f"poly_ws/{PONG}"}
         tipos = set()
-        for ev in eventos_do_payload(record.payload):
+        for ev in eventos_do_payload(payload):
             tipo = ev.get("event_type")
             if isinstance(tipo, str) and NOME_DE_TIPO.fullmatch(tipo):
                 tipos.add(f"poly_ws/{tipo}")
         return tipos or {f"poly_ws/{NAO_CLASSIFICADO}"}
     if record.fonte == "rtds":
-        topic = record.payload.get("topic") if isinstance(record.payload, dict) else None
+        if payload == {"_b64": ""}:
+            return {f"rtds/{FRAME_VAZIO}"}
+        if erro_do_servidor(payload) is not None:
+            return {f"rtds/{ERRO_DO_SERVIDOR}"}
+        topic = payload.get("topic") if isinstance(payload, dict) else None
         if isinstance(topic, str) and NOME_DE_TIPO.fullmatch(topic):
             return {f"rtds/{topic}"}
         return {f"rtds/{NAO_CLASSIFICADO}"}
