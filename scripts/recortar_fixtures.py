@@ -43,7 +43,6 @@ import re
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from pulsearb.backtest.__main__ import caminho_de_leitura
@@ -130,19 +129,20 @@ def nome_do_arquivo(tipo: str) -> str:
     return f"{fonte}__{nome}.jsonl"
 
 
-def gravar(
+def arquivos_do_recorte(
     recorte: dict[str, dict[str, Any]],
     *,
-    pasta: Path,
     origem: dict[str, Any],
-) -> Path:
-    """Escreve um `.jsonl` por tipo e o MANIFESTO dentro de `pasta`.
+) -> list[tuple[str, str]]:
+    """`(nome_do_arquivo, texto)` de cada tipo e do MANIFESTO. Pura: não escreve.
 
-    `pasta` chega JÁ contida: `main` a obtém de `caminho_de_escrita` antes de
-    ler a gravação. Sanitizar aqui de novo, a partir da string do argumento,
-    é o que a análise de fluxo do Sonar não reconhece (S2083, lição do #142).
-    Os nomes dos arquivos vêm de `NOME_DE_TIPO`, que só admite `[a-z0-9_]`.
+    Quem escreve é `main`, chamando `caminho_de_escrita` para CADA nome, no
+    mesmo lugar em que o argumento `--saida` entra. Sanitizar numa função e
+    escrever noutra é o que a análise de fluxo do Sonar não segue (S2083,
+    lição do #142 e do próprio #149). Os nomes vêm de `NOME_DE_TIPO`, que só
+    admite `[a-z0-9_]`, e de constantes.
     """
+    arquivos: list[tuple[str, str]] = []
     manifesto: dict[str, Any] = {
         "gerado_em": datetime.now(UTC).isoformat(timespec="seconds"),
         "origem": origem,
@@ -155,11 +155,11 @@ def gravar(
     }
     for tipo in sorted(recorte):
         bloco = recorte[tipo]
-        destino = pasta / nome_do_arquivo(tipo)
-        destino.write_text("\n".join(bloco["linhas"]) + "\n", encoding="utf-8")
+        nome = nome_do_arquivo(tipo)
+        arquivos.append((nome, "\n".join(bloco["linhas"]) + "\n"))
         inicio, fim = bloco["ts_wall_ns"]
         manifesto["tipos"][tipo] = {
-            "arquivo": destino.name,
+            "arquivo": nome,
             "registros": len(bloco["linhas"]),
             "vistos_no_periodo": bloco["vistos"],
             "bytes": bloco["bytes"],
@@ -168,11 +168,8 @@ def gravar(
                 datetime.fromtimestamp(fim / 1e9, UTC).isoformat(timespec="seconds"),
             ],
         }
-    caminho_manifesto = pasta / MANIFESTO
-    caminho_manifesto.write_text(
-        json.dumps(manifesto, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    return caminho_manifesto
+    arquivos.append((MANIFESTO, json.dumps(manifesto, indent=2, ensure_ascii=False) + "\n"))
+    return arquivos
 
 
 def _hora_utc(bruto: str | None) -> datetime | None:
@@ -192,9 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         caminho = caminho_de_leitura(args.recordings)
-        # A pasta de saída é contida AQUI, antes de ler 73 GB, e é o Path
-        # contido que segue para `gravar` — nunca a string do argumento.
-        pasta = caminho_de_escrita(f"{args.saida}/{MANIFESTO}").parent
+        # Sonda: a pasta de saída é validada ANTES de ler 73 GB.
+        caminho_de_escrita(f"{args.saida}/{MANIFESTO}")
         desde, ate = _hora_utc(args.desde), _hora_utc(args.ate)
         if args.por_tipo <= 0 or args.max_bytes_por_tipo <= 0:
             raise ValueError("--por-tipo e --max-bytes-por-tipo têm de ser positivos")
@@ -209,18 +205,18 @@ def main(argv: list[str] | None = None) -> int:
     if not recorte:
         print("nenhum registro classificável no período — nada gravado", file=sys.stderr)
         return 1
-    manifesto = gravar(
-        recorte,
-        pasta=pasta,
-        origem={
-            "gravacao": caminho.name,
-            "desde": args.desde,
-            "ate": args.ate,
-            "por_tipo": args.por_tipo,
-            "max_bytes_por_tipo": args.max_bytes_por_tipo,
-        },
-    )
-    print(f"manifesto gravado em {manifesto}")
+    origem = {
+        "gravacao": caminho.name,
+        "desde": args.desde,
+        "ate": args.ate,
+        "por_tipo": args.por_tipo,
+        "max_bytes_por_tipo": args.max_bytes_por_tipo,
+    }
+    # Sanitizador e escrita no MESMO lugar, para cada arquivo (S2083).
+    for nome, texto in arquivos_do_recorte(recorte, origem=origem):
+        destino = caminho_de_escrita(f"{args.saida}/{nome}", extensoes=(".jsonl", ".json"))
+        destino.write_text(texto, encoding="utf-8")
+    print(f"manifesto gravado em {caminho_de_escrita(f'{args.saida}/{MANIFESTO}')}")
     for tipo in sorted(recorte):
         b = recorte[tipo]
         print(f"  {tipo:<40} {len(b['linhas']):>4} de {b['vistos']:>9} vistos  {b['bytes']:>8} B")
