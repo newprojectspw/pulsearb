@@ -405,7 +405,7 @@ Não entra em decisão.
 | 7 | 13 tetos `risk.*` explícitos no `config.yaml` + teste de presença | nuvem | 1 PR | 2.8 — **✅ feito 2026-09-17** (2 testes; mutação: apagar uma linha do yaml derruba) |
 | 8 | recorte de eventos reais como fixture dos parsers | Mac → commit | 1 PR | 2.9 |
 | 9 | docstrings de `autorizacao.py:29` e `executor.py:246` | nuvem | junto com 4 | 2.10 — **✅ feito 2026-09-17** |
-| 10 | filtro "≤ 20 resultados" na `varredura_de_arbitragem.py` | nuvem | 1 PR | §3.4 |
+| 10 | filtro "≤ 20 resultados" na `varredura_de_arbitragem.py` | nuvem | 1 PR | §3.4 — **✅ feito 2026-09-17** (`MAX_RESULTADOS_DA_CESTA`, motivo `campo_grande_demais`, 2 testes) |
 
 Os itens 1 e 2 vêm antes de tudo porque são os únicos que podem **mudar
 um número que já está no quadro**. Os de nuvem (3–7, 9, 10) não dependem

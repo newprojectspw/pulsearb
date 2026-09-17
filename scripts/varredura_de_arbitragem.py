@@ -79,9 +79,22 @@ RECUSAS_DE_CONJUNTO = frozenset({
     "evento_ja_decidido",
 })
 
+#: Teto de resultados por evento para a cesta valer a pena olhar. Não é chute:
+#: a replicação independente de Breguez (github.com/ArtBreguez/polymarket-
+#: coherence, 36 eventos negRisk, 964 snapshots de 2026-08-20 a 30, andando
+#: o livro L2 inteiro) mediu **56 % dos campos com ≤ 20 resultados completos
+#: e traváveis, e 0 % dos com > 20**. Bate com o que a rodada de 2026-09-17
+#: achou aqui: 77 e 76 vagas reservadas em 128. Campo grande não é
+#: mispricing, é resultado sem preço — e olhar para ele custa GET por perna
+#: para chegar a uma recusa que já se sabia (auditoria 2026-09-17, §3.4).
+MAX_RESULTADOS_DA_CESTA = 20
+
 MOTIVOS = {
     "sem_evento_negrisk": "a Gamma não devolveu evento neg-risk nenhum",
     "conjunto_pequeno_demais": "o evento tem menos de 2 resultados",
+    "campo_grande_demais": "o evento tem mais resultados do que a cesta "
+                           "consegue travar — campo grande é iliquidez, não "
+                           "mispricing (Breguez, 2026-08: 0% dos > 20 fecham)",
     "fechado_sem_resolucao_legivel": "há resultado FECHADO cuja resolução não "
                                     "dá para ler — não sei se ele resolveu SIM",
     "perna_nem_abriu_nem_resolveu": "há vaga reservada (active=false, "
@@ -319,6 +332,10 @@ def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     mercados = [m for m in (evento.get("markets") or []) if isinstance(m, dict)]
     if len(mercados) < 2:
         return False, "conjunto_pequeno_demais"
+    # Antes de qualquer checagem que custe rede: o tamanho do campo decide
+    # sozinho se vale a pena continuar (ver MAX_RESULTADOS_DA_CESTA).
+    if len(mercados) > MAX_RESULTADOS_DA_CESTA:
+        return False, "campo_grande_demais"
     # A ORDEM DAS CHECAGENS É A ORDEM DO QUE SE APRENDE COM ELAS. "Incompleto"
     # foi o que a primeira rodada devolveu para 20 dos 22 eventos, e não dizia
     # o que fazer: fechado e sem-livro pedem coisas diferentes.
