@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -55,6 +56,9 @@ MAX_BYTES_POR_TIPO_PADRAO = 512 * 1024
 MANIFESTO = "MANIFESTO.json"
 #: Onde o `tests/test_fixtures_reais.py` procura o recorte.
 PASTA_PADRAO = "tests/fixtures/reais"
+#: Forma aceite para `event_type` e `topic`: viram nome de arquivo, e vêm do
+#: CONTEÚDO da gravação. Um tipo fora disto não é classificado — nem gravado.
+NOME_DE_TIPO = re.compile(r"[a-z0-9_]+")
 
 
 def tipos_do_registro(record: ReplayRecord) -> set[str]:
@@ -63,12 +67,12 @@ def tipos_do_registro(record: ReplayRecord) -> set[str]:
         tipos = set()
         for ev in eventos_do_payload(record.payload):
             tipo = ev.get("event_type")
-            if isinstance(tipo, str) and tipo:
+            if isinstance(tipo, str) and NOME_DE_TIPO.fullmatch(tipo):
                 tipos.add(f"poly_ws/{tipo}")
         return tipos
     if record.fonte == "rtds" and isinstance(record.payload, dict):
         topic = record.payload.get("topic")
-        if isinstance(topic, str) and topic:
+        if isinstance(topic, str) and NOME_DE_TIPO.fullmatch(topic):
             return {f"rtds/{topic}"}
     return set()
 
@@ -129,10 +133,16 @@ def nome_do_arquivo(tipo: str) -> str:
 def gravar(
     recorte: dict[str, dict[str, Any]],
     *,
-    pasta: str,
+    pasta: Path,
     origem: dict[str, Any],
 ) -> Path:
-    """Escreve um `.jsonl` por tipo e o MANIFESTO. Todos contidos pela raiz de saída."""
+    """Escreve um `.jsonl` por tipo e o MANIFESTO dentro de `pasta`.
+
+    `pasta` chega JÁ contida: `main` a obtém de `caminho_de_escrita` antes de
+    ler a gravação. Sanitizar aqui de novo, a partir da string do argumento,
+    é o que a análise de fluxo do Sonar não reconhece (S2083, lição do #142).
+    Os nomes dos arquivos vêm de `NOME_DE_TIPO`, que só admite `[a-z0-9_]`.
+    """
     manifesto: dict[str, Any] = {
         "gerado_em": datetime.now(UTC).isoformat(timespec="seconds"),
         "origem": origem,
@@ -145,7 +155,7 @@ def gravar(
     }
     for tipo in sorted(recorte):
         bloco = recorte[tipo]
-        destino = caminho_de_escrita(f"{pasta}/{nome_do_arquivo(tipo)}", extensoes=(".jsonl",))
+        destino = pasta / nome_do_arquivo(tipo)
         destino.write_text("\n".join(bloco["linhas"]) + "\n", encoding="utf-8")
         inicio, fim = bloco["ts_wall_ns"]
         manifesto["tipos"][tipo] = {
@@ -158,7 +168,7 @@ def gravar(
                 datetime.fromtimestamp(fim / 1e9, UTC).isoformat(timespec="seconds"),
             ],
         }
-    caminho_manifesto = caminho_de_escrita(f"{pasta}/{MANIFESTO}")
+    caminho_manifesto = pasta / MANIFESTO
     caminho_manifesto.write_text(
         json.dumps(manifesto, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -182,8 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         caminho = caminho_de_leitura(args.recordings)
-        # Sonda: valida a pasta de saída ANTES de ler 73 GB.
-        caminho_de_escrita(f"{args.saida}/{MANIFESTO}")
+        # A pasta de saída é contida AQUI, antes de ler 73 GB, e é o Path
+        # contido que segue para `gravar` — nunca a string do argumento.
+        pasta = caminho_de_escrita(f"{args.saida}/{MANIFESTO}").parent
         desde, ate = _hora_utc(args.desde), _hora_utc(args.ate)
         if args.por_tipo <= 0 or args.max_bytes_por_tipo <= 0:
             raise ValueError("--por-tipo e --max-bytes-por-tipo têm de ser positivos")
@@ -200,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     manifesto = gravar(
         recorte,
-        pasta=args.saida,
+        pasta=pasta,
         origem={
             "gravacao": caminho.name,
             "desde": args.desde,

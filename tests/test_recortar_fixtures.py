@@ -42,6 +42,12 @@ def _gravar(pasta: Path, registros, *, gz: bool = False) -> Path:
     return pasta
 
 
+def _reader_record(bruto: dict):
+    from pulsearb.replay.reader import ReplayRecord
+
+    return ReplayRecord(**bruto)
+
+
 def _registros():
     regs = []
     for i in range(5):
@@ -51,6 +57,8 @@ def _registros():
     regs.append(_reg(31, "rtds", {"topic": "crypto_prices", "payload": {}}))
     regs.append(_reg(40, "discovery_snapshot", {"markets": []}))  # meta: fora
     regs.append(_reg(41, "poly_ws", {"sem_event_type": True}))    # inclassificável
+    regs.append(_reg(42, "poly_ws", {"event_type": "../fora"}))   # nome que não vira arquivo
+    regs.append(_reg(43, "rtds", {"topic": "Crypto Prices"}))     # idem
     return regs
 
 
@@ -66,6 +74,14 @@ class TestRecorte:
         assert rec["poly_ws/price_change"]["vistos"] == 5
         # O mesmo registro aparece nos dois tipos que carrega.
         assert rec["poly_ws/book"]["linhas"] == rec["poly_ws/last_trade_price"]["linhas"]
+
+    def test_tipo_fora_de_a_z_0_9_nao_e_classificado_porque_vira_nome_de_arquivo(self):
+        def tipos(fonte, payload):
+            return rf.tipos_do_registro(_reader_record(_reg(1, fonte, payload)))
+
+        assert tipos("poly_ws", {"event_type": "../x"}) == set()
+        assert tipos("rtds", {"topic": "a b"}) == set()
+        assert tipos("poly_ws", {"event_type": "book"}) == {"poly_ws/book"}
 
     def test_teto_por_tipo_guarda_os_primeiros_e_segue_contando_os_vistos(self, tmp_path):
         reader = RecordingReader(_gravar(tmp_path / "g", _registros(), gz=True))
