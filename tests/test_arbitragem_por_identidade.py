@@ -576,3 +576,62 @@ class TestBuscarAResolucaoQueOEventoNaoTROUXE:
         )
 
         assert chamadas == []
+
+
+class TestODiagnosticoDoFechadoIlegivel:
+    """O `--cru` tem de responder as QUATRO hipóteses numa rodada só.
+
+    O conserto de `enriquecer_fechados` não destravou os 18 eventos, e a saída
+    da varredura não distingue: a busca falhou, o mercado cheio também não traz
+    o par, não há identificador, ou o nome do resultado não bate com "Yes".
+    Escolher uma e pedir outra rodada de 10 min seria adivinhar.
+    """
+
+    async def test_sem_identificador_o_diagnostico_DIZ_isso(self, capsys):
+        v = _varredura()
+
+        async def get(url, params):
+            raise AssertionError("não devia buscar sem identificador")
+
+        await v._diagnosticar_fechado(get, "https://g", {"closed": True})
+
+        assert "SEM IDENTIFICADOR" in capsys.readouterr().out
+
+    async def test_busca_que_falha_e_NOMEADA(self, capsys):
+        v = _varredura()
+
+        async def get(url, params):
+            raise RuntimeError("404")
+
+        await v._diagnosticar_fechado(get, "https://g", {"closed": True, "id": "7"})
+        saida = capsys.readouterr().out
+
+        assert "A BUSCA FALHOU" in saida
+        assert "https://g/markets/7" in saida
+
+    async def test_par_presente_com_nome_que_NAO_bate_e_apontado(self, capsys):
+        """A hipótese mais provável, e a que o casamento por nome não cobre."""
+        v = _varredura()
+
+        async def get(url, params):
+            return {"outcomes": '["Trump","Biden"]', "outcomePrices": '["0","1"]'}
+
+        await v._diagnosticar_fechado(get, "https://g", {"closed": True, "id": "7"})
+
+        assert "não bate com 'yes'/'sim'" in capsys.readouterr().out
+
+    async def test_diz_se_foi_closed_ou_active_false(self, capsys):
+        """As duas não são a mesma coisa: inativo pode nunca ter aberto, e aí
+        não existe preço final para ler nem vai existir."""
+        v = _varredura()
+
+        async def get(url, params):
+            return {}
+
+        await v._diagnosticar_fechado(
+            get, "https://g", {"active": False, "id": "7"}
+        )
+        saida = capsys.readouterr().out
+
+        assert "closed=None" in saida
+        assert "active=False" in saida
