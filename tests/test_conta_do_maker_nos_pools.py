@@ -341,3 +341,35 @@ def test_coluna_COM_medida_imprime_o_numero(capsys) -> None:
     conta._imprimir_por_mercado([_linha(-16.3)])
 
     assert "-16.300" in capsys.readouterr().out
+
+
+# ── o líquido nos MEDIDOS, ao lado do None (rodada de 4 h, 2026-09-17) ───────
+#
+# Custo de saída medido em 45 de 214 mercados; a regra de cobertura completa
+# deu `None` em todo recorte, e o número que responderia a pergunta ficou nos
+# JSONs sem ninguém somar. Ele passa a sair AO LADO do `None`, nunca no lugar.
+
+
+def test_recorte_publica_o_liquido_nos_medidos_AO_LADO_do_None() -> None:
+    parcial = conta._soma_do_recorte([_mercado(10, 100, 2.0), _mercado(8, 50, None)])
+
+    assert parcial["liquido_com_custo_de_saida_usdc_por_hora"] is None, "a regra fica"
+    assert parcial["mercados_com_custo_de_saida"] == 1
+    assert parcial["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] == pytest.approx(8.0)
+    assert parcial["receita_nos_medidos_usdc_por_hora"] == pytest.approx(10.0)
+
+
+def test_com_cobertura_completa_os_dois_liquidos_coincidem() -> None:
+    completo = conta._soma_do_recorte([_mercado(10, 100, 2.0), _mercado(8, 50, 1.0)])
+
+    assert completo["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] == pytest.approx(
+        completo["liquido_com_custo_de_saida_usdc_por_hora"]
+    )
+
+
+def test_sem_nenhum_medido_o_liquido_nos_medidos_e_None_e_NUNCA_zero() -> None:
+    nenhum = conta._soma_do_recorte([_mercado(10, 100, None)])
+
+    assert nenhum["mercados_com_custo_de_saida"] == 0
+    assert nenhum["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] is None
+    assert nenhum["receita_nos_medidos_usdc_por_hora"] is None
