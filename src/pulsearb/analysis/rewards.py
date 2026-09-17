@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.backtest.book import OrderBook
+from pulsearb.numeros import numero
 
 # `rewardsMaxSpread` observado ao vivo: 1.5 e 4.5. Confirmado em 2026-08-30
 # que a unidade é CENTAVOS (1,5¢ = 0,015 de probabilidade).
@@ -77,18 +78,18 @@ class ParametrosDeReward:
         mercado sem `rewardsDailyRate` no dado é um mercado sem pool, e
         inventar um número aqui produziria receita onde não há nenhuma.
         """
-        taxa = _numero(meta.get("rewards_daily_rate"))
+        taxa = numero(meta.get("rewards_daily_rate"))
         if taxa is None or taxa <= 0:
             return None
-        bruto_spread = _numero(meta.get("rewards_max_spread"))
+        bruto_spread = numero(meta.get("rewards_max_spread"))
         if bruto_spread is None:
             return None
         max_spread = bruto_spread / 100.0 if HIPOTESE_MAX_SPREAD_EM_CENTAVOS else bruto_spread
         return cls(
             daily_rate=taxa,
-            min_size=_numero(meta.get("rewards_min_size")) or 0.0,
+            min_size=numero(meta.get("rewards_min_size")) or 0.0,
             max_spread=max_spread,
-            tick_size=_numero(meta.get("tick_size")) or 0.01,
+            tick_size=numero(meta.get("tick_size")) or 0.01,
         )
 
 
@@ -130,12 +131,12 @@ def _motivo_sem_pool(meta: dict[str, Any]) -> str:
     """
     if not meta:
         return "sem_reward_meta"
-    taxa = _numero(meta.get("rewards_daily_rate"))
+    taxa = numero(meta.get("rewards_daily_rate"))
     if taxa is None:
         return "sem_taxa_diaria"
     if taxa <= 0:
         return "taxa_diaria_zero"
-    if _numero(meta.get("rewards_max_spread")) is None:
+    if numero(meta.get("rewards_max_spread")) is None:
         return "sem_max_spread"
     return "desconhecido"
 
@@ -579,14 +580,3 @@ def _p50(valores: list[float]) -> float | None:
     return round(ordenados[len(ordenados) // 2], 9)
 
 
-def _numero(valor: Any) -> float | None:
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None

@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 
 import orjson
 
+from pulsearb.numeros import numero
 from pulsearb.obs import get_logger
 
 # Sentinela de fim da paginação keyset (verificado, API_NOTES 2.2).
@@ -304,15 +305,15 @@ def _taxas(
 
     schedule = gamma.get("feeSchedule")
     if isinstance(schedule, dict):
-        rate = _as_float(schedule.get("rate"))
-        exponent = _as_float(schedule.get("exponent"))
+        rate = numero(schedule.get("rate"))
+        exponent = numero(schedule.get("exponent"))
         taker_only = bool(schedule.get("takerOnly", False))
-        rebate = _as_float(schedule.get("rebateRate"))
+        rebate = numero(schedule.get("rebateRate"))
 
     fd = (clob_compact or {}).get("fd")
     if isinstance(fd, dict):
-        clob_rate = _as_float(fd.get("r"))
-        clob_exp = _as_float(fd.get("e"))
+        clob_rate = numero(fd.get("r"))
+        clob_exp = numero(fd.get("e"))
         if rate is None:
             rate, exponent = clob_rate, clob_exp
             taker_only = bool(fd.get("to", False))
@@ -332,10 +333,10 @@ def _tick_e_minimo(
 ) -> tuple[float, float, list[str]]:
     """Tick e tamanho mínimo, com o CLOB preferido sobre a Gamma."""
     gates: list[str] = []
-    tick = _as_float((clob_compact or {}).get("mts")) or _as_float(
+    tick = numero((clob_compact or {}).get("mts")) or numero(
         gamma.get("orderPriceMinTickSize")
     )
-    min_size = _as_float((clob_compact or {}).get("mos")) or _as_float(gamma.get("orderMinSize"))
+    min_size = numero((clob_compact or {}).get("mos")) or numero(gamma.get("orderMinSize"))
     if tick is None:
         gates.append("tick_size_ausente")
         tick = float("nan")
@@ -453,17 +454,6 @@ def seguro_na_url(condition_id: str) -> bool:
     return bool(limpo) and all(caractere in _HEX for caractere in limpo)
 
 
-def _as_float(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
 
 
 class MarketDiscovery:

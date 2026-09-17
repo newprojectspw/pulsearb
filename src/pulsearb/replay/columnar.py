@@ -38,6 +38,7 @@ from typing import Any
 
 import orjson
 
+from pulsearb.numeros import numero
 from pulsearb.obs import get_logger
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
 
@@ -102,17 +103,17 @@ def achatar(record: ReplayRecord) -> Iterator[dict[str, Any]]:
         base["market"] = _texto(evento.get("market"))
         base["topic"] = _texto(evento.get("topic"))
         base["asset_id"] = _texto(evento.get("asset_id"))
-        base["price"] = _numero(evento.get("price"))
-        base["size"] = _numero(evento.get("size"))
+        base["price"] = numero(evento.get("price"))
+        base["size"] = numero(evento.get("size"))
         base["side"] = _texto(evento.get("side"))
-        base["best_bid"] = _numero(evento.get("best_bid"))
-        base["best_ask"] = _numero(evento.get("best_ask"))
+        base["best_bid"] = numero(evento.get("best_bid"))
+        base["best_ask"] = numero(evento.get("best_ask"))
 
         # RTDS: o preço mora no payload aninhado.
         interno = evento.get("payload")
         if isinstance(interno, dict):
             base["asset_id"] = base["asset_id"] or _texto(interno.get("symbol"))
-            base["price"] = base["price"] if base["price"] is not None else _numero(
+            base["price"] = base["price"] if base["price"] is not None else numero(
                 interno.get("value")
             )
 
@@ -125,11 +126,11 @@ def achatar(record: ReplayRecord) -> Iterator[dict[str, Any]]:
                     continue
                 linha = dict(base)
                 linha["asset_id"] = _texto(mudanca.get("asset_id")) or base["asset_id"]
-                linha["price"] = _numero(mudanca.get("price"))
-                linha["size"] = _numero(mudanca.get("size"))
+                linha["price"] = numero(mudanca.get("price"))
+                linha["size"] = numero(mudanca.get("size"))
                 linha["side"] = _texto(mudanca.get("side"))
-                linha["best_bid"] = _numero(mudanca.get("best_bid"))
-                linha["best_ask"] = _numero(mudanca.get("best_ask"))
+                linha["best_bid"] = numero(mudanca.get("best_bid"))
+                linha["best_ask"] = numero(mudanca.get("best_ask"))
                 yield linha
             continue
         yield base
@@ -263,17 +264,6 @@ def _texto(valor: Any) -> str | None:
     return valor if isinstance(valor, str) else None
 
 
-def _numero(valor: Any) -> float | None:
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None
 
 
 if __name__ == "__main__":

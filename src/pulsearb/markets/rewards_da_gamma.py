@@ -38,6 +38,10 @@ from __future__ import annotations
 
 from typing import Any
 
+# `numero` continua exportado daqui: quem importava segue funcionando, e a
+# definição é a única, em `pulsearb.numeros`.
+from pulsearb.numeros import numero
+
 #: Onde a Gamma pode pôr a lista de rewards. `clobRewards` é o que se viu ao
 #: vivo (§12.8); `rewards_config` é o nome no SDK. Aceitar os três custa uma
 #: linha; apostar no errado custou o marco inteiro no `price_change` (§6.1b).
@@ -56,21 +60,6 @@ CHAVES_DE_TAXA_DIARIA = (
 #: Onde a Gamma põe o tamanho mínimo e o spread máximo que pontuam.
 CHAVE_MIN_SIZE = "rewardsMinSize"
 CHAVE_MAX_SPREAD = "rewardsMaxSpread"
-
-
-def numero(valor: Any) -> float | None:
-    """`float` ou `None` — string vazia e lixo viram `None`, não zero.
-
-    Zero seria um valor legítimo de taxa ("pool de zero"), então confundir
-    "não veio" com "veio zero" apagaria a diferença entre um mercado sem
-    programa e um com programa vazio.
-    """
-    if valor is None or isinstance(valor, bool):
-        return None
-    try:
-        return float(valor)
-    except (TypeError, ValueError):
-        return None
 
 
 def lista_de_rewards(gamma: dict[str, Any]) -> tuple[str | None, list[Any]]:

@@ -63,6 +63,7 @@ from pulsearb.backtest.runner import (
     varredura_de_threshold,
 )
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
+from pulsearb.numeros import numero, percentil
 
 # As hipóteses nomeadas continuam importadas porque continuam sendo
 # REPORTADAS — como referência histórica. `compute_anchor` saiu do
@@ -556,7 +557,7 @@ class RecordingIndex:
         num token fora de janela ainda é sinal de que a gravação teve perda.
         """
         for evento in eventos_do_payload(record.payload):
-            carimbo = _numero_bruto(evento.get("timestamp"))
+            carimbo = numero(evento.get("timestamp"))
             if carimbo:
                 self.relogio.observar(carimbo, record.ts_wall_ns)
             self.integridade.observar(evento, record.ts_wall_ns)
@@ -681,14 +682,14 @@ class RecordingIndex:
         asset_id = evento.get("asset_id")
         if not isinstance(asset_id, str) or asset_id not in self.janelas_de_interesse:
             return
-        preco = _numero_bruto(evento.get("price"))
+        preco = numero(evento.get("price"))
         if preco is None:
             return
         self.trades[asset_id].append(
             (
                 ts_ns,
                 preco,
-                _numero_bruto(evento.get("size")) or 0.0,
+                numero(evento.get("size")) or 0.0,
                 str(evento.get("side", "")).upper(),
             )
         )
@@ -1209,9 +1210,9 @@ def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
         "repeticoes_do_mesmo_carimbo": len(serie) - len(carimbos),
         "janela_coberta_s": round(span, 1),
         "intervalo_s": {
-            "p50": round(_percentil_simples(ordenados, 50), 3),
-            "p90": round(_percentil_simples(ordenados, 90), 3),
-            "p99": round(_percentil_simples(ordenados, 99), 3),
+            "p50": round(percentil(ordenados, 50), 3),
+            "p90": round(percentil(ordenados, 90), 3),
+            "p99": round(percentil(ordenados, 99), 3),
             "max": round(ordenados[-1], 3),
         },
         "buracos_acima_da_idade_maxima": sum(
@@ -1220,23 +1221,8 @@ def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
     }
 
 
-def _percentil_simples(ordenados: list[float], pct: float) -> float:
-    rank = max(1, min(len(ordenados), int(-(-pct * len(ordenados) // 100))))
-    return ordenados[rank - 1]
 
 
-def _numero_bruto(valor: Any) -> float | None:
-    """O CLOB manda número ora como int, ora como string decimal."""
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None
 
 
 def _rebate_medio(janelas: list[WindowState]) -> float:

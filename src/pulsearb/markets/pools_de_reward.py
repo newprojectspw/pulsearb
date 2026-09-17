@@ -53,6 +53,7 @@ from pulsearb.analysis.rewards import (
 )
 from pulsearb.backtest.book import OrderBook
 from pulsearb.live.rastreador import JanelaAoVivo
+from pulsearb.numeros import numero
 
 #: O `jogo` destas janelas. Valor próprio, e não `twap`, porque é ele que o
 #: `jogos_operados` do taker usa para recusar. Reaproveitar `twap` aqui faria
@@ -89,13 +90,6 @@ class MercadoComPool:
         return self.max_spread_centavos / 100.0
 
 
-def _numero(valor: Any) -> float | None:
-    if valor is None or isinstance(valor, bool):
-        return None
-    try:
-        return float(valor)
-    except (TypeError, ValueError):
-        return None
 
 
 def ler_pagina_de_pools(pagina: Any) -> tuple[list[MercadoComPool], str]:
@@ -116,8 +110,8 @@ def ler_pagina_de_pools(pagina: Any) -> tuple[list[MercadoComPool], str]:
         if not isinstance(bruto, dict):
             continue
         cid = bruto.get("condition_id")
-        taxa = _numero(bruto.get("total_daily_rate"))
-        spread = _numero(bruto.get("rewards_max_spread"))
+        taxa = numero(bruto.get("total_daily_rate"))
+        spread = numero(bruto.get("rewards_max_spread"))
         if not isinstance(cid, str) or not cid or taxa is None or spread is None:
             continue
         if taxa <= 0 or spread <= 0:
@@ -126,7 +120,7 @@ def ler_pagina_de_pools(pagina: Any) -> tuple[list[MercadoComPool], str]:
             MercadoComPool(
                 condition_id=cid,
                 daily_rate=taxa,
-                min_size=_numero(bruto.get("rewards_min_size")) or 0.0,
+                min_size=numero(bruto.get("rewards_min_size")) or 0.0,
                 max_spread_centavos=spread,
             )
         )
@@ -163,7 +157,7 @@ def janela_do_mercado(
     ]
     if len(tokens) < 2:
         return None
-    tick = _numero(mercado.get("minimum_tick_size"))
+    tick = numero(mercado.get("minimum_tick_size"))
     if tick is None or tick <= 0:
         return None
 
@@ -181,7 +175,7 @@ def janela_do_mercado(
         abertura_epoch=agora,
         fechamento_epoch=fechamento,
         tick_size=tick,
-        min_order_size=_numero(mercado.get("minimum_order_size")) or 5.0,
+        min_order_size=numero(mercado.get("minimum_order_size")) or 5.0,
         # Fee do taker: o maker não paga (`takerOnly`, §15.1), mas o campo
         # existe na janela e zerá-lo mentiria sobre o mercado.
         fee_rate=0.0,
