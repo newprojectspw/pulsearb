@@ -22,3 +22,12 @@ original foi truncada antes desses campos.
 Regra: fixture sintética nunca vira "prova" de comportamento do servidor.
 Elas provam apenas que o NOSSO parser aceita o formato documentado. A prova
 real vem das capturas do recorder (M1.C) e dos smokes (M1.E).
+
+## `reais/` — capturas do recorder (auditoria 2026-09-17 §2.9)
+
+Produzido por `scripts/recortar_fixtures.py` sobre a gravação do Mac: os
+primeiros N registros de cada tipo, INTEIROS, como o recorder os escreveu
+(`poly_ws__<event_type>.jsonl`, `rtds__<topic>.jsonl`) e um `MANIFESTO.json`
+com origem, período e contagens. `tests/test_fixtures_reais.py` os consome e
+falha se algum parser ler zero; enquanto a pasta não existir, salta com o
+motivo escrito. É a substituição prometida na linha `rtds_*.json` acima.
