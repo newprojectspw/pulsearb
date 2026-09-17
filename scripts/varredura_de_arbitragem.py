@@ -82,8 +82,11 @@ RECUSAS_DE_CONJUNTO = frozenset({
 MOTIVOS = {
     "sem_evento_negrisk": "a Gamma não devolveu evento neg-risk nenhum",
     "conjunto_pequeno_demais": "o evento tem menos de 2 resultados",
-    "fechado_sem_resolucao_legivel": "há resultado fechado cuja resolução não "
+    "fechado_sem_resolucao_legivel": "há resultado FECHADO cuja resolução não "
                                     "dá para ler — não sei se ele resolveu SIM",
+    "perna_nem_abriu_nem_resolveu": "há vaga reservada (active=false, "
+                                   "closed=false): nunca abriu, não tem preço "
+                                   "nem resolução, e pode ser ativada depois",
     "evento_ja_decidido": "um resultado fechado resolveu SIM: o evento acabou "
                           "e os abertos valem zero",
     "conjunto_sem_livro": "há resultado sem livro de ofertas habilitado — não "
@@ -196,12 +199,32 @@ def resolveu_nao(mercado: dict) -> bool | None:
     return None
 
 
-def _falta_resolucao(mercado: Any) -> bool:
-    """É um resultado FECHADO cuja resolução ainda não dá para ler?"""
+def nunca_abriu(mercado: Any) -> bool:
+    """Vaga reservada: `active=false` **sem** `closed`.
+
+    Medido em 2026-09-17 na VPS (`--cru`): 77 dos 128 mercados de
+    `democratic-presidential-nominee-2028` e 76 dos 128 de
+    `presidential-election-winner-2028` estão assim, com slugs genéricos
+    (`will-person-v-win-...`, `will-person-af-win-...`). Não são resultados
+    fechados: são lugares guardados para candidatos ainda sem nome. Não têm
+    livro, não têm `outcomePrices`, e nada os resolveu.
+    """
     if not isinstance(mercado, dict):
         return False
-    fechado = mercado.get("closed") or not mercado.get("active", True)
-    return bool(fechado) and resolveu_nao(mercado) is None
+    return not mercado.get("active", True) and not mercado.get("closed")
+
+
+def _falta_resolucao(mercado: Any) -> bool:
+    """É um resultado FECHADO cuja resolução ainda não dá para ler?
+
+    Só `closed=true`. Buscar `/markets/{id}` para vaga reservada é requisição
+    jogada fora: a mesma rodada mostrou que o mercado cheio dessas vagas **não
+    traz sequer a chave** `outcomePrices` — não é resposta incompleta, é campo
+    que não existe para quem nunca abriu.
+    """
+    if not isinstance(mercado, dict):
+        return False
+    return bool(mercado.get("closed")) and resolveu_nao(mercado) is None
 
 
 def _rota_do_mercado(base_gamma: str, ident: str) -> str:
@@ -259,6 +282,28 @@ async def enriquecer_fechados(
                 mercado[campo] = cheio[campo]
 
 
+def _veredito_dos_nao_abertos(
+    fechados: list[dict], reservadas: list[dict]
+) -> str | None:
+    """O motivo que os mercados não-abertos impõem, ou `None` se nenhum impõe.
+
+    A ORDEM É A DA FORÇA DO QUE SE APRENDE. Um fechado que resolveu SIM encerra
+    o evento — é definitivo e vem primeiro. Vaga reservada vem antes do fechado
+    ilegível porque é ESTRUTURAL: não se conserta buscando de novo, enquanto o
+    ilegível é lacuna de dado. Deixar o ilegível na frente manteria a causa de
+    77 em 128 mercados escondida atrás de uma que se resolve com um GET.
+    """
+    for m in fechados:
+        if resolveu_nao(m) is False:
+            return "evento_ja_decidido"
+    if reservadas:
+        return "perna_nem_abriu_nem_resolveu"
+    for m in fechados:
+        if resolveu_nao(m) is None:
+            return "fechado_sem_resolucao_legivel"
+    return None
+
+
 def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     """O evento cobre TODO o espaço de resultados?
 
@@ -286,15 +331,18 @@ def conjunto_e_exaustivo(evento: dict) -> tuple[bool, str]:
     # fechado que resolveu SIM encerra o evento (os abertos valem zero), e um
     # fechado ilegível é estado DESCONHECIDO — que aqui recusa, como em todo
     # o resto do projeto.
-    fechados = [m for m in mercados if m.get("closed") or not m.get("active", True)]
-    for m in fechados:
-        resposta = resolveu_nao(m)
-        if resposta is None:
-            return False, "fechado_sem_resolucao_legivel"
-        if not resposta:
-            return False, "evento_ja_decidido"
+    #
+    # A vaga RESERVADA (`active=false`, `closed=false`) é a terceira coisa, e
+    # ela estava escondida atrás do nome errado: `_falta_resolucao` chamava de
+    # "fechado" quem nunca abriu, e a recusa saía com o nome de um fato que não
+    # aconteceu. Recusa com nome falso não vira métrica — é a regra do projeto.
+    fechados = [m for m in mercados if m.get("closed")]
+    reservadas = [m for m in mercados if nunca_abriu(m)]
+    motivo = _veredito_dos_nao_abertos(fechados, reservadas)
+    if motivo:
+        return False, motivo
 
-    abertos = [m for m in mercados if m not in fechados]
+    abertos = [m for m in mercados if not m.get("closed") and m.get("active", True)]
     if len(abertos) < 2:
         return False, "conjunto_pequeno_demais"
     if any(not m.get("enableOrderBook", True) for m in abertos):
@@ -392,6 +440,34 @@ def _contabilizar(
             vistos[slug].append(achado["lucro_usdc"])
 
 
+def porque_ilegivel(mercado: dict) -> str:
+    """Qual metade do par `outcomes`/`outcomePrices` faltou, em uma frase.
+
+    Existe porque a versão anterior deste diagnóstico imprimia "O PAR EXISTE
+    mas o nome do resultado não bate com 'yes'/'sim'" olhando **só** para
+    `outcomes` — e a rodada de 2026-09-17 imprimiu essa frase duas linhas
+    abaixo de `outcomes='["Yes", "No"]' outcomePrices=None`. O nome estava lá;
+    o que faltava era o PREÇO. Concluir sobre o campo que se olhou a respeito
+    do campo que não se olhou é a mesma medida de ausência × ausência de
+    medida do item 1.6, agora dentro do meu próprio diagnóstico.
+    """
+    nomes = _lista(mercado.get("outcomes"))
+    precos = _lista(mercado.get("outcomePrices"))
+    if nomes is None and precos is None:
+        return "NEM nomes NEM preços: o par não veio inteiro"
+    if precos is None:
+        return ("os NOMES vieram e os PREÇOS não — falta o preço final, "
+                f"não o casamento por nome (nomes={nomes!r})")
+    if nomes is None:
+        return f"os PREÇOS vieram e os NOMES não (preços={precos!r})"
+    if len(nomes) != len(precos):
+        return (f"nomes ({len(nomes)}) e preços ({len(precos)}) têm tamanhos "
+                "diferentes — não dá para casar")
+    if not any(str(n).strip().lower() in ("yes", "sim") for n in nomes):
+        return f"o par veio inteiro mas não há 'Yes' entre os nomes: {nomes!r}"
+    return f"o par veio com 'Yes' — o preço é que não virou número: {precos!r}"
+
+
 async def _diagnosticar_fechado(get, base_gamma: str, m: dict) -> None:
     """Por que ESTE resultado fechado não tem resolução legível.
 
@@ -408,11 +484,14 @@ async def _diagnosticar_fechado(get, base_gamma: str, m: dict) -> None:
     # trata as duas igual. Um mercado inativo pode nunca ter aberto — e aí não
     # existe preço final para ler, nem vai existir. Saber qual das duas
     # disparou muda o conserto.
-    print(f"      closed={m.get('closed')!r} active={m.get('active')!r} "
+    especie = "VAGA RESERVADA (nunca abriu)" if nunca_abriu(m) else "FECHADO"
+    print(f"      {especie}: closed={m.get('closed')!r} "
+          f"active={m.get('active')!r} "
           f"umaResolutionStatus={m.get('umaResolutionStatus')!r}")
     print(f"      no evento: outcomes={m.get('outcomes')!r} "
           f"outcomePrices={m.get('outcomePrices')!r}")
-    print(f"      resolveu_nao(evento) = {resolveu_nao(m)!r}")
+    print(f"      resolveu_nao(evento) = {resolveu_nao(m)!r} "
+          f"— {porque_ilegivel(m)}")
     if not isinstance(ident, str | int):
         print("      >>> SEM IDENTIFICADOR: não há o que buscar")
         return
@@ -430,9 +509,8 @@ async def _diagnosticar_fechado(get, base_gamma: str, m: dict) -> None:
     print(f"      cheio: outcomes={cheio.get('outcomes')!r} "
           f"outcomePrices={cheio.get('outcomePrices')!r}")
     print(f"      resolveu_nao(cheio) = {resolveu_nao(cheio)!r}")
-    if resolveu_nao(cheio) is None and cheio.get("outcomes"):
-        print("      >>> O PAR EXISTE mas o nome do resultado não bate com "
-              "'yes'/'sim' — é aqui que o casamento por nome falha")
+    if resolveu_nao(cheio) is None:
+        print(f"      >>> {porque_ilegivel(cheio)}")
 
 
 async def _imprimir_cru(get, base_gamma: str, eventos: list[dict],
@@ -443,21 +521,24 @@ async def _imprimir_cru(get, base_gamma: str, eventos: list[dict],
     manda. Foi ler campo "que parecia razoável" que produziu os dois defeitos
     silenciosos do §6.1b e do §12.13.
     """
-    recusados = [
-        e for e in eventos
-        if conjunto_e_exaustivo(e)[1] == "fechado_sem_resolucao_legivel"
-    ]
-    print(f"\n=== {len(recusados)} evento(s) com fechado ilegível; "
-          f"abrindo {min(quantos, len(recusados))} ===")
+    alvo = ("fechado_sem_resolucao_legivel", "perna_nem_abriu_nem_resolveu")
+    recusados = [e for e in eventos if conjunto_e_exaustivo(e)[1] in alvo]
+    print(f"\n=== {len(recusados)} evento(s) com resultado não-aberto e sem "
+          f"resolução legível; abrindo {min(quantos, len(recusados))} ===")
     for ev in recusados[:quantos]:
         mercados = [m for m in (ev.get("markets") or []) if isinstance(m, dict)]
         print(f"\n  slug={ev.get('slug')!r}  mercados={len(mercados)}")
         print(f"  chaves do evento: {sorted(ev)}")
         if mercados:
             print(f"  chaves de um mercado: {sorted(mercados[0])}")
+        # As duas contagens SEPARADAS. Somadas num número só foi exatamente o
+        # que escondeu que quase nada ali estava fechado.
+        reservadas = [m for m in mercados if nunca_abriu(m)]
         ilegiveis = [m for m in mercados if _falta_resolucao(m)]
+        print(f"  vagas reservadas (nunca abriram): {len(reservadas)} "
+              f"de {len(mercados)}")
         print(f"  fechados ilegíveis: {len(ilegiveis)} de {len(mercados)}")
-        for m in ilegiveis[:3]:
+        for m in (reservadas + ilegiveis)[:3]:
             await _diagnosticar_fechado(get, base_gamma, m)
 
 
