@@ -33,20 +33,26 @@ vs = _carregar()
 TOK = "tok-a"
 
 
-def _delta(ts, bid, ask):
+MS = 1_000_000  # ns por ms
+
+
+def _delta(ts, bid, ask, *, chegada=None):
+    """`ts` é o carimbo do SERVIDOR em ms; `chegada` (ms) é quando entrou no fio."""
+    chegada_ns = (ts if chegada is None else chegada) * MS
     return {
-        "ts_mono_ns": ts, "ts_wall_ns": ts, "fonte": "poly_ws",
-        "payload": {"event_type": "price_change", "price_changes": [
+        "ts_mono_ns": chegada_ns, "ts_wall_ns": chegada_ns, "fonte": "poly_ws",
+        "payload": {"event_type": "price_change", "timestamp": str(ts), "price_changes": [
             {"asset_id": TOK, "price": "0.50", "size": "1", "side": "BUY",
              "best_bid": str(bid), "best_ask": str(ask)}]},
     }
 
 
-def _print(ts, preco, side):
+def _print(ts, preco, side, *, chegada=None):
+    chegada_ns = (ts if chegada is None else chegada) * MS
     return {
-        "ts_mono_ns": ts, "ts_wall_ns": ts, "fonte": "poly_ws",
+        "ts_mono_ns": chegada_ns, "ts_wall_ns": chegada_ns, "fonte": "poly_ws",
         "payload": {"event_type": "last_trade_price", "asset_id": TOK,
-                    "price": str(preco), "side": side, "size": "5", "timestamp": "1"},
+                    "price": str(preco), "side": side, "size": "5", "timestamp": str(ts)},
     }
 
 
@@ -136,11 +142,51 @@ class TestSobreGravacao:
         assert rel["veredito"] == "SEM_AMOSTRA"
 
     def test_topo_velho_demais_nao_classifica(self, tmp_path):
-        regs = [_delta(1_000, 0.50, 0.52), _print(1_000 + int(10e9), 0.52, "BUY")]
+        regs = [_delta(1_000, 0.50, 0.52), _print(1_000 + 10_000, 0.52, "BUY")]
         rel = vs.verificar(_reader(_gravar(tmp_path, regs)), tolerancia_topo_s=5.0)
 
         assert rel["posicoes"][vs.TOPO_VELHO] == 1
         assert rel["classificaveis"] == 0
+
+    def test_alinha_pelo_carimbo_do_servidor_e_nao_pela_ordem_de_chegada(self, tmp_path):
+        """O caso da M2_72H: o livro anda e o print do fill anterior chega DEPOIS.
+
+        Por ordem de chegada o print de 0,52 seria julgado contra 0,56/0,58 e
+        sairia 'no bid ou abaixo' marcado BUY — discordante. Pelo carimbo do
+        servidor o topo dele é o de 0,50/0,52 — concordante.
+        """
+        regs = [
+            _delta(1_000, 0.50, 0.52, chegada=1_800),
+            _delta(2_000, 0.56, 0.58, chegada=2_800),   # chega ANTES do print…
+            _print(1_500, 0.52, "BUY", chegada=2_900),  # …que é anterior a ele
+        ]
+        rel = vs.verificar(_reader(_gravar(tmp_path, regs)))
+
+        assert rel["posicoes"] == {vs.NO_ASK: 1}
+        assert rel["concorda_com_taker"] == 1 and rel["discorda_de_taker"] == 0
+        assert rel["alinhamento"] == "carimbo_do_servidor"
+
+    def test_price_change_que_chega_depois_do_print_ainda_conta_gracas_a_espera(self, tmp_path):
+        regs = [
+            _print(1_500, 0.52, "BUY", chegada=1_600),
+            _delta(1_000, 0.50, 0.52, chegada=2_400),   # 800 ms atrasado, como no fio
+            _delta(9_000, 0.50, 0.52, chegada=9_000),   # só para o relógio de chegada andar
+        ]
+        rel = vs.verificar(_reader(_gravar(tmp_path, regs)), espera_s=3.0)
+        assert rel["posicoes"] == {vs.NO_ASK: 1}
+        atrasos = rel["atrasos_chegada_menos_servidor"]["price_changes"]
+        assert atrasos == {"<=50ms": 1, "<=5000ms": 1}  # 0 ms e 1.400 ms
+
+    def test_janela_de_toque_tolera_o_livro_a_andar_no_meio_do_fill(self, tmp_path):
+        regs = [
+            _delta(1_000, 0.50, 0.52),
+            _delta(1_400, 0.52, 0.54),           # subiu um tick antes do print
+            _print(1_500, 0.52, "BUY"),          # ao alinhar: 0,52 == bid → discorda
+        ]
+        rel = vs.verificar(_reader(_gravar(tmp_path, regs)), janela_ms=1000)
+        assert rel["discorda_de_taker"] == 1
+        assert rel["janela"]["concorda"] == 1   # mas tocou o ask de 0,52 há 100 ms
+        assert rel["janela"]["fracao_taker"] == 1.0
 
     def test_main_recusa_json_absoluto_e_grava_json_relativo(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
