@@ -110,3 +110,30 @@ def test_subscribe_frame_formato():
     # binance + twap60 — os dois tópicos da estratégia (API_NOTES 12.3)
     assert topics == {"crypto_prices", "crypto_prices_twap_sixty"}
     assert all(s["type"] == "update" for s in frame["subscriptions"])
+
+
+# ── `bool` no campo numérico é dado malformado, não preço (auditoria §2.4) ──
+
+
+@pytest.mark.parametrize("topic", ["crypto_prices_chainlink", "crypto_prices"])
+@pytest.mark.parametrize("valor", [True, False])
+def test_bool_no_value_NAO_vira_preco(topic, valor):
+    """`true` virava 1,0 e `false` virava 0,0 — provado na auditoria de
+    2026-09-17. É o preço que decide a janela; malformado recusa."""
+    evento = {
+        "topic": topic,
+        "payload": {"symbol": "btc/usd", "value": valor, "timestamp": 1758000000000},
+    }
+
+    assert parse_rtds_event(evento, 1, 1) is None
+
+
+def test_bool_no_full_accuracy_value_cai_no_value_e_tambem_recusa():
+    """No TWAP, `full_accuracy_value` não-string cai para `value`; se os dois
+    forem bool, continua sem preço."""
+    evento = {
+        "topic": "crypto_prices_twap_sixty",
+        "payload": {"symbol": "btc/usd", "full_accuracy_value": True, "value": True},
+    }
+
+    assert parse_rtds_event(evento, 1, 1) is None

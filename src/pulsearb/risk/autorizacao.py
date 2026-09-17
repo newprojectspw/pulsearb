@@ -26,8 +26,12 @@ subtração só, e as duas se cancelam. Sincronia verificada vem do daemon de
 NTP, que faz medição de duas vias. Não determinado conta como não
 sincronizado.
 
-**Cliente de ordens.** Hoje não existe (itens 3.2 e 3.5). Ele entra nesta
-lista como qualquer outro bloqueio, e sai dela quando existir.
+**Cliente de ordens.** O código existe (`execution/cliente.py`, item 3.2 ✅
+e 3.5 🟡), mas **uma ordem assinada nunca recebeu resposta do CLOB** — a
+única tentativa (2026-09-11) parou em `403 auth_recusada`, antes de o
+servidor avaliar o corpo. Enquanto isso não acontecer, quem constrói o
+executor passa `cliente_de_ordens_existe=False` e este bloqueio fica de pé.
+Ele sai da lista quando o 3.5 fechar, não quando o arquivo existir.
 
 ## Por que TODOS os bloqueios, e não o primeiro
 

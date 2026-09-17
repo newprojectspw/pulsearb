@@ -147,6 +147,14 @@ def parse_rtds_event(parsed: Any, ts_mono_ns: int, ts_wall_ns: int) -> PriceTick
 
 
 def _as_float(value: Any) -> float | None:
+    """Número do fio, ou `None`. `bool` é `None`, nunca 1,0/0,0.
+
+    Era o único dos nove parsers de número do repositório que deixava `true`
+    virar preço 1,0 — e este é o preço que decide a janela (auditoria
+    2026-09-17, §2.4, provado por execução). Dado malformado recusa.
+    """
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
