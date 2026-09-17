@@ -153,6 +153,7 @@ def _soma_do_recorte(sub: list[dict[str, Any]]) -> dict[str, Any]:
     mercados do recorte tiverem a medida. Somar os medidos e calar os outros
     deixaria o recorte passar com um subconjunto (achado do Codex, PR #114)."""
     sem_saida = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is None]
+    medidos = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is not None]
     return {
         "mercados": len(sub),
         "receita_usdc_por_hora": round(sum(x["receita_usdc_por_hora"] for x in sub), 4),
@@ -173,6 +174,27 @@ def _soma_do_recorte(sub: list[dict[str, Any]]) -> dict[str, Any]:
             else round(
                 sum(x["liquido_com_custo_de_saida_usdc_por_hora"] for x in sub), 4
             )
+        ),
+        # O MESMO líquido, só sobre os mercados que TÊM a medida — publicado ao
+        # lado do `None`, nunca no lugar dele. A rodada de 4 h de 2026-09-17
+        # mediu o custo de saída em 45 de 214 mercados (top_5: 4 de 5): pool de
+        # reward paga para cotar e NÃO ser executado, e mercado sem fill não
+        # gera markout de 30 min. Com a regra de cobertura completa o veredito
+        # saiu `None` em todo recorte, e o número que responderia a pergunta
+        # ficou nos JSONs sem ninguém somar. O subconjunto aqui é definido por
+        # DISPONIBILIDADE DE DADO, não por resultado — é o que um LIVE faria
+        # ("só se opera onde o custo de saída foi medido"). Trocar o critério
+        # 1.12d para este número é decisão do quadro, não deste script.
+        "mercados_com_custo_de_saida": len(medidos),
+        "liquido_com_custo_de_saida_nos_medidos_usdc_por_hora": (
+            None
+            if not medidos
+            else round(
+                sum(x["liquido_com_custo_de_saida_usdc_por_hora"] for x in medidos), 4
+            )
+        ),
+        "receita_nos_medidos_usdc_por_hora": (
+            None if not medidos else round(sum(x["receita_usdc_por_hora"] for x in medidos), 4)
         ),
     }
 
@@ -293,9 +315,13 @@ def _imprimir_custo_de_saida(
         return
     for nome, s in relatorio["por_recorte"].items():
         liq = s["liquido_com_custo_de_saida_usdc_por_hora"]
+        nos_medidos = s["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"]
         print(
             f"  {nome:<10} líquido COM custo de saída: {liq!s:>10} USDC/h "
-            f"({s['mercados_sem_custo_de_saida']} de {s['mercados']} sem medida)"
+            f"({s['mercados_sem_custo_de_saida']} de {s['mercados']} sem medida; "
+            f"nos {s['mercados_com_custo_de_saida']} medidos: "
+            f"{_celula(nos_medidos, 9, '+')} USDC/h, receita "
+            f"{_celula(s['receita_nos_medidos_usdc_por_hora'], 8)})"
         )
 
 
