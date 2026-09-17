@@ -455,6 +455,23 @@ class TestARecusaDIZOQueFazer:
         assert v.nunca_abriu({"active": False}) is True
         assert v.nunca_abriu({"active": False, "closed": True}) is False
 
+    def test_campo_com_mais_de_20_resultados_e_recusado_ANTES_de_custar_rede(self):
+        """Breguez (2026-08, 964 snapshots, livro L2 inteiro): 0 % dos campos
+        com > 20 resultados fecham; 56 % dos ≤ 20 fecham. Campo grande é
+        iliquidez, e a rodada de 2026-09-17 viu o mesmo (77 e 76 vagas
+        reservadas em 128). A recusa vem antes de qualquer GET."""
+        v = _varredura()
+        evento = {"markets": [{} for _ in range(v.MAX_RESULTADOS_DA_CESTA + 1)]}
+
+        assert v.conjunto_e_exaustivo(evento) == (False, "campo_grande_demais")
+
+    def test_campo_com_exatamente_20_resultados_ainda_e_olhado(self):
+        """O teto é inclusivo: 20 é o tamanho que o estudo ainda viu fechar."""
+        v = _varredura()
+        evento = {"markets": [{} for _ in range(v.MAX_RESULTADOS_DA_CESTA)]}
+
+        assert v.conjunto_e_exaustivo(evento) == (True, "")
+
     def test_o_Yes_e_casado_pelo_NOME_e_nao_pela_posicao(self):
         """Presumir que o índice 0 é o "Yes" é o campo assumido a partir do
         que parecia razoável — o defeito do §6.1b e do §12.13."""
