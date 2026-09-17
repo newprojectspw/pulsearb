@@ -1,0 +1,15 @@
+{
+  "_origem": "RTDS, gravacao M2_72H, 2026-09-09 02:19-03:19 UTC, verbatim (API_NOTES 6.2b)",
+  "recusa_500": {
+    "body": {
+      "message": "leger AddSubscriptions error: rpc error: code = Internal desc = ERROR #42P01 relation \"__subscriptions\" does not exist, status: rpc error: code = Internal desc = ERROR #42P01 relation \"__subscriptions\" does not exist, message: ERROR #42P01 relation \"__subscriptions\" does not exist"
+    },
+    "statusCode": 500
+  },
+  "recusa_400": {
+    "body": {
+      "message": "leger AddSubscriptions error: rpc error: code = InvalidArgument desc = ERROR #23503 insert or update on table \"crypto_prices_update_subscriptions\" violates foreign key constraint \"connection_id_fk\", status: rpc error: code = InvalidArgument desc = ERROR #23503 insert or update on table \"crypto_prices_update_subscriptions\" violates foreign key constraint \"connection_id_fk\", message: ERROR #23503 insert or update on table \"crypto_prices_update_subscriptions\" violates foreign key constraint \"connection_id_fk\""
+    },
+    "statusCode": 400
+  }
+}

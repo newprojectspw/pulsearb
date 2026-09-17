@@ -33,7 +33,7 @@ from pulsearb.feeds.poly_ws import (
     iter_mudancas,
     resolucao_do_evento,
 )
-from pulsearb.feeds.rtds import TOPIC_BINANCE, TOPIC_TWAP_60, parse_rtds_event
+from pulsearb.feeds.rtds import TOPIC_BINANCE, TOPIC_TWAP_60, erro_do_servidor, parse_rtds_event
 from pulsearb.numeros import numero
 
 PASTA = Path(__file__).resolve().parent / "fixtures" / "reais"
@@ -52,9 +52,11 @@ def _manifesto() -> dict:
     return json.loads(MANIFESTO.read_text(encoding="utf-8"))
 
 
-def _registros(tipo: str) -> list[dict]:
+def _registros(tipo: str, *, obrigatorio: bool = True) -> list[dict]:
     entrada = _manifesto()["tipos"].get(tipo)
     if entrada is None:
+        if not obrigatorio:
+            return []
         pytest.fail(
             f"o recorte commitado não tem registros de {tipo!r} — re-extrair com um "
             "período que o contenha (ver MANIFESTO.json)"
@@ -75,13 +77,38 @@ def _eventos(tipo: str, event_type: str) -> list[dict]:
 
 class TestRecorte:
     def test_nenhum_registro_do_fio_ficou_sem_classificar(self):
-        """Um envelope que `eventos_do_payload` não lê é o defeito, não ruído."""
+        """Um envelope que nenhum parser lê é o defeito, não ruído.
+
+        A primeira rodada real (2026-09-17) falhou AQUI com 344 + 6 registros:
+        PONG gravado, frames vazios e recusas de assinatura do RTDS que
+        ninguém lia (API_NOTES §6.2b). Cada um ganhou categoria e teste.
+        """
         sem_classe = {
             tipo: e["vistos_no_periodo"]
             for tipo, e in _manifesto()["tipos"].items()
             if tipo.endswith("/_nao_classificado")
         }
         assert not sem_classe, f"registros do fio que o parser de envelope não lê: {sem_classe}"
+
+
+class TestOQueMaisChegaPeloFio:
+    """As formas não-dado medidas na M2_72H. Forma EXATA, senão é achado novo."""
+
+    def test_pong_do_clob_e_gravado_e_e_so_pong(self):
+        for r in _registros("poly_ws/_pong", obrigatorio=False):
+            assert r["payload"] == {"_b64": "UE9ORw=="}, r
+
+    def test_frame_vazio_do_rtds_e_so_vazio(self):
+        for r in _registros("rtds/_frame_vazio", obrigatorio=False):
+            assert r["payload"] == {"_b64": ""}, r
+
+    def test_erro_do_servidor_real_e_lido_com_codigo_e_mensagem(self):
+        """A recusa que o feed passa a ler e a transformar em close (0.6)."""
+        for r in _registros("rtds/_erro_do_servidor", obrigatorio=False):
+            erro = erro_do_servidor(r["payload"])
+            assert erro is not None, r
+            assert erro.status_code >= 400
+            assert erro.mensagem, "recusa sem mensagem: o feed não saberia dizer por quê"
 
 
 class TestPolyWs:

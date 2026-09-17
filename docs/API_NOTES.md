@@ -611,6 +611,50 @@ credencial de Chainlink**.
 
 ---
 
+
+### 6.2b. O que MAIS chega pelo fio — medido na M2_72H `[VERIFICADO na gravação]`
+
+Fonte: `scripts/recortar_fixtures.py` sobre `~/pulsearb-gravacao`, 2026-09-09
+02:19–03:19 UTC; recorte commitado em `tests/fixtures/reais/` e consumido por
+`tests/test_fixtures_reais.py`. Primeira rodada em 2026-09-17: os sete
+parsers de dado leram tudo; o que ficou **sem classificação** foi isto.
+
+**CLOB WS grava o `PONG`.** 344 registros/hora, um a cada 10 s: é a resposta
+ao `PING` de aplicação (§6.1). `ReconnectingFeed._receive_loop` chama
+`_handle_message` (que descarta o PONG) e **depois** `on_event` na mesma, então
+o recorder o escreve como `{"_b64": "UE9ORw=="}`. Não é defeito — o recorder
+grava o fio — mas é forma que todo leitor da gravação tem de conhecer.
+
+**RTDS manda frames vazios.** `{"_b64": ""}`, 2 na hora. Sem conteúdo, sem
+tópico. Categoria `rtds/_frame_vazio`; nada os consome.
+
+**RTDS RESPONDE à assinatura, e a resposta pode ser não.** 4 na hora, verbatim:
+
+```json
+{"body": {"message": "leger AddSubscriptions error: rpc error: code = Internal desc = ERROR #42P01 relation \"__subscriptions\" does not exist, ..."}, "statusCode": 500}
+{"body": {"message": "leger AddSubscriptions error: rpc error: code = InvalidArgument desc = ERROR #23503 insert or update on table \"crypto_prices_update_subscriptions\" violates foreign key constraint \"connection_id_fk\", ..."}, "statusCode": 400}
+```
+
+Até 2026-09-17 **ninguém lia isto**. O feed reassinava (§6.2, M2.7), o
+servidor dizia não, e o não ia para o disco sem nome. O `400
+connection_id_fk` diz que o servidor **já não tem a nossa conexão** na
+tabela de assinaturas: reassinar sobre ela não pode funcionar — é a causa
+concreta por trás das 2.482 reassinaturas sem efeito do 0.5 e candidata aos
+83 silêncios com `suspeita_de_assinatura_caducada` do 0.8. O `500
+__subscriptions does not exist` é o servidor quebrado do lado dele.
+
+Desde 2026-09-17: `feeds/rtds.erro_do_servidor` lê a forma, o feed conta
+(`erros_do_servidor`, `ultimo_erro_do_servidor`) e, se a recusa é de
+assinatura, o laço de reassinatura **derruba o socket na primeira**
+(`reconexoes_por_recusa`, close 1012), em vez de esperar N reassinaturas
+mudas como a escalada do 0.6. Os dois contadores saem em
+`saude_do_rtds` do recorder. **Sem medida ainda em gravação longa**: a próxima
+72 h diz se os silêncios de tópico caem.
+
+Não houve, na hora medida, resposta de SUCESSO à assinatura. Se existir, cai
+em `rtds/_nao_classificado` e `tests/test_fixtures_reais.py` falha — que é o
+comportamento desejado: forma nova é achado, não ruído.
+
 ## 7. Fonte de resolução por tipo de mercado — **mudou em agosto/2026**
 
 Esta é a seção mais sensível do M0, porque define qual é o "preço verdade" de

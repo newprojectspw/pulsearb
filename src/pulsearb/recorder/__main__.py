@@ -677,6 +677,13 @@ class Recorder:
         por_silencio = sum(f.reassinaturas_por_silencio for f in feeds)
         watchdog = sum(f.watchdog_reconexoes for f in feeds)
         erros = sum(f.reassinaturas_com_erro for f in feeds)
+        erros_do_servidor = sum(getattr(f, "erros_do_servidor", 0) for f in feeds)
+        por_recusa = sum(f.reconexoes_por_recusa for f in feeds)
+        ultimos = [
+            f.ultimo_erro_do_servidor
+            for f in feeds
+            if getattr(f, "ultimo_erro_do_servidor", None) is not None
+        ]
         # Custo em segundos de cegueira que os mecanismos ADMITEM: cada
         # disparo do watchdog custa até o seu timeout; cada reassinatura por
         # silêncio custa até o limiar de tópico mudo. É um TETO do silêncio
@@ -694,6 +701,15 @@ class Recorder:
             "reassinaturas": reassinaturas,
             "reassinaturas_por_silencio_de_topico": por_silencio,
             "reassinaturas_com_erro": erros,
+            # 2026-09-17: o servidor RESPONDE à reassinatura, e a resposta
+            # pode ser não (API_NOTES §6.2b). Antes ninguém lia.
+            "erros_do_servidor": erros_do_servidor,
+            "reconexoes_por_recusa_do_servidor": por_recusa,
+            "ultimo_erro_do_servidor": (
+                {"status_code": ultimos[-1].status_code, "mensagem": ultimos[-1].mensagem[:200]}
+                if ultimos
+                else None
+            ),
             "reconexoes_por_watchdog": watchdog,
             "idade_por_topico_s": [
                 f.idade_por_topico() for f in feeds if hasattr(f, "idade_por_topico")

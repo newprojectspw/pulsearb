@@ -13,17 +13,27 @@ enxerga um tópico caducando; a reassinatura não derruba conexão morta.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 
 import pytest
 
-from pulsearb.feeds.base import ReconnectingFeed, SilencioDeDados
+from pulsearb.feeds.base import FeedEvent, ReconnectingFeed, SilencioDeDados
 from pulsearb.feeds.rtds import (
     TOPIC_BINANCE,
     TOPIC_TWAP_60,
     PriceTick,
     RtdsFeed,
+    erro_do_servidor,
 )
+
+#: As duas recusas REAIS do RTDS (API_NOTES §6.2b), verbatim.
+_RECUSAS = json.loads(
+    (Path(__file__).parent / "fixtures" / "rtds_recusas_reais.json").read_text(encoding="utf-8")
+)
+RECUSA_500 = _RECUSAS["recusa_500"]
+RECUSA_400 = _RECUSAS["recusa_400"]
 
 
 def _tick(topico: str, idade_s: float) -> PriceTick:
@@ -394,3 +404,77 @@ def test_rotulo_nao_contamina_o_campo_fonte_da_gravacao():
     feed = _feed(rotulo="rtds[1]")
     assert feed.name == "rtds"
     assert feed.rotulo == "rtds[1]"
+
+
+# ──────── 2026-09-17: o servidor RESPONDE à reassinatura, e a resposta pode ser não
+
+
+def _frame(parsed) -> FeedEvent:
+    return FeedEvent(source="rtds", ts_mono_ns=0, ts_wall_ns=0, raw=b"", parsed=parsed)
+
+
+@pytest.mark.asyncio
+async def test_recusa_de_assinatura_do_servidor_derruba_na_primeira_sem_insistir():
+    """A fixture real de uma hora da M2_72H trouxe quatro destas.
+
+    `connection_id_fk` diz que o servidor já não tem a nossa conexão na
+    tabela de assinaturas. Reassinar sobre isso é o que o 0.5 mediu 2.482
+    vezes sem efeito; a escalada do 0.6 só chegava ao close depois de N
+    reassinaturas MUDAS. Com a recusa lida, o close vem na primeira.
+    """
+    feed = _feed(
+        topico_mudo_s=None,
+        reassinatura_intervalo_s=3600.0,
+        reassinaturas_ate_derrubar=3,
+    )
+    feed.PASSO_DE_VERIFICACAO_S = 0.01
+    await feed._handle_message(_frame(RECUSA_400))
+
+    assert feed.erros_do_servidor == 1
+    assert feed.ultimo_erro_do_servidor is not None
+    assert feed.ultimo_erro_do_servidor.status_code == 400
+
+    ws = _WsQueRegistraClose()
+    await asyncio.wait_for(feed._loop_de_reassinatura(ws), timeout=2.0)
+
+    assert ws.fechado_com is not None, "a recusa lida não derrubou a conexão"
+    codigo, motivo = ws.fechado_com
+    assert codigo == 1012
+    assert "recusada" in motivo
+    assert feed.reconexoes_por_recusa == 1
+    assert feed.reconexoes_por_escalada == 0, "não é a escalada por silêncio: é a recusa"
+    assert feed.reassinaturas == 0, "reassinar sobre uma recusa é o erro do 0.5"
+    # A recusa foi consumida: uma nova conexão começa limpa.
+    assert feed._recusa_de_assinatura() is None
+
+
+@pytest.mark.asyncio
+async def test_erro_do_servidor_que_nao_e_de_assinatura_conta_mas_nao_derruba():
+    feed = _feed(topico_mudo_s=None, reassinatura_intervalo_s=0.01)
+    feed.PASSO_DE_VERIFICACAO_S = 0.01
+    await feed._handle_message(_frame({"body": {"message": "rate limited"}, "statusCode": 429}))
+    assert feed.erros_do_servidor == 1
+    assert feed._recusa_de_assinatura() is None
+
+    enviados = []
+
+    async def _fingir(_ws):
+        enviados.append(1)
+        if len(enviados) >= 2:
+            raise RuntimeError("chega")  # o laço devolve ao primeiro erro de envio
+
+    feed._reassinar = _fingir
+    ws = _WsQueRegistraClose()
+    await asyncio.wait_for(feed._loop_de_reassinatura(ws), timeout=2.0)
+    assert ws.fechado_com is None
+    assert feed.reconexoes_por_recusa == 0
+
+
+def test_as_duas_recusas_reais_pedem_derrubar():
+    feed = _feed(topico_mudo_s=None)
+    for bruto in (RECUSA_500, RECUSA_400):
+        erro = erro_do_servidor(bruto)
+        assert erro is not None
+        feed._registrar_erro_do_servidor(erro)
+        recusa = feed._recusa_de_assinatura()
+        assert recusa is not None and str(bruto["statusCode"]) in recusa

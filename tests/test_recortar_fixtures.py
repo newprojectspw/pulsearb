@@ -88,6 +88,19 @@ class TestRecorte:
         assert tipos("poly_ws", {"event_type": "book"}) == {"poly_ws/book"}
         assert tipos("binance_ws", {"e": "trade"}) == set()
 
+    def test_o_que_mais_chega_pelo_fio_tem_categoria_propria(self):
+        """As três formas medidas na M2_72H (API_NOTES §6.2b), verbatim."""
+        def tipos(fonte, payload):
+            return rf.tipos_do_registro(_reader_record(_reg(1, fonte, payload)))
+
+        assert tipos("poly_ws", {"_b64": "UE9ORw=="}) == {"poly_ws/_pong"}
+        assert tipos("rtds", {"_b64": ""}) == {"rtds/_frame_vazio"}
+        recusa = {"body": {"message": "leger AddSubscriptions error: x"}, "statusCode": 400}
+        assert tipos("rtds", recusa) == {"rtds/_erro_do_servidor"}
+        # Um PONG com forma diferente NÃO é PONG: cai em não classificado.
+        assert tipos("poly_ws", {"_b64": "UE9ORw"}) == {"poly_ws/_nao_classificado"}
+        assert tipos("rtds", {"_b64": "UE9ORw=="}) == {"rtds/_nao_classificado"}
+
     def test_desde_e_ate_cortam_por_registro_e_nao_so_por_arquivo(self, tmp_path):
         reader = RecordingReader(_gravar(tmp_path / "g", _registros()))
         t = lambda i: T0 + i * 1_000_000  # noqa: E731
@@ -229,7 +242,7 @@ class TestConsumidorSobreRecorte:
     def test_falha_quando_ha_registro_do_fio_sem_classificar(self, tmp_path, monkeypatch):
         import pytest
 
-        estranho = _reg(2, "poly_ws", {"_b64": "UE9ORw=="})
+        estranho = _reg(2, "poly_ws", {"_b64": "bm92byBmcmFtZQ=="})  # não é PONG
         self._recorte(tmp_path, monkeypatch, [_price_change_gravado(1, 0.49, 0.51), estranho])
         with pytest.raises(AssertionError, match="_nao_classificado"):
             fr.TestRecorte().test_nenhum_registro_do_fio_ficou_sem_classificar()

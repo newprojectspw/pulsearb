@@ -1,13 +1,51 @@
 """Parse dos eventos do RTDS — fixtures estruturais do protocolo verificado."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from pulsearb.feeds.rtds import (
     RtdsFeed,
     e18_to_float,
+    erro_do_servidor,
     normalize_symbol,
     parse_rtds_event,
 )
+
+#: Duas respostas REAIS do RTDS, verbatim, gravadas em 2026-09-09 entre 02:19 e
+#: 03:19 UTC (M2_72H). Não são o que imaginamos que o servidor manda: são o que
+#: ele mandou. Ficheiro partilhado com `test_m27_saude_do_feed.py`.
+_RECUSAS = json.loads(
+    (Path(__file__).parent / "fixtures" / "rtds_recusas_reais.json").read_text(encoding="utf-8")
+)
+RECUSA_500 = _RECUSAS["recusa_500"]
+RECUSA_400 = _RECUSAS["recusa_400"]
+
+
+class TestErroDoServidor:
+    def test_le_as_duas_recusas_reais_e_sabe_que_sao_de_assinatura(self):
+        for bruto, status in ((RECUSA_500, 500), (RECUSA_400, 400)):
+            erro = erro_do_servidor(bruto)
+            assert erro is not None
+            assert erro.status_code == status
+            assert erro.e_de_assinatura
+            assert "AddSubscriptions" in erro.mensagem
+
+    def test_erro_que_nao_e_de_assinatura_e_lido_mas_nao_e_recusa(self):
+        erro = erro_do_servidor({"body": {"message": "rate limited"}, "statusCode": 429})
+        assert erro is not None and erro.status_code == 429
+        assert not erro.e_de_assinatura
+
+    def test_evento_de_preco_e_lixo_nao_sao_erro(self, rtds_events):
+        assert erro_do_servidor(rtds_events["twap_sixty_btc"]) is None
+        assert erro_do_servidor({"_b64": ""}) is None
+        assert erro_do_servidor({"statusCode": "500", "body": {}}) is None
+        assert erro_do_servidor({"statusCode": True, "body": {}}) is None
+        assert erro_do_servidor(None) is None
+
+    def test_a_recusa_nao_vira_price_tick(self):
+        assert parse_rtds_event(RECUSA_400, 1, 2) is None
 
 
 def test_e18_exato():
