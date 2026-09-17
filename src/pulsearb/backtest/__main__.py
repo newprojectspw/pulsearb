@@ -1829,22 +1829,26 @@ def _comparacao_de_encolhimento(
     }
 
 
-def _entradas_validadas(args: argparse.Namespace) -> tuple[Any, Any, Any, Any] | None:
-    """`(desde, ate, caminho, destino)`, ou `None` depois de imprimir o erro.
+def _periodo_validado(args: argparse.Namespace) -> tuple[Any, Any] | None:
+    """`(desde, ate)`, ou `None` depois de imprimir o erro.
 
-    Os dois `try` moravam no `main` e o empurravam acima do teto de
-    complexidade cognitiva do Sonar (19 > 15). A mensagem vai para o
-    stderr aqui, igual a antes; o `main` só decide o código de saída.
+    Só o PERÍODO sai do `main`. Os caminhos (`--recordings`, `--json`) ficam
+    lá, na forma canônica que a análise de fluxo do SonarCloud reconhece como
+    sanitização de S2083 (ver `caminhos.py`): passar o caminho contido por
+    uma tupla devolvida de outra função fez o rastreador perder o
+    sanitizador e reportar path injection no `write_text` — o gate caiu para
+    Security C sem uma linha de risco a mais.
     """
     try:
-        desde = _hora_utc(args.desde)
-        ate = _hora_utc(args.ate)
-        caminho = caminho_de_leitura(args.recordings)
-        destino = caminho_de_escrita(args.json) if args.json else None
+        return _hora_utc(args.desde), _hora_utc(args.ate)
     except ValueError as erro:
         print(str(erro), file=sys.stderr)
         return None
-    return desde, ate, caminho, destino
+
+
+def _restricao_pedida(args: argparse.Namespace) -> bool:
+    """O operador pediu faixa de tempo restante?"""
+    return args.tempo_restante_max is not None or args.tempo_restante_min is not None
 
 
 def _janelas_integras(
@@ -1910,10 +1914,17 @@ def main(argv: list[str] | None = None) -> int:
         parser, args.varredura_de_tamanho
     )
 
-    entradas = _entradas_validadas(args)
-    if entradas is None:
+    periodo = _periodo_validado(args)
+    if periodo is None:
         return 2
-    desde, ate, caminho, destino = entradas
+    desde, ate = periodo
+
+    try:
+        caminho = caminho_de_leitura(args.recordings)
+        destino = caminho_de_escrita(args.json) if args.json else None
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return 2
 
     reader = RecordingReader(caminho, desde=desde, ate=ate)
     index = RecordingIndex(
@@ -2004,9 +2015,7 @@ def main(argv: list[str] | None = None) -> int:
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
         "curvas_de_variancia": curvas,
     }
-    restricao_pedida = (
-        args.tempo_restante_max is not None or args.tempo_restante_min is not None
-    )
+    restricao_pedida = _restricao_pedida(args)
     # A MESMA faixa que o `report` principal opera, para os diagnósticos que
     # alimentam critérios do VEREDITO_M2 medirem a MESMA população que ele:
     # sensibilidade de latência (1.4), curva de edge, curva de capacidade
