@@ -1,6 +1,6 @@
 PY ?= .venv/bin/python
 
-.PHONY: check lint test venv
+.PHONY: check lint typecheck test venv
 
 venv:
 	uv venv --python 3.12 .venv
@@ -9,7 +9,10 @@ venv:
 lint:
 	$(PY) -m ruff check src tests scripts
 
+typecheck:
+	$(PY) -m mypy
+
 test:
 	$(PY) -m pytest
 
-check: lint test
+check: lint typecheck test

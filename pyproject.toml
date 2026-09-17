@@ -39,6 +39,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.16.3",
+    "mypy==2.3.1",
 ]
 
 [build-system]
@@ -97,3 +98,34 @@ max-complexity = 12
 # server.py embute um documento HTML/CSS/JS inteiro numa string: quebrar
 # essas linhas em 100 colunas estragaria o HTML sem ganhar legibilidade.
 "src/pulsearb/ui/server.py" = ["E501"]
+
+[tool.mypy]
+# Auditoria de 2026-09-17, §2.7: 44 erros de tipo e nada no CI. O PR
+# seguinte (#141) introduziu três regressões que SÓ o mypy via — e uma
+# delas chegou ao main porque o commit que a fechava ficou fora do squash.
+# Desde então roda no `make check` e no CI. Não é `strict`: é a trava contra
+# PIORAR, na mesma lógica do C901 acima.
+python_version = "3.12"
+files = ["src/pulsearb"]
+ignore_missing_imports = true
+
+# BASELINE: os módulos que já tinham erro quando o mypy entrou (40 erros em
+# 12 arquivos, medidos em 2026-09-17). A lista SÓ ENCOLHE — consertar um
+# módulo é tirá-lo daqui no mesmo commit, e o mypy passa a guardá-lo.
+# Adicionar módulo a ela é o que não se faz: o erro novo se conserta.
+[[tool.mypy.overrides]]
+module = [
+    "pulsearb.analysis.integrity",
+    "pulsearb.analysis.variancia_de_transicao",
+    "pulsearb.backtest.report",
+    "pulsearb.backtest.runner",
+    "pulsearb.engine.decisao",
+    "pulsearb.execution.auth",
+    "pulsearb.execution.executor",
+    "pulsearb.live.laco_maker",
+    "pulsearb.live.repouso",
+    "pulsearb.recorder.__main__",
+    "pulsearb.recorder.writer",
+    "pulsearb.replay.columnar",
+]
+ignore_errors = true

@@ -57,9 +57,12 @@ class TestOJobEstaNoCI:
         jobs = _ci()["jobs"]
 
         assert "testes" in jobs
+        # `mypy` entrou em 2026-09-17 (auditoria §2.7): o PR #141 chegou ao
+        # main com uma regressão de tipo porque nada no CI a via.
         assert [p.get("name") for p in jobs["testes"]["steps"] if p.get("name")] == [
             "instalar",
             "ruff",
+            "mypy",
             "pytest",
         ]
 

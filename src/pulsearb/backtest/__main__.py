@@ -63,7 +63,7 @@ from pulsearb.backtest.runner import (
     varredura_de_threshold,
 )
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
-from pulsearb.numeros import numero, percentil
+from pulsearb.numeros import numero, percentil_nao_vazio
 
 # As hipóteses nomeadas continuam importadas porque continuam sendo
 # REPORTADAS — como referência histórica. `compute_anchor` saiu do
@@ -86,7 +86,7 @@ from pulsearb.feeds.poly_ws import (
     normalizar_condition_id,
     resolucao_do_evento,
 )
-from pulsearb.feeds.rtds import TOPIC_TWAP_60, e18_do_evento, parse_rtds_event
+from pulsearb.feeds.rtds import TOPIC_TWAP_60, PriceTick, e18_do_evento, parse_rtds_event
 from pulsearb.markets.discovery import duracao_do_slug, parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
@@ -291,6 +291,13 @@ PRE_ROLO_S = 600
 POS_ROLO_S = 5
 
 
+#: Rótulos das duas passadas do índice, para o progresso. Constantes porque
+#: o mesmo texto aparecia seis vezes (Sonar S1192) e um rótulo digitado
+#: diferente numa delas sairia como uma terceira passada no log.
+PASSADA_1 = "passada 1"
+PASSADA_2 = "passada 2"
+
+
 class RecordingIndex:
     """Duas passadas sobre a gravação, com memória limitada por construção.
 
@@ -395,7 +402,7 @@ class RecordingIndex:
     # --------------------------------------------------------------- passadas
     def build(self) -> None:
         self._primeira_passada()
-        self.progresso.terminou("passada 1", self.reader.total)
+        self.progresso.terminou(PASSADA_1, self.reader.total)
         # M2.5: fecha as afirmações de `best_bid_ask` que ainda esperavam
         # alinhamento e as divergências abertas no último evento. Sem isto os
         # dois erros apontariam para o mesmo lado — o de esconder problema.
@@ -405,9 +412,9 @@ class RecordingIndex:
 
     def _primeira_passada(self) -> None:
         """Metadados, preço-verdade e resoluções. Ignora o book por completo."""
-        self.progresso.passada("passada 1", arquivos=len(self.reader.files))
+        self.progresso.passada(PASSADA_1, arquivos=len(self.reader.files))
         for record in self.reader.iter_records():
-            self.progresso.talvez("passada 1", self.reader.total)
+            self.progresso.talvez(PASSADA_1, self.reader.total)
             if record.ts_wall_ns > 0:
                 if self._primeiro_record_ns == 0:
                     self._primeiro_record_ns = record.ts_wall_ns
@@ -427,12 +434,12 @@ class RecordingIndex:
         """Reconstrói os books dos tokens de interesse, dentro da janela deles."""
         if not self.janelas_de_interesse:
             return
-        self.progresso.passada("passada 2", arquivos=len(self.reader.files))
+        self.progresso.passada(PASSADA_2, arquivos=len(self.reader.files))
         for record in self.reader.iter_records():
-            self.progresso.talvez("passada 2", self.reader.total)
+            self.progresso.talvez(PASSADA_2, self.reader.total)
             if record.fonte == "poly_ws":
                 self._on_poly_book(record)
-        self.progresso.terminou("passada 2", self.reader.total)
+        self.progresso.terminou(PASSADA_2, self.reader.total)
 
     # ------------------------------------------------------------- passada 1
     def _on_discovery(self, payload: dict[str, Any]) -> None:
@@ -505,29 +512,7 @@ class RecordingIndex:
 
         if tick is not None and tick.topic == TOPIC_TWAP_60:
             self._twap_vistos += 1
-            anterior = self._ultimo_twap_ns.get(tick.asset)
-            if anterior and record.ts_wall_ns - anterior > SILENCIO_MIN_NS:
-                # Silêncio DESTE ativo. Se o contador global de eventos RTDS
-                # andou no intervalo, a conexão estava viva.
-                andou = self._eventos_rtds - self._eventos_no_ultimo_twap.get(
-                    tick.asset, 0
-                )
-                outros = (
-                    self._eventos_de_outros_topicos
-                    - self._outros_topicos_no_ultimo_twap.get(tick.asset, 0)
-                )
-                self._silencios.append(
-                    {
-                        "inicio_ns": anterior,
-                        "fim_ns": record.ts_wall_ns,
-                        "duracao_s": round((record.ts_wall_ns - anterior) / 1e9, 2),
-                        "escopo": "topico_do_ativo",
-                        "asset": tick.asset,
-                        "eventos_rtds_durante": andou - 1,
-                        "eventos_de_outros_topicos_durante": outros,
-                        "base_da_contagem": BASE_DA_CONTAGEM,
-                    }
-                )
+            self._registrar_silencio_do_ativo(tick, record)
             self._ultimo_twap_ns[tick.asset] = record.ts_wall_ns
             self._eventos_no_ultimo_twap[tick.asset] = self._eventos_rtds
             self._outros_topicos_no_ultimo_twap[tick.asset] = (
@@ -547,6 +532,31 @@ class RecordingIndex:
                 self.streams_e18[tick.asset].append(
                     (int(tick.src_timestamp_ms), valor)
                 )
+
+    def _registrar_silencio_do_ativo(self, tick: PriceTick, record: ReplayRecord) -> None:
+        """Silêncio DESTE ativo no `twap_sixty`, com a prova de que a conexão
+        estava viva: se o contador global de eventos RTDS andou no intervalo,
+        o que caducou foi a assinatura do tópico, não a conexão."""
+        anterior = self._ultimo_twap_ns.get(tick.asset)
+        if not anterior or record.ts_wall_ns - anterior <= SILENCIO_MIN_NS:
+            return
+        andou = self._eventos_rtds - self._eventos_no_ultimo_twap.get(tick.asset, 0)
+        outros = (
+            self._eventos_de_outros_topicos
+            - self._outros_topicos_no_ultimo_twap.get(tick.asset, 0)
+        )
+        self._silencios.append(
+            {
+                "inicio_ns": anterior,
+                "fim_ns": record.ts_wall_ns,
+                "duracao_s": round((record.ts_wall_ns - anterior) / 1e9, 2),
+                "escopo": "topico_do_ativo",
+                "asset": tick.asset,
+                "eventos_rtds_durante": andou - 1,
+                "eventos_de_outros_topicos_durante": outros,
+                "base_da_contagem": BASE_DA_CONTAGEM,
+            }
+        )
 
     def _on_poly_meta(self, record: ReplayRecord) -> None:
         """Resoluções + integridade. O livro pesado fica para a passada 2.
@@ -1210,9 +1220,10 @@ def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
         "repeticoes_do_mesmo_carimbo": len(serie) - len(carimbos),
         "janela_coberta_s": round(span, 1),
         "intervalo_s": {
-            "p50": round(percentil(ordenados, 50), 3),
-            "p90": round(percentil(ordenados, 90), 3),
-            "p99": round(percentil(ordenados, 99), 3),
+            # `len(carimbos) >= 2` acima garante ao menos um intervalo.
+            "p50": round(percentil_nao_vazio(ordenados, 50), 3),
+            "p90": round(percentil_nao_vazio(ordenados, 90), 3),
+            "p99": round(percentil_nao_vazio(ordenados, 99), 3),
             "max": round(ordenados[-1], 3),
         },
         "buracos_acima_da_idade_maxima": sum(
@@ -1818,6 +1829,83 @@ def _comparacao_de_encolhimento(
     }
 
 
+def _periodo_validado(args: argparse.Namespace) -> tuple[Any, Any] | None:
+    """`(desde, ate)`, ou `None` depois de imprimir o erro.
+
+    Só o PERÍODO sai do `main`. Os caminhos (`--recordings`, `--json`) ficam
+    lá, na forma canônica que a análise de fluxo do SonarCloud reconhece como
+    sanitização de S2083 (ver `caminhos.py`): passar o caminho contido por
+    uma tupla devolvida de outra função fez o rastreador perder o
+    sanitizador e reportar path injection no `write_text` — o gate caiu para
+    Security C sem uma linha de risco a mais.
+    """
+    try:
+        return _hora_utc(args.desde), _hora_utc(args.ate)
+    except ValueError as erro:
+        print(str(erro), file=sys.stderr)
+        return None
+
+
+def _restricao_pedida(args: argparse.Namespace) -> bool:
+    """O operador pediu faixa de tempo restante?"""
+    return args.tempo_restante_max is not None or args.tempo_restante_min is not None
+
+
+def _janelas_integras(
+    janelas: list[Any], resolvidas: list[Any], index: RecordingIndex, qualidade_minima: str
+) -> tuple[dict[str, str], list[Any]]:
+    """A marca de qualidade de cada janela, e as RESOLVIDAS que passam do corte.
+
+    M2.5: o corte deixou de ser binário. Cada janela recebe a PIOR marca
+    entre os seus dois tokens, e `--qualidade-minima` decide onde cortar.
+    `sem_dado` (token nunca visto no fio) nunca é excluído aqui: ele não tem
+    livro para o runner usar de qualquer forma, e excluí-lo esconderia a
+    janela por um motivo que não é qualidade de livro.
+    """
+    qualidade_por_slug = {
+        j.slug: index.integridade.qualidade_da_janela(j.token_up, j.token_down)
+        for j in janelas
+    }
+    minimo = ORDEM_QUALIDADE[qualidade_minima]
+    integras = [
+        j
+        for j in resolvidas
+        if ORDEM_QUALIDADE.get(qualidade_por_slug.get(j.slug, "sem_dado"), minimo)
+        >= minimo
+    ]
+    return qualidade_por_slug, integras
+
+
+def _comparacao_de_faixa(
+    restricao_pedida: bool,
+    tempo_restante_max: float | None,
+    cfg_base: dict[str, Any],
+    integras: list[Any],
+    index: RecordingIndex,
+    report: Any,
+) -> tuple[float | None, dict[str, Any]]:
+    """As duas rodadas lado a lado (M2.6 BUG 2.3), sempre.
+
+    Reportar só a restrita esconderia o custo da restrição. A comparação roda
+    mesmo sem `--tempo-restante-max`: aí a faixa é a dos buckets calibrados
+    (≤240s), que é a recomendação que sai da medição.
+    """
+    faixa_comparada = tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
+    if restricao_pedida:
+        report_livre = BacktestRunner(BacktestConfig(**cfg_base)).run(integras, index.streams)
+        return faixa_comparada, {
+            "irrestrito": report_livre.to_dict(),
+            "restrito": report.to_dict(),
+        }
+    report_restrito = BacktestRunner(
+        BacktestConfig(**cfg_base, tempo_restante_max_s=faixa_comparada)
+    ).run(integras, index.streams)
+    return faixa_comparada, {
+        "irrestrito": report.to_dict(),
+        "restrito": report_restrito.to_dict(),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _construir_parser()
     args = parser.parse_args(argv)
@@ -1826,12 +1914,10 @@ def main(argv: list[str] | None = None) -> int:
         parser, args.varredura_de_tamanho
     )
 
-    try:
-        desde = _hora_utc(args.desde)
-        ate = _hora_utc(args.ate)
-    except ValueError as erro:
-        print(str(erro), file=sys.stderr)
+    periodo = _periodo_validado(args)
+    if periodo is None:
         return 2
+    desde, ate = periodo
 
     try:
         caminho = caminho_de_leitura(args.recordings)
@@ -1883,17 +1969,9 @@ def main(argv: list[str] | None = None) -> int:
     # de novo. `sem_dado` (token nunca visto no fio) nunca é excluído aqui:
     # ele não tem livro para o runner usar de qualquer forma, e excluí-lo
     # esconderia a janela por um motivo que não é qualidade de livro.
-    qualidade_por_slug = {
-        j.slug: index.integridade.qualidade_da_janela(j.token_up, j.token_down)
-        for j in janelas
-    }
-    minimo = ORDEM_QUALIDADE[args.qualidade_minima]
-    integras = [
-        j
-        for j in resolvidas
-        if ORDEM_QUALIDADE.get(qualidade_por_slug.get(j.slug, "sem_dado"), minimo)
-        >= minimo
-    ]
+    qualidade_por_slug, integras = _janelas_integras(
+        janelas, resolvidas, index, args.qualidade_minima
+    )
 
     validacao = _validacao_da_ancora(resolvidas, index)
 
@@ -1937,9 +2015,7 @@ def main(argv: list[str] | None = None) -> int:
         "intervalo_min_entre_entradas_s": max(0.0, args.intervalo_entradas),
         "curvas_de_variancia": curvas,
     }
-    restricao_pedida = (
-        args.tempo_restante_max is not None or args.tempo_restante_min is not None
-    )
+    restricao_pedida = _restricao_pedida(args)
     # A MESMA faixa que o `report` principal opera, para os diagnósticos que
     # alimentam critérios do VEREDITO_M2 medirem a MESMA população que ele:
     # sensibilidade de latência (1.4), curva de edge, curva de capacidade
@@ -1973,22 +2049,9 @@ def main(argv: list[str] | None = None) -> int:
     #
     # A comparação roda mesmo sem `--tempo-restante-max`: aí a faixa é a dos
     # buckets calibrados (≤240s), que é a recomendação que sai da medição.
-    faixa_comparada = (
-        args.tempo_restante_max if restricao_pedida else TEMPO_CALIBRADO_MAX_S
+    faixa_comparada, comparacao = _comparacao_de_faixa(
+        restricao_pedida, args.tempo_restante_max, cfg_base, integras, index, report
     )
-    if restricao_pedida:
-        report_livre = BacktestRunner(BacktestConfig(**cfg_base)).run(
-            integras, index.streams
-        )
-        comparacao = {"irrestrito": report_livre.to_dict(), "restrito": report.to_dict()}
-    else:
-        report_restrito = BacktestRunner(
-            BacktestConfig(**cfg_base, tempo_restante_max_s=faixa_comparada)
-        ).run(integras, index.streams)
-        comparacao = {
-            "irrestrito": report.to_dict(),
-            "restrito": report_restrito.to_dict(),
-        }
 
     # M2: a variante encolhida, quando pedida. LADO A LADO com a crua, na
     # mesma faixa calibrada e com entrada única — mudar uma coisa por vez.
