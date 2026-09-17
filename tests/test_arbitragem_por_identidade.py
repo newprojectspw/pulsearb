@@ -389,6 +389,72 @@ class TestARecusaDIZOQueFazer:
             False, "fechado_sem_resolucao_legivel"
         )
 
+    def test_vaga_reservada_NAO_e_chamada_de_fechado(self):
+        """O nome da recusa era falso, e recusa com nome falso não vira métrica.
+
+        Forma medida na VPS em 2026-09-17: `active=false`, `closed=false`,
+        sem `outcomePrices`. Nada ali fechou — são lugares guardados para
+        candidatos ainda sem nome (77 de 128 mercados num evento, 76 de 128
+        no outro). Chamar isso de "fechado sem resolução legível" descrevia
+        um fato que não aconteceu e mandava consertar a busca, que não era
+        o problema.
+        """
+        v = _varredura()
+        evento = {"markets": [
+            {"active": False, "slug": "will-person-v-win-the-2028-x"},
+            {}, {},
+        ]}
+
+        assert v.conjunto_e_exaustivo(evento) == (
+            False, "perna_nem_abriu_nem_resolveu"
+        )
+
+    def test_vaga_reservada_RECUSA_em_vez_de_sair_da_cesta(self):
+        """Falha fechada: não sei se a vaga pode ser ativada e vencer depois.
+
+        Se puder, o conjunto dos abertos NÃO é exaustivo e a 'cesta' é aposta
+        direcional com cara de arbitragem. Descartar a vaga por conveniência
+        seria decidir a favor do trade sobre estado desconhecido.
+        """
+        v = _varredura()
+        evento = {"markets": [{"active": False}, {}, {}]}
+
+        assert v.conjunto_e_exaustivo(evento)[0] is False
+
+    def test_fechado_que_resolveu_SIM_vence_a_vaga_reservada(self):
+        """Evento decidido é definitivo — não fica atrás de um motivo menor."""
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True, "outcomes": '["Yes","No"]',
+             "outcomePrices": '["1","0"]'},
+            {"active": False},
+            {}, {},
+        ]}
+
+        assert v.conjunto_e_exaustivo(evento) == (False, "evento_ja_decidido")
+
+    def test_vaga_reservada_vem_ANTES_do_fechado_ilegivel(self):
+        """O ilegível some com um GET; a vaga é estrutural. Deixar o ilegível
+        na frente manteve a causa de 77 em 128 escondida atrás dela."""
+        v = _varredura()
+        evento = {"markets": [
+            {"closed": True}, {"active": False}, {}, {},
+        ]}
+
+        assert v.conjunto_e_exaustivo(evento) == (
+            False, "perna_nem_abriu_nem_resolveu"
+        )
+
+    def test_vaga_reservada_NAO_gera_busca_de_resolucao(self):
+        """Buscar `/markets/{id}` para quem nunca abriu é requisição jogada
+        fora: o mercado cheio não traz sequer a chave `outcomePrices`."""
+        v = _varredura()
+
+        assert v._falta_resolucao({"active": False}) is False
+        assert v._falta_resolucao({"closed": True}) is True
+        assert v.nunca_abriu({"active": False}) is True
+        assert v.nunca_abriu({"active": False, "closed": True}) is False
+
     def test_o_Yes_e_casado_pelo_NOME_e_nao_pela_posicao(self):
         """Presumir que o índice 0 é o "Yes" é o campo assumido a partir do
         que parecia razoável — o defeito do §6.1b e do §12.13."""
@@ -610,7 +676,7 @@ class TestODiagnosticoDoFechadoIlegivel:
         assert "https://g/markets/7" in saida
 
     async def test_par_presente_com_nome_que_NAO_bate_e_apontado(self, capsys):
-        """A hipótese mais provável, e a que o casamento por nome não cobre."""
+        """Nome fora do par: aí sim é o casamento por nome que falha."""
         v = _varredura()
 
         async def get(url, params):
@@ -618,7 +684,40 @@ class TestODiagnosticoDoFechadoIlegivel:
 
         await v._diagnosticar_fechado(get, "https://g", {"closed": True, "id": "7"})
 
-        assert "não bate com 'yes'/'sim'" in capsys.readouterr().out
+        assert "não há 'Yes' entre os nomes" in capsys.readouterr().out
+
+    async def test_nomes_sem_precos_NAO_e_culpa_do_nome(self, capsys):
+        """A forma que a VPS mandou em 2026-09-17, e que a versão anterior
+        deste diagnóstico leu errado.
+
+        `outcomes='["Yes", "No"]'` com `outcomePrices=None`: o nome está lá, o
+        preço é que não veio. A frase antiga — "O PAR EXISTE mas o nome do
+        resultado não bate com 'yes'/'sim'" — saía impressa duas linhas abaixo
+        do dado que a desmente, porque a condição olhava só `outcomes`.
+        """
+        v = _varredura()
+
+        async def get(url, params):
+            return {"outcomes": '["Yes", "No"]'}
+
+        await v._diagnosticar_fechado(get, "https://g", {"closed": True, "id": "7"})
+        saida = capsys.readouterr().out
+
+        assert "os NOMES vieram e os PREÇOS não" in saida
+        assert "não há 'Yes' entre os nomes" not in saida
+
+    async def test_vaga_reservada_e_nomeada_como_tal(self, capsys):
+        """`active=false` sem `closed` não é fechado, e o rótulo diz isso."""
+        v = _varredura()
+
+        async def get(url, params):
+            return {"outcomes": '["Yes", "No"]'}
+
+        await v._diagnosticar_fechado(
+            get, "https://g", {"active": False, "id": "559703"}
+        )
+
+        assert "VAGA RESERVADA (nunca abriu)" in capsys.readouterr().out
 
     async def test_diz_se_foi_closed_ou_active_false(self, capsys):
         """As duas não são a mesma coisa: inativo pode nunca ter aberto, e aí
