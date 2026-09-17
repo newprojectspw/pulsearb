@@ -1,9 +1,11 @@
 """Os parsers contra registros REAIS da gravação (auditoria 2026-09-17 §2.9).
 
 `tests/fixtures/reais/` é produzido por `scripts/recortar_fixtures.py` sobre
-a gravação do Mac e commitado. Enquanto não existir, estes testes SALTAM com
-o motivo escrito — saltar é honesto; passar sobre fixture sintética seria
-"teste que encoda a suposição" (CLAUDE.md).
+a gravação do Mac e commitado. Enquanto a PASTA não existir, estes testes
+SALTAM com o motivo escrito — saltar é honesto; passar sobre fixture
+sintética seria "teste que encoda a suposição" (CLAUDE.md). Mas um manifesto
+commitado que NÃO tenha um tipo obrigatório FALHA, não salta: senão um
+recorte curto deixaria um parser sem prova e a suíte verde (Codex, #149).
 
 O que cada teste pergunta é a única coisa que uma fixture real responde e
 uma sintética não: **o parser lê o que o servidor mandou, ou lê zero?** Os
@@ -19,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from pulsearb.backtest.book import OrderBook
 from pulsearb.feeds.poly_ws import (
     EVENT_BOOK,
     EVENT_LAST_TRADE,
@@ -30,7 +33,7 @@ from pulsearb.feeds.poly_ws import (
     iter_mudancas,
     resolucao_do_evento,
 )
-from pulsearb.feeds.rtds import TOPIC_TWAP_60, parse_rtds_event
+from pulsearb.feeds.rtds import TOPIC_BINANCE, TOPIC_TWAP_60, parse_rtds_event
 from pulsearb.numeros import numero
 
 PASTA = Path(__file__).resolve().parent / "fixtures" / "reais"
@@ -45,11 +48,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _manifesto() -> dict:
+    return json.loads(MANIFESTO.read_text(encoding="utf-8"))
+
+
 def _registros(tipo: str) -> list[dict]:
-    manifesto = json.loads(MANIFESTO.read_text(encoding="utf-8"))
-    entrada = manifesto["tipos"].get(tipo)
+    entrada = _manifesto()["tipos"].get(tipo)
     if entrada is None:
-        pytest.skip(f"o recorte não tem registros de {tipo!r} — ver MANIFESTO.json")
+        pytest.fail(
+            f"o recorte commitado não tem registros de {tipo!r} — re-extrair com um "
+            "período que o contenha (ver MANIFESTO.json)"
+        )
     linhas = (PASTA / entrada["arquivo"]).read_text(encoding="utf-8").splitlines()
     assert len(linhas) == entrada["registros"], "manifesto e arquivo discordam"
     return [json.loads(x) for x in linhas]
@@ -62,6 +71,17 @@ def _eventos(tipo: str, event_type: str) -> list[dict]:
         for ev in eventos_do_payload(r["payload"])
         if ev.get("event_type") == event_type
     ]
+
+
+class TestRecorte:
+    def test_nenhum_registro_do_fio_ficou_sem_classificar(self):
+        """Um envelope que `eventos_do_payload` não lê é o defeito, não ruído."""
+        sem_classe = {
+            tipo: e["vistos_no_periodo"]
+            for tipo, e in _manifesto()["tipos"].items()
+            if tipo.endswith("/_nao_classificado")
+        }
+        assert not sem_classe, f"registros do fio que o parser de envelope não lê: {sem_classe}"
 
 
 class TestPolyWs:
@@ -80,12 +100,29 @@ class TestPolyWs:
         com_topo = [m for m in mudancas if m.best_bid is not None and m.best_ask is not None]
         assert com_topo, "nenhuma mudança trouxe best_bid/best_ask — o topo autoritativo sumiu"
 
-    def test_book_real_tem_forma_conhecida(self):
+    def test_book_real_tem_forma_conhecida_e_o_parser_de_producao_le_todos_os_niveis(self):
+        """`forma_do_book` aceita `buys`/`sells`; `OrderBook.from_event` só lê
+        `bids`/`asks`. Um livro real na forma alternativa passaria no primeiro e
+        sairia VAZIO do segundo — o parser-lê-zero que este arquivo existe para
+        apanhar (Codex, #149). Por isso a contagem de níveis tem de bater."""
         eventos = _eventos("poly_ws/book", EVENT_BOOK)
         assert eventos
+        niveis_lidos = 0
         for ev in eventos:
             forma = forma_do_book(ev)
             assert not forma.startswith("__"), f"book com forma desconhecida: {forma}"
+            book = OrderBook.from_event(ev)
+            assert book is not None, f"from_event recusou um book real: {ev.get('asset_id')}"
+            crus = [
+                n for lado in ("bids", "asks") for n in (ev.get(lado) or [])
+                if isinstance(n, dict) and numero(n.get("size")) not in (None, 0)
+            ]
+            assert len(book.bids) + len(book.asks) == len(crus), (
+                f"from_event leu {len(book.bids) + len(book.asks)} níveis de {len(crus)} "
+                f"(forma {forma}): o parser de produção não vê o que o servidor mandou"
+            )
+            niveis_lidos += len(crus)
+        assert niveis_lidos > 0, "nenhum book real trouxe nível algum"
 
     def test_last_trade_price_real_tem_preco_e_side(self):
         eventos = _eventos("poly_ws/last_trade_price", EVENT_LAST_TRADE)
@@ -104,10 +141,17 @@ class TestPolyWs:
 
 
 class TestRtds:
+    def _ticks(self, topic: str):
+        registros = _registros(f"rtds/{topic}")
+        return [parse_rtds_event(r["payload"], r["ts_mono_ns"], r["ts_wall_ns"]) for r in registros]
+
     def test_twap_sixty_real_vira_price_tick(self):
-        registros = _registros(f"rtds/{TOPIC_TWAP_60}")
-        ticks = [
-            parse_rtds_event(r["payload"], r["ts_mono_ns"], r["ts_wall_ns"]) for r in registros
-        ]
+        ticks = self._ticks(TOPIC_TWAP_60)
         assert all(t is not None for t in ticks), "twap_sixty real que parse_rtds_event não lê"
+        assert all(t.price > 0 for t in ticks if t is not None)
+
+    def test_crypto_prices_binance_real_vira_price_tick(self):
+        """O ramo `TOPIC_BINANCE` do parser é outro; fixture real para ele também."""
+        ticks = self._ticks(TOPIC_BINANCE)
+        assert all(t is not None for t in ticks), "crypto_prices real que parse_rtds_event não lê"
         assert all(t.price > 0 for t in ticks if t is not None)

@@ -58,21 +58,32 @@ PASTA_PADRAO = "tests/fixtures/reais"
 #: Forma aceite para `event_type` e `topic`: viram nome de arquivo, e vêm do
 #: CONTEÚDO da gravação. Um tipo fora disto não é classificado — nem gravado.
 NOME_DE_TIPO = re.compile(r"[a-z0-9_]+")
+#: Registro de `poly_ws`/`rtds` cujo conteúdo o parser de envelope não lê.
+#: Vai para o recorte com este nome em vez de ser descartado: um envelope
+#: desconhecido é EXATAMENTE o que a fixture existe para revelar, e o
+#: `tests/test_fixtures_reais.py` falha se esta categoria aparecer.
+NAO_CLASSIFICADO = "_nao_classificado"
 
 
 def tipos_do_registro(record: ReplayRecord) -> set[str]:
-    """`fonte/tipo` de cada evento que o registro carrega. Vazio = não classificável."""
+    """`fonte/tipo` de cada evento que o registro carrega.
+
+    `poly_ws` e `rtds` são as fontes do fio: um registro delas que não
+    classifica vai para `fonte/_nao_classificado`, nunca para o lixo. Outras
+    fontes (meta, binance_ws) devolvem vazio e ficam de fora do recorte.
+    """
     if record.fonte == "poly_ws":
         tipos = set()
         for ev in eventos_do_payload(record.payload):
             tipo = ev.get("event_type")
             if isinstance(tipo, str) and NOME_DE_TIPO.fullmatch(tipo):
                 tipos.add(f"poly_ws/{tipo}")
-        return tipos
-    if record.fonte == "rtds" and isinstance(record.payload, dict):
-        topic = record.payload.get("topic")
+        return tipos or {f"poly_ws/{NAO_CLASSIFICADO}"}
+    if record.fonte == "rtds":
+        topic = record.payload.get("topic") if isinstance(record.payload, dict) else None
         if isinstance(topic, str) and NOME_DE_TIPO.fullmatch(topic):
             return {f"rtds/{topic}"}
+        return {f"rtds/{NAO_CLASSIFICADO}"}
     return set()
 
 
@@ -94,8 +105,15 @@ def recortar(
     *,
     por_tipo: int = POR_TIPO_PADRAO,
     max_bytes_por_tipo: int = MAX_BYTES_POR_TIPO_PADRAO,
+    desde_ns: int | None = None,
+    ate_ns: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Os primeiros `por_tipo` registros de cada tipo, dentro do teto de bytes.
+
+    `desde_ns`/`ate_ns` cortam por `ts_wall_ns` de CADA registro. O
+    `RecordingReader` usa `desde`/`ate` só para escolher os arquivos-hora,
+    com uma hora de margem de cada lado; sem este corte o manifesto rotularia
+    como "do período" registros de fora dele (revisão do Codex no #149).
 
     Devolve `{tipo: {"linhas": [...], "bytes": n, "ts_wall_ns": (min, max),
     "vistos": total_no_periodo}}`. Pura sobre o reader.
@@ -104,6 +122,10 @@ def recortar(
         lambda: {"linhas": [], "bytes": 0, "ts_wall_ns": None, "vistos": 0}
     )
     for record in reader.iter_records(incluir_meta=False):
+        if desde_ns is not None and record.ts_wall_ns < desde_ns:
+            continue
+        if ate_ns is not None and record.ts_wall_ns > ate_ns:
+            continue
         for tipo in tipos_do_registro(record):
             bloco = saida[tipo]
             bloco["vistos"] += 1
@@ -173,9 +195,16 @@ def arquivos_do_recorte(
 
 
 def _hora_utc(bruto: str | None) -> datetime | None:
+    """ISO 8601 → UTC. Offset explícito é CONVERTIDO, não relabelado.
+
+    `replace(tzinfo=UTC)` sobre `2026-09-09T00:00-03:00` dava 00:00 UTC em
+    vez de 03:00 UTC, e o reader escolhia os arquivos-hora errados (Codex,
+    #149). Sem offset, a hora é lida como UTC — é o que o runbook manda.
+    """
     if not bruto:
         return None
-    return datetime.fromisoformat(bruto).replace(tzinfo=UTC)
+    lido = datetime.fromisoformat(bruto.strip().replace("Z", "+00:00"))
+    return (lido if lido.tzinfo else lido.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -200,7 +229,11 @@ def main(argv: list[str] | None = None) -> int:
 
     reader = RecordingReader(caminho, desde=desde, ate=ate)
     recorte = recortar(
-        reader, por_tipo=args.por_tipo, max_bytes_por_tipo=args.max_bytes_por_tipo
+        reader,
+        por_tipo=args.por_tipo,
+        max_bytes_por_tipo=args.max_bytes_por_tipo,
+        desde_ns=int(desde.timestamp() * 1e9) if desde else None,
+        ate_ns=int(ate.timestamp() * 1e9) if ate else None,
     )
     if not recorte:
         print("nenhum registro classificável no período — nada gravado", file=sys.stderr)

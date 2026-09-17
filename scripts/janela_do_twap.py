@@ -140,9 +140,16 @@ def comparar(
 
 
 def _hora_utc(bruto: str | None) -> datetime | None:
+    """ISO 8601 → UTC. Offset explícito é CONVERTIDO, não relabelado.
+
+    `replace(tzinfo=UTC)` sobre `2026-09-09T00:00-03:00` dava 00:00 UTC em
+    vez de 03:00 UTC, e o reader escolhia os arquivos-hora errados (Codex,
+    #149). Sem offset, a hora é lida como UTC — é o que o runbook manda.
+    """
     if not bruto:
         return None
-    return datetime.fromisoformat(bruto).replace(tzinfo=UTC)
+    lido = datetime.fromisoformat(bruto.strip().replace("Z", "+00:00"))
+    return (lido if lido.tzinfo else lido.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 def _janelas_csv(bruto: str) -> tuple[float, ...]:
