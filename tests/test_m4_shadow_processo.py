@@ -1854,3 +1854,54 @@ class TestOLacoMakerQueAborta:
 
         assert processo.falhou is not None
         assert "io_do_diario_maker" in processo.falhou
+
+
+class TestReconciliacaoDoMakerNoArranque:
+    """Auditoria 2026-09-17 §2.3: a reconciliação existia e ninguém a chamava.
+
+    O `run` passa a chamá-la ANTES de subir as tarefas, e ela é fail-closed:
+    leitura que falha derruba o arranque com motivo nomeado, em vez de cotar
+    por cima de uma órfã que ninguém viu.
+    """
+
+    async def test_roda_no_sombra_e_o_relato_ganha_o_resultado(self, tmp_path):
+        processo = _com_maker(tmp_path)
+
+        await processo._reconciliar_maker_no_arranque()
+
+        assert processo.falhou is None
+        assert processo.laco_maker.ultima_reconciliacao == {
+            "casadas": 0,
+            "orfas": 0,
+            "fantasmas": 0,
+            "registros_largados": [],
+            "cancelamentos": {},
+        }
+
+    async def test_leitura_que_falha_marca_a_rodada_e_SOBE(self, tmp_path, monkeypatch):
+        from pulsearb.execution.cliente import ErroDeLeitura
+
+        processo = _com_maker(tmp_path)
+
+        async def cego(**_kw):
+            raise ErroDeLeitura("GET /data/orders: timeout")
+
+        monkeypatch.setattr(processo.laco_maker, "reconciliar_no_arranque", cego)
+
+        with pytest.raises(ErroDeLeitura):
+            await processo._reconciliar_maker_no_arranque()
+        assert processo.falhou is not None
+        assert processo.falhou.startswith("reconciliacao_no_arranque: ErroDeLeitura")
+
+    def test_o_run_chama_a_reconciliacao_ANTES_de_subir_as_tarefas(self):
+        """Prende a fiação, não só a função: foi a fiação que faltou por
+        três semanas. O mesmo método de guarda do `test_todo_motivo_...`."""
+        import inspect
+
+        from pulsearb.live.shadow import ProcessoShadow
+
+        fonte = inspect.getsource(ProcessoShadow.run)
+        chamada = fonte.index("await self._reconciliar_maker_no_arranque()")
+        tarefas = fonte.index("tarefas = [")
+
+        assert chamada < tarefas

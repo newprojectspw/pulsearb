@@ -95,8 +95,11 @@ from pulsearb.live.cotacao import (
 from pulsearb.live.execucao_maker import (
     Efeito,
     OrdemDaCotacao,
+    Reconciliacao,
     ResultadoDaAcao,
     aplicar_decisao,
+    cancelar_orfas,
+    reconciliar,
 )
 from pulsearb.live.rastreador import JanelaAoVivo
 from pulsearb.live.repouso import (
@@ -189,6 +192,9 @@ class LacoMaker:
     #: o mesmo do outro lado: 2 execuções atravessadas de 12 dominaram o
     #: markout (−22,85 USDC).
     pausa_apos_fill_toxico_s: float | None = None
+    #: O que a reconciliação de arranque achou, para o relato de 60 s. `None`
+    #: até ela rodar — e "não rodou" é diferente de "rodou e achou zero".
+    ultima_reconciliacao: dict[str, Any] | None = None
     #: Em SHADOW a nossa ordem NÃO está no livro, então `best_bid < preço` é
     #: o gatilho exato. Em LIVE ela está — e quando o mercado anda para
     #: baixo, ela VIRA o melhor bid: o gatilho passa a ser "somos o topo e
@@ -1014,6 +1020,59 @@ class LacoMaker:
     def _contar(self, motivo: str) -> None:
         self.motivos[motivo] = self.motivos.get(motivo, 0) + 1
 
+    async def reconciliar_no_arranque(
+        self, *, cancelar_orfas_achadas: bool = True
+    ) -> Reconciliacao:
+        """Casa o que ACHÁVAMOS repousar com o que o servidor diz repousar.
+
+        Existia desde o 3.5 como função (`execucao_maker.reconciliar`) e como
+        contrato em três lugares — "quem recebe INCERTA não reenvia,
+        reconcilia" — e **ninguém a chamava** (auditoria 2026-09-17, §2.3). Um
+        processo que morre entre o envio e a resposta deixa ordem no livro que
+        ninguém gerencia; reiniciar perde a memória em RAM. Ler o servidor é a
+        única fonte que resolve isso, e por isso roda no ARRANQUE, antes de
+        qualquer cotação nova.
+
+        - **Órfã** (o servidor lista, nós não esperávamos): cancelada por
+          default — é exposição que nenhum portão desta sessão autorizou. Um
+          cancelamento `INCERTA` fica no relato: recancelar é seguro (§4.4).
+        - **Fantasma** (esperávamos, o servidor não lista): preencheu ou já
+          foi cancelada; o registro é largado quando TODAS as pernas sumiram.
+          Uma perna só sumida é estado desconhecido e fica para o `passo`.
+        - **Leitura que falha SOBE** (`ErroDeLeitura`): declarar o livro limpo
+          sem ter olhado é o pior desfecho possível aqui.
+
+        Em SHADOW o cliente é o sombra e a leitura vem do diário — o caminho é
+        exercitado a cada arranque, sem rede. Em LIVE é o `GET /data/orders`.
+        """
+        esperadas = {
+            order_id: aberta
+            for aberta in self.abertas.values()
+            for order_id in aberta.order_ids
+        }
+        rec = await reconciliar(self.cliente, esperadas)
+        fantasmas = set(rec.fantasmas)
+        largadas = [
+            slug
+            for slug, aberta in self.abertas.items()
+            if aberta.order_ids and all(oid in fantasmas for oid in aberta.order_ids)
+        ]
+        for slug in largadas:
+            self.abertas.pop(slug)
+        desfechos: dict[str, str] = {}
+        if cancelar_orfas_achadas and rec.orfas:
+            desfechos = await cancelar_orfas(self.cliente, rec)
+        self.ultima_reconciliacao = {
+            "casadas": len(rec.casadas),
+            "orfas": len(rec.orfas),
+            "fantasmas": len(rec.fantasmas),
+            "registros_largados": largadas,
+            "cancelamentos": desfechos,
+        }
+        registrar = log.info if rec.limpa else log.warning
+        registrar("reconciliacao do maker no arranque", **self.ultima_reconciliacao)
+        return rec
+
     def resumo(self) -> dict[str, Any]:
         """O que sai no relato de 60 s do SHADOW."""
         return {
@@ -1031,6 +1090,7 @@ class LacoMaker:
             },
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),
+            "reconciliacao_no_arranque": self.ultima_reconciliacao,
             "nota": (
                 "`motivos` acumula desde o inicio e responde a pergunta que "
                 "importa quando o bot nao cota: ele nao achou onde cotar, ou "

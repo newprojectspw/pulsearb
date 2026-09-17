@@ -1455,3 +1455,94 @@ class TestRecolherQuandoOLivroAnda:
         assert len(laco.abertas) == 1
         efeitos = await laco.recolher_se_o_livro_andou(_livro_de(sozinhos), agora_ns=4)
         assert len(efeitos) == 1 and laco.abertas == {}
+
+
+# ── reconciliação no ARRANQUE (auditoria 2026-09-17, §2.3) ────────────────────
+#
+# `reconciliar`/`cancelar_orfas` existiam desde o 3.5, testadas, e tinham ZERO
+# chamadas fora dos testes. O contrato "INCERTA obriga reconciliação" estava
+# escrito em três lugares e cumprido em nenhum. Estes testes prendem o que o
+# arranque faz com cada uma das três situações, e que a leitura que falha SOBE.
+
+
+def _aberta_com_id(order_id, *, order_id_down=""):
+    from pulsearb.live.repouso import CotacaoAberta
+
+    return CotacaoAberta(
+        cotacao=Cotacao(distancia_ticks=2, tamanho=5.0, dois_lados=bool(order_id_down)),
+        desde_epoch=1000.0,
+        order_id=order_id,
+        order_id_down=order_id_down,
+    )
+
+
+async def _colocar_orfa_no_cliente(cliente):
+    """Uma cotação que ENTROU no servidor (sombra) e que o nosso lado não tem."""
+    from pulsearb.risk import OrdemPretendida
+
+    ordem = OrdemPretendida(
+        slug="btc-updown-5m-1", token_id="tok-up", lado_up=True, shares=5.0, preco_limite=0.5
+    )
+    return await cliente.enviar(ordem, janela="j1")
+
+
+class TestReconciliacaoNoArranque:
+    async def test_orfa_e_cancelada_e_vai_para_o_relato(self, tmp_path):
+        """O caso real: envio INCERTA que afinal entrou, processo reiniciou."""
+        laco = _laco(tmp_path)
+        enviada = await _colocar_orfa_no_cliente(laco.cliente)
+        assert enviada.order_id in laco.cliente.repousadas
+
+        rec = await laco.reconciliar_no_arranque()
+
+        assert len(rec.orfas) == 1
+        assert laco.cliente.repousadas == {}, "a órfã tinha de sair do livro"
+        assert laco.ultima_reconciliacao["orfas"] == 1
+        assert laco.resumo()["reconciliacao_no_arranque"]["orfas"] == 1
+
+    async def test_sem_cancelar_a_orfa_fica_e_e_apenas_relatada(self, tmp_path):
+        laco = _laco(tmp_path)
+        await _colocar_orfa_no_cliente(laco.cliente)
+
+        rec = await laco.reconciliar_no_arranque(cancelar_orfas_achadas=False)
+
+        assert len(rec.orfas) == 1
+        assert len(laco.cliente.repousadas) == 1
+        assert laco.ultima_reconciliacao["cancelamentos"] == {}
+
+    async def test_fantasma_com_TODAS_as_pernas_sumidas_e_largado(self, tmp_path):
+        """Esperávamos, o servidor não lista: preencheu ou já foi cancelada."""
+        laco = _laco(tmp_path)
+        laco.abertas["j-fantasma"] = _aberta_com_id("sombra-nao-existe")
+
+        rec = await laco.reconciliar_no_arranque()
+
+        assert rec.fantasmas == ("sombra-nao-existe",)
+        assert "j-fantasma" not in laco.abertas
+        assert laco.ultima_reconciliacao["registros_largados"] == ["j-fantasma"]
+
+    async def test_uma_perna_so_sumida_e_estado_desconhecido_e_FICA(self, tmp_path):
+        """Perna que sumiu e perna que repousa: não é fantasma inteiro, e largar
+        o registro esconderia a perna viva. Fica para o `passo` decidir."""
+        laco = _laco(tmp_path)
+        enviada = await _colocar_orfa_no_cliente(laco.cliente)
+        laco.abertas["j-meia"] = _aberta_com_id(enviada.order_id, order_id_down="sumiu")
+
+        rec = await laco.reconciliar_no_arranque()
+
+        assert rec.fantasmas == ("sumiu",)
+        assert "j-meia" in laco.abertas
+
+    async def test_leitura_que_falha_SOBE_e_nao_declara_o_livro_limpo(self, tmp_path):
+        from pulsearb.execution.cliente import ErroDeLeitura
+
+        class _ClienteCego:
+            async def listar_ordens_abertas(self, *, token_id=None, market=None):
+                raise ErroDeLeitura("timeout no GET /data/orders")
+
+        laco = _laco(tmp_path)
+        laco.cliente = _ClienteCego()
+
+        with pytest.raises(ErroDeLeitura):
+            await laco.reconciliar_no_arranque()
+        assert laco.ultima_reconciliacao is None, "não rodou ≠ rodou e achou zero"
