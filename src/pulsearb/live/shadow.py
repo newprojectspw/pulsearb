@@ -48,6 +48,7 @@ from typing import Any
 import httpx
 
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
+from pulsearb.execution.cliente import ErroDeLeitura
 from pulsearb.execution.cliente_sombra import ClienteSombraDeOrdens
 from pulsearb.execution.executor import escolher_executor
 from pulsearb.feeds.base import FeedEvent
@@ -751,6 +752,21 @@ class ProcessoShadow:
             **self.ciclo.resumo(agora_epoch=time.time(), agora_ns=time.time_ns()),
         }
 
+    async def _reconciliar_maker_no_arranque(self) -> None:
+        """Reconciliação de arranque da rota maker — e ela é fail-closed.
+
+        `ErroDeLeitura` não é engolido: não saber o que repousa no livro é
+        motivo de NÃO subir, e a rodada sai com o motivo nomeado em `falhou`
+        em vez de cotar por cima de uma órfã que ninguém viu.
+        """
+        assert self.laco_maker is not None
+        try:
+            await self.laco_maker.reconciliar_no_arranque()
+        except ErroDeLeitura as erro:
+            self.falhou = f"reconciliacao_no_arranque: {type(erro).__name__}: {erro}"
+            log.error("reconciliacao do maker no arranque falhou", erro=self.falhou)
+            raise
+
     # ───────────────────────────────────────────────────────────────── run
     async def run(self, duration_seconds: float) -> dict[str, Any]:
         # DOIS PRAZOS, e encerra no primeiro que vencer. Item 3.14.
@@ -802,6 +818,11 @@ class ProcessoShadow:
             await self.poly.start()
             if self.settings.descobrir_pools_de_reward:
                 await self.poly_pools.start()
+            # ANTES de qualquer cotação: o que o servidor diz que repousa
+            # contra o que achávamos. Auditoria 2026-09-17 §2.3 — a função
+            # existia, o contrato existia, e nenhum arranque a chamava.
+            if self.laco_maker is not None:
+                await self._reconciliar_maker_no_arranque()
             tarefas = [
                 asyncio.create_task(
                     self.laco_de_descoberta(
