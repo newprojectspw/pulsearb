@@ -63,7 +63,7 @@ from pulsearb.backtest.runner import (
     varredura_de_threshold,
 )
 from pulsearb.caminhos import caminho_de_escrita, caminho_de_relatorio_lido
-from pulsearb.numeros import numero, percentil
+from pulsearb.numeros import numero, percentil_nao_vazio
 
 # As hipóteses nomeadas continuam importadas porque continuam sendo
 # REPORTADAS — como referência histórica. `compute_anchor` saiu do
@@ -1210,9 +1210,10 @@ def _cadencia_da_serie(serie: list[tuple[int, int]]) -> dict[str, Any]:
         "repeticoes_do_mesmo_carimbo": len(serie) - len(carimbos),
         "janela_coberta_s": round(span, 1),
         "intervalo_s": {
-            "p50": round(percentil(ordenados, 50), 3),
-            "p90": round(percentil(ordenados, 90), 3),
-            "p99": round(percentil(ordenados, 99), 3),
+            # `len(carimbos) >= 2` acima garante ao menos um intervalo.
+            "p50": round(percentil_nao_vazio(ordenados, 50), 3),
+            "p90": round(percentil_nao_vazio(ordenados, 90), 3),
+            "p99": round(percentil_nao_vazio(ordenados, 99), 3),
             "max": round(ordenados[-1], 3),
         },
         "buracos_acima_da_idade_maxima": sum(

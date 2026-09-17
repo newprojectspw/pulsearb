@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from pulsearb.numeros import numero, percentil
+from pulsearb.numeros import numero, percentil, percentil_nao_vazio
 
 
 class TestNumero:
@@ -55,3 +55,14 @@ class TestPercentil:
         assert percentil([3, 1, 2], 50) == 2
         assert isinstance(percentil([3, 1, 2], 50), int)
         assert percentil([1.123456789, 2.0], 50) == 1.123456789
+
+
+class TestPercentilNaoVazio:
+    def test_devolve_o_numero_sem_Optional(self):
+        assert percentil_nao_vazio([3, 1, 2], 50) == 2
+
+    def test_vazia_LEVANTA_em_vez_de_virar_zero(self):
+        """`or 0` transformaria ausência em zero — o padrão que o projeto trata
+        como defeito. Quem prometeu não-vazia e mentiu recebe a exceção."""
+        with pytest.raises(ValueError, match="vazia"):
+            percentil_nao_vazio([], 50)

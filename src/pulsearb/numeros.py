@@ -53,3 +53,17 @@ def percentil(valores: list[float] | list[int], pct: float) -> float | int | Non
     n = len(ordenados)
     rank = max(1, min(n, int(-(-pct * n // 100))))
     return ordenados[rank - 1]
+
+
+def percentil_nao_vazio(valores: list[float] | list[int], pct: float) -> float | int:
+    """`percentil` para lista que o chamador GARANTE não vazia.
+
+    Vazia levanta `ValueError` em vez de devolver `None`: quem chama já
+    provou o tamanho (um `len(...) < 2: return` logo acima, em geral) e
+    quer o número, não um `Optional` para desembrulhar. E não é `or 0`:
+    ausência virando zero é o padrão que este projeto trata como defeito.
+    """
+    valor = percentil(valores, pct)
+    if valor is None:
+        raise ValueError("percentil de lista vazia — o chamador prometeu não-vazia")
+    return valor
