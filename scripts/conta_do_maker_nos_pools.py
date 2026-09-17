@@ -263,6 +263,94 @@ def _linha_do_mercado(
     }
 
 
+#: O que a coluna vazia diz quando não há medida. NUNCA `0.000`: zero é um
+#: custo medido e baixo, ausente é custo desconhecido, e a conta do 1.12
+#: fecha por 3% de custo — a diferença entre os dois decide o item.
+SEM_MEDIDA = "—"
+
+
+def _imprimir_custo_de_saida(
+    relatorio: dict[str, Any], saida_por_mercado: dict[str, float] | None
+) -> None:
+    """O termo que decide o 1.12, ou o aviso de que ele não foi medido.
+
+    O aviso vai para o **stdout**, não para o stderr. Ele não é erro de
+    programa: é o achado mais importante da rodada. No stderr ele some num
+    `> arquivo.txt` e o que sobra gravado é uma conta que termina em
+    `LÍQUIDO +293,46 USDC/h` sem nada dizendo que o custo que a reprova nunca
+    entrou — medida de ausência virando ausência de medida pelo canal de
+    saída (rodada de 2026-09-17 na VPS).
+    """
+    if saida_por_mercado is None:
+        print(
+            "CUSTO DE SAÍDA AUSENTE — o 1.12 continua 🟡, e as somas abaixo "
+            "NÃO são o veredito: elas param no markout de 5 s, que é "
+            "justamente o que o quadro julgou insuficiente em 2026-09-14. "
+            "O markout precisa vir com recorte por mercado e horizonte de "
+            "30 min — o que exige uma coleta MAIOR que 30 min "
+            "(markout_dos_pools.py --duracao 4h)."
+        )
+        return
+    for nome, s in relatorio["por_recorte"].items():
+        liq = s["liquido_com_custo_de_saida_usdc_por_hora"]
+        print(
+            f"  {nome:<10} líquido COM custo de saída: {liq!s:>10} USDC/h "
+            f"({s['mercados_sem_custo_de_saida']} de {s['mercados']} sem medida)"
+        )
+
+
+def _celula(valor: Any, largura: int, sinal: str = "") -> str:
+    """Número formatado, ou `—` quando a medida não existe."""
+    if valor is None:
+        return f"{SEM_MEDIDA:>{largura}}"
+    return f"{valor:>{sinal}{largura}.3f}"
+
+
+def _imprimir_por_mercado(com_conta: list[dict[str, Any]]) -> None:
+    """A tabela por mercado, com a coluna do custo de SAÍDA ao lado.
+
+    Ela existe porque `liq/h` sozinho é a conta de 5 s, e quem lê a tabela não
+    tem como saber disso pela tabela.
+    """
+    print()
+    cab = ("mercado", "receita/h", "custo/h", "liq/h 5s", "liq/h saída", "USDC/1k sh")
+    print(
+        f"{cab[0]:<42} {cab[1]:>9} {cab[2]:>9} {cab[3]:>9} {cab[4]:>11} {cab[5]:>10}"
+    )
+    for x in com_conta[:15]:
+        print(
+            f"{str(x['pergunta'])[:42]:<42} "
+            f"{_celula(x['receita_usdc_por_hora'], 9)} "
+            f"{_celula(x['custo_maximo_usdc_por_hora'], 9)} "
+            f"{_celula(x['liquido_no_pior_caso_usdc_por_hora'], 9, '+')} "
+            f"{_celula(x['liquido_com_custo_de_saida_usdc_por_hora'], 11, '+')} "
+            f"{x['receita_por_mil_shares']!s:>10}"
+        )
+
+
+def _imprimir_somas(
+    relatorio: dict[str, Any], saida_por_mercado: dict[str, float] | None
+) -> None:
+    """As somas, com o cabeçalho dizendo DE QUAL conta elas são.
+
+    "pior caso de custo" era ambíguo: o pior caso é o do FLUXO (todo ele nos
+    atropela), não o do custo — e com o custo de saída ausente a linha lia
+    como se fosse o resultado final.
+    """
+    qual = "markout 5 s" if saida_por_mercado is None else "markout 5 s e saída"
+    print(f"\nsomas (pior caso de FLUXO; {qual}):")
+    for nome, s in relatorio["por_recorte"].items():
+        linha = (
+            f"  {nome:<10} {s['mercados']:>3} mercados: "
+            f"receita {s['receita_usdc_por_hora']:>8.2f} - "
+            f"custo {s['custo_maximo_usdc_por_hora']:>8.2f} = "
+            f"LÍQUIDO {s['liquido_no_pior_caso_usdc_por_hora']:>+8.2f} USDC/h"
+        )
+        if saida_por_mercado is None:
+            linha += f"  (custo de saída: {SEM_MEDIDA})"
+        print(linha)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="conta_do_maker_nos_pools")
     parser.add_argument("--pools", required=True)
@@ -379,39 +467,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"\nmarkout usado: -{custo_c} c/share (5s, {n_exec} execuções)")
-    if saida_por_mercado is None:
-        print(
-            "CUSTO DE SAÍDA AUSENTE — o 1.12 continua 🟡. O markout precisa vir "
-            "com recorte por mercado e horizonte de 30 min (markout_dos_pools.py "
-            "de 2026-09-14+).",
-            file=sys.stderr,
-        )
-    else:
-        for nome, s in relatorio["por_recorte"].items():
-            liq = s["liquido_com_custo_de_saida_usdc_por_hora"]
-            print(
-                f"  {nome:<10} líquido COM custo de saída: {liq!s:>10} USDC/h "
-                f"({s['mercados_sem_custo_de_saida']} de {s['mercados']} sem medida)"
-            )
-    print()
-    cab = ("mercado", "receita/h", "custo/h", "liq/h", "USDC/1k sh")
-    print(f"{cab[0]:<42} {cab[1]:>9} {cab[2]:>9} {cab[3]:>9} {cab[4]:>10}")
-    for x in com_conta[:15]:
-        print(
-            f"{str(x['pergunta'])[:42]:<42} "
-            f"{x['receita_usdc_por_hora']:>9.3f} "
-            f"{x['custo_maximo_usdc_por_hora']:>9.3f} "
-            f"{x['liquido_no_pior_caso_usdc_por_hora']:>+9.3f} "
-            f"{x['receita_por_mil_shares']!s:>10}"
-        )
-    print("\nsomas (pior caso de custo):")
-    for nome, s in relatorio["por_recorte"].items():
-        print(
-            f"  {nome:<10} {s['mercados']:>3} mercados: "
-            f"receita {s['receita_usdc_por_hora']:>8.2f} - "
-            f"custo {s['custo_maximo_usdc_por_hora']:>8.2f} = "
-            f"LÍQUIDO {s['liquido_no_pior_caso_usdc_por_hora']:>+8.2f} USDC/h"
-        )
+    _imprimir_custo_de_saida(relatorio, saida_por_mercado)
+    _imprimir_por_mercado(com_conta)
+    _imprimir_somas(relatorio, saida_por_mercado)
     return 0
 
 

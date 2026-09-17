@@ -247,3 +247,97 @@ def test_recorte_so_soma_custo_de_saida_com_cobertura_completa() -> None:
     assert parcial["liquido_com_custo_de_saida_usdc_por_hora"] is None
     assert parcial["mercados_sem_custo_de_saida"] == 1
     assert conta._soma_do_recorte([])["liquido_com_custo_de_saida_usdc_por_hora"] is None
+
+
+# ── a ausência tem de sobreviver ao `> arquivo.txt` (rodada de 2026-09-17) ──
+#
+# Na VPS o aviso `CUSTO DE SAÍDA AUSENTE` saiu no **stderr** e a conta de 5 s
+# saiu no stdout, terminando em `LÍQUIDO +293,46 USDC/h`. Num redirecionamento
+# o aviso some e sobra gravado um número que parece veredito e não é: o termo
+# que reprova o 1.12 nunca entrou nele.
+
+
+def _pools_e_markout(tmp_path, monkeypatch, markout: dict) -> None:
+    _raiz_de_leitura(tmp_path, monkeypatch)
+    import json as _json
+
+    (tmp_path / "mk.json").write_text(_json.dumps(markout), encoding="utf-8")
+
+
+def test_custo_de_saida_ausente_sai_no_STDOUT_e_nao_no_stderr(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """O canal é a evidência: no stderr o aviso não sobrevive ao redirect."""
+    _pools_e_markout(tmp_path, monkeypatch, _markout(-0.06))
+    codigo = conta.main(["--pools", "pools.json", "--markout", "mk.json"])
+    saida = capsys.readouterr()
+
+    assert codigo == 0
+    assert "CUSTO DE SAÍDA AUSENTE" in saida.out
+    assert "CUSTO DE SAÍDA AUSENTE" not in saida.err
+
+
+def test_o_aviso_DIZ_que_as_somas_nao_sao_o_veredito(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Sem isto, quem lê a última linha lê a conta de 5 s como resultado."""
+    _pools_e_markout(tmp_path, monkeypatch, _markout(-0.06))
+    conta.main(["--pools", "pools.json", "--markout", "mk.json"])
+    saida = capsys.readouterr().out
+
+    assert "NÃO são o veredito" in saida
+    assert "markout de 5 s" in saida
+
+
+def test_somas_sem_custo_de_saida_carregam_a_marca(capsys) -> None:
+    relatorio = {"por_recorte": {"top_5": {
+        "mercados": 5, "receita_usdc_por_hora": 36.34,
+        "custo_maximo_usdc_por_hora": 0.0,
+        "liquido_no_pior_caso_usdc_por_hora": 36.34,
+    }}}
+    conta._imprimir_somas(relatorio, None)
+    saida = capsys.readouterr().out
+
+    assert "pior caso de FLUXO; markout 5 s)" in saida
+    assert f"custo de saída: {conta.SEM_MEDIDA}" in saida
+
+
+def test_somas_COM_custo_de_saida_nao_carregam_a_marca(capsys) -> None:
+    relatorio = {"por_recorte": {"top_5": {
+        "mercados": 5, "receita_usdc_por_hora": 36.34,
+        "custo_maximo_usdc_por_hora": 0.0,
+        "liquido_no_pior_caso_usdc_por_hora": 36.34,
+    }}}
+    conta._imprimir_somas(relatorio, {"lac-9-5": 2.0})
+    saida = capsys.readouterr().out
+
+    assert "markout 5 s e saída" in saida
+    assert "custo de saída: —" not in saida
+
+
+def _linha(liq_saida):
+    return {
+        "pergunta": "Will the highest temperature in Milan be 25C",
+        "receita_usdc_por_hora": 3.708,
+        "custo_maximo_usdc_por_hora": 0.0,
+        "liquido_no_pior_caso_usdc_por_hora": 3.708,
+        "liquido_com_custo_de_saida_usdc_por_hora": liq_saida,
+        "receita_por_mil_shares": 20.8303,
+    }
+
+
+def test_coluna_sem_medida_imprime_travessao_e_NUNCA_zero(capsys) -> None:
+    """Zero é custo medido e baixo; ausente é custo desconhecido. A conta do
+    1.12 fecha por 3% de custo — a diferença entre os dois decide o item."""
+    conta._imprimir_por_mercado([_linha(None)])
+    saida = capsys.readouterr().out
+
+    assert "liq/h saída" in saida
+    assert conta.SEM_MEDIDA in saida.splitlines()[-1]
+    assert "0.000" not in saida.splitlines()[-1].split()[-2]
+
+
+def test_coluna_COM_medida_imprime_o_numero(capsys) -> None:
+    conta._imprimir_por_mercado([_linha(-16.3)])
+
+    assert "-16.300" in capsys.readouterr().out
