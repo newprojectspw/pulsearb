@@ -114,3 +114,53 @@ def test_ticks_do_microprice_negativo_e_recusado_no_carregamento(tmp_path, monke
 
     monkeypatch.setenv("PULSEARB_MAKER_TICKS_ABAIXO_DO_MICROPRICE", "0")
     assert Settings.load(tmp_path / "inexistente.yaml").maker_ticks_abaixo_do_microprice == 0
+
+
+# ── todo teto de risco tem de estar ESCRITO no config.yaml versionado ─────────
+#
+# Auditoria de 2026-09-17, §2.8: nenhum dos treze campos de `RiskSettings`
+# aparecia no `config.yaml`; todos valiam o default do código. Quem abria o
+# arquivo para saber quanto o bot pode perder por dia não achava a resposta,
+# e quem mudava o default no código mudava o teto sem tocar no arquivo que
+# deveria ser a decisão. Este teste não pina os VALORES — subir um teto é
+# decisão legítima, e o lugar dela é o yaml — só exige que cada campo exista
+# ali, para que a decisão seja visível.
+
+
+def test_todo_teto_de_risco_esta_escrito_no_config_yaml():
+    from pathlib import Path
+
+    import yaml
+
+    from pulsearb.settings import RiskSettings
+
+    raiz = Path(__file__).resolve().parent.parent
+    cfg = yaml.safe_load((raiz / "config.yaml").read_text(encoding="utf-8"))
+    escritos = set((cfg.get("risk") or {}).keys())
+    esperados = set(RiskSettings.model_fields)
+
+    faltam = sorted(esperados - escritos)
+    assert not faltam, (
+        f"tetos de risco sem linha no config.yaml: {faltam}. Escreva-os na seção "
+        "`risk:` (com o valor que valer) — o teto de dinheiro é decisão do "
+        "arquivo versionado, não default escondido no código."
+    )
+    sobram = sorted(escritos - esperados)
+    assert not sobram, f"chaves em `risk:` que RiskSettings não conhece: {sobram}"
+
+
+def test_o_config_yaml_versionado_carrega_e_os_tetos_batem_com_o_que_esta_escrito():
+    """Se o yaml diz 25, `Settings.load` tem de devolver 25 — e não o default
+    por um erro de nome de chave que o pydantic ignoraria em silêncio."""
+    from pathlib import Path
+
+    import yaml
+
+    from pulsearb.settings import Settings
+
+    raiz = Path(__file__).resolve().parent.parent
+    cfg = yaml.safe_load((raiz / "config.yaml").read_text(encoding="utf-8"))
+    s = Settings.load(str(raiz / "config.yaml"))
+
+    for campo, valor in cfg["risk"].items():
+        assert getattr(s.risk, campo) == valor, campo

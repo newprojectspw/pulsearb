@@ -73,5 +73,56 @@ ui:
   host: "127.0.0.1"
   port: 8080
 
+# Os tetos de dinheiro. TODOS em USDC, todos pequenos de propósito.
+#
+# Até 2026-09-17 esta seção não existia: os treze valores moravam só no
+# default de `RiskSettings` (settings.py), e quem abria este arquivo para
+# saber quanto o bot pode perder por dia não achava a resposta (auditoria,
+# §2.8). Os valores abaixo SÃO os defaults — escrevê-los aqui não muda o
+# comportamento, muda quem decide: subir um teto passa a ser uma linha num
+# arquivo versionado, revisada num PR, e não um número escondido no código.
+# `tests/test_settings.py` falha se algum campo de `RiskSettings` faltar aqui.
+#
+# Os números saem do que o M2 mediu (ver a docstring de `RiskSettings`):
+# o backtest de 20 h moveu 2,91 USDC por trade; a profundidade mediana a
+# 3 ticks na duração mais líquida foi 87,8 USDC. Operar acima disso é apostar
+# contra uma medição que já existe.
+risk:
+  # Teto por ordem. Pequeno o bastante para uma sequência de erros custar
+  # menos que uma pizza; grande o bastante para não ser só ruído de taxa.
+  stake_max_por_trade_usdc: 5.0
+  # Teto por janela de mercado: três entradas de 5 no mesmo mercado ainda
+  # são uma aposta só no mesmo movimento.
+  stake_max_por_janela_usdc: 15.0
+  # Capital simultaneamente em risco, somando todas as janelas.
+  exposicao_max_usdc: 50.0
+  # Janelas com posição aberta ao mesmo tempo.
+  posicoes_max_abertas: 5
+  # Disjuntor diário. Ao estourar, GRUDA: não desarma sozinho no dia
+  # seguinte e sobrevive a reinício do processo.
+  perda_max_diaria_usdc: 25.0
+  # Faixa de preço operável. Fora dela o payoff assimétrico transforma erro
+  # de modelo em perda desproporcional (comprar a 0,97 arrisca 0,97 por 0,03).
+  preco_minimo: 0.05
+  preco_maximo: 0.95
+  # Perdas seguidas que disparam a pausa, e quanto ela dura. Quatro seguidas
+  # com hit rate de 0,59 têm ~2,8 % de chance de acaso: raro o bastante para
+  # investigar, comum o bastante para não travar a semana.
+  perdas_seguidas_para_pausa: 4
+  pausa_apos_sequencia_s: 3600.0
+  # Spread acima do qual não se opera: com 0,04 o custo de atravessar iguala
+  # o edge exigido pelo critério 1.1 (≥ 0,02), e o trade não pode ganhar.
+  spread_maximo: 0.04
+  # Atraso máximo entre o carimbo do servidor e a nossa chegada (item 3.10):
+  # deriva + latência + fila, somadas. A decisão inteira se apoia em
+  # `seconds_left`.
+  atraso_max_ms: 250.0
+  # Onde o registro do dia mora (sobrevive a reinício) e a chave de
+  # emergência: enquanto o arquivo KILL existir, nenhuma ordem passa. É
+  # arquivo, não flag, para poder ser acionada por `touch` numa sessão ssh
+  # com o bot travado.
+  caminho_do_registro: "data/risco/registro_do_dia.json"
+  caminho_do_kill: "data/risco/KILL"
+
 # Modo de execução: SIM é o default absoluto. LIVE exige a trava tripla (M4).
 mode: SIM
