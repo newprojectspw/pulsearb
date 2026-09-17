@@ -1,0 +1,133 @@
+{
+  "gerado_em": "2026-09-17T19:05:32+00:00",
+  "origem": {
+    "gravacao": "pulsearb-gravacao",
+    "desde": "2026-09-09T02:19Z",
+    "ate": "2026-09-09T03:19Z",
+    "por_tipo": 100,
+    "max_bytes_por_tipo": 524288
+  },
+  "tipos": {
+    "poly_ws/_pong": {
+      "arquivo": "poly_ws___pong.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 344,
+      "bytes": 11100,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:44+00:00",
+        "2026-09-09T02:36:52+00:00"
+      ]
+    },
+    "poly_ws/best_bid_ask": {
+      "arquivo": "poly_ws__best_bid_ask.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 136252,
+      "bytes": 37014,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:37+00:00",
+        "2026-09-09T02:19:37+00:00"
+      ]
+    },
+    "poly_ws/book": {
+      "arquivo": "poly_ws__book.jsonl",
+      "registros": 11,
+      "vistos_no_periodo": 52117,
+      "bytes": 524220,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:37+00:00",
+        "2026-09-09T02:19:43+00:00"
+      ]
+    },
+    "poly_ws/last_trade_price": {
+      "arquivo": "poly_ws__last_trade_price.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 24517,
+      "bytes": 47167,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:38+00:00",
+        "2026-09-09T02:20:02+00:00"
+      ]
+    },
+    "poly_ws/market_resolved": {
+      "arquivo": "poly_ws__market_resolved.jsonl",
+      "registros": 30,
+      "vistos_no_periodo": 30,
+      "bytes": 19657,
+      "ts_wall_utc": [
+        "2026-09-09T02:21:58+00:00",
+        "2026-09-09T03:16:58+00:00"
+      ]
+    },
+    "poly_ws/new_market": {
+      "arquivo": "poly_ws__new_market.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 1158,
+      "bytes": 272932,
+      "ts_wall_utc": [
+        "2026-09-09T02:20:21+00:00",
+        "2026-09-09T02:38:56+00:00"
+      ]
+    },
+    "poly_ws/price_change": {
+      "arquivo": "poly_ws__price_change.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 2931322,
+      "bytes": 68861,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:37+00:00",
+        "2026-09-09T02:19:37+00:00"
+      ]
+    },
+    "poly_ws/tick_size_change": {
+      "arquivo": "poly_ws__tick_size_change.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 120,
+      "bytes": 36900,
+      "ts_wall_utc": [
+        "2026-09-09T02:26:16+00:00",
+        "2026-09-09T03:04:44+00:00"
+      ]
+    },
+    "rtds/_erro_do_servidor": {
+      "arquivo": "rtds___erro_do_servidor.jsonl",
+      "registros": 4,
+      "vistos_no_periodo": 4,
+      "bytes": 2136,
+      "ts_wall_utc": [
+        "2026-09-09T02:24:07+00:00",
+        "2026-09-09T03:05:21+00:00"
+      ]
+    },
+    "rtds/_frame_vazio": {
+      "arquivo": "rtds___frame_vazio.jsonl",
+      "registros": 2,
+      "vistos_no_periodo": 2,
+      "bytes": 200,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:12+00:00",
+        "2026-09-09T03:05:37+00:00"
+      ]
+    },
+    "rtds/crypto_prices": {
+      "arquivo": "rtds__crypto_prices.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 21509,
+      "bytes": 30402,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:13+00:00",
+        "2026-09-09T02:19:29+00:00"
+      ]
+    },
+    "rtds/crypto_prices_twap_sixty": {
+      "arquivo": "rtds__crypto_prices_twap_sixty.jsonl",
+      "registros": 100,
+      "vistos_no_periodo": 26492,
+      "bytes": 34922,
+      "ts_wall_utc": [
+        "2026-09-09T02:19:13+00:00",
+        "2026-09-09T02:19:25+00:00"
+      ]
+    }
+  },
+  "nota": "Registros REAIS, como o recorder os escreveu. Fixture sintética prova que o parser aceita o formato que imaginamos; esta prova que aceita o que o servidor mandou. Auditoria 2026-09-17 §2.9."
+}
