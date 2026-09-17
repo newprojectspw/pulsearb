@@ -22,6 +22,7 @@ import orjson
 import websockets
 
 from pulsearb.feeds.base import FeedEvent, OnEvent, ReconnectingFeed
+from pulsearb.numeros import numero
 
 TOPIC_BINANCE = "crypto_prices"
 TOPIC_TWAP_60 = "crypto_prices_twap_sixty"
@@ -127,9 +128,9 @@ def parse_rtds_event(parsed: Any, ts_mono_ns: int, ts_wall_ns: int) -> PriceTick
             except ValueError:
                 price = None
         if price is None:
-            price = _as_float(payload.get("value"))
+            price = numero(payload.get("value"))
     elif topic in (TOPIC_BINANCE, "crypto_prices_chainlink"):
-        price = _as_float(payload.get("value"))
+        price = numero(payload.get("value"))
     else:
         return None
 
@@ -144,25 +145,6 @@ def parse_rtds_event(parsed: Any, ts_mono_ns: int, ts_wall_ns: int) -> PriceTick
         ts_mono_ns=ts_mono_ns,
         ts_wall_ns=ts_wall_ns,
     )
-
-
-def _as_float(value: Any) -> float | None:
-    """Número do fio, ou `None`. `bool` é `None`, nunca 1,0/0,0.
-
-    Era o único dos nove parsers de número do repositório que deixava `true`
-    virar preço 1,0 — e este é o preço que decide a janela (auditoria
-    2026-09-17, §2.4, provado por execução). Dado malformado recusa.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
 
 
 class RtdsFeed(ReconnectingFeed):

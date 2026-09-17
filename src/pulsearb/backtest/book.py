@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pulsearb.feeds.poly_ws import MudancaDePreco, iter_mudancas
+from pulsearb.numeros import numero
 
 
 @dataclass(slots=True)
@@ -210,28 +211,17 @@ def _levels(raw: Any, *, reverse: bool) -> list[tuple[float, float]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        preco = _as_float(item.get("price"))
-        tamanho = _as_float(item.get("size"))
+        preco = numero(item.get("price"))
+        tamanho = numero(item.get("size"))
         if preco is not None and tamanho is not None and tamanho > 0:
             saida.append((preco, tamanho))
     saida.sort(reverse=reverse)  # tupla ordena por preço primeiro; ver apply_price_change
     return saida
 
 
-def _as_float(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return None
-    return None
 
 
 def _ts_ns(value: Any) -> int:
     """O CLOB manda timestamp em ms, às vezes como string."""
-    ms = _as_float(value)
+    ms = numero(value)
     return int(ms * 1e6) if ms else 0

@@ -400,7 +400,7 @@ Não entra em decisão.
 | 2 | `anchor_sweep` com `window_seconds=30` vs `60` nas janelas de 5m da M2_72H; datar a nota do API_NOTES | Mac | 1 execução | 2.2 |
 | 3 | ligar `reconciliar` + `cancelar_orfas` no arranque do SHADOW (a leitura é GET; a ação fica atrás de flag) e pôr no quadro como sub-item do 3.5 | nuvem | 1 PR | 2.3 |
 | 4 | `_as_float` rejeita `bool` + 2 testes | nuvem | 1 PR pequeno | 2.4 — **✅ feito 2026-09-17** (5 testes, mutação verificada) |
-| 5 | `pulsearb/numeros.py` com `numero()` e `percentil()`; nove imports | nuvem | 1 PR | 2.5, 2.6 |
+| 5 | `pulsearb/numeros.py` com `numero()` e `percentil()`; nove imports | nuvem | 1 PR | 2.5, 2.6 — **✅ feito 2026-09-17** (eram onze parsers e quatro percentis, não nove e três; 12 testes, mutações verificadas) |
 | 6 | `mypy` no `make check` com baseline; corrigir `decisao.py:17` | nuvem | 1 PR | 2.7 |
 | 7 | 13 tetos `risk.*` explícitos no `config.yaml` + teste de presença | nuvem | 1 PR | 2.8 — **✅ feito 2026-09-17** (2 testes; mutação: apagar uma linha do yaml derruba) |
 | 8 | recorte de eventos reais como fixture dos parsers | Mac → commit | 1 PR | 2.9 |

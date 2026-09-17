@@ -75,6 +75,8 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Any
 
+from pulsearb.numeros import percentil
+
 # Grade da varredura fina de τ (segundos em torno da abertura), no passo da
 # cadência do stream (~1s). ±180s cobre com folga qualquer atraso plausível
 # de publicação/consumo.
@@ -560,11 +562,6 @@ _ROTULOS_PPB = (
 )
 
 
-def _percentil(ordenados: list[int], fracao: float) -> int | None:
-    if not ordenados:
-        return None
-    indice = min(int(fracao * len(ordenados)), len(ordenados) - 1)
-    return ordenados[indice]
 
 
 def _distribuicao_das_folgas(
@@ -598,8 +595,8 @@ def _distribuicao_das_folgas(
         "tau_s": tau,
         "janelas_com_folga": len(folgas),
         "histograma_ppb": histograma,
-        "p50_ppb": _percentil(ordenados, 0.50),
-        "p90_ppb": _percentil(ordenados, 0.90),
+        "p50_ppb": percentil(ordenados, 50),
+        "p90_ppb": percentil(ordenados, 90),
         "max_ppb": ordenados[-1] if ordenados else None,
         "limiar_ppb": limiar_ppb,
         "abaixo_do_limiar": sum(1 for ppb in folgas if ppb < limiar_ppb),

@@ -21,6 +21,7 @@ import orjson
 import websockets
 
 from pulsearb.feeds.base import FeedEvent, OnEvent, ReconnectingFeed
+from pulsearb.numeros import numero
 
 # Heartbeat de aplicação do CLOB: texto puro, NUNCA binário (API_NOTES 6.1).
 PING = "PING"
@@ -109,8 +110,8 @@ def iter_mudancas(
             asset_id = (
                 asset_do_topo if isinstance(asset_do_topo, str) else asset_padrao
             )
-        preco = _numero(bruta.get("price"))
-        tamanho = _numero(bruta.get("size"))
+        preco = numero(bruta.get("price"))
+        tamanho = numero(bruta.get("size"))
         if asset_id is None or preco is None or tamanho is None:
             continue
         yield MudancaDePreco(
@@ -118,8 +119,8 @@ def iter_mudancas(
             price=preco,
             size=tamanho,
             side=str(bruta.get("side", "")).upper(),
-            best_bid=_numero(bruta.get("best_bid")),
-            best_ask=_numero(bruta.get("best_ask")),
+            best_bid=numero(bruta.get("best_bid")),
+            best_ask=numero(bruta.get("best_ask")),
         )
 
 
@@ -244,7 +245,7 @@ def resolucao_do_evento(evento: dict[str, Any]) -> Resolucao | None:
         tokens=tuple(tokens),
         winning_token_id=vencedor_token,
         winning_outcome=vencedor_rotulo,
-        ts_servidor_ms=_numero(evento.get("timestamp")),
+        ts_servidor_ms=numero(evento.get("timestamp")),
         sintetico=bool(evento.get("_sintetico")),
     )
 
@@ -314,17 +315,6 @@ def tokens_do_evento(evento: dict[str, Any]) -> set[str]:
     return tokens
 
 
-def _numero(valor: Any) -> float | None:
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None
 
 
 class PolyMarketWsFeed(ReconnectingFeed):

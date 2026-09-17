@@ -63,6 +63,7 @@ from pulsearb.feeds.poly_ws import (
     forma_do_price_change,
     iter_mudancas,
 )
+from pulsearb.numeros import numero, percentil
 
 # Tolerância padrão da comparação de topo, em unidades de preço.
 # Meio tick do menor tick observado (0,001) — abaixo disso é ruído de
@@ -464,8 +465,8 @@ class MonitorDeIntegridade:
                 return []
             estado = self._estado(asset_id)
             estado.marcar_tempo(carimbo)
-            afirmado_bid = _numero(evento.get("best_bid"))
-            afirmado_ask = _numero(evento.get("best_ask"))
+            afirmado_bid = numero(evento.get("best_bid"))
+            afirmado_ask = numero(evento.get("best_ask"))
             # (a) conta BRUTA, na hora, contra o livro atual — é o que o
             #     recorder precisa para reagir, e é a conta antiga do M2.2.
             imediatas = self._conferir(
@@ -1112,7 +1113,7 @@ def _carimbo_ms(evento: dict[str, Any], ts_ns: int) -> float:
     evento sem `timestamp` não pode derrubar a comparação inteira, então ele
     cai para a chegada e vira, no pior caso, o comportamento antigo.
     """
-    valor = _numero(evento.get("timestamp"))
+    valor = numero(evento.get("timestamp"))
     if valor is not None and valor > 0:
         return valor
     return ts_ns / 1e6
@@ -1228,28 +1229,17 @@ def _niveis(bruto: Any) -> dict[float, float]:
     for item in bruto:
         if not isinstance(item, dict):
             continue
-        preco = _numero(item.get("price"))
-        tamanho = _numero(item.get("size"))
+        preco = numero(item.get("price"))
+        tamanho = numero(item.get("size"))
         if preco is not None and tamanho is not None and tamanho > 0:
             saida[preco] = tamanho
     return saida
 
 
-def _numero(valor: Any) -> float | None:
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None
 
 
 def _percentil(ordenadas: list[float], pct: float) -> float | None:
-    if not ordenadas:
-        return None
-    rank = max(1, min(len(ordenadas), int(-(-pct * len(ordenadas) // 100))))
-    return round(ordenadas[rank - 1], 6)
+    """`percentil` arredondado a 6 casas: formatação do relatório, por cima da
+    MESMA estatística de `pulsearb.numeros` — não uma quinta definição."""
+    valor = percentil(ordenadas, pct)
+    return None if valor is None else round(valor, 6)

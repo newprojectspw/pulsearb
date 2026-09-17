@@ -23,6 +23,7 @@ from typing import Any
 
 from pulsearb.backtest.book import OrderBook
 from pulsearb.engine.fees import fee_pp_por_share
+from pulsearb.numeros import percentil
 
 # Faixas que DEFINEM a hipótese do tick (API_NOTES 13.3a). Ficam nomeadas
 # porque não são números de conveniência: mudar qualquer uma muda o que
@@ -34,12 +35,6 @@ PRECO_EQUILIBRADO_BAIXO = 0.35
 PRECO_EQUILIBRADO_ALTO = 0.65
 
 
-def _percentil(valores: list[float], pct: float) -> float | None:
-    if not valores:
-        return None
-    ordenados = sorted(valores)
-    rank = max(1, min(len(ordenados), int(-(-pct * len(ordenados) // 100))))
-    return ordenados[rank - 1]
 
 
 def _dist(valores: list[float]) -> dict[str, Any]:
@@ -48,9 +43,9 @@ def _dist(valores: list[float]) -> dict[str, Any]:
     return {
         "n": len(valores),
         "min": round(min(valores), 4),
-        "p50": round(_percentil(valores, 50) or 0, 4),
-        "p90": round(_percentil(valores, 90) or 0, 4),
-        "p99": round(_percentil(valores, 99) or 0, 4),
+        "p50": round(percentil(valores, 50) or 0, 4),
+        "p90": round(percentil(valores, 90) or 0, 4),
+        "p99": round(percentil(valores, 99) or 0, 4),
         "max": round(max(valores), 4),
         "media": round(statistics.fmean(valores), 4),
     }

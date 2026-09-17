@@ -59,6 +59,7 @@ from pulsearb.markets.rewards_da_gamma import (
     forma_dos_rewards,
     taxa_diaria_de_reward,
 )
+from pulsearb.numeros import numero
 from pulsearb.obs import get_logger, setup_logging
 from pulsearb.recorder.gaps import GapTracker, resumo_gaps
 from pulsearb.recorder.writer import (
@@ -102,18 +103,6 @@ RESOLUTION_POLL_SECONDS = 120.0
 # grafia nova.
 
 
-def _numero(valor: Any) -> float | None:
-    """Número vindo do fio: o CLOB manda timestamp ora int, ora string."""
-    if isinstance(valor, bool) or valor is None:
-        return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    if isinstance(valor, str):
-        try:
-            return float(valor)
-        except ValueError:
-            return None
-    return None
 
 
 def market_snapshot(
@@ -354,7 +343,7 @@ class Recorder:
                 asset_id = item.get("asset_id")
                 if isinstance(asset_id, str):
                     self.resolvidos.add(asset_id)
-            carimbo = _numero(item.get("timestamp"))
+            carimbo = numero(item.get("timestamp"))
             if carimbo:
                 self.relogio.observar(carimbo, event.ts_wall_ns)
             for divergencia in self.integridade.observar(item, event.ts_wall_ns):
