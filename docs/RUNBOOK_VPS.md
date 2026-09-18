@@ -775,15 +775,32 @@ Duas fontes, e a diferença entre elas é informação:
 
 ```bash
 # (a) o que o recorder ACHA que aconteceu — teto calculado dos eventos que
-#     os mecanismos detectaram
-jq '.saude_do_rtds' relatorio_do_recorder.json
+#     os mecanismos detectaram. Ele NAO grava um arquivo à parte: sai na
+#     linha final do log e vai para dentro da própria gravação, como meta
+#     `recorder_relatorio` (ver `_write_meta` em recorder/__main__.py).
+grep '"recorder encerrado"' /tmp/teste1h.log | tail -1 | jq '.saude_do_rtds'
 
 # (b) a AUTORIDADE — lê os carimbos da gravação, não depende de o mecanismo
-#     ter percebido
-.venv/bin/python -m pulsearb.backtest data/recordings --json teste.json
-jq '.gravacao.silencio_do_rtds | {total_s, silencios, por_escopo,
-    suspeita_de_assinatura_caducada}' teste.json
+#     ter percebido. O `--json` exige caminho RELATIVO dentro do diretório
+#     de trabalho (é a trava de escrita; `/tmp/...` é recusado).
+mkdir -p relatorios && chown pulsearb:pulsearb relatorios
+sudo -u pulsearb .venv/bin/python -m pulsearb.backtest data/recordings \
+  --json relatorios/teste1h.json
+jq '{ilegiveis: (.gravacao.arquivos_ilegiveis|length),
+     conhecidas: .gravacao.janelas_conhecidas,
+     com_resolucao: .gravacao.janelas_com_resolucao,
+     silencio: (.gravacao.silencio_do_rtds
+                | {total_s, silencios, por_escopo,
+                   suspeita_de_assinatura_caducada})}' relatorios/teste1h.json
 ```
+
+Os dois comandos acima estavam errados até 2026-09-18, e o erro é do tipo que
+só a execução mostra: o (a) mandava ler `relatorio_do_recorder.json`, um
+arquivo que o recorder **nunca escreveu** — `jq` responde *No such file or
+directory* e quem estivesse com pressa leria isso como gravação que falhou. O
+(b) passava `teste.json` (e, pior, `/tmp/teste.json`), que a trava de caminho
+recusa: *nome de saída inválido*. Nenhum dos dois roda antes de a hora
+FECHAR, porque o relatório do (a) só existe no fim.
 
 Se **(a) disser que a meta foi atingida e (b) disser que não**, existe uma
 terceira causa de silêncio que nenhum dos dois mecanismos cobre — e ela é o
