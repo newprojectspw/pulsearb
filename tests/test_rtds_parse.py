@@ -150,6 +150,35 @@ def test_subscribe_frame_formato():
     assert all(s["type"] == "update" for s in frame["subscriptions"])
 
 
+def test_twap_thirty_so_entra_por_opcao_e_e_vigiado_como_os_outros():
+    """Auditoria §2.2: a prova directa da janela das 5m exige GRAVAR o tópico
+    de 30 s. Desligado por defeito; ligado, entra no frame E na lista que o
+    detector de tópico mudo vigia — assinar sem vigiar gravaria silêncio."""
+    import orjson
+
+    from pulsearb.feeds.rtds import TOPIC_TWAP_30
+
+    sem = RtdsFeed(url="wss://x", user_agent="ua", assets=["btc"])
+    assert TOPIC_TWAP_30 not in sem.topicos_assinados
+
+    com = RtdsFeed(url="wss://x", user_agent="ua", assets=["btc"], topicos_extra=(TOPIC_TWAP_30,))
+    frame = orjson.loads(com.subscribe_frame())
+    topics = {s["topic"] for s in frame["subscriptions"]}
+    assert topics == {"crypto_prices", "crypto_prices_twap_sixty", "crypto_prices_twap_thirty"}
+    assert com.topicos_assinados == (*RtdsFeed.TOPICOS_ASSINADOS, TOPIC_TWAP_30)
+    # Repetir um tópico já assinado não o duplica no frame.
+    dup = RtdsFeed(url="wss://x", user_agent="ua", assets=["btc"], topicos_extra=("crypto_prices",))
+    assert dup.topicos_assinados == RtdsFeed.TOPICOS_ASSINADOS
+
+    # E o evento do tópico de 30 s vira PriceTick pelo mesmo parser (startswith twap).
+    tick = parse_rtds_event(
+        {"topic": TOPIC_TWAP_30, "payload": {"symbol": "btc/usd", "timestamp": 1,
+                                             "full_accuracy_value": "78640000000000000000000"}},
+        1, 2,
+    )
+    assert tick is not None and tick.topic == TOPIC_TWAP_30 and tick.asset == "btc"
+
+
 # ── `bool` no campo numérico é dado malformado, não preço (auditoria §2.4) ──
 
 
