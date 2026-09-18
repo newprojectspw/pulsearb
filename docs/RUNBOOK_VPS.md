@@ -600,16 +600,35 @@ reação: 6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de 60 s/h
 sudo systemctl stop pulsearb-recorder
 sudo systemctl status pulsearb-recorder     # confirmar 'inactive (dead)'
 
-# 2. atualizar e reinstalar
-cd ~/pulsearb
-git pull
-.venv/bin/pip install -e .
+# 2. atualizar e reinstalar — em /opt/pulsearb, que é o que o systemd roda
+cd /opt/pulsearb
+sudo git pull origin main
+sudo .venv/bin/pip install -e .
+sudo chown -R pulsearb:pulsearb /opt/pulsearb
 
-# 3. UMA HORA de teste — não pule
-.venv/bin/python -m pulsearb.recorder --duration 1h
+# 3. a unit INSTALADA tem de ser a do repositório
+diff /etc/systemd/system/pulsearb-recorder.service \
+     /opt/pulsearb/deploy/pulsearb-recorder.service && echo IDENTICAS
 
-# 4. conferir a meta de aceite (ver abaixo) ANTES da gravação longa
+# 4. UMA HORA de teste — não pule
+cd /opt/pulsearb && sudo -u pulsearb .venv/bin/python -m pulsearb.recorder --duration 1h
+
+# 5. conferir a meta de aceite (ver abaixo) ANTES da gravação longa
 ```
+
+**`/opt/pulsearb`, e nunca `~/pulsearb`.** Escrito assim porque a versão
+anterior desta sequência dizia `cd ~/pulsearb`: como ela se roda com `sudo`,
+o `~` é `/root`, e o comando cria (ou atualiza) um **segundo clone** que o
+systemd não usa. Encontrado na VPS em 2026-09-18 — havia um `/root/pulsearb`
+de 100 MB, parado num commit antigo, ao lado do `/opt/pulsearb` de verdade.
+`git pull` nele atualiza nada que rode, e `.venv/bin/pip install -e .` ali
+instala noutro venv. O passo 3 existe pela mesma razão: a unit instalada
+tinha `User=root` onde o repositório diz `User=pulsearb`, e quem lê só o
+repositório não descobre isso.
+
+**O passo 4 precisa de espaço em disco.** Uma hora custa ~470 MB (§6). Se
+`df -h /` mostrar menos de ~1 GB livre, recolha as gravações antigas (§7)
+antes — não comece pelo teste e descubra o disco cheio no meio dele.
 
 ### A meta de aceite, e onde lê-la
 
@@ -652,6 +671,12 @@ sudo systemctl start pulsearb-recorder
 sudo systemctl status pulsearb-recorder
 # e a verificação pós-start da §5.1, que continua obrigatória
 ```
+
+**E confira que ela ficou de pé.** `systemctl stop` não é falha, então
+`Restart=always` não a reergue: uma gravação parada à mão fica parada para
+sempre, calada. Foi o que aconteceu entre 11 e 18/09/2026 — o passo 1 desta
+sequência correu, os outros não, e o recorder passou **uma semana inteira**
+sem gravar sem nada denunciar. Se você parar aqui, anote onde parou.
 
 ## 8. Parar
 
