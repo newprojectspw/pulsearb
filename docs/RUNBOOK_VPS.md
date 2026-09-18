@@ -3,11 +3,22 @@
 Do zero até uma gravação de 72h rodando. Testável por quem nunca viu o
 projeto.
 
-**Região: Londres.** Escolhida entre as candidatas, mas com uma ressalva
-honesta: a cadência medida do feed (p50 ~0,9s, API_NOTES 13.1) torna a
-latência de rede praticamente irrelevante para esta estratégia. A escolha é
-**revisável** e de baixo impacto — se o backtest mostrar sensibilidade real a
-latência, revisita-se; enquanto não mostrar, é ruído.
+Este runbook cobre **gravação e SHADOW**. A §8.1 prepara a carteira, mas o
+host LIVE precisa passar antes pelo passo 0 dela: esta VPS é recusada por
+região pelo CLOB.
+
+**Região: Londres — e esta máquina serve para GRAVAR e para SHADOW, não
+para LIVE.** `[MEDIDO 2026-09-18]` O CLOB recusa ordens vindas daqui com
+`403 Trading restricted in your region` (API_NOTES §17). A recusa é anterior
+a qualquer validação do corpo da ordem: não é defeito a consertar com código,
+nem credencial, nem allowance. Enquanto o host LIVE for este, **não fundeie a
+carteira** — ver §8.1, passo 0.
+
+Para o que esta máquina faz — gravar e rodar SHADOW — Londres continua boa, e
+a escolha é de baixo impacto: a cadência medida do feed (p50 ~0,9s, API_NOTES
+13.1) torna a latência de rede praticamente irrelevante para esta estratégia.
+Se o backtest mostrar sensibilidade real a latência, revisita-se; enquanto não
+mostrar, é ruído.
 
 ---
 
@@ -20,7 +31,7 @@ Qualquer VPS pequena serve. O recorder é I/O de rede e escrita sequencial:
 | vCPU | 1 | o processo passa a vida esperando socket |
 | RAM | 1 GB | fila assíncrona + buffers de WS |
 | Disco | **80 GB** (mín. 50 GB com descarga periódica) | ~470 MB/h comprimido (ver §6); 72h ≈ 34 GB |
-| Região | Londres | ver ressalva acima |
+| Região | Londres | grava e roda SHADOW; **não** opera LIVE — ver acima |
 
 Ubuntu 24.04 LTS. Ao criar, adicione sua chave SSH.
 
@@ -589,16 +600,35 @@ reação: 6 caducidades/h × até 300 s seriam 1.800 s/h contra a meta de 60 s/h
 sudo systemctl stop pulsearb-recorder
 sudo systemctl status pulsearb-recorder     # confirmar 'inactive (dead)'
 
-# 2. atualizar e reinstalar
-cd ~/pulsearb
-git pull
-.venv/bin/pip install -e .
+# 2. atualizar e reinstalar — em /opt/pulsearb, que é o que o systemd roda
+cd /opt/pulsearb
+sudo git pull origin main
+sudo .venv/bin/pip install -e .
+sudo chown -R pulsearb:pulsearb /opt/pulsearb
 
-# 3. UMA HORA de teste — não pule
-.venv/bin/python -m pulsearb.recorder --duration 1h
+# 3. a unit INSTALADA tem de ser a do repositório
+diff /etc/systemd/system/pulsearb-recorder.service \
+     /opt/pulsearb/deploy/pulsearb-recorder.service && echo IDENTICAS
 
-# 4. conferir a meta de aceite (ver abaixo) ANTES da gravação longa
+# 4. UMA HORA de teste — não pule
+cd /opt/pulsearb && sudo -u pulsearb .venv/bin/python -m pulsearb.recorder --duration 1h
+
+# 5. conferir a meta de aceite (ver abaixo) ANTES da gravação longa
 ```
+
+**`/opt/pulsearb`, e nunca `~/pulsearb`.** Escrito assim porque a versão
+anterior desta sequência dizia `cd ~/pulsearb`: como ela se roda com `sudo`,
+o `~` é `/root`, e o comando cria (ou atualiza) um **segundo clone** que o
+systemd não usa. Encontrado na VPS em 2026-09-18 — havia um `/root/pulsearb`
+de 100 MB, parado num commit antigo, ao lado do `/opt/pulsearb` de verdade.
+`git pull` nele atualiza nada que rode, e `.venv/bin/pip install -e .` ali
+instala noutro venv. O passo 3 existe pela mesma razão: a unit instalada
+tinha `User=root` onde o repositório diz `User=pulsearb`, e quem lê só o
+repositório não descobre isso.
+
+**O passo 4 precisa de espaço em disco.** Uma hora custa ~470 MB (§6). Se
+`df -h /` mostrar menos de ~1 GB livre, recolha as gravações antigas (§7)
+antes — não comece pelo teste e descubra o disco cheio no meio dele.
 
 ### A meta de aceite, e onde lê-la
 
@@ -642,6 +672,12 @@ sudo systemctl status pulsearb-recorder
 # e a verificação pós-start da §5.1, que continua obrigatória
 ```
 
+**E confira que ela ficou de pé.** `systemctl stop` não é falha, então
+`Restart=always` não a reergue: uma gravação parada à mão fica parada para
+sempre, calada. Foi o que aconteceu entre 11 e 18/09/2026 — o passo 1 desta
+sequência correu, os outros não, e o recorder passou **uma semana inteira**
+sem gravar sem nada denunciar. Se você parar aqui, anote onde parou.
+
 ## 8. Parar
 
 ```bash
@@ -676,6 +712,39 @@ Sem elas a ordem é aceita pelo CLOB e falha na liquidação. Não é erro de
 assinatura, e a mensagem não fala em allowance.
 
 Ordem dos passos:
+
+0. **Conferir que o host pode NEGOCIAR — antes de pôr dinheiro em qualquer
+   lugar.** `[MEDIDO 2026-09-18]` O CLOB recusa ordens por região, e a VPS de
+   Londres é uma das recusadas (API_NOTES §17).
+
+   Este passo é uma **porta**, e a numeração zero é só para dizer o que ela
+   guarda: ele precisa das credenciais, então corre **depois de 1, 2, 6 e 7**
+   — que não custam nada nem expõem capital — e **antes de 3, 4 e 5**, que
+   põem dinheiro e aprovações numa carteira quente. Rode-o do host que vai
+   operar LIVE, com a carteira ainda **vazia**: é para isso que o smoke exige
+   saldo zero.
+
+   ```bash
+   cd /home/pulsearb && set -a && . /home/pulsearb/.env.credenciais && set +a \
+     && PULSEARB_SMOKE_ORDEM="EU ACEITO ENVIAR UMA ORDEM REAL" \
+     /opt/pulsearb/.venv/bin/python \
+     /opt/pulsearb/scripts/smoke_ordem_assinada.py
+   ```
+
+   (A frase é a do smoke, `PULSEARB_SMOKE_ORDEM`, e **não** é a do item 3.4:
+   este script envia uma ordem, não liga o modo LIVE.)
+
+   - `motivo: auth_recusada` com `403 Trading restricted in your region` →
+     **pare aqui.** Este host não opera LIVE com código nenhum. Não execute os
+     passos 3, 4 e 5: fundear e aprovar allowances deixaria dinheiro e
+     aprovações numa carteira que não pode enviar ordem.
+   - recusa de NEGÓCIO (saldo insuficiente, allowance em falta) → o host
+     negocia; siga para 3.
+
+   Onde o bot pode operar legalmente é decisão de quem o opera, e é de
+   conformidade antes de ser técnica. Este runbook regista o facto medido e
+   manda verificar antes de gastar; contornar o bloqueio não é caminho que
+   este projeto tome.
 
 1. **Criar a carteira nova.** Chave privada gerada offline, na máquina que vai
    operar. Não importar chave que já existiu em outro lugar.
@@ -752,6 +821,11 @@ carteira vier a receber depois.
 
 **Checklist antes da primeira ordem real:**
 
+- [ ] **o host NÃO é recusado por região** — passo 0 da §8.1 rodado NESTA
+      máquina, com a carteira vazia, e a recusa NÃO foi `403 Trading
+      restricted in your region` (API_NOTES §17). Esta linha é a primeira
+      porque é a única que, se falhar, condena as outras: não há allowance,
+      capital nem credencial que faça um host bloqueado enviar ordem.
 - [ ] carteira nova, chave nunca usada em outro lugar
 - [ ] só o capital de operação em USDC, e MATIC para gás
 - [ ] allowance de USDC setada, no valor do capital e não infinita
