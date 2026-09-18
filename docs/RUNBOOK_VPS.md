@@ -524,6 +524,36 @@ Precedente, e é por isso que esta secção existe: em 18/08 dois arquivos
 saíram corrompidos e o dia inteiro deu **732 janelas conhecidas e ZERO com
 resolução**. Ninguém sabia até alguém olhar (quadro 4.1).
 
+### O relatório já conta os arquivos ilegíveis — leia esse campo
+
+`reader.arquivos_ilegiveis` conta todo arquivo que o leitor não conseguiu
+abrir, e o backtest escreve a contagem em `gravacao.arquivos_ilegiveis`.
+Ele não sobe erro e não pára: conta e segue para o próximo. Isso é
+deliberado — uma hora ilegível não pode matar a leitura das outras 71 —
+mas significa que **um relatório com arquivo ilegível parece um relatório
+normal** se ninguém olhar o campo.
+
+```bash
+for f in relatorios/DIA_*.json; do
+  printf "%-42s " "$(basename "$f")"
+  jq -c '{ilegiveis: (.gravacao.arquivos_ilegiveis|length),
+          conhecidas: .gravacao.janelas_conhecidas,
+          com_resolucao: .gravacao.janelas_com_resolucao}' "$f"
+done
+```
+
+A **taxa de resolução** (`com_resolucao / conhecidas`) é o segundo olhar, e
+apanha o estrago que a contagem sozinha não mede. Medido em 2026-09-18 sobre
+os sete dias de agosto: os dias sãos ficam entre **0,888 e 0,916**, e o dia
+19/08 deu **164 de 670 = 0,2448** — três em cada quatro janelas sem
+resolução, com apenas UM arquivo ilegível. Um arquivo perdido não custa uma
+hora: custa o que aquela hora encadeava.
+
+O dia 18/08 é o caso extremo: 3 ilegíveis, 732 janelas conhecidas, **zero**
+com resolução. Esse foi notado na altura; os outros nove arquivos
+corrompidos da mesma pasta só apareceram um mês depois, numa varredura
+`gzip -t` completa — e os relatórios diziam a contagem certa o tempo todo.
+
 ### Antes do backtest longo: converta para colunar
 
 Sobre 72h de JSONL, cada cenário do backtest reparseia o arquivo inteiro. A
