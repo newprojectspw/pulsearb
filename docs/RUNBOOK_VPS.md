@@ -760,6 +760,18 @@ carteira vier a receber depois.
 - [ ] as 5 variáveis no `EnvironmentFile`, arquivo `0600`
 - [ ] `chronyc tracking` verde (item 5.4 recusa LIVE sem NTP)
 - [ ] o endereço público anotado onde a equipe vê; a chave privada em lugar nenhum
+- [ ] **o venv tem `eth-account`** — `.venv/bin/python -c "import eth_account"`
+
+  **Medido em 2026-09-18, e o achado é a razão desta linha existir.** O venv da
+  VPS tinha todas as dependências menos essa, e `eth-account` é a biblioteca
+  que ASSINA a ordem (`execution/ordem.py`, API_NOTES §1.4). Nada quebrou
+  durante semanas porque o recorder e o SHADOW nunca assinam nada: o
+  `ModuleNotFoundError` só aparece na primeira ordem de verdade. Um ambiente
+  que roda 24 h e só falha no dia do dinheiro é o pior tipo de falha.
+
+  A causa: o venv foi criado antes de `eth-account` entrar no `pyproject.toml`
+  e nunca mais foi sincronizado. O conserto é `pip install -e .`, que é seguro
+  porque todas as versões estão fixadas.
 
 ## 9. Checklist da primeira hora
 
