@@ -66,6 +66,20 @@ def test_snapshot_carrega_o_que_o_m2_precisa():
     assert snapshot["end_date_iso"]
 
 
+def test_recorder_assina_twap_thirty_so_com_a_opcao(tmp_path):
+    """Auditoria §2.2: a opção `feeds.rtds_assinar_twap_thirty` tem de chegar
+    ao feed — e por defeito NÃO muda o que o recorder grava."""
+    from pulsearb.feeds.rtds import TOPIC_TWAP_30
+
+    settings = Settings.load("inexistente.yaml")
+    settings.recorder.output_dir = str(tmp_path)
+    assert settings.feeds.rtds_assinar_twap_thirty is False
+    assert all(TOPIC_TWAP_30 not in f.topicos_assinados for f in Recorder(settings).rtds_feeds)
+
+    settings.feeds.rtds_assinar_twap_thirty = True
+    assert all(TOPIC_TWAP_30 in f.topicos_assinados for f in Recorder(settings).rtds_feeds)
+
+
 @pytest.fixture
 def recorder(server, tmp_path):  # noqa: F811
     settings = Settings.load("config.yaml")

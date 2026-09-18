@@ -26,6 +26,11 @@ from pulsearb.numeros import numero
 
 TOPIC_BINANCE = "crypto_prices"
 TOPIC_TWAP_60 = "crypto_prices_twap_sixty"
+#: TWAP Chainlink de 30 s (API_NOTES §6.2). Só o de 60 s liquida os mercados
+#: observados (§12.3, nota sem data) — a auditoria 2026-09-17 §2.2 quer a
+#: prova directa de que as janelas de 5m não usam este. Assina-se por opção
+#: (`feeds.rtds_assinar_twap_thirty`), desligada por defeito.
+TOPIC_TWAP_30 = "crypto_prices_twap_thirty"
 
 _E18 = 10**18
 
@@ -199,10 +204,18 @@ class RtdsFeed(ReconnectingFeed):
         on_tick: Any = None,  # Callable[[PriceTick], None] | None
         on_event: OnEvent | None = None,
         topico_mudo_s: float | None = None,
+        topicos_extra: tuple[str, ...] = (),
         **kwargs: Any,
     ) -> None:
         self.topico_mudo_s = topico_mudo_s
         super().__init__(name="rtds", url=url, user_agent=user_agent, on_event=on_event, **kwargs)
+        #: O que ESTA conexão assina: os dois tópicos da estratégia mais os
+        #: extras pedidos (hoje só `TOPIC_TWAP_30`, para a prova do §2.2). É o
+        #: mesmo conjunto que o detector de tópico mudo vigia — assinar um
+        #: tópico e não o vigiar seria gravar silêncio sem o notar.
+        self.topicos_assinados: tuple[str, ...] = self.TOPICOS_ASSINADOS + tuple(
+            t for t in topicos_extra if t not in self.TOPICOS_ASSINADOS
+        )
         self.assets = [a.lower() for a in assets]
         self.on_tick = on_tick
         self.last_tick_by_key: dict[tuple[str, str], PriceTick] = {}
@@ -222,8 +235,7 @@ class RtdsFeed(ReconnectingFeed):
             {
                 "action": "subscribe",
                 "subscriptions": [
-                    {"topic": TOPIC_BINANCE, "type": "update"},
-                    {"topic": TOPIC_TWAP_60, "type": "update"},
+                    {"topic": topico, "type": "update"} for topico in self.topicos_assinados
                 ],
             }
         ).decode()
@@ -277,7 +289,7 @@ class RtdsFeed(ReconnectingFeed):
         if not self.topico_mudo_s:
             return None
         idades = self.idade_por_topico_e_ativo()
-        assinados = set(self.TOPICOS_ASSINADOS)
+        assinados = set(self.topicos_assinados)
         mudos = sorted(
             (idade, topico, asset)
             for (topico, asset), idade in idades.items()

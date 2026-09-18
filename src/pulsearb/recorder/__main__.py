@@ -49,7 +49,7 @@ from pulsearb.feeds.poly_ws import (
     PolyMarketWsFeed,
     tokens_do_evento,
 )
-from pulsearb.feeds.rtds import RtdsFeed, parse_rtds_event
+from pulsearb.feeds.rtds import TOPIC_TWAP_30, RtdsFeed, parse_rtds_event
 from pulsearb.markets.discovery import (
     DiscoveredMarket,
     MarketDiscovery,
@@ -190,6 +190,10 @@ class Recorder:
                 # dava para saber qual reclamava.
                 reassinaturas_ate_derrubar=(
                     settings.feeds.rtds_reassinaturas_ate_derrubar
+                ),
+                # §2.2: o TWAP de 30 s só entra quando a gravação é para isso.
+                topicos_extra=(
+                    (TOPIC_TWAP_30,) if settings.feeds.rtds_assinar_twap_thirty else ()
                 ),
                 rotulo=f"rtds[{indice}]",
             )

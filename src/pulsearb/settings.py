@@ -90,6 +90,13 @@ class FeedSettings(BaseModel):
     # somando o limiar de topico mudo. Contra os 997s observados num unico
     # alarme, e outra ordem de grandeza.
     rtds_reassinaturas_ate_derrubar: int = 3
+    # TWAP DE 30 s (auditoria 2026-09-17 §2.2). O recorder assina só o de
+    # 60 s, e a nota do API_NOTES §12.3 que diz "60 s para todas as durações"
+    # não tem data. A prova directa de que as janelas de 5m não liquidam pelo
+    # de 30 s exige GRAVAR o tópico de 30 s e correr a varredura τ com ele.
+    # Desligado por defeito: dobra o tráfego do RTDS (~26 mil eventos/h a
+    # mais) e o engine não o consome. Liga-se numa gravação de 72 h dedicada.
+    rtds_assinar_twap_thirty: bool = False
 
 
 class RecorderSettings(BaseModel):

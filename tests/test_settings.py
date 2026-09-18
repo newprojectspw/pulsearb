@@ -45,6 +45,8 @@ def test_watchdog_por_tipo_de_feed():
     assert feeds.stale_after_seconds_twap == 5.0
     assert feeds.stale_after_seconds_spot == 3.0
     assert feeds.stale_after_seconds_book == 30.0
+    # §2.2: o TWAP de 30 s é opt-in; o defeito NÃO muda o que o recorder grava.
+    assert feeds.rtds_assinar_twap_thirty is False
     # Cada limiar precisa ficar ACIMA do p99 medido do seu feed.
     assert feeds.stale_after_seconds_twap > 2.47
     assert feeds.stale_after_seconds_spot > 1.20
