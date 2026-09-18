@@ -3,11 +3,22 @@
 Do zero até uma gravação de 72h rodando. Testável por quem nunca viu o
 projeto.
 
-**Região: Londres.** Escolhida entre as candidatas, mas com uma ressalva
-honesta: a cadência medida do feed (p50 ~0,9s, API_NOTES 13.1) torna a
-latência de rede praticamente irrelevante para esta estratégia. A escolha é
-**revisável** e de baixo impacto — se o backtest mostrar sensibilidade real a
-latência, revisita-se; enquanto não mostrar, é ruído.
+Este runbook cobre **gravação e SHADOW**. A §8.1 prepara a carteira, mas o
+host LIVE precisa passar antes pelo passo 0 dela: esta VPS é recusada por
+região pelo CLOB.
+
+**Região: Londres — e esta máquina serve para GRAVAR e para SHADOW, não
+para LIVE.** `[MEDIDO 2026-09-18]` O CLOB recusa ordens vindas daqui com
+`403 Trading restricted in your region` (API_NOTES §17). A recusa é anterior
+a qualquer validação do corpo da ordem: não é defeito a consertar com código,
+nem credencial, nem allowance. Enquanto o host LIVE for este, **não fundeie a
+carteira** — ver §8.1, passo 0.
+
+Para o que esta máquina faz — gravar e rodar SHADOW — Londres continua boa, e
+a escolha é de baixo impacto: a cadência medida do feed (p50 ~0,9s, API_NOTES
+13.1) torna a latência de rede praticamente irrelevante para esta estratégia.
+Se o backtest mostrar sensibilidade real a latência, revisita-se; enquanto não
+mostrar, é ruído.
 
 ---
 
@@ -20,7 +31,7 @@ Qualquer VPS pequena serve. O recorder é I/O de rede e escrita sequencial:
 | vCPU | 1 | o processo passa a vida esperando socket |
 | RAM | 1 GB | fila assíncrona + buffers de WS |
 | Disco | **80 GB** (mín. 50 GB com descarga periódica) | ~470 MB/h comprimido (ver §6); 72h ≈ 34 GB |
-| Região | Londres | ver ressalva acima |
+| Região | Londres | grava e roda SHADOW; **não** opera LIVE — ver acima |
 
 Ubuntu 24.04 LTS. Ao criar, adicione sua chave SSH.
 
@@ -677,6 +688,39 @@ assinatura, e a mensagem não fala em allowance.
 
 Ordem dos passos:
 
+0. **Conferir que o host pode NEGOCIAR — antes de pôr dinheiro em qualquer
+   lugar.** `[MEDIDO 2026-09-18]` O CLOB recusa ordens por região, e a VPS de
+   Londres é uma das recusadas (API_NOTES §17).
+
+   Este passo é uma **porta**, e a numeração zero é só para dizer o que ela
+   guarda: ele precisa das credenciais, então corre **depois de 1, 2, 6 e 7**
+   — que não custam nada nem expõem capital — e **antes de 3, 4 e 5**, que
+   põem dinheiro e aprovações numa carteira quente. Rode-o do host que vai
+   operar LIVE, com a carteira ainda **vazia**: é para isso que o smoke exige
+   saldo zero.
+
+   ```bash
+   cd /home/pulsearb && set -a && . /home/pulsearb/.env.credenciais && set +a \
+     && PULSEARB_SMOKE_ORDEM="EU ACEITO ENVIAR UMA ORDEM REAL" \
+     /opt/pulsearb/.venv/bin/python \
+     /opt/pulsearb/scripts/smoke_ordem_assinada.py
+   ```
+
+   (A frase é a do smoke, `PULSEARB_SMOKE_ORDEM`, e **não** é a do item 3.4:
+   este script envia uma ordem, não liga o modo LIVE.)
+
+   - `motivo: auth_recusada` com `403 Trading restricted in your region` →
+     **pare aqui.** Este host não opera LIVE com código nenhum. Não execute os
+     passos 3, 4 e 5: fundear e aprovar allowances deixaria dinheiro e
+     aprovações numa carteira que não pode enviar ordem.
+   - recusa de NEGÓCIO (saldo insuficiente, allowance em falta) → o host
+     negocia; siga para 3.
+
+   Onde o bot pode operar legalmente é decisão de quem o opera, e é de
+   conformidade antes de ser técnica. Este runbook regista o facto medido e
+   manda verificar antes de gastar; contornar o bloqueio não é caminho que
+   este projeto tome.
+
 1. **Criar a carteira nova.** Chave privada gerada offline, na máquina que vai
    operar. Não importar chave que já existiu em outro lugar.
 2. **Anotar o endereço** (público — pode ir para o `.env` e para este runbook).
@@ -752,6 +796,11 @@ carteira vier a receber depois.
 
 **Checklist antes da primeira ordem real:**
 
+- [ ] **o host NÃO é recusado por região** — passo 0 da §8.1 rodado NESTA
+      máquina, com a carteira vazia, e a recusa NÃO foi `403 Trading
+      restricted in your region` (API_NOTES §17). Esta linha é a primeira
+      porque é a única que, se falhar, condena as outras: não há allowance,
+      capital nem credencial que faça um host bloqueado enviar ordem.
 - [ ] carteira nova, chave nunca usada em outro lugar
 - [ ] só o capital de operação em USDC, e MATIC para gás
 - [ ] allowance de USDC setada, no valor do capital e não infinita

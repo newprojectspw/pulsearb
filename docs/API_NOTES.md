@@ -1703,17 +1703,33 @@ detalhe: {'status': 403, 'resposta': {'error': 'Trading restricted in your
 
 ### O que esta resposta PROVA que funciona
 
-Tudo o que vem antes da recusa, e é muito:
+Tudo o que vem antes da recusa — e é preciso ser exacto sobre o que é
+"tudo", porque a primeira versão desta seção afirmou demais:
 
-- **A assinatura L2 está certa.** A leitura de saldo (`0.0`) usa o mesmo
-  mecanismo de autenticação e passou. Um erro de assinatura daria 401 ali,
-  antes de chegar à ordem.
+- **As credenciais L2 estão certas, e a assinatura de GET também.** A leitura
+  de saldo (`0.0`) passou, e ela é autenticada. Um segredo, `api_key` ou
+  passphrase errados dariam 401 ali.
 - **A descoberta funciona ao vivo**: achou `btc-updown-5m-1789742700`,
   tick 0,01, mercado operável.
-- **A construção e o envio da ordem funcionam**: FOK, 5 shares a 0,01, preço
-  que não cruza. O corpo saiu, o servidor respondeu.
+- **A construção e o envio da ordem funcionam** até ao fio: FOK, 5 shares a
+  0,01, preço que não cruza. O corpo saiu e o servidor respondeu.
 - **As travas do smoke funcionam**: leu o saldo antes de tudo e só seguiu
   por ser zero.
+
+### O que continua POR VERIFICAR, e é preciso dizer
+
+**A assinatura L2 do POST da ordem.** `assinar_l2` assina
+`timestamp + method + request_path + body` (§3). A leitura de saldo é um
+**GET** de `/balance-allowance` com **corpo vazio**; a ordem é um **POST**
+de `/order` com corpo. São mensagens diferentes, e a parte que o GET nunca
+exercita é justamente a serialização canónica do corpo — onde um byte a mais
+ou uma chave fora de ordem quebra o HMAC sem avisar.
+
+O 403 de região chega ANTES de o servidor validar a assinatura do POST.
+Portanto, mudar para uma região permitida pode ainda revelar um 401 no
+`/order`. Isso não seria regressão: seria a primeira vez que essa assinatura
+é testada. (Achado do Codex na revisão do PR #160; a versão anterior desta
+seção dizia "a assinatura L2 está certa" sem esta distinção.)
 
 ### O que ela BLOQUEIA
 
@@ -1726,9 +1742,10 @@ Tudo o que vem antes da recusa, e é muito:
 
 ### O que NÃO é
 
-Não é assinatura errada, não é credencial expirada, não é allowance em
-falta, não é a ordem mal construída. Nenhuma dessas hipóteses produz 403 com
-esta mensagem, e a leitura de saldo bem sucedida exclui as duas primeiras.
+Não é credencial expirada, não é allowance em falta, não é a ordem mal
+construída. Nenhuma dessas hipóteses produz 403 com esta mensagem, e a
+leitura de saldo bem sucedida exclui a credencial. Sobre a assinatura do
+POST não se pode dizer nem uma coisa nem outra: ela não foi avaliada.
 
 ### O que fica em aberto
 
