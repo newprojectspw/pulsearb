@@ -373,3 +373,74 @@ def test_sem_nenhum_medido_o_liquido_nos_medidos_e_None_e_NUNCA_zero() -> None:
     assert nenhum["mercados_com_custo_de_saida"] == 0
     assert nenhum["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] is None
     assert nenhum["receita_nos_medidos_usdc_por_hora"] is None
+
+
+# ─────────────────────── 2026-09-18: o critério 1.12d e o selector, decididos
+
+
+def test_1_12d_soma_os_medidos_quando_a_cobertura_de_shares_basta() -> None:
+    """95 % do fluxo medido: o número sai, e é a soma dos medidos."""
+    sub = [_mercado(10, 950, 2.0), _mercado(8, 50, None)]
+    s = conta._soma_do_recorte(sub)
+
+    assert s["cobertura_de_shares_medidas"] == pytest.approx(0.95)
+    assert s["liquido_do_1_12d_usdc_por_hora"] == pytest.approx(8.0)
+    # Os dois diagnósticos continuam publicados, e discordam entre si.
+    assert s["liquido_com_custo_de_saida_usdc_por_hora"] is None, "cobertura completa: regra fica"
+    assert s["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] == pytest.approx(8.0)
+
+
+def test_1_12d_RECUSA_abaixo_do_limiar_e_diz_quanto_faltou() -> None:
+    """50 % do fluxo medido: não responde, e publica a fracção que faltou."""
+    sub = [_mercado(10, 500, 2.0), _mercado(8, 500, None)]
+    s = conta._soma_do_recorte(sub)
+
+    assert s["cobertura_de_shares_medidas"] == pytest.approx(0.5)
+    assert s["liquido_do_1_12d_usdc_por_hora"] is None
+    assert s["cobertura_minima_exigida"] == conta.COBERTURA_MINIMA_DE_SHARES
+    # E o número frouxo continua lá, para a escolha do critério ser auditável.
+    assert s["liquido_com_custo_de_saida_nos_medidos_usdc_por_hora"] == pytest.approx(8.0)
+
+
+def test_cobertura_e_de_SHARES_e_nao_de_contagem_de_mercados() -> None:
+    """Um mercado grande sem medida reprova; nove pequenos sem medida não.
+
+    Contagem diria 'metade coberta' nos dois casos. O que atropela a cotação
+    é fluxo, e é por fluxo que o limiar pesa.
+    """
+    grande_sem_medida = [_mercado(10, 100, 2.0), _mercado(8, 900, None)]
+    assert conta._soma_do_recorte(grande_sem_medida)["liquido_do_1_12d_usdc_por_hora"] is None
+
+    pequenos_sem_medida = [_mercado(10, 950, 2.0)] + [_mercado(1, 5, None) for _ in range(9)]
+    s = conta._soma_do_recorte(pequenos_sem_medida)
+    assert s["cobertura_de_shares_medidas"] == pytest.approx(950 / 995, abs=1e-4)
+    assert s["liquido_do_1_12d_usdc_por_hora"] == pytest.approx(8.0)
+
+
+def test_recorte_sem_fluxo_nenhum_nao_finge_cobertura() -> None:
+    s = conta._soma_do_recorte([_mercado(10, 0, None)])
+    assert s["cobertura_de_shares_medidas"] is None
+    assert s["liquido_do_1_12d_usdc_por_hora"] is None
+
+
+def test_selector_ordena_por_receita_por_mil_shares_e_nao_por_liquido() -> None:
+    """O mercado que paga mais por unidade de fluxo vem primeiro, mesmo que
+    outro tenha líquido bruto maior. É a troca decidida em 2026-09-18."""
+    def _m(nome: str, liquido: float, por_mil: float | None) -> dict:
+        return {
+            "pergunta": nome,
+            "liquido_no_pior_caso_usdc_por_hora": liquido,
+            "receita_por_mil_shares": por_mil,
+        }
+
+    linhas = [
+        _m("grande e caro", 50.0, 2.0),   # líquido alto, paga pouco por share
+        _m("pequeno e caro", 3.0, 40.0),  # líquido baixo, paga MUITO por share
+        _m("sem fluxo medido", 9.0, None),
+    ]
+    linhas.sort(key=conta._chave_do_selector)
+
+    assert [x["pergunta"] for x in linhas] == [
+        "pequeno e caro", "grande e caro", "sem fluxo medido",
+    ]
+    assert conta.ORDENADO_POR == "receita_por_mil_shares"
