@@ -177,6 +177,32 @@ class TestSobreGravacao:
         atrasos = rel["atrasos_chegada_menos_servidor"]["price_changes"]
         assert atrasos == {"<=50ms": 1, "<=5000ms": 1}  # 0 ms e 1.400 ms
 
+    def test_livro_pos_negocio_emitido_antes_do_print_nao_engana_a_janela(self, tmp_path):
+        """O mecanismo medido na M2_72H (exemplo real: print 0,69 BUY, topo
+        bid 0,69/ask 0,70 um milissegundo ANTES). O servidor emite o livro já
+        sem o ask consumido antes do print do negócio que o consumiu; pelo
+        alinhamento estrito o fill aparece no bid e "discorda"; a janela vê o
+        ask de 0,69 que existia. 40 prints assim: estrito MAKER, janela TAKER.
+        """
+        regs = []
+        for i in range(40):
+            base = 10_000 + i * 1_000
+            regs.append(_delta(base, 0.68, 0.69))           # livro pré-negócio
+            regs.append(_delta(base + 99, 0.69, 0.70))      # livro pós-negócio…
+            regs.append(_print(base + 100, 0.69, "BUY"))    # …emitido 1 ms antes do print
+        rel = vs.verificar(_reader(_gravar(tmp_path, regs)))
+
+        assert rel["veredito_estrito"] == "MAKER", "o estrito lê o livro pós-negócio"
+        assert rel["fracao_taker"] == 0.0
+        assert rel["janela"]["concorda"] == 40 and rel["janela"]["discorda"] == 0
+        assert rel["veredito"] == "TAKER"
+        assert rel["base_do_veredito"] == "janela_de_toque"
+
+    def test_janela_inclui_o_topo_em_vigor_no_inicio_dela(self, tmp_path):
+        regs = [_delta(1_000, 0.50, 0.52), _print(9_000, 0.52, "BUY")]  # livro parado há 8 s
+        rel = vs.verificar(_reader(_gravar(tmp_path, regs)))
+        assert rel["janela"]["concorda"] == 1
+
     def test_janela_de_toque_tolera_o_livro_a_andar_no_meio_do_fill(self, tmp_path):
         regs = [
             _delta(1_000, 0.50, 0.52),
