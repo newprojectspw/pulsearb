@@ -1,42 +1,39 @@
-"""Qual janela do TWAP resolve cada duração: 30 s ou 60 s? Medido, não lido.
+"""A âncora verificada (τ=0, stream twap_sixty no fecho) explica CADA duração?
 
-    python scripts/janela_do_twap.py ~/pulsearb-gravacao \
-        --desde 2026-09-09T02:19Z --ate 2026-09-12T02:19Z \
+    python scripts/janela_do_twap.py ~/pulsearb-gravacao \\
+        --desde 2026-09-09T02:19Z --ate 2026-09-12T02:19Z \\
         --json relatorios/JANELA_TWAP_M2_72H.json
 
-## Por que existe (auditoria 2026-09-17 §2.2)
+## Por que existe (auditoria 2026-09-17 §2.2), e o que a v1 mediu de errado
 
-`engine/twap.py` usa `TWAP_WINDOW_SECONDS_DEFAULT = 60` para TODAS as
-durações. O API_NOTES diz as duas coisas: §7 "5m usa 30 s", §12.3 "o dado
-vivo mostra 60 s para todas" — e a nota do §12.3 NÃO TEM DATA. A mudança
-pública é datada: a Polymarket passou a liquidar por TWAP Chainlink em
-2026-08-07, com 30 s para 5m e 60 s para 15m/4h. Se a observação do §12.3
-foi feita antes disso, o engine modela as janelas de 5m com a janela errada.
+`engine/twap.py` usa 60 s para TODAS as durações; o API_NOTES §7 diz "5m usa
+30 s" e o §12.3, sem data, "60 s para todas". A v1 deste script comparou
+janelas de 30 e 60 s calculando a MÉDIA das amostras do stream antes do
+fecho — e o M2.6 já tinha provado que essa definição de final perde
+(`final_media_60s` 0,9648 contra `final_stream_no_fechamento` 1,0; API_NOTES
+§13.8). Na M2_72H a v1 deu 55 e 102 "erros" para 5m: ruído da definição
+errada, não evidência sobre a janela. Um script que mede pela definição que
+sabidamente perde não responde a pergunta nenhuma.
 
-## O que mede
+## O que esta versão mede
 
-Para cada duração (300, 900, 14400 s) e cada janela candidata (30 e 60 s),
-roda `evaluate_hypotheses` — o MESMO código do backtest (regra "mesmo
-caminho") — sobre as janelas resolvidas da gravação e conta quantas
-resoluções reais cada janela reproduz. A janela verdadeira reproduz todas;
-a errada erra nas apertadas. O veredito por duração tem nome:
+O MESMO caminho da varredura τ do backtest (`analysis/anchor_sweep.varrer` +
+`veredito_da_ancora`): âncora = valor do stream `twap_sixty` na abertura,
+final = valor do stream no fecho, inteiros na escala 1e18, eixo = carimbo do
+servidor. Só que **por duração** (300, 900, 14400 s), em vez de tudo junto.
+
+O que responde: se τ=0 com o stream de 60 s explica as resoluções das janelas
+de 5m tão bem quanto as de 15m e 4h, então o que liquida as de 5m é o TWAP de
+60 s, e a nota do §12.3 pode ganhar data. Se as de 5m discordarem mais, a
+janela delas é outra — e a prova final exige gravar `crypto_prices_twap_thirty`
+(o recorder só assina o de 60 s; `feeds/rtds.TOPICOS_ASSINADOS`).
 
 | veredito | quando |
 |---|---|
-| `JANELA_30` | só a de 30 s tem hipótese sobrevivente |
-| `JANELA_60` | só a de 60 s tem hipótese sobrevivente |
-| `AMBAS` | as duas sobrevivem — faltam janelas apertadas para separar |
-| `NENHUMA` | nenhuma sobrevive — lacuna no stream ou âncora fora das testadas; o relatório diz qual errou menos |
-| `SEM_DADO` | nenhuma janela resolvida dessa duração foi avaliada |
-
-O relatório inteiro de cada (duração, janela) vai no JSON, hipótese a
-hipótese, para quem quiser ler o que sobreviveu e o que não.
-
-## O que NÃO decide
-
-Este script não muda o engine. Se der `JANELA_30` para 5m, a mudança é
-`TWAP_WINDOW_SECONDS_DEFAULT` por duração e a nota do §12.3 ganha data —
-mas isso é outro commit, com o número deste relatório citado.
+| `CONFIRMADA` | τ=0 explica ≥ 98 % das elegíveis (limiar do backtest) |
+| `DESMENTIDA` | abaixo do limiar |
+| `SEM_AMOSTRA` | menos de 20 elegíveis, ou todas indeterminadas |
+| `SEM_DADO` | nenhuma janela resolvida da duração |
 """
 
 from __future__ import annotations
@@ -45,134 +42,92 @@ import argparse
 import json
 import sys
 from collections import defaultdict
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from pulsearb.analysis.anchor_sweep import (
+    JanelaResolvida,
+    varrer,
+    veredito_da_ancora,
+)
 from pulsearb.backtest.__main__ import Progresso, RecordingIndex, caminho_de_leitura
 from pulsearb.caminhos import caminho_de_escrita
-from pulsearb.engine.anchor import (
-    WindowOutcome,
-    evaluate_hypotheses,
-    report_anchor_validation,
-)
 from pulsearb.replay.reader import RecordingReader
 
-JANELAS_PADRAO: tuple[float, ...] = (30.0, 60.0)
-
 VEREDITOS: dict[str, str] = {
-    "JANELA_30": "só a janela de 30 s reproduz todas as resoluções desta duração",
-    "JANELA_60": "só a janela de 60 s reproduz todas as resoluções desta duração",
-    "AMBAS": "as duas janelas sobrevivem — faltam janelas apertadas para separá-las",
-    "NENHUMA": (
-        "nenhuma janela reproduz todas as resoluções — lacuna no stream ou "
-        "âncora fora das hipóteses; ver `menos_erros`"
-    ),
-    "SEM_DADO": "nenhuma janela resolvida desta duração foi avaliada",
+    "CONFIRMADA": "τ=0 com o stream twap_sixty explica as resoluções desta duração",
+    "DESMENTIDA": "τ=0 com o stream twap_sixty NÃO explica esta duração — a janela é outra",
+    "SEM_AMOSTRA": "poucas janelas elegíveis, ou todas indeterminadas — sem evidência",
+    "SEM_DADO": "nenhuma janela resolvida desta duração",
 }
 
 
-def _rotulo(janela_s: float) -> str:
-    return f"JANELA_{int(janela_s)}"
-
-
-def _menos_erros(por_janela: dict[str, dict[str, Any]]) -> str | None:
-    """A janela cuja MELHOR hipótese errou menos. None se nada foi avaliado."""
-    candidatas = [
-        (r["erros_minimos"], rotulo)
-        for rotulo, r in por_janela.items()
-        if r["erros_minimos"] is not None
-    ]
-    if not candidatas:
-        return None
-    candidatas.sort()
-    if len(candidatas) > 1 and candidatas[0][0] == candidatas[1][0]:
-        return None  # empate: não há "menos"
-    return candidatas[0][1]
-
-
-def _veredito(por_janela: dict[str, dict[str, Any]], janelas_s: Sequence[float]) -> str:
-    avaliadas = [r for r in por_janela.values() if r["avaliadas"] > 0]
-    if not avaliadas:
-        return "SEM_DADO"
-    vivas = [rotulo for rotulo, r in por_janela.items() if r["sobreviventes"]]
-    if len(vivas) == 1 and len(janelas_s) == 2 and vivas[0] in ("JANELA_30", "JANELA_60"):
-        return vivas[0]
-    if len(vivas) >= 2:
-        return "AMBAS"
-    if len(vivas) == 1:
-        return "AMBAS"  # janelas fora do par 30/60: o nome fixo não se aplica
-    return "NENHUMA"
+def _rotulo(veredito: dict[str, Any]) -> str:
+    confirmada = veredito.get("confirmada")
+    if confirmada is True:
+        return "CONFIRMADA"
+    if confirmada is False:
+        return "DESMENTIDA"
+    return "SEM_AMOSTRA"
 
 
 def comparar(
-    por_duracao: dict[int, Sequence[WindowOutcome]],
-    *,
-    janelas_s: Sequence[float] = JANELAS_PADRAO,
+    por_duracao: dict[int, list[JanelaResolvida]],
+    streams_e18: dict[str, list[tuple[int, int]]],
 ) -> dict[str, Any]:
-    """Roda as hipóteses com cada janela, por duração. Pura."""
+    """A varredura τ do backtest, por duração. Pura."""
     saida: dict[str, Any] = {}
     for duracao_s in sorted(por_duracao):
-        outcomes = por_duracao[duracao_s]
-        por_janela: dict[str, dict[str, Any]] = {}
-        for janela_s in janelas_s:
-            scores = evaluate_hypotheses(outcomes, window_seconds=janela_s)
-            relatorio = report_anchor_validation(scores)
-            avaliados = [s.total_avaliado for s in scores.values()]
-            erros = [s.erros for s in scores.values() if s.total_avaliado > 0]
-            por_janela[_rotulo(janela_s)] = {
-                "janela_s": janela_s,
-                "avaliadas": max(avaliados, default=0),
-                "sobreviventes": [h.value for h, s in scores.items() if s.sobreviveu],
-                "erros_minimos": min(erros) if erros else None,
-                "relatorio": relatorio,
-            }
-        veredito = _veredito(por_janela, janelas_s)
+        janelas = por_duracao[duracao_s]
+        if not janelas:
+            rotulo, veredito, varredura = "SEM_DADO", {}, {}
+        else:
+            varredura = varrer(janelas, streams_e18)
+            veredito = veredito_da_ancora(varredura)
+            rotulo = _rotulo(veredito)
+        fino = varredura.get("final_stream_no_fechamento") or {}
         saida[str(duracao_s)] = {
             "duracao_s": duracao_s,
-            "janelas_alimentadas": len(outcomes),
-            "veredito": veredito,
-            "o_que_significa": VEREDITOS[veredito],
-            "menos_erros": _menos_erros(por_janela),
-            "por_janela": por_janela,
+            "veredito": rotulo,
+            "o_que_significa": VEREDITOS[rotulo],
+            "janelas_recebidas": len(janelas),
+            "janelas_elegiveis": veredito.get("janelas_elegiveis"),
+            "consistencia_tau0": veredito.get("consistencia_do_tau_verificado"),
+            "janelas_discordantes": veredito.get("janelas_discordantes"),
+            "janelas_indeterminadas": veredito.get("janelas_indeterminadas"),
+            "regiao_viavel_100pct": veredito.get("regiao_viavel_100pct"),
+            "melhores_tau": (fino.get("melhores_tau") or [])[:3],
+            "discordantes_em_tau0": varredura.get("discordantes_em_tau_verificado") or [],
+            "texto_do_veredito": veredito.get("veredito"),
         }
     return saida
 
 
 def _hora_utc(bruto: str | None) -> datetime | None:
-    """ISO 8601 → UTC. Offset explícito é CONVERTIDO, não relabelado.
-
-    `replace(tzinfo=UTC)` sobre `2026-09-09T00:00-03:00` dava 00:00 UTC em
-    vez de 03:00 UTC, e o reader escolhia os arquivos-hora errados (Codex,
-    #149). Sem offset, a hora é lida como UTC — é o que o runbook manda.
-    """
+    """ISO 8601 → UTC. Offset explícito é CONVERTIDO, não relabelado."""
     if not bruto:
         return None
     lido = datetime.fromisoformat(bruto.strip().replace("Z", "+00:00"))
     return (lido if lido.tzinfo else lido.replace(tzinfo=UTC)).astimezone(UTC)
 
 
-def _janelas_csv(bruto: str) -> tuple[float, ...]:
-    valores = tuple(float(x) for x in bruto.split(","))
-    if not valores or any(v <= 0 for v in valores):
-        raise ValueError(f"--janelas espera segundos positivos separados por vírgula: {bruto!r}")
-    return valores
-
-
 def _imprimir(rel: dict[str, Any]) -> None:
     for bloco in rel.values():
         print(
-            f"\nduração {bloco['duracao_s']:>6} s: {bloco['janelas_alimentadas']} janelas "
-            f"resolvidas → {bloco['veredito']} ({bloco['o_que_significa']})"
+            f"\nduração {bloco['duracao_s']:>6} s: {bloco['janelas_recebidas']} recebidas, "
+            f"{bloco['janelas_elegiveis']} elegíveis → {bloco['veredito']} "
+            f"({bloco['o_que_significa']})"
         )
-        for rotulo, r in bloco["por_janela"].items():
-            sobreviventes = ", ".join(r["sobreviventes"]) or "nenhuma"
-            print(
-                f"  {rotulo:>9}: avaliadas={r['avaliadas']:<5} erros mínimos="
-                f"{r['erros_minimos']!s:<5} sobreviventes: {sobreviventes}"
-            )
-        if bloco["menos_erros"]:
-            print(f"  menos erros: {bloco['menos_erros']}")
+        print(
+            f"  consistência em τ=0: {bloco['consistencia_tau0']}  "
+            f"discordantes: {bloco['janelas_discordantes']}  "
+            f"indeterminadas: {bloco['janelas_indeterminadas']}  "
+            f"região 100 %: {bloco['regiao_viavel_100pct']}"
+        )
+        for m in bloco["melhores_tau"]:
+            print(f"    τ={m['tau_s']:>4} s  {m['consistencia']}  ({m['avaliadas']} avaliadas)")
+        if bloco["texto_do_veredito"]:
+            print(f"  {bloco['texto_do_veredito']}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -180,14 +135,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("recordings", help="diretório (ou arquivo) da gravação")
     p.add_argument("--desde", default=None)
     p.add_argument("--ate", default=None)
-    p.add_argument("--janelas", default="30,60", help="segundos, separados por vírgula")
     p.add_argument("--json", default=None)
     args = p.parse_args(argv)
     try:
         caminho = caminho_de_leitura(args.recordings)
         destino = caminho_de_escrita(args.json) if args.json else None
         desde, ate = _hora_utc(args.desde), _hora_utc(args.ate)
-        janelas_s = _janelas_csv(args.janelas)
     except ValueError as erro:
         print(str(erro), file=sys.stderr)
         return 2
@@ -197,24 +150,24 @@ def main(argv: list[str] | None = None) -> int:
     index = RecordingIndex(reader, limite_por_token=1, niveis_retidos=1, progresso=Progresso())
     index.build()
 
-    por_duracao: dict[int, list[WindowOutcome]] = defaultdict(list)
+    por_duracao: dict[int, list[JanelaResolvida]] = defaultdict(list)
     for j in index.janelas():
         if j.jogo != "twap" or j.resolveu_up is None:
             continue
         por_duracao[j.duracao_s].append(
-            WindowOutcome(
+            JanelaResolvida(
                 slug=j.slug,
-                open_ts_ns=j.open_ts_ns,
-                close_ts_ns=j.close_ts_ns,
-                samples=tuple(index.streams.get(j.asset, [])),
-                resolved_up=bool(j.resolveu_up),
+                asset=j.asset,
+                abertura_ms=j.open_ts_ns // 1_000_000,
+                fechamento_ms=j.close_ts_ns // 1_000_000,
+                resolveu_up=bool(j.resolveu_up),
             )
         )
     if not por_duracao:
         print("nenhuma janela TWAP resolvida na gravação — nada a comparar", file=sys.stderr)
         return 1
 
-    rel = comparar(por_duracao, janelas_s=janelas_s)
+    rel = comparar(por_duracao, dict(index.streams_e18))
     if destino is not None:
         destino.write_text(json.dumps(rel, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"relatório gravado em {destino}")
