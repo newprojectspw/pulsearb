@@ -366,6 +366,14 @@ da hora deixa o `.jsonl.gz` daquela hora sem o fim. O guarda disparou em
 estragar: a hora interrompida vai-se de qualquer maneira, e é por isso que
 libertar disco ANTES vale mais do que confiar no guarda.
 
+**Três arquivos estão perdidos por isto, e a perda é definitiva**
+`[MEDIDO 2026-09-18]`: `pulsearb-20260823-0100.jsonl.gz`, o
+`-002` da mesma hora e o `pulsearb-20260825-0500.jsonl.gz` falham no
+`gzip -t` **na VPS**, não só na cópia. Foi por causa deles que a verificação
+de integridade do §7 deixou de ser opcional: eles falharam primeiro do lado
+do Mac, o que parecia transferência interrompida, e só o teste na origem
+mostrou que não havia de onde recuperar.
+
 **O que isso obriga antes de qualquer `systemctl start`:**
 
 ```bash
