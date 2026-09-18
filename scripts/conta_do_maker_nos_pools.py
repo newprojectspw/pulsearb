@@ -148,12 +148,73 @@ def _custo_de_saida(markout: dict[str, Any] | None) -> dict[str, float] | None:
     return saida or None
 
 
+#: Quanto do FLUXO do recorte precisa de ter custo de saída medido para o
+#: número do 1.12d valer. Decidido por Paulo em 2026-09-18, entre três
+#: opções postas antes de ele ver qualquer resultado desta regra.
+#:
+#: Por que uma fracção de SHARES e não de mercados: o que atropela a cotação
+#: é fluxo, não contagem. Dez mercados minúsculos sem medida pesam menos que
+#: um grande, e um critério por contagem trataria os dois igual.
+#:
+#: Por que 90 % e não 100 %: com cobertura completa (a regra do Codex no
+#: #114) o número saiu `None` em TODO recorte das rodadas de 4 h e 24 h —
+#: pool de reward paga para cotar e NÃO ser executado, e mercado sem fill não
+#: gera markout de 30 min. Um critério que nunca produz número não recusa
+#: nada: só cala. Por que não "só os medidos": aí o recorte passaria com o
+#: subconjunto que por acaso teve dado, que é o achado do #114.
+COBERTURA_MINIMA_DE_SHARES = 0.90
+
+
+def _cobertura_de_shares(sub: list[dict[str, Any]], medidos: list[dict[str, Any]]) -> float | None:
+    """Fracção do fluxo do recorte que TEM custo de saída medido.
+
+    `None` quando o recorte não tem fluxo nenhum — sem shares não há fracção,
+    e devolver 1,0 ali diria "coberto" onde a verdade é "não há o que cobrir".
+    """
+    total = sum(x["volume"]["shares_por_hora"] for x in sub)
+    if total <= 0:
+        return None
+    return sum(x["volume"]["shares_por_hora"] for x in medidos) / total
+
+
+#: Como o recorte é ORDENADO — e portanto quais mercados um LIVE operaria.
+#:
+#: Era `liquido_no_pior_caso` (receita menos markout de 5 s), e o universo
+#: vinha da varredura ordenada por `daily_rate`: os pools maiores. A rodada
+#: de 4 h de 2026-09-17 mostrou o que isso escolhe — nos mercados do topo por
+#: tamanho o custo de saída comia 66 % da receita, e abaixo deles passava dos
+#: 100 %. Pool grande atrai fluxo grande, e é o fluxo que atropela a cotação.
+#:
+#: `receita_por_mil_shares` é a receita por unidade de fluxo que nos atropela:
+#: exactamente o eixo em que os seis mercados sobreviventes se separaram dos
+#: que perdem. Trocado por decisão de Paulo em 2026-09-18, ANTES das rodadas
+#: SHADOW de 14 dias — se fosse depois, elas mediriam os mercados errados.
+#:
+#: Mercado sem fluxo medido (`receita_por_mil_shares is None`) vai para o FIM,
+#: não para o início: "nenhum trade na amostra" é ausência de dado, não
+#: ausência de fluxo, e pô-lo em primeiro seria seleccionar pela falta.
+ORDENADO_POR = "receita_por_mil_shares"
+
+
+def _chave_do_selector(x: dict[str, Any]) -> float:
+    return -(x[ORDENADO_POR] or 0.0)
+
+
 def _soma_do_recorte(sub: list[dict[str, Any]]) -> dict[str, Any]:
-    """A soma de um recorte — e o líquido com custo de saída SÓ se TODOS os
-    mercados do recorte tiverem a medida. Somar os medidos e calar os outros
-    deixaria o recorte passar com um subconjunto (achado do Codex, PR #114)."""
+    """A soma de um recorte, com TRÊS líquidos com custo de saída, de propósito.
+
+    - `liquido_com_custo_de_saida_usdc_por_hora`: cobertura COMPLETA ou
+      `None` (regra do Codex, #114). Fica como diagnóstico: é o mais estrito.
+    - `liquido_com_custo_de_saida_nos_medidos_usdc_por_hora`: sobre quem tem
+      medida, sem exigir nada. Fica como diagnóstico: é o mais frouxo.
+    - `liquido_do_1_12d_usdc_por_hora`: **o que decide o item 1.12d** desde
+      2026-09-18 — sobre os medidos, mas só se eles cobrirem
+      `COBERTURA_MINIMA_DE_SHARES` do fluxo. Os outros dois continuam
+      publicados para que a escolha do critério continue auditável.
+    """
     sem_saida = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is None]
     medidos = [x for x in sub if x["liquido_com_custo_de_saida_usdc_por_hora"] is not None]
+    cobertura = _cobertura_de_shares(sub, medidos)
     return {
         "mercados": len(sub),
         "receita_usdc_por_hora": round(sum(x["receita_usdc_por_hora"] for x in sub), 4),
@@ -195,6 +256,20 @@ def _soma_do_recorte(sub: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "receita_nos_medidos_usdc_por_hora": (
             None if not medidos else round(sum(x["receita_usdc_por_hora"] for x in medidos), 4)
+        ),
+        # ─────────────────────────── O NÚMERO QUE DECIDE O 1.12d (2026-09-18)
+        # Líquido sobre os mercados medidos, mas SÓ se eles cobrirem
+        # `COBERTURA_MINIMA_DE_SHARES` do fluxo do recorte. Abaixo disso o
+        # recorte não responde — e `cobertura_de_shares_medidas` diz quanto
+        # faltou, para a recusa ter número em vez de silêncio.
+        "cobertura_de_shares_medidas": (
+            None if cobertura is None else round(cobertura, 4)
+        ),
+        "cobertura_minima_exigida": COBERTURA_MINIMA_DE_SHARES,
+        "liquido_do_1_12d_usdc_por_hora": (
+            None
+            if cobertura is None or cobertura < COBERTURA_MINIMA_DE_SHARES or not medidos
+            else round(sum(x["liquido_com_custo_de_saida_usdc_por_hora"] for x in medidos), 4)
         ),
     }
 
@@ -416,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {i}/{len(alvo)} mercados…", file=sys.stderr)
 
     com_conta = [x for x in linhas if x["liquido_no_pior_caso_usdc_por_hora"] is not None]
-    com_conta.sort(key=lambda x: -x["liquido_no_pior_caso_usdc_por_hora"])
+    com_conta.sort(key=_chave_do_selector)
 
     def _soma(quantos: int) -> dict[str, Any]:
         return _soma_do_recorte(com_conta[:quantos])
@@ -439,8 +514,11 @@ def main(argv: list[str] | None = None) -> int:
             "horizonte": HORIZONTE_DE_SAIDA,
             "regra": (
                 "max(|markout adverso a 30 min|, spread/2 no fill) em c/share "
-                "x shares/h do fluxo taker (mesma hipotese pessimista da conta de 5 s); "
-                "recorte so soma com cobertura COMPLETA"
+                "x shares/h do fluxo taker (mesma hipotese pessimista da conta de 5 s). "
+                "O 1.12d le `liquido_do_1_12d_usdc_por_hora`: soma sobre os mercados "
+                f"MEDIDOS, valida so com >= {COBERTURA_MINIMA_DE_SHARES:.0%} das shares "
+                "do recorte cobertas. Os outros dois liquidos (cobertura completa e "
+                "medidos sem exigencia) ficam publicados ao lado, como diagnostico"
             ),
             "nota": (
                 "É o termo que o 1.12 não media. Ausente aqui significa que o "
@@ -450,6 +528,14 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
         "mercados_avaliados": len(linhas),
+        "ordenado_por": ORDENADO_POR,
+        "nota_do_selector": (
+            "Os recortes sao os N primeiros nesta ordem — e portanto os "
+            "mercados que um LIVE operaria. Ate 2026-09-18 a ordem era o "
+            "liquido no pior caso sobre um universo escolhido por tamanho de "
+            "pool, e a rodada de 4 h mostrou que isso apanha justamente os "
+            "mercados em que o custo de saida come a receita."
+        ),
         # Os recortes existem para expor o ÓTIMO: passar de certo ponto
         # PIORA o líquido, porque volume (que é custo) cresce mais rápido que
         # receita. `sorted(set(...))` para não publicar `top_50` e `top_40`
