@@ -46,8 +46,21 @@ token com carimbo ≤ ao do print. Como o `price_change` pode chegar DEPOIS do
 print que descreve, os prints esperam `--espera-s` (3 s de chegada) antes de
 serem julgados. Uma segunda medida, `janela`, pergunta se o preço do print
 TOCOU o ask (BUY) ou o bid (SELL) em algum topo do último segundo de
-servidor — tolera o livro a andar no meio do fill. As duas saem lado a lado;
-o veredito usa a primeira.
+servidor — tolera o livro a andar no meio do fill. As duas saem lado a lado.
+
+## O que a v2 mediu, e por que o veredito é o da janela
+
+M2_72H, 2026-09-18: alinhamento estrito **0,8368**; janela de 1 s
+**0,9932** (1.770.661 concordam, 12.180 discordam, 18.800 sem toque). Os
+discordantes do estrito, agora com carimbo, mostram o mecanismo: o print
+de 0,69 BUY tem como "último topo ≤ carimbo" `bid 0,69 / ask 0,70`,
+**1 ms antes** — é o livro DEPOIS de a compra ter esvaziado o ask de 0,69,
+e o servidor emite esse `price_change` antes do `last_trade_price` do
+negócio que o causou. O alinhamento estrito compara o print com o livro
+pós-negócio, onde o preço do fill aparece do lado oposto. É viés
+sistemático da medida, não do campo. A janela de 1 s vê o livro
+pré-negócio e é a medida correcta para esta ordem de emissão. O veredito
+passa a ser o dela; o estrito continua no relatório como diagnóstico.
 """
 
 from __future__ import annotations
@@ -161,8 +174,12 @@ class _Topos:
         return None if i == 0 else (self.ts[i - 1], self.bid[i - 1], self.ask[i - 1])
 
     def tocou(self, ts_ms: int, janela_ms: int, preco: float) -> tuple[bool, bool]:
-        """(tocou o ask, tocou o bid) em algum topo de (ts−janela, ts]."""
-        a = bisect_right(self.ts, ts_ms - janela_ms)
+        """(tocou o ask, tocou o bid) em algum topo em vigor durante [ts−janela, ts].
+
+        Inclui o topo que já estava em vigor no início da janela: um livro
+        parado há dez segundos continua a ser o livro do último segundo.
+        """
+        a = max(0, bisect_right(self.ts, ts_ms - janela_ms) - 1)
         b = bisect_right(self.ts, ts_ms)
         asks = self.ask[a:b]
         bids = self.bid[a:b]
@@ -217,13 +234,15 @@ class _Conta:
             self.posicoes[SEM_TOPO] += 1
             return
         ts_topo, bid, ask = visto
+        # A janela julga-se sempre que há topo: ela olha para o livro em vigor
+        # no último segundo, e um livro parado há mais tempo continua em vigor.
+        self._julgar_janela(pr, topos)
         if pr.ts_ms - ts_topo > self.tolerancia_topo_ms:
             self.posicoes[TOPO_VELHO] += 1
             return
         posicao = classificar(pr.preco, bid, ask)
         self.posicoes[posicao] += 1
         self.por_lado[pr.lado][posicao] += 1
-        self._julgar_janela(pr, topos)
         if posicao == DENTRO:
             return
         agressor_comprou = posicao == NO_ASK
@@ -306,11 +325,14 @@ def verificar(
         conta.julgar(pr, topos.get(pr.asset))
 
     classificaveis = conta.concorda + conta.discorda
-    resultado = veredito(conta.concorda, conta.discorda)
     na_janela = conta.janela["concorda"] + conta.janela["discorda"]
+    resultado = veredito(conta.janela["concorda"], conta.janela["discorda"])
+    estrito = veredito(conta.concorda, conta.discorda)
     return {
         "veredito": resultado,
         "o_que_significa": VEREDITOS[resultado],
+        "base_do_veredito": "janela_de_toque",
+        "veredito_estrito": estrito,
         "alinhamento": "carimbo_do_servidor",
         "prints": prints,
         "classificaveis": classificaveis,
@@ -323,7 +345,9 @@ def verificar(
         },
         "janela": {
             "janela_ms": janela_ms,
-            **dict(sorted(conta.janela.items())),
+            "concorda": conta.janela["concorda"],
+            "discorda": conta.janela["discorda"],
+            "sem_toque": conta.janela["sem_toque"],
             "fracao_taker": round(conta.janela["concorda"] / na_janela, 4) if na_janela else None,
         },
         "atrasos_chegada_menos_servidor": {k: dict(sorted(v.items())) for k, v in atrasos.items()},
@@ -332,11 +356,13 @@ def verificar(
         "espera_s": espera_s,
         "limiares": {"taker": LIMIAR_TAKER, "maker": LIMIAR_MAKER, "minimo": MINIMO_DE_AMOSTRA},
         "nota": (
-            "Topo = best_bid/best_ask do ultimo price_change do MESMO token com "
-            "carimbo de SERVIDOR <= ao do print (feeds/poly_ws.py). Print no ask ou "
-            "acima so pode ser agressor comprando; no bid ou abaixo, vendendo; dentro "
-            "do spread nao classifica. `janela` = o preco tocou o topo do lado certo "
-            "em algum instante do ultimo segundo. Auditoria 2026-09-17 §2.1."
+            "VEREDITO pela `janela`: o preco do print tocou o ask (BUY) ou o bid "
+            "(SELL) em algum topo em vigor no ultimo segundo de servidor. O "
+            "alinhamento ESTRITO (ultimo price_change com carimbo <= ao do print) "
+            "fica como diagnostico: o servidor emite o livro POS-negocio antes do "
+            "print, e ai o preco do fill aparece do lado oposto — vies da medida, "
+            "nao do campo (M2_72H: estrito 0,8368, janela 0,9932). Auditoria "
+            "2026-09-17 §2.1; API_NOTES §6.1c."
         ),
     }
 
@@ -354,7 +380,11 @@ def _imprimir(rel: dict[str, Any]) -> None:
         print("exemplos discordantes:")
         for e in rel["exemplos_discordantes"]:
             print(f"  {e}")
-    print(f"\nVEREDITO: {rel['veredito']} — {rel['o_que_significa']}")
+    print(
+        f"\nVEREDITO (janela de toque): {rel['veredito']} — {rel['o_que_significa']}\n"
+        f"  alinhamento estrito, só diagnóstico: {rel['veredito_estrito']} "
+        f"(fração {rel['fracao_taker']})"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,9 +1,9 @@
-"""`scripts/janela_do_twap.py` — auditoria 2026-09-17 §2.2.
+"""`scripts/janela_do_twap.py` — a varredura τ do backtest, por duração.
 
-A gravação sintética aqui NÃO é a forma do servidor: é só o stream que o
-`WindowOutcome` já recebe do índice. O que se testa é a comparação — se um
-stream construído para resolver pela janela de 30 s é reconhecido como tal,
-e o simétrico — e que todo veredito declarado é alcançável.
+Auditoria 2026-09-17 §2.2. Os streams aqui são sintéticos no padrão dos
+testes da varredura (`test_m211_folga_relativa.py`): inteiros e18, carimbo
+do servidor, uma amostra por segundo. O que se prende é a divisão por
+duração e a leitura do veredito do backtest — não o servidor.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+
+from pulsearb.analysis.anchor_sweep import JanelaResolvida
 
 RAIZ = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -20,92 +22,80 @@ assert _spec is not None and _spec.loader is not None
 jt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(jt)
 
-from pulsearb.engine.anchor import WindowOutcome  # noqa: E402
-
-S = 1_000_000_000
-ABERTURA = 1_000 * S
-FECHO = ABERTURA + 300 * S
+E18 = 10**18
+BASE_MS = 1_788_920_000_000  # 2026-09-09 ~02:13 UTC
+PRECO = 78_640 * E18
 
 
-def _stream_em_degrau(base: float, ultimos_30_s: float, primeiros_30_dos_60: float):
-    """Uma amostra por segundo. Nos 60 s finais, dois patamares distintos.
-
-    TWAP-30 = `ultimos_30_s`; TWAP-60 = média dos dois patamares. Com a
-    âncora em `base`, o sinal de (twap − âncora) pode ser diferente nos dois.
-    """
-    amostras: list[tuple[int, float]] = []
-    for t in range(-120, 301):
-        ts = ABERTURA + t * S
-        if t > 270:
-            preco = ultimos_30_s
-        elif t > 240:
-            preco = primeiros_30_dos_60
-        else:
-            preco = base
-        amostras.append((ts, preco))
-    return tuple(amostras)
+def _stream(fechos: dict[int, int], *, duracao_total_s: int) -> dict[str, list[tuple[int, int]]]:
+    """Uma amostra por segundo, constante em PRECO, com o valor trocado nos
+    instantes de fecho pedidos (`{fechamento_ms: valor}`)."""
+    return {
+        "btc": [
+            (BASE_MS + s * 1000, fechos.get(BASE_MS + s * 1000, PRECO))
+            for s in range(-300, duracao_total_s + 120)
+        ]
+    }
 
 
-def _janela(slug: str, samples, resolved_up: bool) -> WindowOutcome:
-    return WindowOutcome(
-        slug=slug, open_ts_ns=ABERTURA, close_ts_ns=FECHO, samples=samples, resolved_up=resolved_up
-    )
+def _janelas(duracao_s: int, n: int, *, coerentes: bool) -> tuple[list[JanelaResolvida], dict]:
+    """`n` janelas consecutivas de `duracao_s`. Cada fecho tem valor acima ou
+    abaixo do PRECO alternadamente; `coerentes` diz se a resolução segue o
+    stream (τ=0 explica) ou o contrário (τ=0 desmentido)."""
+    janelas, fechos = [], {}
+    for i in range(n):
+        abertura = BASE_MS + i * duracao_s * 1000
+        fecho = abertura + duracao_s * 1000
+        sobe = i % 2 == 0
+        fechos[fecho] = PRECO + (1 if sobe else -1) * 50 * E18  # folga 0,06 %: decide
+        janelas.append(JanelaResolvida(
+            slug=f"btc-{duracao_s}-{i}", asset="btc", abertura_ms=abertura,
+            fechamento_ms=fecho, resolveu_up=sobe if coerentes else not sobe,
+        ))
+    return janelas, fechos
 
 
-# TWAP-30 = 101 (> 100: Up); TWAP-60 = (101 + 98)/2 = 99,5 (< 100: Down).
-DISCORDANTE = _stream_em_degrau(100.0, 101.0, 98.0)
-
-
-class TestVeredito:
-    def test_stream_que_resolve_pela_janela_de_30_da_JANELA_30(self):
-        rel = jt.comparar({300: [_janela("btc-5m-a", DISCORDANTE, True)] * 3})
+class TestComparar:
+    def test_duracao_coerente_com_tau0_da_CONFIRMADA(self):
+        janelas, fechos = _janelas(300, 24, coerentes=True)
+        rel = jt.comparar({300: janelas}, _stream(fechos, duracao_total_s=300 * 24))
         bloco = rel["300"]
-        assert bloco["veredito"] == "JANELA_30"
-        assert bloco["por_janela"]["JANELA_30"]["erros_minimos"] == 0
-        assert bloco["por_janela"]["JANELA_60"]["erros_minimos"] == 3
+        assert bloco["veredito"] == "CONFIRMADA"
+        assert bloco["consistencia_tau0"] == 1.0
+        assert bloco["janelas_discordantes"] == 0
+        assert bloco["janelas_elegiveis"] == 24
 
-    def test_stream_que_resolve_pela_janela_de_60_da_JANELA_60(self):
-        rel = jt.comparar({300: [_janela("btc-5m-a", DISCORDANTE, False)] * 3})
-        assert rel["300"]["veredito"] == "JANELA_60"
-        assert rel["300"]["menos_erros"] == "JANELA_60"
-
-    def test_stream_em_que_as_duas_concordam_da_AMBAS(self):
-        concordante = _stream_em_degrau(100.0, 105.0, 105.0)
-        rel = jt.comparar({900: [_janela("btc-15m-a", concordante, True)]})
-        assert rel["900"]["veredito"] == "AMBAS"
-        assert rel["900"]["menos_erros"] is None
-
-    def test_resolucao_contraria_as_duas_da_NENHUMA_e_diz_quem_errou_menos(self):
-        concordante = _stream_em_degrau(100.0, 105.0, 105.0)  # as duas dizem Up
-        janelas = [_janela("a", concordante, False), _janela("b", DISCORDANTE, True)]
-        # 30 s: erra `a`, acerta `b` → 1 erro; 60 s: erra as duas → 2 erros.
-        rel = jt.comparar({300: janelas})
-        assert rel["300"]["veredito"] == "NENHUMA"
-        assert rel["300"]["menos_erros"] == "JANELA_30"
-
-    def test_sem_amostras_da_SEM_DADO(self):
-        rel = jt.comparar({14400: [_janela("btc-4h-a", (), True)]})
-        assert rel["14400"]["veredito"] == "SEM_DADO"
-
-    def test_todo_veredito_declarado_e_alcancavel(self):
-        concordante = _stream_em_degrau(100.0, 105.0, 105.0)
-        rel = jt.comparar(
-            {
-                300: [_janela("a", DISCORDANTE, True)],
-                900: [_janela("b", DISCORDANTE, False)],
-                14400: [_janela("c", concordante, True)],
-                1: [_janela("d", concordante, False), _janela("e", DISCORDANTE, True)],
-                2: [_janela("f", (), True)],
-            }
-        )
-        assert {b["veredito"] for b in rel.values()} == set(jt.VEREDITOS)
+    def test_duracao_com_resolucoes_ao_contrario_da_DESMENTIDA(self):
+        janelas, fechos = _janelas(900, 24, coerentes=False)
+        rel = jt.comparar({900: janelas}, _stream(fechos, duracao_total_s=900 * 24))
+        assert rel["900"]["veredito"] == "DESMENTIDA"
+        assert rel["900"]["consistencia_tau0"] == 0.0
+        assert len(rel["900"]["discordantes_em_tau0"]) > 0
 
     def test_as_duracoes_nao_se_misturam(self):
+        j5, f5 = _janelas(300, 24, coerentes=True)
+        j15, f15 = _janelas(900, 24, coerentes=False)
+        fechos = {**f5, **f15}
+        rel = jt.comparar({300: j5, 900: j15}, _stream(fechos, duracao_total_s=900 * 24))
+        assert rel["300"]["veredito"] == "CONFIRMADA"
+        assert rel["900"]["veredito"] == "DESMENTIDA"
+
+    def test_poucas_janelas_da_SEM_AMOSTRA_e_nenhuma_da_SEM_DADO(self):
+        janelas, fechos = _janelas(14400, 3, coerentes=True)
+        rel = jt.comparar({14400: janelas, 60: []}, _stream(fechos, duracao_total_s=14400 * 3))
+        assert rel["14400"]["veredito"] == "SEM_AMOSTRA"
+        assert rel["60"]["veredito"] == "SEM_DADO"
+
+    def test_todo_veredito_declarado_e_alcancavel(self):
+        j5, f5 = _janelas(300, 24, coerentes=True)
+        j15, f15 = _janelas(900, 24, coerentes=False)
+        j4h, f4h = _janelas(14400, 3, coerentes=True)
+        fechos = {**f5, **f15, **f4h}
         rel = jt.comparar(
-            {300: [_janela("a", DISCORDANTE, True)], 900: [_janela("b", DISCORDANTE, False)]}
+            {300: j5, 900: j15, 14400: j4h, 60: []},
+            _stream(fechos, duracao_total_s=14400 * 3),
         )
-        assert rel["300"]["veredito"] == "JANELA_30"
-        assert rel["900"]["veredito"] == "JANELA_60"
+        assert {b["veredito"] for b in rel.values()} == set(jt.VEREDITOS)
 
 
 class TestHoraUtc:
@@ -116,12 +106,11 @@ class TestHoraUtc:
 
 
 class TestMain:
-    def test_main_recusa_json_absoluto_e_janelas_invalidas(self, tmp_path, monkeypatch, capsys):
+    def test_main_recusa_json_absoluto(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("PULSEARB_BACKTEST_OUTPUT_ROOT", raising=False)
         (tmp_path / "grav").mkdir()
         assert jt.main([str(tmp_path / "grav"), "--json", "/tmp/j.json"]) == 2
-        assert jt.main([str(tmp_path / "grav"), "--janelas", "30,0"]) == 2
         assert jt.main(["nao-existe"]) == 2
         assert "nome de saída inválido" in capsys.readouterr().err
 
@@ -130,7 +119,8 @@ class TestMain:
         pasta = tmp_path / "grav"
         pasta.mkdir()
         (pasta / "pulsearb-20260917-1200.jsonl").write_text(
-            json.dumps({"ts_wall_ns": ABERTURA, "fonte": "poly_ws", "payload": {}}) + "\n",
+            json.dumps({"ts_mono_ns": 1, "ts_wall_ns": BASE_MS * 10**6, "fonte": "poly_ws",
+                        "payload": {}}) + "\n",
             encoding="utf-8",
         )
         assert jt.main([str(pasta)]) == 1

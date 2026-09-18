@@ -570,6 +570,31 @@ O que a captura estabelece:
   **30 s** sem PONG. Não é o ping/pong do protocolo WebSocket — é texto na
   camada de aplicação.
 
+
+### 6.1c. `side` do `last_trade_price` é o lado do TAKER; o livro pós-negócio sai antes do print `[VERIFICADO na gravação]`
+
+Medido na M2_72H (2026-09-09 02:19 → 09-12 02:19 UTC) por
+`scripts/verificar_side.py`, 1.801.752 prints, contra o `best_bid`/`best_ask`
+que o próprio servidor manda em cada `price_change`:
+
+- **`side` = lado do agressor.** Em 99,32 % dos prints classificáveis o preço
+  tocou o ask (BUY) ou o bid (SELL) em algum topo em vigor no último segundo
+  de servidor (janela de toque); 0,68 % o contrário; 1,1 % não tocaram
+  nenhum. A convenção de `live/livros.py` ("BUY comprou dos asks, SELL vendeu
+  nos bids") está certa, e com ela o sinal de todo markout do projecto.
+- **Ordem de emissão:** o `price_change` que descreve o livro DEPOIS do
+  negócio sai com carimbo ≤ ao do `last_trade_price` do negócio — nos
+  exemplos, 1 ms antes. Quem alinhar um print com "o último topo com carimbo
+  ≤ ao dele" vê o livro pós-negócio, onde o preço do fill aparece do lado
+  oposto (o ask de 0,69 consumido vira bid de 0,69). Foi o que deu 0,8368 no
+  alinhamento estrito e 0,8274 na v1 por ordem de chegada. Não é semântica do
+  campo: é ordem de emissão. Qualquer medida que use o livro no instante do
+  print tem de olhar um pouco ANTES dele.
+- **Atraso de chegada:** 2,3 % dos `price_change` (5,05 M) e 2,4 % dos prints
+  chegaram ao recorder mais de 5 s depois do carimbo do servidor; a mediana
+  fica abaixo de 200 ms. É atraso na máquina de gravação/rede, não do
+  servidor — a mesma família do 4.1.
+
 ### 6.2. RTDS — o feed de preço "verdade"
 
 `[VERIFICADO]` — `_internal/streams/rtds/protocol.py`, `models/rtds_events.py`,
