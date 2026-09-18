@@ -949,6 +949,26 @@ Para **5m, 15m e 4h** (btc e eth): **streams TWAP de 60 segundos da Chainlink**
 > O tópico `crypto_prices_twap_thirty` existe no protocolo mas não corresponde
 > a nenhum mercado observado.
 
+**Datado e medido em 2026-09-18 (auditoria §2.2), na M2_72H (2026-09-09
+02:19 → 09-12 02:19 UTC), por `scripts/janela_do_twap.py` — a varredura τ do
+backtest (`anchor_sweep.varrer`, valor do stream `twap_sixty` na abertura e no
+fecho, inteiros e18, carimbo do servidor), separada por duração:**
+
+| duração | recebidas | elegíveis | consistência em τ=0 | discordantes | indeterminadas |
+|---|---|---|---|---|---|
+| 5m (300 s) | 1.768 | 1.764 | **0,9994** | 1 | 25 |
+| 15m (900 s) | 588 | 586 | 1,0 | 0 | 4 |
+| 4h (14400 s) | 36 | 34 | 1,0 | 0 | 0 |
+
+O stream de 60 s explica as janelas de 5m tão bem quanto as de 15m e 4h; a
+única discordante está dentro do orçamento de lixo residual do VEREDITO_M2
+§2b. Se as 5m liquidassem por um TWAP de 30 s, a diferença entre os dois
+streams apareceria como discordância nas janelas apertadas — e não apareceu
+em três dias. A nota acima deixa de ser sem data: **o engine fica com 60 s
+para todas as durações.** O que isto NÃO é: prova directa de que o stream de
+30 s discordaria — para isso existe `feeds.rtds_assinar_twap_thirty` (#156),
+a ligar numa gravação dedicada se algum dia a dúvida voltar.
+
 ### 12.4. Regra de resolução (texto capturado) `[VERIFICADO ao vivo — semântica RESOLVIDA em 13.8]`
 
 **Up** se o TWAP do intervalo do título ≥ preço no início do intervalo; senão
