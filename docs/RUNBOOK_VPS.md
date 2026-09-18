@@ -256,7 +256,8 @@ se desmente.)*
 
 | | Estimativa original | **Real (medido 2026-08-18)** |
 |---|---|---|
-| Comprimido | ~5 MB/h | **~470 MB/h** |
+| Comprimido | ~5 MB/h | **~470 MB/h** (média de 24 h; **699 MiB/h medidos**
+  numa hora de tarde, 2026-09-18 — dimensione pelo pico, não pela média) |
 | Por dia | ~0,12 GB | **~11 GB** |
 | **72h** | ~0,35 GB | **~34 GB** |
 | Semana | ~0,82 GB | ~77 GB |
@@ -391,21 +392,55 @@ Duas saídas quando o disco é o limite. Escolha uma **antes** de começar as
 72h, não no meio.
 
 **a) Descarga periódica.** Baixe e apague as horas já transferidas conforme
-avança, em vez de esperar o fim. Rode isto na máquina de análise a cada ~12h:
+avança, em vez de esperar o fim. **Na máquina de análise** (o Mac), a cada
+~12 h enquanto a gravação longa correr:
 
 ```bash
-# baixa tudo que já fechou, verifica a integridade e só então apaga da VPS
-rsync -avz --partial --progress \
-  'root@SEU_IP:/opt/pulsearb/data/recordings/pulsearb-*.jsonl.gz' ~/pulsearb-dados/
-
-for f in ~/pulsearb-dados/pulsearb-*.jsonl.gz; do gzip -t "$f" || echo "RUIM: $f"; done
-
-# apague só o que baixou íntegro, e NUNCA o arquivo da hora corrente
-ssh root@SEU_IP 'ls -t /opt/pulsearb/data/recordings/*.jsonl.gz | tail -n +2 | xargs rm -f'
+cd ~/pulsearb-code
+./scripts/descarga_periodica.sh root@SEU_IP ~/pulsearb-dados
 ```
 
-O `tail -n +2` preserva o arquivo mais recente, que é aquele em que o recorder
-está escrevendo neste instante.
+Ele compõe `fetch_recordings.sh` (baixa e reprova se algum `gzip -t` falhar)
+com `purge_recordings.sh` (refaz as conferências e só apaga o que passou nas
+três: **existe aqui**, **o tamanho bate com o da VPS**, **o gzip abre**). As
+três travas estão travadas por teste desde 2026-09-18
+(`tests/test_purga_de_gravacoes.py`), cada uma verificada por mutação:
+desligar qualquer uma derruba um teste que apaga gravação que não devia.
+
+Ele baixa **ontem e hoje**, não só hoje, porque uma rodada depois da
+meia-noite UTC deixaria as horas do dia anterior para trás — e o purge não
+apaga o que não chegou, então elas ficariam na VPS para sempre.
+
+**A receita que estava aqui até 2026-09-18 apagava gravação boa e ruim por
+igual**, e fica registada porque o modo de falha é instrutivo:
+
+```bash
+# ERRADO — não use. O `rm` abaixo corre mesmo que o `gzip -t` acima reprove.
+for f in ~/pulsearb-dados/pulsearb-*.jsonl.gz; do gzip -t "$f" || echo "RUIM: $f"; done
+ssh root@SEU_IP 'ls -t .../*.jsonl.gz | tail -n +2 | xargs rm -f'
+```
+
+O `gzip -t` **imprimia** `RUIM` e seguia; o `ssh ... rm` apagava por posição
+na lista, não por integridade. Um arquivo que baixou pela metade tem o nome
+certo e some do mesmo jeito. Foi assim que se perderam três horas de agosto
+(§7).
+
+**O que pode fazer esta rotina falhar em silêncio, e como ver:** o Mac
+dormindo na hora do agendamento. Registe a saída e confira que ela tem uma
+entrada nova a cada 12 h:
+
+```bash
+# cada linha do crontab do Mac, com log:
+# 0 */12 * * * cd ~/pulsearb-code && ./scripts/descarga_periodica.sh \
+#   root@SEU_IP ~/pulsearb-dados >> ~/descarga.log 2>&1
+
+tail -20 ~/descarga.log            # tem de terminar com '=== fim ... ==='
+grep -c '=== fim' ~/descarga.log   # uma por rodada bem sucedida
+```
+
+Se o Mac dorme, ou `sudo pmset -a sleep 0` durante a gravação, ou
+`caffeinate -i` numa aba aberta. Uma descarga que não corre leva o disco aos
+85 % e o `disk-guard` para o recorder — calado, como em 11/09.
 
 **b) Volume extra.** Se preferir não depender de rotina manual, anexe um
 volume e aponte o recorder para ele — o caminho de saída é configurável por
