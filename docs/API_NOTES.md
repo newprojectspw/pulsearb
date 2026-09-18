@@ -1685,3 +1685,54 @@ O item **3.5 continua 🟡**. O que foi exercitado é a encanação — DNS, TLS
 timeout, parsing, e a existência dos endpoints. O que falta é o que sempre
 faltou: **uma ordem assinada recebendo resposta do servidor**, que exige
 credencial e move dinheiro. Nenhum GET público substitui isso.
+
+## 17. Bloqueio REGIONAL do CLOB `[VERIFICADO ao vivo — 2026-09-18]`
+
+**O servidor recusa ORDENS por região, e a recusa não tem nada a ver com o
+código.** Medido na VPS de Londres (DigitalOcean `lon1`) com
+`scripts/smoke_ordem_assinada.py`, carteira dedicada
+`0xaAe999…10C8C`, saldo zero:
+
+```
+estado : recusada
+motivo : auth_recusada
+detalhe: {'status': 403, 'resposta': {'error': 'Trading restricted in your
+         region, please refer to available regions -
+         https://docs.polymarket.com/developers/CLOB/geoblock'}}
+```
+
+### O que esta resposta PROVA que funciona
+
+Tudo o que vem antes da recusa, e é muito:
+
+- **A assinatura L2 está certa.** A leitura de saldo (`0.0`) usa o mesmo
+  mecanismo de autenticação e passou. Um erro de assinatura daria 401 ali,
+  antes de chegar à ordem.
+- **A descoberta funciona ao vivo**: achou `btc-updown-5m-1789742700`,
+  tick 0,01, mercado operável.
+- **A construção e o envio da ordem funcionam**: FOK, 5 shares a 0,01, preço
+  que não cruza. O corpo saiu, o servidor respondeu.
+- **As travas do smoke funcionam**: leu o saldo antes de tudo e só seguiu
+  por ser zero.
+
+### O que ela BLOQUEIA
+
+- **O item 3.5 não fecha a partir desta máquina.** O critério dele é uma
+  ordem assinada cuja recusa venha do NEGÓCIO (saldo, allowance), provando
+  que o servidor avaliou o corpo. Um 403 de região é anterior a isso: o
+  servidor nem olhou para a ordem.
+- **O modo LIVE não pode operar desta máquina, com código nenhum.** Não é
+  defeito a consertar: é onde a máquina está.
+
+### O que NÃO é
+
+Não é assinatura errada, não é credencial expirada, não é allowance em
+falta, não é a ordem mal construída. Nenhuma dessas hipóteses produz 403 com
+esta mensagem, e a leitura de saldo bem sucedida exclui as duas primeiras.
+
+### O que fica em aberto
+
+Onde o bot opera é decisão de quem o opera, e é uma decisão de conformidade
+antes de ser técnica. Este documento regista o facto medido e mais nada: o
+CLOB recusa ordens vindas desta região. Contornar o bloqueio não é um
+caminho que este projeto tome.
