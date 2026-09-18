@@ -346,7 +346,25 @@ escolha certa: dado de medição não se apaga para caber mais dado.
 falha, então `Restart=always` não reergue; a única marca fica numa linha de
 `/var/log/disk-guard.log` que ninguém lê; e nenhuma das verificações deste
 runbook olhava para lá. Entre 11 e 18/09/2026 o recorder ficou parado sem
-nada denunciar.
+nada denunciar. O log confirma, linha por linha:
+
+```
+Fri Sep 11 05:50:01 UTC 2026 disco em 85% — recorder parado
+...
+Fri Sep 18 15:30:01 UTC 2026 disco em 85% — recorder parado
+```
+
+`05:50:01` é o segundo em que o journal do systemd registou `Stopping`. E ele
+não parou de disparar: uma linha a cada 10 minutos durante a semana toda,
+porque o disco nunca desceu dos 85 %. Há dois episódios anteriores no mesmo
+log, 20–21/08 e 25/08.
+
+**E ele truncou gravação, mesmo sem apagar nada.** Matar o processo no meio
+da hora deixa o `.jsonl.gz` daquela hora sem o fim. O guarda disparou em
+**25/08 05:40** e o `pulsearb-20260825-0500.jsonl.gz` falha no `gzip -t` —
+é a hora que estava a ser escrita. Não apagar não é o mesmo que não
+estragar: a hora interrompida vai-se de qualquer maneira, e é por isso que
+libertar disco ANTES vale mais do que confiar no guarda.
 
 **O que isso obriga antes de qualquer `systemctl start`:**
 
@@ -468,6 +486,23 @@ antes de concluir seja o que for:
 ls -l ~/pulsearb-dados/pulsearb-*.jsonl.gz \
   | awk '{n=$NF; sub(/.*\//,"",n);
           if ($5 < 52428800) printf "%8.2f MB  %s\n", $5/1048576, n}'
+```
+
+**E nome igual dos dois lados NÃO é cópia boa.** Antes de apagar da VPS,
+compare os nomes E teste a cópia — a comparação de nomes passou em
+2026-09-18 com os 38 arquivos da VPS presentes no Mac, e **três deles
+estavam corrompidos do lado do Mac**. Teste com uma trava que impeça o
+falso verde do lado vazio:
+
+```bash
+# o lado da VPS TEM de ter linhas; zero linhas faz o `comm` passar por engano
+ssh <host> 'ls /opt/pulsearb/data/recordings/' | sort > /tmp/vps.txt
+wc -l /tmp/vps.txt                       # se der 0, a comparação NÃO rodou
+ls ~/pulsearb-dados/ | grep '\.jsonl\.gz$' | sort -u > /tmp/mac.txt
+comm -23 /tmp/vps.txt /tmp/mac.txt       # vazio = todos os nomes chegaram
+while read -r f; do
+  gzip -t ~/pulsearb-dados/"$f" 2>/dev/null || echo "RUIM: $f"
+done < /tmp/vps.txt                      # vazio = todas as cópias prestam
 ```
 
 **Medido em 2026-09-18 sobre a gravação de 11 a 15/09:** 12 horas abaixo de
