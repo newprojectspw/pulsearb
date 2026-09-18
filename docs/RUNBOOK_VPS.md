@@ -323,6 +323,68 @@ só `./scripts/estado_vps.sh`. Item que não deu para apurar aparece como
 Se a primeira hora fechada não estiver na casa das centenas de MB, algo está
 errado — provavelmente um feed calado (§5.1).
 
+### O `disk-guard.sh` PARA o recorder, e ninguém avisa `[MEDIDO 2026-09-18]`
+
+Existe na VPS um script que **não está neste repositório** e que nenhuma
+secção mencionava até hoje:
+
+```bash
+# /usr/local/bin/disk-guard.sh, no cron do root: */10 * * * *
+USO=$(df / | awk 'NR==2{print $5}' | tr -d '%')
+if [ "$USO" -ge 85 ]; then
+  systemctl stop pulsearb-recorder
+  echo "$(date) disco em ${USO}% — recorder parado" >> /var/log/disk-guard.log
+fi
+```
+
+**O que ele acerta:** escolheu PARAR em vez de apagar. Nenhuma gravação foi
+destruída por ele — os 15 GB de 09/09 a 11/09 estavam inteiros quando a
+máquina foi inspeccionada em 18/09. Para um guarda de disco, essa é a
+escolha certa: dado de medição não se apaga para caber mais dado.
+
+**O que ele erra, e custou uma semana:** ele é MUDO. `systemctl stop` não é
+falha, então `Restart=always` não reergue; a única marca fica numa linha de
+`/var/log/disk-guard.log` que ninguém lê; e nenhuma das verificações deste
+runbook olhava para lá. Entre 11 e 18/09/2026 o recorder ficou parado sem
+nada denunciar. O log confirma, linha por linha:
+
+```
+Fri Sep 11 05:50:01 UTC 2026 disco em 85% — recorder parado
+...
+Fri Sep 18 15:30:01 UTC 2026 disco em 85% — recorder parado
+```
+
+`05:50:01` é o segundo em que o journal do systemd registou `Stopping`. E ele
+não parou de disparar: uma linha a cada 10 minutos durante a semana toda,
+porque o disco nunca desceu dos 85 %. Há dois episódios anteriores no mesmo
+log, 20–21/08 e 25/08.
+
+**E ele truncou gravação, mesmo sem apagar nada.** Matar o processo no meio
+da hora deixa o `.jsonl.gz` daquela hora sem o fim. O guarda disparou em
+**25/08 05:40** e o `pulsearb-20260825-0500.jsonl.gz` falha no `gzip -t` —
+é a hora que estava a ser escrita. Não apagar não é o mesmo que não
+estragar: a hora interrompida vai-se de qualquer maneira, e é por isso que
+libertar disco ANTES vale mais do que confiar no guarda.
+
+**Três arquivos estão perdidos por isto, e a perda é definitiva**
+`[MEDIDO 2026-09-18]`: `pulsearb-20260823-0100.jsonl.gz`, o
+`-002` da mesma hora e o `pulsearb-20260825-0500.jsonl.gz` falham no
+`gzip -t` **na VPS**, não só na cópia. Foi por causa deles que a verificação
+de integridade do §7 deixou de ser opcional: eles falharam primeiro do lado
+do Mac, o que parecia transferência interrompida, e só o teste na origem
+mostrou que não havia de onde recuperar.
+
+**O que isso obriga antes de qualquer `systemctl start`:**
+
+```bash
+df -h /                      # abaixo de 85 %, ou o guarda derruba em ≤10 min
+tail -5 /var/log/disk-guard.log
+```
+
+Subir o recorder com o disco em 85 % não dá gravação curta: dá gravação de
+até dez minutos, repetida, cada uma com o seu arquivo. Libere disco (§7 e as
+duas saídas abaixo) **primeiro**.
+
 ### Descarga periódica (disco menor) ou volume extra
 
 Duas saídas quando o disco é o limite. Escolha uma **antes** de começar as
@@ -417,6 +479,50 @@ Medido: 2 milhões de eventos `price_change` sobre 40 tokens → **81 MB de
 pico** (50 mil snapshots retidos, 1,95 milhão descartados), contra o `Killed` da versão anterior. O preço é uma segunda passada
 sobre o arquivo (a primeira só lê metadados, e é ela que descobre quais tokens
 importam) e a truncagem dos books aos `--niveis-book` do topo.
+
+### Antes de QUALQUER análise: o tamanho de cada hora
+
+`gzip -t` prova que o arquivo não está corrompido. Não prova que ele tem
+dado dentro — um arquivo de 255 bytes passa no teste e lê, no backtest, como
+uma hora de mercado sem nenhum evento. É ausência de medida com a cara de
+medida de ausência, que é a confusão que este projeto persegue em todo lado.
+
+Uma hora saudável desta gravação pesa ~300 MB (§6). Liste as que destoam
+antes de concluir seja o que for:
+
+```bash
+ls -l ~/pulsearb-dados/pulsearb-*.jsonl.gz \
+  | awk '{n=$NF; sub(/.*\//,"",n);
+          if ($5 < 52428800) printf "%8.2f MB  %s\n", $5/1048576, n}'
+```
+
+**E nome igual dos dois lados NÃO é cópia boa.** Antes de apagar da VPS,
+compare os nomes E teste a cópia — a comparação de nomes passou em
+2026-09-18 com os 38 arquivos da VPS presentes no Mac, e **três deles
+estavam corrompidos do lado do Mac**. Teste com uma trava que impeça o
+falso verde do lado vazio:
+
+```bash
+# o lado da VPS TEM de ter linhas; zero linhas faz o `comm` passar por engano
+ssh <host> 'ls /opt/pulsearb/data/recordings/' | sort > /tmp/vps.txt
+wc -l /tmp/vps.txt                       # se der 0, a comparação NÃO rodou
+ls ~/pulsearb-dados/ | grep '\.jsonl\.gz$' | sort -u > /tmp/mac.txt
+comm -23 /tmp/vps.txt /tmp/mac.txt       # vazio = todos os nomes chegaram
+while read -r f; do
+  gzip -t ~/pulsearb-dados/"$f" 2>/dev/null || echo "RUIM: $f"
+done < /tmp/vps.txt                      # vazio = todas as cópias prestam
+```
+
+**Medido em 2026-09-18 sobre a gravação de 11 a 15/09:** 12 horas abaixo de
+50 MB, em dois blocos (12/09 11:00–16:00 e 14/09 13:00 + 20:00–23:00 +
+15/09 00:00), **duas delas com 255 bytes** — o arquivo criado e nada
+escrito. O último arquivo da série está truncado, que é o que fica quando o
+processo morre a escrever. Essas horas não entram em medida nenhuma sem
+serem contadas como lacuna.
+
+Precedente, e é por isso que esta secção existe: em 18/08 dois arquivos
+saíram corrompidos e o dia inteiro deu **732 janelas conhecidas e ZERO com
+resolução**. Ninguém sabia até alguém olhar (quadro 4.1).
 
 ### Antes do backtest longo: converta para colunar
 
