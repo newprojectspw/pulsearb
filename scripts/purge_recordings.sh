@@ -49,9 +49,29 @@ echo
 # custa aspas-por-construção que ninguém acerta. Mandando o valor pelo cano e
 # lendo com `read -r`, o comando remoto fica em aspas simples: nada expande do
 # lado do cliente e o caminho chega inteiro.
+#
+# O `exit 0` no fim do comando REMOTO é o que separa as duas causas de saída
+# vazia. Sem ele, `stat` sobre um glob que não casa sai != 0, e o `ssh` também
+# sai != 0 quando é ELE que falha (255: host que não resolve, chave recusada,
+# rede caída). As duas viravam a mesma coisa — e com o `|| true` que estava
+# aqui, viravam "nenhuma gravação" e saída ZERO. Uma rotina que não conseguiu
+# falar com a VPS relatava sucesso.
+#
+# Com o `exit 0` remoto, qualquer status != 0 é falha do próprio `ssh`, e aí
+# a saída é 2 e NADA é apagado — que é o que se quer de um portão: não saber
+# é motivo de recusa.
+set +e
 remotos=$(printf '%s\n' "$ORIGEM" \
-  | ssh "$HOST" 'read -r dir; stat -c "%s %n" "$dir"/*.jsonl.gz 2>/dev/null' \
-  || true)
+  | ssh "$HOST" 'read -r dir; stat -c "%s %n" "$dir"/*.jsonl.gz 2>/dev/null; exit 0')
+status_do_ssh=$?
+set -e
+
+if [ "$status_do_ssh" -ne 0 ]; then
+  echo "ERRO: não consegui falar com $HOST (ssh saiu $status_do_ssh)." >&2
+  echo "      NADA foi apagado. Confira o host, a chave e a rede." >&2
+  exit 2
+fi
+
 if [ -z "$remotos" ]; then
   echo "nenhuma gravação em $HOST:$ORIGEM"
   exit 0
