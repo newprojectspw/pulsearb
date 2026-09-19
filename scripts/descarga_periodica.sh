@@ -39,15 +39,16 @@ echo "=== descarga periódica  $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 # comando.
 #
 # Não saber se a VPS respondeu é motivo de RECUSA, nunca de seguir em frente.
-if ! ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" true 2>/tmp/pulsearb-sonda.$$; then
+# O erro do ssh vai para uma VARIÁVEL, não para um arquivo em /tmp: nome de
+# temporário previsível num diretório que todo mundo escreve é convite a
+# symlink, e aqui não há nada que justifique o arquivo.
+if ! erro_da_sonda=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" true 2>&1); then
   echo "ERRO: não consegui falar com $HOST." >&2
-  sed 's/^/      /' /tmp/pulsearb-sonda.$$ >&2 || true
-  rm -f /tmp/pulsearb-sonda.$$
+  [ -n "$erro_da_sonda" ] && printf '      %s\n' "$erro_da_sonda" >&2
   echo "      NADA foi baixado nem apagado." >&2
   echo "      Se o host tem um apelido no ~/.ssh/config, use o apelido." >&2
   exit 2
 fi
-rm -f /tmp/pulsearb-sonda.$$
 
 for dia in "$ONTEM" "$HOJE"; do
   echo "--- baixando $dia"

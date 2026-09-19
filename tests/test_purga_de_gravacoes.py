@@ -29,6 +29,10 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "purge_recordings.sh"
 
+PRECISA_DO_GZIP = pytest.mark.skipif(
+    shutil.which("gzip") is None, reason="precisa do gzip"
+)
+
 # Ignora o host ($1) e roda o comando localmente, com o stdin do chamador.
 DUBLE_DE_SSH = '#!/bin/sh\nshift\nexec /bin/bash -c "$*"\n'
 
@@ -93,7 +97,7 @@ def _nomes_no_remoto(cenario: dict[str, Path]) -> set[str]:
     return {p.name for p in cenario["remoto"].iterdir()}
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_apaga_so_a_copia_integra_e_preserva_as_outras_duas(cenario) -> None:
     saida = _rodar(cenario, "--apagar")
 
@@ -104,7 +108,7 @@ def test_apaga_so_a_copia_integra_e_preserva_as_outras_duas(cenario) -> None:
     }
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_sem_apagar_e_o_default_e_nada_e_removido(cenario) -> None:
     antes = _nomes_no_remoto(cenario)
 
@@ -115,7 +119,7 @@ def test_sem_apagar_e_o_default_e_nada_e_removido(cenario) -> None:
     assert _nomes_no_remoto(cenario) == antes
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_arquivo_que_nao_chegou_aqui_nunca_e_apagado(cenario) -> None:
     (cenario["local"] / "pulsearb-20260918-1800.jsonl.gz").unlink()
 
@@ -125,7 +129,7 @@ def test_arquivo_que_nao_chegou_aqui_nunca_e_apagado(cenario) -> None:
     assert "pulsearb-20260918-1800.jsonl.gz" in _nomes_no_remoto(cenario)
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_ssh_que_falha_recusa_em_vez_de_dizer_que_nao_ha_gravacao(cenario) -> None:
     """A falha que o log escondeu em 2026-09-18.
 
@@ -141,6 +145,6 @@ def test_ssh_que_falha_recusa_em_vez_de_dizer_que_nao_ha_gravacao(cenario) -> No
     saida = _rodar(cenario, "--apagar")
 
     assert saida.returncode == 2, saida.stdout
-    assert "nao consegui falar" in saida.stderr.replace("ã", "a").replace("ã", "a")
+    assert "consegui falar com" in saida.stderr
     assert "NADA foi apagado" in saida.stderr
     assert _nomes_no_remoto(cenario) == antes
