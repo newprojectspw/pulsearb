@@ -29,8 +29,19 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "purge_recordings.sh"
 
+PRECISA_DO_GZIP = pytest.mark.skipif(
+    shutil.which("gzip") is None, reason="precisa do gzip"
+)
+
 # Ignora o host ($1) e roda o comando localmente, com o stdin do chamador.
 DUBLE_DE_SSH = '#!/bin/sh\nshift\nexec /bin/bash -c "$*"\n'
+
+# O que o ssh faz quando o host nao resolve, a chave e recusada ou a rede cai.
+DUBLE_DE_SSH_QUE_FALHA = (
+    '#!/bin/sh\n'
+    'echo "ssh: Could not resolve hostname seu_ip" >&2\n'
+    'exit 255\n'
+)
 
 
 def _gravacao(conteudo: bytes) -> bytes:
@@ -86,7 +97,7 @@ def _nomes_no_remoto(cenario: dict[str, Path]) -> set[str]:
     return {p.name for p in cenario["remoto"].iterdir()}
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_apaga_so_a_copia_integra_e_preserva_as_outras_duas(cenario) -> None:
     saida = _rodar(cenario, "--apagar")
 
@@ -97,7 +108,7 @@ def test_apaga_so_a_copia_integra_e_preserva_as_outras_duas(cenario) -> None:
     }
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_sem_apagar_e_o_default_e_nada_e_removido(cenario) -> None:
     antes = _nomes_no_remoto(cenario)
 
@@ -108,7 +119,7 @@ def test_sem_apagar_e_o_default_e_nada_e_removido(cenario) -> None:
     assert _nomes_no_remoto(cenario) == antes
 
 
-@pytest.mark.skipif(shutil.which("gzip") is None, reason="precisa do gzip")
+@PRECISA_DO_GZIP
 def test_arquivo_que_nao_chegou_aqui_nunca_e_apagado(cenario) -> None:
     (cenario["local"] / "pulsearb-20260918-1800.jsonl.gz").unlink()
 
@@ -116,3 +127,24 @@ def test_arquivo_que_nao_chegou_aqui_nunca_e_apagado(cenario) -> None:
 
     assert saida.returncode == 0, saida.stderr
     assert "pulsearb-20260918-1800.jsonl.gz" in _nomes_no_remoto(cenario)
+
+
+@PRECISA_DO_GZIP
+def test_ssh_que_falha_recusa_em_vez_de_dizer_que_nao_ha_gravacao(cenario) -> None:
+    """A falha que o log escondeu em 2026-09-18.
+
+    Com o `|| true` que havia aqui, `ssh` caindo dava saida VAZIA e status
+    ZERO — indistinguivel de "a VPS nao tem gravacao nenhuma". A rotina
+    imprimia sucesso sem ter falado com a VPS, e o marcador que o RUNBOOK §6
+    manda conferir (`=== fim ===`) saia no log de um run que falhou inteiro.
+    """
+    (cenario["binarios"] / "ssh").write_text(DUBLE_DE_SSH_QUE_FALHA)
+    (cenario["binarios"] / "ssh").chmod(0o755)
+    antes = _nomes_no_remoto(cenario)
+
+    saida = _rodar(cenario, "--apagar")
+
+    assert saida.returncode == 2, saida.stdout
+    assert "consegui falar com" in saida.stderr
+    assert "NADA foi apagado" in saida.stderr
+    assert _nomes_no_remoto(cenario) == antes

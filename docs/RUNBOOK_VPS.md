@@ -392,12 +392,30 @@ Duas saídas quando o disco é o limite. Escolha uma **antes** de começar as
 72h, não no meio.
 
 **a) Descarga periódica.** Baixe e apague as horas já transferidas conforme
-avança, em vez de esperar o fim. **Na máquina de análise** (o Mac), a cada
-~12 h enquanto a gravação longa correr:
+avança, em vez de esperar o fim.
+
+**Primeiro, dê um apelido à VPS — uma vez só.** Todo comando daqui em diante
+usa o apelido, e assim nenhum bloco para colar contém um `SEU_IP` que alguém
+cola literal. (Aconteceu três vezes em 2026-09-18, e a terceira produziu o
+falso verde descrito abaixo.)
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+
+Host pulsearb-vps
+  HostName 203.0.113.10        # <- o IP REAL da VPS, editado uma vez
+  User root
+EOF
+
+ssh pulsearb-vps true && echo "a VPS responde"
+```
+
+**Depois**, na máquina de análise (o Mac), a cada ~12 h enquanto a gravação
+longa correr:
 
 ```bash
 cd ~/pulsearb-code
-./scripts/descarga_periodica.sh root@SEU_IP ~/pulsearb-dados
+./scripts/descarga_periodica.sh pulsearb-vps ~/pulsearb-dados
 ```
 
 Ele compõe `fetch_recordings.sh` (baixa e reprova se algum `gzip -t` falhar)
@@ -432,11 +450,26 @@ entrada nova a cada 12 h:
 ```bash
 # cada linha do crontab do Mac, com log:
 # 0 */12 * * * cd ~/pulsearb-code && ./scripts/descarga_periodica.sh \
-#   root@SEU_IP ~/pulsearb-dados >> ~/descarga.log 2>&1
+#   pulsearb-vps ~/pulsearb-dados >> ~/descarga.log 2>&1
 
 tail -20 ~/descarga.log            # tem de terminar com '=== fim ... ==='
 grep -c '=== fim' ~/descarga.log   # uma por rodada bem sucedida
 ```
+
+**`=== fim ===` só sai quando a rotina de facto falou com a VPS, e isso
+precisou de conserto.** Na primeira versão, um host que não resolvia fazia o
+`rsync` falhar, o tratamento dizia *"sem arquivos deste dia"*, o purge não
+achava nada e a rodada terminava imprimindo `=== fim ===` — a corrida inteira
+falhava e o log dizia que tinha corrido, no mesmo marcador que esta secção
+manda conferir. Hoje há duas travas:
+
+- `descarga_periodica.sh` sonda o host (`ssh -o BatchMode=yes … true`) **antes
+  de tudo** e sai com 2 sem imprimir `=== fim ===` se não houver resposta;
+- `purge_recordings.sh` distingue *«a VPS não tem gravação»* de *«não falei
+  com a VPS»*, e no segundo caso sai com 2 sem apagar nada.
+
+As duas estão travadas por teste (`tests/test_purga_de_gravacoes.py`,
+verificado por mutação). Não saber é motivo de recusa, nunca de seguir.
 
 Se o Mac dorme, ou `sudo pmset -a sleep 0` durante a gravação, ou
 `caffeinate -i` numa aba aberta. Uma descarga que não corre leva o disco aos

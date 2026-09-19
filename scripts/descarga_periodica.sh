@@ -30,6 +30,26 @@ HOJE=$(date -u +%Y-%m-%d)
 
 echo "=== descarga periódica  $(date -u '+%Y-%m-%d %H:%M:%S UTC') ==="
 
+# A SONDA VEM PRIMEIRO, e ela é a razão de este bloco existir. Sem ela, um
+# host que não resolve fazia o `rsync` falhar, o `||` abaixo dizia "sem
+# arquivos deste dia", o purge não achava nada e a rotina terminava
+# imprimindo `=== fim ===`. Ou seja: a corrida inteira falhava e o log dizia
+# que tinha corrido — e `=== fim ===` é exatamente o marcador que o RUNBOOK
+# §6 manda conferir. Medido em 2026-09-18, com o host errado na linha de
+# comando.
+#
+# Não saber se a VPS respondeu é motivo de RECUSA, nunca de seguir em frente.
+# O erro do ssh vai para uma VARIÁVEL, não para um arquivo em /tmp: nome de
+# temporário previsível num diretório que todo mundo escreve é convite a
+# symlink, e aqui não há nada que justifique o arquivo.
+if ! erro_da_sonda=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" true 2>&1); then
+  echo "ERRO: não consegui falar com $HOST." >&2
+  [ -n "$erro_da_sonda" ] && printf '      %s\n' "$erro_da_sonda" >&2
+  echo "      NADA foi baixado nem apagado." >&2
+  echo "      Se o host tem um apelido no ~/.ssh/config, use o apelido." >&2
+  exit 2
+fi
+
 for dia in "$ONTEM" "$HOJE"; do
   echo "--- baixando $dia"
   # Um dia sem nenhum arquivo faz o fetch sair com 1, e isso NÃO é erro aqui:
