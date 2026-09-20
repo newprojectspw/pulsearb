@@ -1265,10 +1265,76 @@ conexões WS do CLOB com quatro assinantes também não estão medidos. Se não
 couber, a saída não é voltar para 56 dias em sequência: é rodar **base +
 uma** por vez, que preserva a comparação contra o mesmo mercado.
 
+### 10.1d. A medida das primeiras horas — feita em 2026-09-20
+
+As quatro subiram em `2026-09-19 22:15:50..54 UTC` na VPS de **1 vCPU /
+961 MiB / 24 GB**. Medida às `01:50 UTC` do dia seguinte, **3 h 34 min**
+depois. **Ela responde uma das três perguntas do §10.1c e deixa duas em
+aberto** — o que está aberto vai escrito abaixo, não resumido em "parcial".
+
+| pergunta | medida | veredito |
+|---|---|---|
+| disco do diário | 11.368.842 B somados em 3 h 34 → **3,04 MiB/h nas quatro** | ✅ **336 h ≈ 1,0 GiB**, contra 18 GB livres |
+| o processo sobrevive | `NRestarts=0` nas quatro, `active running` | ✅ nas primeiras 3 h 34 |
+| nível ERRO no diário | `"nivel":"ERRO…"` na última hora: **0** | ✅ |
+| **memória** | 787 MiB usados, **174 disponíveis, swap 0** | ❓ **não resolvido** |
+| **CPU** | carga **4,00 / 4,00 / 4,01 em 1 vCPU** | ❓ **não resolvido** |
+| **WS do CLOB** | **601 linhas/h** casando `erro\|falhou\|Traceback` nas quatro | ❓ **não resolvido** |
+
+Os tamanhos por instância, para conferir que nenhuma parou de escrever:
+`ancora 3.472.902`, `base 2.527.711`, `pausa 2.286.741`,
+`recolher 3.081.488`.
+
+**Por que 601 não é o mesmo número que 0.** O grep largo casa toda linha que
+carrega um campo `"erro"`, e as 601 são WARNING de `conexão caiu` —
+`ConnectionClosedError: no close frame received or sent`,
+`"close_origem":"cliente"`. Nenhuma é nível ERRO. Mas 601/h nas quatro é
+**uma reconexão a cada ~24 s por processo**, contra as 11/h medidas no §7.2
+com um processo só. O salto é de 13×, e ele não está explicado.
+
+**As duas hipóteses para o salto, e elas se distinguem.** (a) Os quatro
+processos não recebem CPU para responder o ping a tempo, e é o CLIENTE que
+derruba a conexão — o que `"close_origem":"cliente"` e a carga 4,00
+sustentam. (b) O CLOB limita quatro assinantes do mesmo IP. **Enquanto não
+se distinguir, o ensaio de 14 dias está sob suspeita**, porque se for (a) a
+fila do escalonador entra no `cotacoes_repousando` e no `meio_no_fill` com o
+nome do mercado — o mesmo tipo de confusão que o §10.1c existe para impedir,
+só que vindo da máquina em vez do calendário.
+
+**Carga 4,00 sozinha não prova saturação de CPU.** A carga do Linux conta
+processos em R **e** em D (espera de disco). Para separar:
+
+```bash
+ps -o pid,stat,pcpu,pmem,etimes,args -C python --sort=-pcpu | head -6
+vmstat 5 4            # colunas r (fila) e wa (espera de E/S)
+grep -c 'Out of memory' /var/log/syslog || true
+```
+
+Leia assim: `%CPU` somando perto de 100 e `r` ≥ 4 com `wa` baixo é a
+hipótese (a) — CPU saturada. `wa` alto com `%CPU` baixo é disco, e aí a
+carga 4,00 não contamina a medida.
+
+**O que fazer com o veredito:**
+
+- **CPU saturada (a)** → o ensaio de quatro rodadas não cabe nesta máquina.
+  A saída do §10.1c vale: **base + uma regra** por vez, dois processos, 28
+  dias em vez de 14 — ou uma VPS maior, que preserva os 14.
+- **Limite do CLOB (b)** → a reconexão é do feed, não do relógio; siga, mas
+  registre a taxa no relato final, porque ela entra na cobertura.
+
+**A gravação de 72 h NÃO sobe junto enquanto isso estiver em aberto.** O
+disco até comporta (§6: ~699 MiB/h, com a descarga de 12 h o pico é ~8,2
+GiB, e sobram 18 GB), mas **a memória não**: 174 MiB disponíveis e **zero
+swap** não acomodam um quinto processo Python. Um OOM aqui mata uma das
+rodadas, e uma rodada com buraco que as irmãs não têm é exatamente a
+comparação que o §10.1c recusa.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
-- **Disco do diário:** não medido. Meça na primeira hora
-  (`ls -l data/diarios/`) e extrapole para 14 dias antes de deixar rodando.
+- **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
+  instâncias, ≈ 1,0 GiB em 336 h, contra 18 GB livres. A conta e o método
+  estão no §10.1d, junto com as duas perguntas que a mesma medida deixou em
+  aberto (memória e CPU).
 - **O custo de saída** (quadro, 1.12): o SHADOW anota as intenções, não as
   execuções. O número que decide o 1.12 sai do `markout_dos_pools.py` com os
   horizontes longos, no Mac — este passo não substitui aquele.
