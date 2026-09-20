@@ -492,30 +492,49 @@ class ReconnectingFeed:
                     continue
             elif await self._escalar_se_sem_efeito(ws, sem_efeito, urgencia):
                 return
-            try:
-                await self._reassinar(ws)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.reassinaturas_com_erro += 1
-                self.log.warning(
-                    "reassinatura falhou", erro=f"{type(exc).__name__}: {exc}"
-                )
+            if not await self._reassinar_registrando(ws):
                 return
-            self.reassinaturas += 1
             desde_a_ultima = 0.0
             if urgencia is not None:
                 sem_efeito += 1
-                self.reassinaturas_por_silencio += 1
-                self.log.warning(
-                    "tópico mudo com a conexão viva: reassinando",
-                    conexao=self.rotulo,
-                    motivo=urgencia,
-                    tentativas_sem_efeito=sem_efeito,
-                    total_por_silencio=self.reassinaturas_por_silencio,
-                )
-            else:
-                self.log.debug("reassinatura periódica", total=self.reassinaturas)
+            self._anotar_reassinatura(urgencia, sem_efeito)
+
+    async def _reassinar_registrando(self, ws: websockets.ClientConnection) -> bool:
+        """Reenvia a assinatura e conta. `False` = o laço deve parar.
+
+        Extraído do `_loop_de_reassinatura` sem mudar comportamento: a
+        função passara de 15 para 17 de complexidade cognitiva e o Sonar
+        reprovou o gate por Maintainability. **O `raise` do
+        `CancelledError` continua vindo antes do `except Exception`** — é
+        ele que deixa o cancelamento do laço subir em vez de virar
+        "reassinatura falhou".
+        """
+        try:
+            await self._reassinar(ws)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.reassinaturas_com_erro += 1
+            self.log.warning(
+                "reassinatura falhou", erro=f"{type(exc).__name__}: {exc}"
+            )
+            return False
+        self.reassinaturas += 1
+        return True
+
+    def _anotar_reassinatura(self, urgencia: str | None, sem_efeito: int) -> None:
+        """A periódica é `debug`; a por silêncio é `warning` e tem contador."""
+        if urgencia is None:
+            self.log.debug("reassinatura periódica", total=self.reassinaturas)
+            return
+        self.reassinaturas_por_silencio += 1
+        self.log.warning(
+            "tópico mudo com a conexão viva: reassinando",
+            conexao=self.rotulo,
+            motivo=urgencia,
+            tentativas_sem_efeito=sem_efeito,
+            total_por_silencio=self.reassinaturas_por_silencio,
+        )
 
     async def _escalar_se_sem_efeito(
         self, ws: websockets.ClientConnection, sem_efeito: int, urgencia: str
