@@ -1717,9 +1717,28 @@ o regime de disputa. Ou seja: o que move a taxa de reconexão é outra coisa —
 hora do dia ou agitação do mercado são os suspeitos óbvios, nenhum medido.
 
 **Isto virou item próprio, e ele não sai de graça com hardware:** ~30–45
-reconexões/h por processo, com `close_origem: cliente` e
-`no close frame received or sent`. Enquanto não tiver causa, entra como
-ressalva no relato de cobertura de qualquer rodada de 14 dias.
+reconexões/h por processo, com `no close frame received or sent`. Enquanto
+não tiver causa, entra como ressalva no relato de cobertura de qualquer
+rodada de 14 dias.
+
+> ⚠️ **O `close_origem: cliente` que aparece nessas linhas era um DEFEITO do
+> registro, não um dado.** `feeds/base.py` fazia
+> `"servidor" if rcvd is not None else "cliente"` — carimbava **cliente**
+> sempre que não havia frame recebido, **inclusive quando não havia frame
+> nenhum**, que é exatamente o caso de `no close frame received or sent` e o
+> de um `OSError` de rede. Ninguém fechou pelo protocolo ali: a conexão
+> morreu por baixo dele.
+>
+> Isso sustentou parte da hipótese de CPU saturada que as janelas limpas
+> depois derrubaram. **Ausência de frame é ausência de medida** — e um campo
+> que finge saber vira gráfico e vira conclusão. Corrigido para três estados
+> (`servidor`, `cliente`, `desconhecida`), com teste que falha se voltar.
+>
+> **Para a investigação, isso muda o ponto de partida:** o suspeito passa a
+> ser a camada de transporte — corte de TCP/TLS por intermediário, rede da
+> VPS, ou o servidor derrubando sem close frame — e não o nosso laço de
+> eventos. Nos registros novos, `close_origem: desconhecida` é o carimbo a
+> procurar.
 
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 

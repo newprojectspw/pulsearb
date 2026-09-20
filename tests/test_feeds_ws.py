@@ -396,3 +396,65 @@ def test_frames_sao_json_valido():
         "operation": "unsubscribe",
         "assets_ids": ["x"],
     }
+
+
+class _FrameFalso:
+    """O bastante do frame de close do `websockets` para o registro ler."""
+
+    def __init__(self, code: int, reason: str) -> None:
+        self.code = code
+        self.reason = reason
+
+
+class _QuedaFalsa(Exception):
+    """`ConnectionClosed` tem `rcvd` e `sent`; qualquer um pode ser None."""
+
+    def __init__(self, rcvd: object | None, sent: object | None) -> None:
+        super().__init__("no close frame received or sent")
+        self.rcvd = rcvd
+        self.sent = sent
+
+
+def _feed_qualquer() -> RtdsFeed:
+    return RtdsFeed(url="ws://127.0.0.1:1", user_agent="ua", assets=["btc"])
+
+
+def test_origem_da_queda_tem_tres_estados_e_nao_adivinha():
+    """Sem frame nenhum, a origem é DESCONHECIDA — nunca "cliente".
+
+    O defeito que este teste impede custou uma investigação inteira em
+    2026-09-20. O registro fazia `"servidor" if rcvd else "cliente"`, então
+    toda queda de transporte — `no close frame received or sent`, `OSError`
+    de rede — saía carimbada como se o NOSSO lado tivesse fechado. As ~30–45
+    reconexões/h do SHADOW foram investigadas sob a hipótese de CPU saturada
+    apoiada, entre outras coisas, nesse carimbo; a hipótese caiu quando a
+    contagem solo deu IGUAL à contagem sob disputa.
+
+    Ausência de frame é ausência de medida. Um campo que finge saber vira
+    gráfico e vira conclusão — e foi o que aconteceu.
+    """
+    feed = _feed_qualquer()
+
+    # 1. o SERVIDOR fechou: veio frame.
+    feed._registrar_queda(_QuedaFalsa(rcvd=_FrameFalso(1011, "erro"), sent=None))
+    assert feed.close_reasons[-1]["close_origem"] == "servidor"
+    assert feed.close_reasons[-1]["close_code"] == 1011
+
+    # 2. NÓS fechamos: mandamos frame e não voltou nada.
+    feed._registrar_queda(_QuedaFalsa(rcvd=None, sent=_FrameFalso(1000, "tchau")))
+    assert feed.close_reasons[-1]["close_origem"] == "cliente"
+    assert feed.close_reasons[-1]["close_code"] == 1000
+
+    # 3. NINGUÉM fechou pelo protocolo — é o caso real da VPS.
+    feed._registrar_queda(_QuedaFalsa(rcvd=None, sent=None))
+    queda = feed.close_reasons[-1]
+    assert queda["close_origem"] == feed.ORIGEM_DESCONHECIDA
+    assert queda["close_origem"] != "cliente", (
+        "regressão do defeito de 2026-09-20: queda sem frame voltou a ser "
+        "atribuída ao cliente"
+    )
+    assert queda["close_code"] is None
+
+    # 4. erro de transporte puro, que nem tem os atributos.
+    feed._registrar_queda(OSError("connection reset by peer"))
+    assert feed.close_reasons[-1]["close_origem"] == feed.ORIGEM_DESCONHECIDA
