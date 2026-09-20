@@ -258,8 +258,14 @@ class ReconnectingFeed:
     #: dizer que não aguenta. Medido na VPS em 2026-09-20: 4 das 24 quedas de
     #: uma hora vieram com 1013, e todas foram respondidas assim.
     #:
-    #: O `1012 Service Restart` (as outras 20) NÃO entra aqui de propósito:
-    #: ele diz que o serviço está voltando, e voltar rápido é o certo.
+    #: O `1012 Service Restart` (as outras 20) entra também. A primeira
+    #: versão desta tabela o deixava de fora com o argumento de que "ele diz
+    #: que o serviço está voltando"; isso inverte o padrão, que diz que o
+    #: serviço **está reiniciando** e recomenda voltar com atraso aleatório
+    #: de 5 a 30 s (achado do Codex no #177).
+    #:
+    #: O que separa os casos não é o código, é **quem fechou** — ver
+    #: `_espera_minima`. O nosso próprio 1012 tem piso zero.
     ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1012: 5.0, 1013: 5.0}
 
     def _espera_minima(self, motivo: dict[str, Any] | None) -> float:
@@ -315,7 +321,16 @@ class ReconnectingFeed:
         a COMPOSIÇÃO (jitter × piso), não só a tabela.
         """
         # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
-        return max(backoff * (0.5 + _JITTER.random()), piso)
+        if piso <= 0.0:
+            return backoff * (0.5 + _JITTER.random())
+        # Com piso, GRUDAR nele seria pior que não ter jitter: `max(x, piso)`
+        # manda ao piso exato toda sorte abaixo dele — metade delas — e
+        # muitos clientes que receberam o mesmo 1012 voltariam no MESMO
+        # instante, que é a debandada que o jitter existe para evitar
+        # (achado do Codex no #177). O sorteio passa a ser DENTRO da faixa,
+        # com o piso como limite inferior em vez de corte.
+        teto = max(backoff, piso) * 1.5
+        return piso + (teto - piso) * _JITTER.random()
 
     def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
         """Extrai código, razão e ORIGEM do close — e recusa adivinhar a origem.
@@ -477,30 +492,49 @@ class ReconnectingFeed:
                     continue
             elif await self._escalar_se_sem_efeito(ws, sem_efeito, urgencia):
                 return
-            try:
-                await self._reassinar(ws)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.reassinaturas_com_erro += 1
-                self.log.warning(
-                    "reassinatura falhou", erro=f"{type(exc).__name__}: {exc}"
-                )
+            if not await self._reassinar_registrando(ws):
                 return
-            self.reassinaturas += 1
             desde_a_ultima = 0.0
             if urgencia is not None:
                 sem_efeito += 1
-                self.reassinaturas_por_silencio += 1
-                self.log.warning(
-                    "tópico mudo com a conexão viva: reassinando",
-                    conexao=self.rotulo,
-                    motivo=urgencia,
-                    tentativas_sem_efeito=sem_efeito,
-                    total_por_silencio=self.reassinaturas_por_silencio,
-                )
-            else:
-                self.log.debug("reassinatura periódica", total=self.reassinaturas)
+            self._anotar_reassinatura(urgencia, sem_efeito)
+
+    async def _reassinar_registrando(self, ws: websockets.ClientConnection) -> bool:
+        """Reenvia a assinatura e conta. `False` = o laço deve parar.
+
+        Extraído do `_loop_de_reassinatura` sem mudar comportamento: a
+        função passara de 15 para 17 de complexidade cognitiva e o Sonar
+        reprovou o gate por Maintainability. **O `raise` do
+        `CancelledError` continua vindo antes do `except Exception`** — é
+        ele que deixa o cancelamento do laço subir em vez de virar
+        "reassinatura falhou".
+        """
+        try:
+            await self._reassinar(ws)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.reassinaturas_com_erro += 1
+            self.log.warning(
+                "reassinatura falhou", erro=f"{type(exc).__name__}: {exc}"
+            )
+            return False
+        self.reassinaturas += 1
+        return True
+
+    def _anotar_reassinatura(self, urgencia: str | None, sem_efeito: int) -> None:
+        """A periódica é `debug`; a por silêncio é `warning` e tem contador."""
+        if urgencia is None:
+            self.log.debug("reassinatura periódica", total=self.reassinaturas)
+            return
+        self.reassinaturas_por_silencio += 1
+        self.log.warning(
+            "tópico mudo com a conexão viva: reassinando",
+            conexao=self.rotulo,
+            motivo=urgencia,
+            tentativas_sem_efeito=sem_efeito,
+            total_por_silencio=self.reassinaturas_por_silencio,
+        )
 
     async def _escalar_se_sem_efeito(
         self, ws: websockets.ClientConnection, sem_efeito: int, urgencia: str

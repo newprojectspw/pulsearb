@@ -620,3 +620,39 @@ def test_nosso_proprio_close_nao_alimenta_a_escalada():
     for _ in range(5):
         assert feed._piso_da_volta(nosso) == 0.0
     assert feed.pedidos_de_paciencia_seguidos == 0
+
+
+def test_o_piso_nao_vira_ponto_de_encontro():
+    """Com piso, `max(x, piso)` grudaria metade das voltas no MESMO valor.
+
+    Achado do Codex no #177, e é o inverso do problema anterior: depois de
+    fazer o piso valer, `max(backoff * jitter, piso)` mandava ao piso EXATO
+    toda sorte abaixo dele — metade delas. Muitos clientes que receberam o
+    mesmo `1012` voltariam no mesmo instante, que é exatamente a debandada
+    que o jitter existe para evitar.
+
+    O sorteio passou a ser DENTRO da faixa `[piso, teto)`, com o piso como
+    limite inferior em vez de corte.
+    """
+    feed = _feed_qualquer()
+    do_servidor = {"close_code": 1013, "close_origem": "servidor"}
+    piso = feed._espera_minima(do_servidor)
+
+    amostras = [feed.espera_da_volta(feed.reconnect_initial_seconds, piso) for _ in range(400)]
+
+    assert min(amostras) >= piso, "o piso continua sendo piso"
+    no_piso_exato = sum(1 for a in amostras if a == piso)
+    assert no_piso_exato <= 4, (
+        f"regressão: {no_piso_exato} de 400 voltas caíram no piso EXATO — "
+        "o piso virou ponto de encontro em vez de limite inferior"
+    )
+    assert len(set(amostras)) > 300, "as esperas têm de ficar espalhadas"
+
+
+def test_sem_piso_o_jitter_antigo_nao_muda():
+    """Sem piso, a distribuição continua sendo a de sempre, [0.5, 1.5)x."""
+    feed = _feed_qualquer()
+    amostras = [feed.espera_da_volta(10.0, 0.0) for _ in range(400)]
+    assert min(amostras) >= 5.0
+    assert max(amostras) < 15.0
+    assert min(amostras) < 6.0, "a faixa começa em 0.5x, não no backoff"
