@@ -122,6 +122,8 @@ class ReconnectingFeed:
         self._last_msg_mono_ns: int = 0
         self._connected = False
         self.reconnect_count = 0
+        #: Quedas SEGUIDAS em que o servidor pediu paciência.
+        self.pedidos_de_paciencia_seguidos = 0
         self.message_count = 0
         # Motivo de cada queda: sem isto, "conexão caiu" é um beco sem saída
         # na investigação. Limitado às últimas MAX_CLOSE_REASONS — numa
@@ -238,11 +240,9 @@ class ReconnectingFeed:
             if self._stopped.is_set():
                 return
             self.reconnect_count += 1
-            # O piso sobe o PRÓPRIO backoff, não só esta espera: assim a
-            # duplicação abaixo parte dele, e um segundo pedido de paciência
-            # seguido espera mais que o primeiro, não a mesma coisa.
-            backoff = max(backoff, self._espera_minima(motivo))
-            await asyncio.sleep(self.espera_da_volta(backoff, motivo))
+            piso = self._piso_da_volta(motivo)
+            backoff = max(backoff, piso)
+            await asyncio.sleep(self.espera_da_volta(backoff, piso))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
     #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket
@@ -278,7 +278,31 @@ class ReconnectingFeed:
             return 0.0
         return self.ESPERA_MINIMA_POR_CODIGO.get(codigo, 0.0)
 
-    def espera_da_volta(self, backoff: float, motivo: dict[str, Any] | None) -> float:
+    def _piso_da_volta(self, motivo: dict[str, Any] | None) -> float:
+        """O piso desta volta, DOBRANDO a cada pedido de paciência seguido.
+
+        **Por que um contador próprio, e não o `backoff`** (achado P2 do
+        Codex na revisão do #177): o laço faz `backoff =
+        reconnect_initial_seconds` a cada conexão BEM SUCEDIDA. Como o
+        servidor aceita a conexão e só depois a fecha com 1013, o backoff
+        volta a 0,5 s antes de cada queda — então subir o backoff pelo piso
+        dava 5 s TODA vez, e a escalada que o comentário anterior prometia
+        nunca acontecia. O contador sobrevive ao reset porque não é o
+        backoff.
+
+        Zera em qualquer queda que NÃO seja pedido de paciência: se o
+        servidor fechou por outro motivo, ele não está mais sobrecarregado
+        do ponto de vista desta conta.
+        """
+        piso = self._espera_minima(motivo)
+        if piso <= 0.0:
+            self.pedidos_de_paciencia_seguidos = 0
+            return 0.0
+        self.pedidos_de_paciencia_seguidos += 1
+        dobras = self.pedidos_de_paciencia_seguidos - 1
+        return min(piso * (2**dobras), self.reconnect_max_seconds)
+
+    def espera_da_volta(self, backoff: float, piso: float = 0.0) -> float:
         """O sono desta volta: jitter aplicado, e o piso DEPOIS dele.
 
         Achado P2 do Codex na revisão do #177, e é a diferença entre um piso
@@ -290,7 +314,6 @@ class ReconnectingFeed:
         Método público e puro de propósito: o teste do piso precisa exercer
         a COMPOSIÇÃO (jitter × piso), não só a tabela.
         """
-        piso = self._espera_minima(motivo)
         # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
         return max(backoff * (0.5 + _JITTER.random()), piso)
 

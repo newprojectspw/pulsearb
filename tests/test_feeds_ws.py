@@ -509,14 +509,8 @@ def test_espera_minima_nao_encurta_um_backoff_ja_grande():
     """
     feed = _feed_qualquer()
     piso = feed._espera_minima({"close_code": 1013, "close_origem": "servidor"})
-
     backoff_grande = 30.0
     assert max(backoff_grande, piso) == backoff_grande
-
-    # a escalada depois de dois 1013 seguidos
-    backoff = feed.reconnect_initial_seconds          # 0,5 s
-    backoff = min(max(backoff, piso) * 2, feed.reconnect_max_seconds)
-    assert backoff == 10.0, "o segundo 1013 tem de esperar mais que o primeiro"
 
 
 class _QuedaComHandshake(Exception):
@@ -570,7 +564,7 @@ def test_o_piso_sobrevive_ao_jitter():
     assert piso == 5.0
 
     for _ in range(300):
-        assert feed.espera_da_volta(feed.reconnect_initial_seconds, do_servidor) >= piso
+        assert feed.espera_da_volta(feed.reconnect_initial_seconds, piso) >= piso
 
 
 def test_o_piso_nao_vale_para_o_close_que_nos_mandamos():
@@ -583,3 +577,46 @@ def test_o_piso_nao_vale_para_o_close_que_nos_mandamos():
 
     do_servidor = {"close_code": 1012, "close_origem": "servidor"}
     assert feed._espera_minima(do_servidor) == 5.0
+
+
+
+def test_a_escalada_do_piso_sobrevive_ao_reset_do_backoff():
+    """A escalada tem de contar QUEDAS, não o backoff — que reseta antes.
+
+    Achado P2 do Codex no #177, e ele derrubou uma AFIRMAÇÃO minha, não só
+    um número: o comentário e o runbook diziam que um segundo `1013`
+    seguido esperaria 10 s. Nunca esperava. O laço faz `backoff =
+    reconnect_initial_seconds` a cada conexão **bem sucedida**, e o servidor
+    aceita a conexão antes de fechá-la — então o backoff voltava a 0,5 s
+    antes de cada queda e o piso o levava a 5 s TODA vez.
+
+    O teste anterior refazia a aritmética de uma queda só e por isso não via
+    o reset. Este percorre a sequência real.
+    """
+    feed = _feed_qualquer()
+    sobrecarga = {"close_code": 1013, "close_origem": "servidor"}
+    outra_coisa = {"close_code": 1000, "close_origem": "servidor"}
+
+    assert feed._piso_da_volta(sobrecarga) == 5.0
+    assert feed._piso_da_volta(sobrecarga) == 10.0, (
+        "regressão: o segundo pedido de paciência seguido voltou a esperar o "
+        "mesmo que o primeiro"
+    )
+    assert feed._piso_da_volta(sobrecarga) == 20.0
+
+    # teto: não passa do reconnect_max_seconds
+    assert feed._piso_da_volta(sobrecarga) == feed.reconnect_max_seconds
+
+    # e uma queda por outro motivo zera a conta
+    assert feed._piso_da_volta(outra_coisa) == 0.0
+    assert feed.pedidos_de_paciencia_seguidos == 0
+    assert feed._piso_da_volta(sobrecarga) == 5.0
+
+
+def test_nosso_proprio_close_nao_alimenta_a_escalada():
+    """Derrubar a conexão de propósito não é o servidor pedindo paciência."""
+    feed = _feed_qualquer()
+    nosso = {"close_code": 1012, "close_origem": "cliente"}
+    for _ in range(5):
+        assert feed._piso_da_volta(nosso) == 0.0
+    assert feed.pedidos_de_paciencia_seguidos == 0

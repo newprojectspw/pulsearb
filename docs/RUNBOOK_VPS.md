@@ -1911,11 +1911,20 @@ Corrigido com um **piso de espera por código**, e a assimetria é o ponto:
 | `1012` Service Restart | **nenhum** | ele diz que está VOLTANDO — voltar rápido é o certo |
 
 É `max(backoff, piso)`, não substituição: depois de muitas quedas seguidas
-o backoff exponencial já passa de 5 s, e trocar pelo piso deixaria a
+o backoff exponencial já passa do piso, e trocar por ele deixaria a
 reconexão **mais** agressiva justamente quando o servidor está pior. E o
-piso sobe o **próprio** `backoff`, não só a espera daquela volta — assim a
-duplicação parte dele, e um segundo `1013` seguido espera 10 s em vez de
-voltar aos 5. Quem pediu paciência duas vezes recebe mais, não a mesma. Os
+piso vale **depois** do jitter, não antes: multiplicado por `[0.5, 1.5)`,
+um piso de 5 s deixava metade das voltas dormindo menos que o mínimo.
+
+**A escalada conta QUEDAS, não o backoff, e a razão é um erro que eu havia
+escrito aqui.** A versão anterior desta seção prometia que um segundo
+`1013` seguido esperaria 10 s. Não esperava: o laço faz `backoff =
+reconnect_initial_seconds` a cada conexão **bem sucedida**, e o servidor
+aceita a conexão antes de fechá-la — então o backoff voltava a 0,5 s antes
+de cada queda e o piso o levava a 5 s toda vez. Um contador próprio
+(`pedidos_de_paciencia_seguidos`) sobrevive ao reset: 5 s, 10 s, 20 s, até
+o `reconnect_max_seconds`. Zera em qualquer queda que não seja pedido de
+paciência. Os
 dois testes fixam as duas coisas, e o primeiro foi verificado por mutação.
 
 > ⚠️ **O DIAGNÓSTICO ACIMA ESTÁ SOB SUSPEITA, e a suspeita é minha.** A
