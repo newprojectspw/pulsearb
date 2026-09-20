@@ -1312,7 +1312,8 @@ grep -c 'Out of memory' /var/log/syslog || true
 
 Leia assim: `%CPU` somando perto de 100 e `r` ≥ 4 com `wa` baixo é a
 hipótese (a) — CPU saturada. `wa` alto com `%CPU` baixo é disco, e aí a
-carga 4,00 não contamina a medida.
+carga 4,00 não contamina a medida. **Foi rodado, e deu (a) — o §10.1e traz
+os números e o que eles obrigam.**
 
 **O que fazer com o veredito:**
 
@@ -1328,6 +1329,86 @@ GiB, e sobram 18 GB), mas **a memória não**: 174 MiB disponíveis e **zero
 swap** não acomodam um quinto processo Python. Um OOM aqui mata uma das
 rodadas, e uma rodada com buraco que as irmãs não têm é exatamente a
 comparação que o §10.1c recusa.
+
+### 10.1e. O desempate foi feito: é (a), CPU saturada
+
+Rodado em `2026-09-20 ~04:10 UTC`, 5 h 55 min depois de as quatro subirem.
+**Não sobrou ambiguidade.**
+
+```
+    PID STAT %CPU %MEM ELAPSED COMMAND
+ 105231 Rsl  24.5 14.9   21282 …shadow --diario …-recolher.jsonl
+ 105177 Rsl  24.5 14.6   21283 …shadow --diario …-base.jsonl
+ 105343 Rsl  24.5 14.4   21279 …shadow --diario …-pausa.jsonl
+ 105285 Rsl  24.4 14.6   21281 …shadow --diario …-ancora.jsonl
+
+ r  b   swpd   free  …   in   cs us sy id wa
+ 4  0      0  83936  … 2058 1080 97  3  0  0
+ 4  0      0  85868  … 1996 1056 97  3  0  0
+ 4  0      0  87396  … 2230 1064 97  3  0  0
+```
+
+(A **primeira** linha do `vmstat` é média desde o boot e se descarta sempre;
+as três acima são as amostras de 5 s.)
+
+**Os quatro sinais dizem a mesma coisa:**
+
+| sinal | valor | o que significa |
+|---|---|---|
+| `STAT` | **R** nos quatro | rodando/prontos, nenhum em D (espera de disco) |
+| `%CPU` | 24,5 / 24,5 / 24,5 / 24,4 | **somam 97,9% de 1 vCPU** — dividem um núcleo em quatro |
+| `id` | **0** | **zero ocioso**: não há CPU sobrando em instante nenhum |
+| `wa` | **0** | não é disco. A hipótese (b) do §10.1d não se sustenta por aqui |
+| `r` | **4** constante | os quatro estão **sempre** prontos, sempre esperando vez |
+| OOM | **0** | ainda não matou nada — mas `free` em ~85 MiB e swap zero |
+
+**O que `r = 4` com `id = 0` prova, e é o essencial:** se cada processo
+precisasse mesmo só de 24,5%, ele dormiria depois de trabalhar e a fila
+média cairia para perto de 1. Ela não cai. Os quatro estão permanentemente
+prontos — **cada um quer mais CPU do que recebe**. Os 24,5% não são o custo
+de uma rodada, são o teto que o escalonador impõe a ela.
+
+E isso explica as 601 reconexões/h do §10.1d sem precisar de mais nada: o
+laço de eventos não volta a tempo de responder o ping, e quem fecha a
+conexão é o nosso lado — exatamente o `"close_origem":"cliente"` com
+`no close frame received or sent` que o diário registra.
+
+**Consequência, dita sem rodeio: o ensaio de 14 dias iniciado em
+2026-09-19 22:15 UTC não produz dado válido.** O `cotacoes_repousando` e o
+`meio_no_fill` das quatro carregam fila de escalonador junto com mercado, e
+o feed cai 150×/h em cada uma. Não é um ensaio ruim que se corrige na
+análise: é um instrumento medindo a si mesmo.
+
+**O que esta medida AINDA não diz, e é o que decide a saída:** quanto UMA
+rodada consome sozinha. Com `id = 0` não dá para inferir — o teto esconde a
+demanda. Sem esse número não se sabe se **base + uma** (a saída do §10.1c)
+cabe, nem que tamanho de máquina comprar.
+
+**O ensaio que responde, e responde duas coisas de uma vez** — 10 minutos:
+
+```bash
+# Para três, deixa a base sozinha. O ensaio já está invalidado; parar não
+# perde nada que se fosse aproveitar.
+for r in recolher ancora pausa; do
+    sudo systemctl stop pulsearb-shadow-maker@$r
+done
+sleep 120     # deixa assentar
+
+ps -o pid,stat,pcpu,pmem,args -C python --sort=-pcpu | head -3
+vmstat 5 4
+journalctl -u pulsearb-shadow-maker@base --since '-8min' --no-pager \
+  | grep -c 'conexão caiu'
+```
+
+Leia os dois resultados assim:
+
+- **`%CPU` de uma rodada sozinha.** É a demanda real, sem teto. Divida 100
+  por ela para saber quantas rodadas cabem por núcleo — e some folga, porque
+  um núcleo a 100% é onde a reconexão começou.
+- **A contagem de `conexão caiu` com UM processo.** Se despencar, era CPU
+  (confirma (a) por um segundo caminho). Se continuar alta, há **também**
+  um limite do CLOB por IP, e aí nem uma máquina maior resolve sozinha —
+  isso precisaria entrar no relato de cobertura.
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
