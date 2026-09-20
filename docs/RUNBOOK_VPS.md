@@ -1402,13 +1402,93 @@ journalctl -u pulsearb-shadow-maker@base --since '-8min' --no-pager \
 
 Leia os dois resultados assim:
 
-- **`%CPU` de uma rodada sozinha.** É a demanda real, sem teto. Divida 100
-  por ela para saber quantas rodadas cabem por núcleo — e some folga, porque
-  um núcleo a 100% é onde a reconexão começou.
+- **A demanda de uma rodada sozinha.** Ela sai do `vmstat`, **não** do
+  `%CPU` do `ps` — ver a armadilha no §10.1f. Divida 100 por ela para saber
+  quantas rodadas cabem por núcleo, e some folga, porque um núcleo a 100% é
+  onde a reconexão começou.
 - **A contagem de `conexão caiu` com UM processo.** Se despencar, era CPU
   (confirma (a) por um segundo caminho). Se continuar alta, há **também**
   um limite do CLOB por IP, e aí nem uma máquina maior resolve sozinha —
   isso precisaria entrar no relato de cobertura.
+
+### 10.1f. Uma rodada sozinha custa ~40% de um núcleo
+
+Rodado em `2026-09-20 ~04:25 UTC`, com `recolher`, `ancora` e `pausa`
+paradas e a `base` sozinha:
+
+```
+    PID STAT %CPU %MEM COMMAND
+ 105177 Ssl  24.6 14.8 …shadow --diario …-base.jsonl
+
+ r  b   swpd    free  …   in   cs us sy id wa st
+ 1  0      0  504880  … 1845  933 34  4 61  0  1
+ 0  0      0  504880  … 1836  916 34  4 62  0  0
+ 0  0      0  504880  … 2161  937 43  5 52  0  1
+```
+
+**A ARMADILHA, e ela quase inverte a leitura: o `%CPU` do `ps` é a média de
+TODA a vida do processo**, não o instante — tempo de CPU acumulado dividido
+pelo tempo decorrido desde o `exec`. Este processo passou 5 h 55 min
+disputando o núcleo a 24,5% e só 2 min sozinho, então os **24,6% que o `ps`
+mostra são o passado sob disputa**, quase inalterado. Quem lê o `ps` aqui
+conclui que a rodada custa 24,5% com ou sem concorrência — e compraria
+máquina errada. **A demanda real está no `vmstat`, que mede o intervalo.**
+
+**O que o `vmstat` diz:** `us + sy` = 38, 38, 48 → **uma rodada custa ~40%
+de um núcleo**, com `id` entre 52 e 62%. E os dois sinais que definiam a
+saturação viraram: `STAT` foi de **R** para **S** (o processo volta a
+dormir, não fica mais sempre pronto) e `r` caiu de 4 constante para 0–1.
+
+**Memória:** `free` subiu de ~85 MiB para ~505 MiB. Três rodadas a menos
+liberaram ~420 MiB, ou seja **~140 MiB por rodada** — bate com os 14,6% de
+`%MEM` sobre 961 MiB.
+
+**A conta de capacidade, então:**
+
+| arranjo | CPU pedida | cabe em 1 vCPU? |
+|---|---|---|
+| 1 rodada | ~40% | ✅ com folga |
+| **base + uma regra** (a saída do §10.1c) | **~80%** | ❌ **não com folga** — 80% sustentado, com picos a 96% (2 × 48%), é a mesma beira onde a reconexão apareceu |
+| as quatro em paralelo | ~160% | ❌ impossível |
+
+**Isto muda a saída do §10.1c nesta máquina.** "Base + uma regra" foi
+escrita como o plano B de disco e de processo, não contra um teto de CPU
+medido: a 80% de um núcleo ela repete o defeito com menos margem. **Numa
+VPS de 1 vCPU o ensaio honesto é UMA rodada por vez** — e isso é o
+sequencial de 56 dias que o §10.1c recusa por comparar regra com mercado.
+
+**Logo: o desenho de quatro rodadas paralelas exige máquina maior.** Quatro
+× 40% = 160% de CPU e ~560 MiB de RSS. **4 vCPU** deixa o ensaio a ~40% de
+utilização, que é onde ele deve ficar; 2 vCPU o deixaria a ~80%, na mesma
+beira. Memória: 2 GiB já bastam pela conta, e swap deixa de ser zero.
+
+**O que NÃO está medido aqui, e precisa estar antes de comprar:** os ~40%
+saem de **três amostras de 5 s**, e elas já variam de 38 a 48 conforme o
+mercado. Antes de dimensionar hardware, deixe UMA rodada sozinha por
+30–60 min e refaça o `vmstat` — o pico importa mais que a média, porque é
+ele que satura.
+
+**A comparação de reconexões ainda NÃO está feita, e o número de 4 não a
+faz.** Aquele `grep -c 'conexão caiu'` pegou uma janela de 8 min que
+cobria ~5,7 min com as quatro de pé e ~2,3 min com uma só — está misturada.
+E as 601/h do §10.1d vieram de outro `grep` (`erro\|falhou\|Traceback`, nas
+quatro unidades), que casa mais linhas que só as de reconexão. **Os dois
+números não se comparam.** A comparação limpa é a mesma unidade, o mesmo
+`grep` e a mesma duração, numa janela de cada regime:
+
+```bash
+# solo — rode depois de 30 min com uma rodada só
+journalctl -u pulsearb-shadow-maker@base --since '-20min' --no-pager \
+  | grep -c 'conexão caiu'
+
+# disputa — a MESMA conta, numa janela em que as quatro rodavam
+journalctl -u pulsearb-shadow-maker@base \
+  --since '2026-09-20 03:30' --until '2026-09-20 03:50' --no-pager \
+  | grep -c 'conexão caiu'
+```
+
+Se o solo for muito menor, a reconexão era CPU. Se os dois forem parecidos,
+há uma causa independente da carga, e máquina maior não a resolve.
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
