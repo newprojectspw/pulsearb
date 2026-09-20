@@ -1534,16 +1534,23 @@ uma conta, não de uma medida.** Vale a regra do quadro nos dois sentidos:
 sudo systemctl start pulsearb-shadow-maker@pausa   # base + uma regra
 sleep 600                                          # 10 min, não 2
 
-vmstat 5 12                    # id e r sob DOIS processos
-ps -o pid,stat,pcpu,args -C python --sort=-pcpu | head -4
-journalctl -u pulsearb-shadow-maker@base --since '-10min' --no-pager \
-  | grep -c 'conexão caiu'
+vmstat 5 12
+pidstat -p "$(pgrep -f 'shadow.*-base\.jsonl' | head -1)" 5 12
 ```
 
-Reprova (e aí sim ❌) se: `id` encostar em 0, `r` ficar em 2 constante, ou a
-contagem de reconexão subir contra a janela solo do §10.1f. **Passa** se
-sobrar `id` com folga e a reconexão não mudar — e então o plano B vale, sem
-gastar nada.
+> ⚠️ **O CRITÉRIO DE REPROVA QUE EU TINHA ESCRITO AQUI ERA INSUFICIENTE.** Ele
+> dizia: reprova se `id` encostar em 0 ou `r` ficar em 2 constante. **O ensaio
+> foi rodado e NENHUM dos dois aconteceu — e mesmo assim reprovou.** Num
+> núcleo só, dois processos que querem CPU no MESMO instante formam fila
+> mesmo havendo ocioso entre as rajadas: o `id` médio continua bonito e a
+> espera acontece dentro das janelas que importam. **A coluna que mede isso
+> é `%wait` do `pidstat`** — tempo do processo na fila de execução, pronto e
+> sem receber CPU. É ela que reprova, e ela não aparece no `vmstat`.
+
+**Critério correto:** compare o `%wait` do `pidstat` com o da janela solo do
+§10.1f. Solo, ele fica em ~0. Se subir para dois dígitos, o escalonador
+entrou na medida — e entrou exatamente nos momentos de mercado agitado, que
+são os que decidem a cotação.
 
 #### A medida por PID foi feita, e o pico é o que muda tudo
 
@@ -1644,6 +1651,75 @@ A janela de disputa está dentro do intervalo em que as quatro rodavam
 
 Se o solo for muito menor, a reconexão era CPU. Se os dois forem parecidos,
 há uma causa independente da carga, e máquina maior não a resolve.
+
+### 10.1f-bis. O ensaio de duas rodadas REPROVOU — e não pelo `id`
+
+Rodado em `2026-09-20 15:17` e repetido às `15:30`, com `base` + `pausa`.
+**Os dois sinais que eu tinha eleito como critério passaram:**
+
+| sinal | esperado para reprovar | medido |
+|---|---|---|
+| `id` do `vmstat` | encostar em 0 | **mínimo 21%** — nunca zerou |
+| `r` do `vmstat` | 2 constante | **0 a 4**, quase sempre 0–2 |
+
+**E mesmo assim o regime reprova, pela coluna que eu não tinha olhado:**
+
+| `%wait` do `pidstat` sobre a `base` | mínimo | máximo | média |
+|---|---|---|---|
+| **sozinha** (14:57) | 0,00 | 1,20 | **0,38%** |
+| **com a `pausa`** (15:17) | 9,60 | 23,40 | **16,70%** |
+| **com a `pausa`** (15:30) | 23,20 | 50,20 | **35,97%** |
+
+**`%wait` é o tempo em que o processo está PRONTO e não recebe CPU** — fila
+de escalonador pura. Ele saiu de ~0,4% para **36%**: quase cem vezes. Na
+segunda rodada de amostras, **metade do tempo** em alguns intervalos.
+
+**Por que o `id` não pegou isso, e a lição vale além deste caso.** `id` é
+média sobre 5 s de máquina inteira; `%wait` é do processo, e conta o
+instante. Duas rodadas que reagem ao MESMO evento de livro acordam JUNTAS:
+nesses milissegundos uma espera a outra, e entre as rajadas sobra ocioso que
+enche o `id` de volta. **Média boa com fila nas rajadas é o pior caso** —
+porque as rajadas são exatamente quando a cotação decide, e é a latência
+delas que o `cotacoes_repousando` e o `meio_no_fill` medem.
+
+**Veredito: ❌ base + uma regra NÃO cabe em 1 vCPU. Medido, com o número que
+reprovou: `%wait` de 0,38% para 16,70% e 35,97%.** O plano B do §10.1h morre
+aqui, e com ele a última saída gratuita.
+
+**O que sobra para o item 4.2, sem eufemismo:**
+
+| caminho | custo | o que entrega |
+|---|---|---|
+| **VPS de 4 vCPU** | ~1 mês de aluguel | as quatro em paralelo, 14 dias, todas as comparações limpas |
+| uma rodada por vez | 56 dias | ❌ o §10.1c já recusa: compara regra com mercado |
+| baratear a rodada | trabalho não medido | 40% de um núcleo para cotar em 60 mercados em SHADOW é muito; `in` ~2.000–3.000/s e `cs` ~1.000/s sugerem que há o que cortar. **Mas isso é uma investigação inteira, não um ajuste** — e nada garante que caiba em 1 vCPU no fim |
+
+**A recomendação é a primeira linha**, e a razão é de risco, não de
+preferência: as outras duas gastam semanas para talvez chegar ao mesmo
+lugar, e o 4.2 é pré-requisito de LIVE.
+
+### 10.1f-ter. A reconexão NÃO é CPU — agora com janelas limpas
+
+Mesma unidade, mesmo `grep`, quatro janelas de 20 min:
+
+| janela | regime | `conexão caiu` |
+|---|---|---|
+| 03:30–03:50 | **quatro rodadas disputando** | **8** |
+| 05:00–05:20 | uma rodada sozinha | **15** |
+| 09:00–09:20 | uma rodada sozinha | **14** |
+| 13:00–13:20 | uma rodada sozinha | **8** |
+
+**Solo é igual ou MAIOR que sob disputa.** A hipótese de que a CPU derrubava
+o feed está descartada com janelas limpas, e não por inferência.
+
+E a variação entre as janelas solo (8 a 15) é **maior** que a diferença para
+o regime de disputa. Ou seja: o que move a taxa de reconexão é outra coisa —
+hora do dia ou agitação do mercado são os suspeitos óbvios, nenhum medido.
+
+**Isto virou item próprio, e ele não sai de graça com hardware:** ~30–45
+reconexões/h por processo, com `close_origem: cliente` e
+`no close frame received or sent`. Enquanto não tiver causa, entra como
+ressalva no relato de cobertura de qualquer rodada de 14 dias.
 
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
