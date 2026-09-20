@@ -17,7 +17,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import websockets
 
@@ -175,6 +175,11 @@ class ReconnectingFeed:
     async def _run(self) -> None:
         backoff = self.reconnect_initial_seconds
         while not self._stopped.is_set():
+            # Sem queda registrada nesta volta não há pedido do servidor a
+            # respeitar — e sem inicializar aqui, a volta que termina SEM
+            # exceção (o `_receive_loop` retornando) chegaria na espera com
+            # `motivo` inexistente.
+            motivo: dict[str, Any] | None = None
             try:
                 async with websockets.connect(
                     self.url,
@@ -222,13 +227,36 @@ class ReconnectingFeed:
             if self._stopped.is_set():
                 return
             self.reconnect_count += 1
+            espera = max(backoff, self._espera_minima(motivo))
             # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
-            await asyncio.sleep(backoff * (0.5 + random.random()))
+            await asyncio.sleep(espera * (0.5 + random.random()))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
     #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket
     #: (TCP/TLS cortado, rede, intermediário). NÃO é o cliente fechando.
     ORIGEM_DESCONHECIDA = "desconhecida"
+
+    #: Piso de espera por código de close, quando o SERVIDOR pede paciência.
+    #:
+    #: O `1013 Try Again Later` do RFC 6455 §7.4.1 diz, com essas palavras,
+    #: que o servidor está sobrecarregado e o cliente deve voltar MAIS TARDE.
+    #: O laço abaixo zera o backoff a cada conexão boa, então sem este piso
+    #: um 1013 era respondido em ~0,5 s — insistir em cima de quem acabou de
+    #: dizer que não aguenta. Medido na VPS em 2026-09-20: 4 das 24 quedas de
+    #: uma hora vieram com 1013, e todas foram respondidas assim.
+    #:
+    #: O `1012 Service Restart` (as outras 20) NÃO entra aqui de propósito:
+    #: ele diz que o serviço está voltando, e voltar rápido é o certo.
+    ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1013: 5.0}
+
+    def _espera_minima(self, motivo: dict[str, Any] | None) -> float:
+        """Quanto esperar no mínimo, pelo que o servidor disse no close."""
+        if not motivo:
+            return 0.0
+        codigo = motivo.get("close_code")
+        if not isinstance(codigo, int):
+            return 0.0
+        return self.ESPERA_MINIMA_POR_CODIGO.get(codigo, 0.0)
 
     def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
         """Extrai código, razão e ORIGEM do close — e recusa adivinhar a origem.

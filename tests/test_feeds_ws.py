@@ -458,3 +458,43 @@ def test_origem_da_queda_tem_tres_estados_e_nao_adivinha():
     # 4. erro de transporte puro, que nem tem os atributos.
     feed._registrar_queda(OSError("connection reset by peer"))
     assert feed.close_reasons[-1]["close_origem"] == feed.ORIGEM_DESCONHECIDA
+
+
+def test_1013_do_servidor_nao_e_respondido_em_meio_segundo():
+    """`Try Again Later` pede paciência, e o laço ignorava o pedido.
+
+    Medido na VPS em 2026-09-20: das 24 quedas de uma hora, **20 vieram com
+    `1012 Service Restart` e 4 com `1013 Try Again Later`**. O laço de
+    reconexão zera o backoff a cada conexão boa, então as quatro foram
+    respondidas em ~0,5 s — insistir em cima de um servidor que acabou de
+    dizer, pelo código do RFC 6455 §7.4.1, que está sobrecarregado.
+
+    O 1012 continua sem piso DE PROPÓSITO: ele diz que o serviço está
+    voltando, e voltar rápido é o certo. A assimetria é o conteúdo deste
+    teste — um piso em todos os códigos seria tão errado quanto nenhum.
+    """
+    feed = _feed_qualquer()
+
+    pede_paciencia = {"close_code": 1013, "close_origem": "servidor"}
+    assert feed._espera_minima(pede_paciencia) >= 5.0, (
+        "regressão: 1013 Try Again Later voltou a ser respondido no backoff "
+        "curto"
+    )
+
+    # E o que NÃO deve ganhar piso:
+    assert feed._espera_minima({"close_code": 1012}) == 0.0
+    assert feed._espera_minima({"close_code": 1000}) == 0.0
+    assert feed._espera_minima({"close_code": None}) == 0.0
+    assert feed._espera_minima(None) == 0.0
+
+
+def test_espera_minima_nao_encurta_um_backoff_ja_grande():
+    """O piso é PISO, não substituição: depois de muitas quedas seguidas o
+    backoff exponencial já passa dos 5 s, e aplicar o piso no lugar dele
+    faria a reconexão ficar MAIS agressiva justamente quando o servidor está
+    pior. O laço usa `max(backoff, piso)` — este teste fixa essa escolha.
+    """
+    feed = _feed_qualquer()
+    piso = feed._espera_minima({"close_code": 1013})
+    backoff_grande = 30.0
+    assert max(backoff_grande, piso) == backoff_grande
