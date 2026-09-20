@@ -1434,10 +1434,47 @@ mostra são o passado sob disputa**, quase inalterado. Quem lê o `ps` aqui
 conclui que a rodada custa 24,5% com ou sem concorrência — e compraria
 máquina errada. **A demanda real está no `vmstat`, que mede o intervalo.**
 
-**O que o `vmstat` diz:** `us + sy` = 38, 38, 48 → **uma rodada custa ~40%
-de um núcleo**, com `id` entre 52 e 62%. E os dois sinais que definiam a
-saturação viraram: `STAT` foi de **R** para **S** (o processo volta a
-dormir, não fica mais sempre pronto) e `r` caiu de 4 constante para 0–1.
+**O que o `vmstat` diz:** `us + sy` = 38, 38, 48 com `id` entre 52 e 62%. E
+os dois sinais que definiam a saturação viraram: `STAT` foi de **R** para
+**S** (o processo volta a dormir, não fica mais sempre pronto) e `r` caiu de
+4 constante para 0–1. **Esses dois sinais bastam para o veredito de
+saturação** — eles são da máquina, e é da máquina que se quer saber.
+
+**Mas os 38–48% NÃO são, ainda, o custo de uma rodada** (achado P2 do Codex
+na revisão do #170). O `us`/`sy` do `vmstat` é da máquina INTEIRA: parar as
+outras três não prova que o que sobrou pertence à `base`. Qualquer outro
+serviço do host entra na conta, e multiplicar esse número por quatro
+dimensiona VPS errado. **Estender a amostra para 30–60 min não corrige isso
+— é erro de atribuição, não de ruído.**
+
+**Como medir o custo de UMA rodada de verdade.** Precisa ser por PID e por
+intervalo. Por intervalo porque o `%CPU` do `ps` é média de vida (a
+armadilha acima); por PID porque o `vmstat` é da máquina:
+
+```bash
+# 1. a linha de base: o host SEM nenhuma rodada
+sudo systemctl stop 'pulsearb-shadow-maker@*'
+vmstat 5 6          # us+sy aqui é o custo do host, e sai da conta
+
+# 2. a rodada sozinha, por PID
+sudo systemctl start pulsearb-shadow-maker@base
+sleep 120
+pidstat -p "$(pgrep -f 'shadow.*-base\.jsonl' | head -1)" 5 12
+```
+
+Sem `pidstat` (pacote `sysstat`), o mesmo pela contabilidade do kernel —
+`utime + stime` do `/proc`, que é exatamente o que o `pidstat` lê:
+
+```bash
+pid=$(pgrep -f 'shadow.*-base\.jsonl' | head -1)
+tick=$(getconf CLK_TCK)
+ler() { awk '{print $14+$15}' /proc/"$pid"/stat; }
+a=$(ler); sleep 60; b=$(ler)
+echo "CPU da rodada no minuto: $(( (b - a) * 100 / (60 * tick) ))%"
+```
+
+O número que dimensiona hardware é **esse**, não o `us+sy`. Repita algumas
+vezes: o que satura é o pico, não a média.
 
 **Memória:** `free` subiu de ~85 MiB para ~505 MiB. Três rodadas a menos
 liberaram ~420 MiB, ou seja **~140 MiB por rodada** — bate com os 14,6% de
@@ -1482,6 +1519,64 @@ contagem de reconexão subir contra a janela solo do §10.1f. **Passa** se
 sobrar `id` com folga e a reconexão não mudar — e então o plano B vale, sem
 gastar nada.
 
+### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
+
+Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
+que o relatado. **Quem passar direto da medida de capacidade para o ensaio
+de 14 dias soma dado inválido no resultado, em silêncio.**
+
+**O mecanismo, verificado na fonte.** A unit passa um caminho FIXO
+(`ExecStart … --diario data/diarios/shadow-maker-%i.jsonl`), então a
+unicidade por `O_EXCL` de `caminho_do_diario_da_rodada` **não vale aqui** —
+ela é do caminho default. Com `--diario` explícito o `_anotar` abre em
+**append**. E o leitor (`scripts/resumo_da_rodada_maker.py`) corta o diário
+em trechos onde `parede_s` CAI, uma subida do processo por trecho, e
+**SOMA os trechos** — de propósito, para que um fill perdido num trecho
+morto não suma da ressalva.
+
+Junte as duas: reiniciar a `base` no mesmo arquivo cria um trecho novo que é
+**somado** às ~6 h de quatro processos que já estão lá — as mesmas 6 h que
+o §10.1e declarou inválidas. O número final sai contaminado sem nenhum campo
+dizendo isso. E a `pausa`, parada e religada, carrega um buraco que a `base`
+não tem: **cobertura desigual entre rodadas**, que é justamente o que o
+§10.1c existe para impedir.
+
+**Então, depois da medida de capacidade e ANTES do ensaio valer:**
+
+```bash
+cd /opt/pulsearb
+sudo systemctl stop 'pulsearb-shadow-maker@*'
+
+# AFASTE, não apague: estes arquivos são a prova da medida de capacidade.
+q=data/invalidado-$(date -u +%Y%m%dT%H%M%SZ)
+sudo -u pulsearb mkdir -p "$q"
+sudo -u pulsearb mv data/diarios/shadow-maker-*.jsonl "$q"/ 2>/dev/null || true
+sudo -u pulsearb mv data/risco/registro_maker_*.json  "$q"/ 2>/dev/null || true
+ls -l "$q"
+
+# PRAZO NOVO, e o mesmo para todas as que subirem.
+FIM=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)
+sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
+    deploy/rodadas/comum.env
+grep '^PULSEARB_RODADA_TERMINA_EM=' deploy/rodadas/comum.env    # confira
+
+sudo systemctl daemon-reload
+for r in base pausa; do sudo systemctl start pulsearb-shadow-maker@$r; done
+
+# O relógio só começou se os diários nasceram AGORA e vazios.
+sleep 20 && ls -l data/diarios/
+```
+
+O registro de risco vai junto porque o ensaio do 4.2 sobe com registro
+limpo — é o procedimento das rodadas r7 em diante, e um registro com
+exposição herdada da medida de capacidade faria o portão recusar por um
+motivo que não é do ensaio.
+
+**A conferência que fecha isto:** `ls -l data/diarios/` logo depois tem de
+mostrar arquivos novos e pequenos. Diário grande ali é diário antigo que não
+foi afastado — e o resultado de 14 dias sairia somado com a medida de
+capacidade.
+
 **O que JÁ está decidido, porque é aritmética e não extrapolação:** quatro
 rodadas em paralelo pedem ~160% de um núcleo, e nenhuma máquina de 1 vCPU
 entrega isso. **Se o desenho de quatro rodadas simultâneas for inegociável,
@@ -1490,11 +1585,11 @@ deixa o ensaio a ~40% de utilização, 2 vCPU a ~80%. Memória: 2 GiB bastam
 pela conta, e o swap deixa de ser zero. **Mas essa compra só é necessária se
 o ensaio de duas rodadas acima reprovar** — meça antes de gastar.
 
-**O que NÃO está medido aqui, e precisa estar antes de comprar:** os ~40%
-saem de **três amostras de 5 s**, e elas já variam de 38 a 48 conforme o
-mercado. Antes de dimensionar hardware, deixe UMA rodada sozinha por
-30–60 min e refaça o `vmstat` — o pico importa mais que a média, porque é
-ele que satura.
+**O que NÃO está medido aqui, e precisa estar antes de comprar:** os 38–48%
+saem de **três amostras de 5 s** da máquina inteira. Faltam as duas coisas:
+a **atribuição** (por PID, como acima) e a **variação** (o pico, não a
+média). Sem as duas, o número que multiplica por quatro é chute com cara de
+medida.
 
 **A comparação de reconexões ainda NÃO está feita, e o número de 4 não a
 faz.** Aquele `grep -c 'conexão caiu'` pegou uma janela de 8 min que
