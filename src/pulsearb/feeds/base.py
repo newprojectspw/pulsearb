@@ -226,13 +226,37 @@ class ReconnectingFeed:
             await asyncio.sleep(backoff * (0.5 + random.random()))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
+    #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket
+    #: (TCP/TLS cortado, rede, intermediário). NÃO é o cliente fechando.
+    ORIGEM_DESCONHECIDA = "desconhecida"
+
     def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
-        """Extrai código e razão do close — o dado que faltava para diagnosticar.
+        """Extrai código, razão e ORIGEM do close — e recusa adivinhar a origem.
 
         Um `ConnectionClosed` do websockets carrega o frame de close com o
         código do RFC 6455 (1000 normal, 1006 anormal, 1011 erro do servidor,
         1013 try again later...). Sem registrar isso, toda queda vira a mesma
         linha de log e a investigação não tem por onde começar.
+
+        **A origem tem TRÊS estados, não dois, e isso custou caro em
+        2026-09-20.** A versão anterior fazia
+        `"servidor" if recebido is not None else "cliente"` — ou seja,
+        carimbava **cliente** sempre que não havia frame recebido, inclusive
+        quando não havia frame NENHUM. E é exatamente esse o caso do
+        `ConnectionClosedError: no close frame received or sent` e o de um
+        `OSError` de transporte: ninguém fechou pelo protocolo, a conexão
+        morreu por baixo dele.
+
+        O log então dizia `close_origem: "cliente"` para quedas de rede, e a
+        investigação das ~30–45 reconexões/h do SHADOW foi conduzida por uma
+        hora em cima de uma hipótese de CPU sustentada, entre outras coisas,
+        por esse carimbo. **Ausência de frame é ausência de medida, não medida
+        de que o cliente fechou** — e um campo que finge saber é pior que um
+        campo vazio, porque vira gráfico e vira conclusão.
+
+        - `rcvd` presente → **servidor** fechou;
+        - só `sent` presente → **cliente** fechou;
+        - nenhum dos dois → **desconhecida**.
         """
         codigo: int | None = None
         razao: str | None = None
@@ -242,11 +266,17 @@ class ReconnectingFeed:
         if frame is not None:
             codigo = getattr(frame, "code", None)
             razao = getattr(frame, "reason", None)
+        if recebido is not None:
+            origem = "servidor"
+        elif enviado is not None:
+            origem = "cliente"
+        else:
+            origem = self.ORIGEM_DESCONHECIDA
         motivo = {
             "erro": f"{type(exc).__name__}: {exc}",
             "close_code": codigo,
             "close_reason": razao,
-            "close_origem": "servidor" if recebido is not None else "cliente",
+            "close_origem": origem,
         }
         self.close_count += 1
         self.close_reasons.append(motivo)
