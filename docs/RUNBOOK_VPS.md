@@ -1740,6 +1740,111 @@ rodada de 14 dias.
 > eventos. Nos registros novos, `close_origem: desconhecida` é o carimbo a
 > procurar.
 
+**O que já está DESCARTADO, para ninguém reinvestigar:**
+
+| hipótese | como caiu |
+|---|---|
+| CPU saturada derruba o feed | contagem solo (15, 14, 8 em 20 min) **igual ou maior** que sob disputa das quatro (8) — §10.1f-ter |
+| somos nós reconectando para reassinar | `subscribe`/`unsubscribe` do `poly_ws.py` mandam **frame na conexão viva**, não reconectam. **Cuidado com o que isto NÃO diz:** o giro de mercado continua sendo a causa — só que pelo lado do servidor, ver §10.1f-quater |
+| o heartbeat de aplicação estourou | o `_heartbeat` fecha com `code=1000, reason="heartbeat timeout"` e loga `"heartbeat morto: sem PONG"` — as quedas observadas não têm código nem essa linha |
+
+**A próxima medida, depois de a VPS rodar o código novo**, responde duas
+coisas de uma vez: a origem verdadeira e se há periodicidade (periodicidade
+é assinatura de timeout de intermediário):
+
+```bash
+echo "=== de onde partiu a queda ==="
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+  | grep 'conexão caiu' | grep -o '"close_origem":"[a-z]*"' | sort | uniq -c
+
+echo "=== os intervalos entre quedas, em segundos ==="
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-unix \
+  | grep 'conexão caiu' | cut -d. -f1 \
+  | awk 'NR>1{print $1-a} {a=$1}' | sort -n | uniq -c
+```
+
+Leia assim: `desconhecida` na maioria confirma transporte. E se os
+intervalos se concentrarem num valor (60 s, 300 s, 3600 s), **é timeout de
+intermediário** — aí a saída é keepalive de TCP ou um PING de aplicação mais
+frequente, e não tem a ver com o CLOB. Intervalos espalhados apontam para
+rede instável, que é outra conversa.
+
+### 10.1f-quater. Achado: é o SERVIDOR que fecha, a cada ~300 s
+
+Medido em `2026-09-20 ~21:30 UTC`, 60 min com a `base` sozinha rodando o
+código do #174. **As duas distribuições respondem de uma vez.**
+
+**De onde partiu a queda:**
+
+```
+     24 "close_origem":"servidor"
+```
+
+**Vinte e quatro de vinte e quatro.** Nenhuma `cliente`, nenhuma
+`desconhecida`. O servidor manda frame de close — ele encerra, e avisa.
+
+**Os intervalos entre quedas, em segundos:**
+
+```
+     10 0        ← rajada: várias conexões caem no MESMO segundo
+      1 1
+      1 7
+      1 102
+      1 204
+      1 299   ┐
+      2 305   ├─ NOVE intervalos na faixa de 5 minutos
+      5 306   ┘
+      1 592        ← ~2 × 296: uma queda que não foi registrada no meio
+```
+
+**Nove dos treze intervalos não-nulos caem entre 299 e 306 s, e um é o
+dobro disso.** Isso é período, não dispersão. E o período é **~300 s — os
+cinco minutos exatos do ciclo `updown`**.
+
+**A leitura, e ela inverte o diagnóstico:** o CLOB encerra a conexão quando
+o mercado de 5 min acaba. Não é rede instável, não é timeout de
+intermediário, não é defeito nosso. **É o ciclo do produto.** As rajadas de
+`0 s` são várias conexões caindo no mesmo instante — todas no mesmo
+fechamento de mercado.
+
+> ⚠️ **E isto corrige uma frase que eu tinha escrito na tabela acima.** Eu
+> havia registrado "o giro de mercado do `updown` a cada 5 min não derruba
+> nada", com base em ler que `subscribe`/`unsubscribe` não reconectam. A
+> leitura do NOSSO código estava certa; a conclusão sobre o fenômeno estava
+> errada, porque eu tinha olhado só um dos dois lados da conexão. **Não
+> reconectamos — mas o servidor fecha.** É o mesmo defeito de método que já
+> apareceu duas vezes hoje: concluir sobre o que não se mediu.
+
+**O que isto muda para o item da reconexão:**
+
+- **Deixa de ser defeito e vira característica.** ~30–45 quedas/h é o que o
+  ciclo de 5 min produz, e nenhuma máquina, rede ou keepalive muda isso.
+- **Continua entrando na cobertura**, porque o tempo de reconexão é tempo
+  sem livro — mas a ressalva agora tem nome e causa, em vez de ser um
+  número solto.
+- **A pergunta útil deixou de ser "por que cai" e passou a ser "quanto
+  custa".** O que fecha o item é medir o tempo entre a queda e a primeira
+  mensagem depois dela, somado na hora: é ISSO que entra no relato de
+  cobertura das 14 dias.
+
+**O que ainda falta medir, e são dois números:**
+
+```bash
+# 1. o CÓDIGO do close — diz se é encerramento limpo do mercado (1000/1001)
+#    ou outra coisa que só parece periódica
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+  | grep 'conexão caiu' | grep -o '"close_code":[0-9]*' | sort | uniq -c
+
+# 2. as quedas caem em múltiplos de 300 no relógio? (confirma o ciclo)
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-unix \
+  | grep 'conexão caiu' | cut -d. -f1 | awk '{print $1 % 300}' | sort -n | uniq -c
+```
+
+O segundo é o que fecha a causa: se os restos se concentrarem num valor, as
+quedas estão **presas ao relógio do mercado**, e não ao tempo de vida da
+conexão. Resto espalhado significaria que é a conexão que envelhece — outra
+causa, mesmo período aparente.
+
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
 Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
