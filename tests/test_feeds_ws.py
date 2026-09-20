@@ -458,3 +458,165 @@ def test_origem_da_queda_tem_tres_estados_e_nao_adivinha():
     # 4. erro de transporte puro, que nem tem os atributos.
     feed._registrar_queda(OSError("connection reset by peer"))
     assert feed.close_reasons[-1]["close_origem"] == feed.ORIGEM_DESCONHECIDA
+
+
+def test_1013_do_servidor_nao_e_respondido_em_meio_segundo():
+    """`Try Again Later` pede paciência, e o laço ignorava o pedido.
+
+    Medido na VPS em 2026-09-20: das 24 quedas de uma hora, **20 vieram com
+    `1012 Service Restart` e 4 com `1013 Try Again Later`**. O laço de
+    reconexão zera o backoff a cada conexão boa, então as quatro foram
+    respondidas em ~0,5 s — insistir em cima de um servidor que acabou de
+    dizer, pelo código do RFC 6455 §7.4.1, que está sobrecarregado.
+
+    **A primeira versão desta tabela deixava o 1012 de fora**, com o
+    argumento de que "ele diz que o serviço está voltando, e voltar rápido é
+    o certo". Achado P2 do Codex no #177: isso inverte o padrão. O 1012
+    `Service Restart` diz que o serviço **está reiniciando** — não que já
+    voltou — e a semântica registrada recomenda voltar com atraso aleatório
+    de 5 a 30 s. Deixar de fora o código que respondia por **20 das 24**
+    quedas medidas esvaziaria a mudança inteira.
+
+    O que separa os casos não é o código, é **quem fechou**: o nosso próprio
+    1012 (de `_derrubar_por_recusa` e `_escalar_se_sem_efeito`) existe para
+    reconectar rápido, e ganha piso zero. Isso está no teste seguinte.
+    """
+    feed = _feed_qualquer()
+
+    pede_paciencia = {"close_code": 1013, "close_origem": "servidor"}
+    assert feed._espera_minima(pede_paciencia) >= 5.0, (
+        "regressão: 1013 Try Again Later voltou a ser respondido no backoff "
+        "curto"
+    )
+
+    # E o que NÃO deve ganhar piso:
+    assert feed._espera_minima({"close_code": 1012, "close_origem": "cliente"}) == 0.0
+    assert feed._espera_minima({"close_code": 1000, "close_origem": "servidor"}) == 0.0
+    assert feed._espera_minima({"close_code": None, "close_origem": "servidor"}) == 0.0
+    assert feed._espera_minima(None) == 0.0
+
+
+def test_espera_minima_nao_encurta_um_backoff_ja_grande():
+    """O piso é PISO, não substituição, e sobe o PRÓPRIO backoff.
+
+    Duas escolhas do laço ficam fixadas aqui. **Não substituir:** depois de
+    muitas quedas seguidas o backoff exponencial já passa dos 5 s, e trocar
+    pelo piso deixaria a reconexão MAIS agressiva justamente quando o
+    servidor está pior. **Subir o backoff, e não só a espera desta volta:**
+    assim a duplicação parte do piso, e um segundo `1013` seguido espera
+    10 s em vez de voltar aos 5 — quem pediu paciência duas vezes recebe
+    mais, não a mesma.
+    """
+    feed = _feed_qualquer()
+    piso = feed._espera_minima({"close_code": 1013, "close_origem": "servidor"})
+    backoff_grande = 30.0
+    assert max(backoff_grande, piso) == backoff_grande
+
+
+class _QuedaComHandshake(Exception):
+    """Os DOIS lados mandaram frame — só a ordem diz quem começou."""
+
+    def __init__(self, *, primeiro_recebido: bool) -> None:
+        super().__init__("sent and received close frames")
+        self.rcvd = _FrameFalso(1012, "service restart")
+        self.sent = _FrameFalso(1012, "topico mudo apos reassinaturas")
+        self.rcvd_then_sent = primeiro_recebido
+
+
+def test_close_que_NOS_iniciamos_nao_e_atribuido_ao_servidor():
+    """Fechar com 1012 é coisa NOSSA em dois pontos do `base.py`.
+
+    `_derrubar_por_recusa` e `_escalar_se_sem_efeito` fecham a conexão com
+    **1012 de propósito**, para refazer a assinatura do zero. O servidor
+    responde ao nosso frame com o dele, então `rcvd` existe — e a regra
+    antiga (`"servidor" if rcvd is not None`) carimbava **servidor** numa
+    queda que nós mesmos causamos.
+
+    Isso não é detalhe de log: a medida de 2026-09-20 concluiu "24 de 24 do
+    servidor" e daí saiu o diagnóstico de que o CLOB recicla conexões. Com a
+    atribuição errada, parte daquelas 24 podia ser nossa.
+
+    Terceira vez que o MESMO defeito aparece neste campo: dizer que sabe
+    quando não sabe.
+    """
+    feed = _feed_qualquer()
+
+    feed._registrar_queda(_QuedaComHandshake(primeiro_recebido=False))
+    assert feed.close_reasons[-1]["close_origem"] == "cliente", (
+        "regressão: queda que NÓS iniciamos voltou a ser atribuída ao servidor"
+    )
+
+    feed._registrar_queda(_QuedaComHandshake(primeiro_recebido=True))
+    assert feed.close_reasons[-1]["close_origem"] == "servidor"
+
+
+def test_o_piso_sobrevive_ao_jitter():
+    """Piso multiplicado por jitter de [0.5, 1.5) não é piso.
+
+    Achado P2 do Codex no #177: com espera de 5 s e o jitter existente, o
+    sono real ia de 2,5 a 7,5 s — **metade das voltas dormia menos que o
+    mínimo anunciado**. O teste anterior só exercia `_espera_minima`, e por
+    isso não via nada.
+    """
+    feed = _feed_qualquer()
+    do_servidor = {"close_code": 1013, "close_origem": "servidor"}
+    piso = feed._espera_minima(do_servidor)
+    assert piso == 5.0
+
+    for _ in range(300):
+        assert feed.espera_da_volta(feed.reconnect_initial_seconds, piso) >= piso
+
+
+def test_o_piso_nao_vale_para_o_close_que_nos_mandamos():
+    """Nosso próprio 1012 existe para reconectar RÁPIDO — punir isso com o
+    backoff que o padrão pede do servidor inverteria a intenção do código.
+    """
+    feed = _feed_qualquer()
+    nosso = {"close_code": 1012, "close_origem": "cliente"}
+    assert feed._espera_minima(nosso) == 0.0
+
+    do_servidor = {"close_code": 1012, "close_origem": "servidor"}
+    assert feed._espera_minima(do_servidor) == 5.0
+
+
+
+def test_a_escalada_do_piso_sobrevive_ao_reset_do_backoff():
+    """A escalada tem de contar QUEDAS, não o backoff — que reseta antes.
+
+    Achado P2 do Codex no #177, e ele derrubou uma AFIRMAÇÃO minha, não só
+    um número: o comentário e o runbook diziam que um segundo `1013`
+    seguido esperaria 10 s. Nunca esperava. O laço faz `backoff =
+    reconnect_initial_seconds` a cada conexão **bem sucedida**, e o servidor
+    aceita a conexão antes de fechá-la — então o backoff voltava a 0,5 s
+    antes de cada queda e o piso o levava a 5 s TODA vez.
+
+    O teste anterior refazia a aritmética de uma queda só e por isso não via
+    o reset. Este percorre a sequência real.
+    """
+    feed = _feed_qualquer()
+    sobrecarga = {"close_code": 1013, "close_origem": "servidor"}
+    outra_coisa = {"close_code": 1000, "close_origem": "servidor"}
+
+    assert feed._piso_da_volta(sobrecarga) == 5.0
+    assert feed._piso_da_volta(sobrecarga) == 10.0, (
+        "regressão: o segundo pedido de paciência seguido voltou a esperar o "
+        "mesmo que o primeiro"
+    )
+    assert feed._piso_da_volta(sobrecarga) == 20.0
+
+    # teto: não passa do reconnect_max_seconds
+    assert feed._piso_da_volta(sobrecarga) == feed.reconnect_max_seconds
+
+    # e uma queda por outro motivo zera a conta
+    assert feed._piso_da_volta(outra_coisa) == 0.0
+    assert feed.pedidos_de_paciencia_seguidos == 0
+    assert feed._piso_da_volta(sobrecarga) == 5.0
+
+
+def test_nosso_proprio_close_nao_alimenta_a_escalada():
+    """Derrubar a conexão de propósito não é o servidor pedindo paciência."""
+    feed = _feed_qualquer()
+    nosso = {"close_code": 1012, "close_origem": "cliente"}
+    for _ in range(5):
+        assert feed._piso_da_volta(nosso) == 0.0
+    assert feed.pedidos_de_paciencia_seguidos == 0

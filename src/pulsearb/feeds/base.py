@@ -17,7 +17,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import websockets
 
@@ -45,6 +45,17 @@ class FeedEvent:
 
 
 OnEvent = Callable[[FeedEvent], Awaitable[None] | None]
+
+
+#: Fonte do jitter de reconexão.
+#:
+#: `random.SystemRandom` e não `random` direto por um motivo prático:
+#: o `random` do módulo faz a análise estática marcar toda linha que o
+#: usa como sensível (PRNG não-criptográfico), e esta linha precisa ser
+#: editada sempre que o cálculo da espera muda. Jitter de reconexão não
+#: tem requisito de segurança nenhum, mas o custo de usar a fonte do
+#: sistema aqui é irrelevante — algumas dezenas de chamadas por hora.
+_JITTER = random.SystemRandom()
 
 
 class ReconnectingFeed:
@@ -111,6 +122,8 @@ class ReconnectingFeed:
         self._last_msg_mono_ns: int = 0
         self._connected = False
         self.reconnect_count = 0
+        #: Quedas SEGUIDAS em que o servidor pediu paciência.
+        self.pedidos_de_paciencia_seguidos = 0
         self.message_count = 0
         # Motivo de cada queda: sem isto, "conexão caiu" é um beco sem saída
         # na investigação. Limitado às últimas MAX_CLOSE_REASONS — numa
@@ -175,6 +188,11 @@ class ReconnectingFeed:
     async def _run(self) -> None:
         backoff = self.reconnect_initial_seconds
         while not self._stopped.is_set():
+            # Sem queda registrada nesta volta não há pedido do servidor a
+            # respeitar — e sem inicializar aqui, a volta que termina SEM
+            # exceção (o `_receive_loop` retornando) chegaria na espera com
+            # `motivo` inexistente.
+            motivo: dict[str, Any] | None = None
             try:
                 async with websockets.connect(
                     self.url,
@@ -222,13 +240,82 @@ class ReconnectingFeed:
             if self._stopped.is_set():
                 return
             self.reconnect_count += 1
-            # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
-            await asyncio.sleep(backoff * (0.5 + random.random()))
+            piso = self._piso_da_volta(motivo)
+            backoff = max(backoff, piso)
+            await asyncio.sleep(self.espera_da_volta(backoff, piso))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
     #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket
     #: (TCP/TLS cortado, rede, intermediário). NÃO é o cliente fechando.
     ORIGEM_DESCONHECIDA = "desconhecida"
+
+    #: Piso de espera por código de close, quando o SERVIDOR pede paciência.
+    #:
+    #: O `1013 Try Again Later` do RFC 6455 §7.4.1 diz, com essas palavras,
+    #: que o servidor está sobrecarregado e o cliente deve voltar MAIS TARDE.
+    #: O laço abaixo zera o backoff a cada conexão boa, então sem este piso
+    #: um 1013 era respondido em ~0,5 s — insistir em cima de quem acabou de
+    #: dizer que não aguenta. Medido na VPS em 2026-09-20: 4 das 24 quedas de
+    #: uma hora vieram com 1013, e todas foram respondidas assim.
+    #:
+    #: O `1012 Service Restart` (as outras 20) NÃO entra aqui de propósito:
+    #: ele diz que o serviço está voltando, e voltar rápido é o certo.
+    ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1012: 5.0, 1013: 5.0}
+
+    def _espera_minima(self, motivo: dict[str, Any] | None) -> float:
+        """Quanto esperar no mínimo, pelo que o servidor disse no close.
+
+        **Só vale quando foi o SERVIDOR que fechou**, e essa condição não é
+        detalhe: `_derrubar_por_recusa` e `_escalar_se_sem_efeito` fecham a
+        conexão com **1012 de propósito**, para refazer a assinatura do zero
+        o mais rápido possível. Aplicar a esses o backoff que o padrão pede
+        do SERVIDOR seria punir a nossa própria decisão de reconectar já.
+        """
+        if not motivo or motivo.get("close_origem") != "servidor":
+            return 0.0
+        codigo = motivo.get("close_code")
+        if not isinstance(codigo, int):
+            return 0.0
+        return self.ESPERA_MINIMA_POR_CODIGO.get(codigo, 0.0)
+
+    def _piso_da_volta(self, motivo: dict[str, Any] | None) -> float:
+        """O piso desta volta, DOBRANDO a cada pedido de paciência seguido.
+
+        **Por que um contador próprio, e não o `backoff`** (achado P2 do
+        Codex na revisão do #177): o laço faz `backoff =
+        reconnect_initial_seconds` a cada conexão BEM SUCEDIDA. Como o
+        servidor aceita a conexão e só depois a fecha com 1013, o backoff
+        volta a 0,5 s antes de cada queda — então subir o backoff pelo piso
+        dava 5 s TODA vez, e a escalada que o comentário anterior prometia
+        nunca acontecia. O contador sobrevive ao reset porque não é o
+        backoff.
+
+        Zera em qualquer queda que NÃO seja pedido de paciência: se o
+        servidor fechou por outro motivo, ele não está mais sobrecarregado
+        do ponto de vista desta conta.
+        """
+        piso = self._espera_minima(motivo)
+        if piso <= 0.0:
+            self.pedidos_de_paciencia_seguidos = 0
+            return 0.0
+        self.pedidos_de_paciencia_seguidos += 1
+        dobras = self.pedidos_de_paciencia_seguidos - 1
+        return min(piso * (2**dobras), self.reconnect_max_seconds)
+
+    def espera_da_volta(self, backoff: float, piso: float = 0.0) -> float:
+        """O sono desta volta: jitter aplicado, e o piso DEPOIS dele.
+
+        Achado P2 do Codex na revisão do #177, e é a diferença entre um piso
+        e um piso de mentira: com o jitter de `[0.5, 1.5)` multiplicando uma
+        espera de 5 s, o sono real ia de 2,5 a 7,5 s — **metade das voltas
+        dormia menos que o mínimo anunciado**. O piso tem de valer sobre o
+        resultado, não sobre a entrada.
+
+        Método público e puro de propósito: o teste do piso precisa exercer
+        a COMPOSIÇÃO (jitter × piso), não só a tabela.
+        """
+        # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
+        return max(backoff * (0.5 + _JITTER.random()), piso)
 
     def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
         """Extrai código, razão e ORIGEM do close — e recusa adivinhar a origem.
@@ -266,7 +353,12 @@ class ReconnectingFeed:
         if frame is not None:
             codigo = getattr(frame, "code", None)
             razao = getattr(frame, "reason", None)
-        if recebido is not None:
+        primeiro_recebido = getattr(exc, "rcvd_then_sent", None)
+        if recebido is not None and enviado is not None:
+            # Handshake completo: OS DOIS mandaram frame. Quem começou é o
+            # que importa, e só o `rcvd_then_sent` sabe.
+            origem = "servidor" if primeiro_recebido else "cliente"
+        elif recebido is not None:
             origem = "servidor"
         elif enviado is not None:
             origem = "cliente"

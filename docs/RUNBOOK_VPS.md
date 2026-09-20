@@ -1845,6 +1845,120 @@ quedas estão **presas ao relógio do mercado**, e não ao tempo de vida da
 conexão. Resto espalhado significaria que é a conexão que envelhece — outra
 causa, mesmo período aparente.
 
+### 10.1f-quinquies. NÃO é o relógio do mercado — é `1012`, e é a conexão que envelhece
+
+Os dois comandos que o §10.1f-quater deixou pendentes foram rodados
+(`2026-09-20 ~22:00 UTC`, 60 min). **Os dois derrubam a conclusão daquela
+seção, e o segundo era o teste que eu tinha escrito justamente para isso.**
+
+**O código do close:**
+
+```
+     20 "close_code":1012
+      4 "close_code":1013
+```
+
+Nenhum 1000, nenhum 1001. Pelo RFC 6455 §7.4.1:
+
+| código | o que significa |
+|---|---|
+| **1012 Service Restart** | o servidor está **reiniciando** — 20 de 24 |
+| **1013 Try Again Later** | o servidor está **sobrecarregado** e pede para voltar mais tarde — 4 de 24 |
+
+Fim normal de mercado seria `1000` ou `1001`. **Não é isso que o CLOB manda.**
+
+**Os carimbos módulo 300:**
+
+```
+ 2 1 · 1 49 · 1 51 · 1 71 · 1 177 · 1 183 · 1 209 · 1 210 · 2 215
+ 2 221 · 1 226 · 1 232 · 2 283 · 1 288 · 2 289 · 2 293 · 2 295
+```
+
+**Espalhados por toda a faixa de 0 a 299.** Se as quedas estivessem presas
+ao relógio do mercado, os restos se concentrariam num valor. Não se
+concentram.
+
+> ⚠️ **Correção da conclusão do §10.1f-quater.** Aquela seção afirmava que
+> "o CLOB encerra a conexão quando o mercado de 5 min acaba". **Está
+> errado.** O período de ~300 s é real, mas ele é o **tempo de vida da
+> conexão**, não o calendário do mercado — que é exatamente a alternativa
+> que o §10.1f-quater nomeou ("conexão que envelhece, outra causa com o
+> mesmo período aparente") e mandou distinguir pelo módulo. O teste
+> funcionou; a conclusão anterior não sobreviveu a ele.
+
+**O diagnóstico que fica:** a borda do CLOB recicla conexões por idade, com
+vida de ~5 min, e anuncia isso como `1012 Service Restart`. A fase é a de
+cada conexão, por isso não alinha com o relógio. Quatro vezes por hora ela
+está sobrecarregada e manda `1013`.
+
+**Nada disso é nosso defeito, e nada disso melhora com máquina maior** — as
+duas conclusões do §10.1f-ter seguem de pé. Mas apareceu uma coisa que É
+nossa, abaixo.
+
+#### O que ERA nosso: respondíamos `1013` em meio segundo
+
+O laço de `_run` zera o backoff a cada conexão boa (`backoff =
+self.reconnect_initial_seconds`), e **não olhava o código do close**. Como
+cada conexão vive ~5 min e conecta bem, o backoff estava sempre em 0,5 s
+quando a queda chegava. Resultado: nas quatro vezes em que o servidor disse
+**"estou sobrecarregado, volte mais tarde"**, nós voltamos em meio segundo.
+
+Corrigido com um **piso de espera por código**, e a assimetria é o ponto:
+
+| código | piso | por quê |
+|---|---|---|
+| `1013` Try Again Later | **5 s** | o servidor pediu paciência; insistir é ignorar o pedido |
+| `1012` Service Restart | **nenhum** | ele diz que está VOLTANDO — voltar rápido é o certo |
+
+É `max(backoff, piso)`, não substituição: depois de muitas quedas seguidas
+o backoff exponencial já passa do piso, e trocar por ele deixaria a
+reconexão **mais** agressiva justamente quando o servidor está pior. E o
+piso vale **depois** do jitter, não antes: multiplicado por `[0.5, 1.5)`,
+um piso de 5 s deixava metade das voltas dormindo menos que o mínimo.
+
+**A escalada conta QUEDAS, não o backoff, e a razão é um erro que eu havia
+escrito aqui.** A versão anterior desta seção prometia que um segundo
+`1013` seguido esperaria 10 s. Não esperava: o laço faz `backoff =
+reconnect_initial_seconds` a cada conexão **bem sucedida**, e o servidor
+aceita a conexão antes de fechá-la — então o backoff voltava a 0,5 s antes
+de cada queda e o piso o levava a 5 s toda vez. Um contador próprio
+(`pedidos_de_paciencia_seguidos`) sobrevive ao reset: 5 s, 10 s, 20 s, até
+o `reconnect_max_seconds`. Zera em qualquer queda que não seja pedido de
+paciência. Os
+dois testes fixam as duas coisas, e o primeiro foi verificado por mutação.
+
+> ⚠️ **O DIAGNÓSTICO ACIMA ESTÁ SOB SUSPEITA, e a suspeita é minha.** A
+> revisão do #177 achou que `_registrar_queda` atribuía a origem por
+> `"servidor" if rcvd is not None`. Num close que **NÓS** iniciamos o
+> servidor responde com o frame dele, então `rcvd` existe — e a queda saía
+> carimbada **servidor**. E nós fechamos com **1012 de propósito** em dois
+> pontos (`_derrubar_por_recusa` e `_escalar_se_sem_efeito`).
+>
+> Ou seja: parte das "20 de 24 com 1012 do servidor" pode ter sido nossa.
+> Corrigido com `rcvd_then_sent`, que é o atributo do `websockets` que diz
+> quem mandou o frame primeiro — **terceira vez que este mesmo campo diz
+> saber o que não sabe**.
+>
+> **O teste que decide, e não precisa de código novo:** as duas quedas
+> nossas carregam razão própria no frame.
+>
+> ```bash
+> journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+>   | grep 'conexão caiu' | grep -o '"close_reason":"[^"]*"' | sort | uniq -c
+>
+> journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+>   | grep -c 'derrubando a conexão'
+> ```
+>
+> `topico mudo apos reassinaturas` ou `assinatura recusada pelo servidor` na
+> primeira saída, ou qualquer número acima de zero na segunda, e as quedas
+> são nossas. Vazio nas duas e o diagnóstico do ciclo do servidor se
+> sustenta.
+
+**O que segue em aberto:** o custo. ~24 quedas/h × tempo até a primeira
+mensagem depois de cada uma = tempo sem livro por hora, e é esse número que
+entra no relato de cobertura das 14 dias. Ainda não foi medido.
+
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
 Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
