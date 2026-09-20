@@ -1740,35 +1740,6 @@ rodada de 14 dias.
 > eventos. Nos registros novos, `close_origem: desconhecida` é o carimbo a
 > procurar.
 
-**O que já está DESCARTADO, para ninguém reinvestigar:**
-
-| hipótese | como caiu |
-|---|---|
-| CPU saturada derruba o feed | contagem solo (15, 14, 8 em 20 min) **igual ou maior** que sob disputa das quatro (8) — §10.1f-ter |
-| somos nós reconectando para reassinar | `subscribe`/`unsubscribe` do `poly_ws.py` mandam **frame na conexão viva**, não reconectam. O giro de mercado do `updown` a cada 5 min não derruba nada |
-| o heartbeat de aplicação estourou | o `_heartbeat` fecha com `code=1000, reason="heartbeat timeout"` e loga `"heartbeat morto: sem PONG"` — as quedas observadas não têm código nem essa linha |
-
-**A próxima medida, depois de a VPS rodar o código novo**, responde duas
-coisas de uma vez: a origem verdadeira e se há periodicidade (periodicidade
-é assinatura de timeout de intermediário):
-
-```bash
-echo "=== de onde partiu a queda ==="
-journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
-  | grep 'conexão caiu' | grep -o '"close_origem":"[a-z]*"' | sort | uniq -c
-
-echo "=== os intervalos entre quedas, em segundos ==="
-journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-unix \
-  | grep 'conexão caiu' | cut -d. -f1 \
-  | awk 'NR>1{print $1-a} {a=$1}' | sort -n | uniq -c
-```
-
-Leia assim: `desconhecida` na maioria confirma transporte. E se os
-intervalos se concentrarem num valor (60 s, 300 s, 3600 s), **é timeout de
-intermediário** — aí a saída é keepalive de TCP ou um PING de aplicação mais
-frequente, e não tem a ver com o CLOB. Intervalos espalhados apontam para
-rede instável, que é outra conversa.
-
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
 Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
