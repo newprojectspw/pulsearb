@@ -1411,7 +1411,7 @@ Leia os dois resultados assim:
   um limite do CLOB por IP, e aí nem uma máquina maior resolve sozinha —
   isso precisaria entrar no relato de cobertura.
 
-### 10.1f. Uma rodada sozinha custa ~40% de um núcleo
+### 10.1f. Uma rodada sozinha cabe, e o custo dela tem teto de ~40%
 
 Rodado em `2026-09-20 ~04:25 UTC`, com `recolher`, `ancora` e `pausa`
 paradas e a `base` sozinha:
@@ -1498,7 +1498,7 @@ liberaram ~420 MiB, ou seja **~140 MiB por rodada** — bate com os 14,6% de
 
 | arranjo | CPU pedida | veredito |
 |---|---|---|
-| 1 rodada | ~40% **medido** | ✅ cabe com folga, `id` 52–62% |
+| 1 rodada | **≤ 38–48%** — teto do host, não atribuído | ✅ cabe com folga, `id` 52–62% |
 | **base + uma regra** (a saída do §10.1c) | ~80%, pico extrapolado ~96% | ❓ **NÃO MEDIDO** — ver abaixo |
 | as quatro em paralelo | ~160% | ❌ **medido e reprovado**: `id=0`, `r=4` |
 
@@ -1533,71 +1533,28 @@ contagem de reconexão subir contra a janela solo do §10.1f. **Passa** se
 sobrar `id` com folga e a reconexão não mudar — e então o plano B vale, sem
 gastar nada.
 
-### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
-
-Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
-que o relatado. **Quem passar direto da medida de capacidade para o ensaio
-de 14 dias soma dado inválido no resultado, em silêncio.**
-
-**O mecanismo, verificado na fonte.** A unit passa um caminho FIXO
-(`ExecStart … --diario data/diarios/shadow-maker-%i.jsonl`), então a
-unicidade por `O_EXCL` de `caminho_do_diario_da_rodada` **não vale aqui** —
-ela é do caminho default. Com `--diario` explícito o `_anotar` abre em
-**append**. E o leitor (`scripts/resumo_da_rodada_maker.py`) corta o diário
-em trechos onde `parede_s` CAI, uma subida do processo por trecho, e
-**SOMA os trechos** — de propósito, para que um fill perdido num trecho
-morto não suma da ressalva.
-
-Junte as duas: reiniciar a `base` no mesmo arquivo cria um trecho novo que é
-**somado** às ~6 h de quatro processos que já estão lá — as mesmas 6 h que
-o §10.1e declarou inválidas. O número final sai contaminado sem nenhum campo
-dizendo isso. E a `pausa`, parada e religada, carrega um buraco que a `base`
-não tem: **cobertura desigual entre rodadas**, que é justamente o que o
-§10.1c existe para impedir.
-
-**Então, depois da medida de capacidade e ANTES do ensaio valer:**
-
-```bash
-cd /opt/pulsearb
-sudo systemctl stop 'pulsearb-shadow-maker@*'
-
-# AFASTE, não apague: estes arquivos são a prova da medida de capacidade.
-q=data/invalidado-$(date -u +%Y%m%dT%H%M%SZ)
-sudo -u pulsearb mkdir -p "$q"
-sudo -u pulsearb mv data/diarios/shadow-maker-*.jsonl "$q"/ 2>/dev/null || true
-sudo -u pulsearb mv data/risco/registro_maker_*.json  "$q"/ 2>/dev/null || true
-ls -l "$q"
-
-# PRAZO NOVO, e o mesmo para todas as que subirem.
-FIM=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)
-sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
-    deploy/rodadas/comum.env
-grep '^PULSEARB_RODADA_TERMINA_EM=' deploy/rodadas/comum.env    # confira
-
-sudo systemctl daemon-reload
-for r in base pausa; do sudo systemctl start pulsearb-shadow-maker@$r; done
-
-# O relógio só começou se os diários nasceram AGORA e vazios.
-sleep 20 && ls -l data/diarios/
-```
-
-O registro de risco vai junto porque o ensaio do 4.2 sobe com registro
-limpo — é o procedimento das rodadas r7 em diante, e um registro com
-exposição herdada da medida de capacidade faria o portão recusar por um
-motivo que não é do ensaio.
-
-**A conferência que fecha isto:** `ls -l data/diarios/` logo depois tem de
-mostrar arquivos novos e pequenos. Diário grande ali é diário antigo que não
-foi afastado — e o resultado de 14 dias sairia somado com a medida de
-capacidade.
+**Os 38–48% da primeira linha são um TETO, não o custo da rodada** (achado
+P2 do Codex, quarta rodada do #170 — a versão anterior desta tabela dizia
+"~40% medido" enquanto a seção acima já explicava que o `us+sy` é da máquina
+inteira; a tabela contradizia o próprio texto). Como a carga do resto do
+host é ≥ 0, vale `custo_da_rodada ≤ 38–48%` **na janela amostrada**, e nada
+mais forte do que isso até a medida por PID rodar. As duas incertezas
+apontam para lados opostos: a **atribuição** faz o número ser alto demais
+(sobra host dentro dele), a **amostra curta** faz ser baixo demais (o pico
+de uma janela maior pode passar de 48%).
 
 **O que JÁ está decidido, porque é aritmética e não extrapolação:** quatro
-rodadas em paralelo pedem ~160% de um núcleo, e nenhuma máquina de 1 vCPU
-entrega isso. **Se o desenho de quatro rodadas simultâneas for inegociável,
-ele exige máquina maior** — 4 × 40% = 160% de CPU e ~560 MiB de RSS; 4 vCPU
-deixa o ensaio a ~40% de utilização, 2 vCPU a ~80%. Memória: 2 GiB bastam
-pela conta, e o swap deixa de ser zero. **Mas essa compra só é necessária se
-o ensaio de duas rodadas acima reprovar** — meça antes de gastar.
+rodadas em paralelo pedem mais de um núcleo, e nenhuma máquina de 1 vCPU
+entrega isso — isso não depende de atribuição nenhuma, já que o regime de
+quatro foi medido direto com `id = 0` e `r = 4`.
+
+**O tamanho da máquina, esse ainda não está decidido.** Os `4 × 40% = 160%`
+saem do teto, então **4 vCPU é folgado com certeza, e pode ser folgado
+demais** — se a medida por PID der 25% por rodada, 2 vCPU resolve. ~560 MiB
+de RSS somados; 2 GiB de memória bastam pela conta e tiram o swap do zero.
+**Não compre por esta tabela: rode o `pidstat` primeiro**, e só então
+multiplique. E a compra só entra em cena se o ensaio de duas rodadas acima
+reprovar.
 
 **O que NÃO está medido aqui, e precisa estar antes de comprar:** os 38–48%
 saem de **três amostras de 5 s** da máquina inteira. Faltam as duas coisas:
@@ -1649,6 +1606,109 @@ A janela de disputa está dentro do intervalo em que as quatro rodavam
 
 Se o solo for muito menor, a reconexão era CPU. Se os dois forem parecidos,
 há uma causa independente da carga, e máquina maior não a resolve.
+
+### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
+
+Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
+que o relatado. **Quem passar direto da medida de capacidade para o ensaio
+de 14 dias soma dado inválido no resultado, em silêncio.**
+
+**O mecanismo, verificado na fonte.** A unit passa um caminho FIXO
+(`ExecStart … --diario data/diarios/shadow-maker-%i.jsonl`), então a
+unicidade por `O_EXCL` de `caminho_do_diario_da_rodada` **não vale aqui** —
+ela é do caminho default. Com `--diario` explícito o `_anotar` abre em
+**append**. E o leitor (`scripts/resumo_da_rodada_maker.py`) corta o diário
+em trechos onde `parede_s` CAI, uma subida do processo por trecho, e
+**SOMA os trechos** — de propósito, para que um fill perdido num trecho
+morto não suma da ressalva.
+
+Junte as duas: reiniciar a `base` no mesmo arquivo cria um trecho novo que é
+**somado** às ~6 h de quatro processos que já estão lá — as mesmas 6 h que
+o §10.1e declarou inválidas. O número final sai contaminado sem nenhum campo
+dizendo isso. E a `pausa`, parada e religada, carrega um buraco que a `base`
+não tem: **cobertura desigual entre rodadas**, que é justamente o que o
+§10.1c existe para impedir.
+
+**Então, depois da medida de capacidade e ANTES do ensaio valer:**
+
+```bash
+cd /opt/pulsearb
+sudo systemctl stop 'pulsearb-shadow-maker@*'
+
+# AFASTE, não apague: estes arquivos são a prova da medida de capacidade.
+q=data/invalidado-$(date -u +%Y%m%dT%H%M%SZ)
+sudo -u pulsearb mkdir -p "$q"
+sudo -u pulsearb mv data/diarios/shadow-maker-*.jsonl "$q"/ 2>/dev/null || true
+sudo -u pulsearb mv data/risco/registro_maker_*.json  "$q"/ 2>/dev/null || true
+ls -l "$q"
+
+# PRAZO NOVO, e o mesmo para todas as que subirem.
+FIM=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)
+sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
+    deploy/rodadas/comum.env
+grep '^PULSEARB_RODADA_TERMINA_EM=' deploy/rodadas/comum.env    # confira
+
+sudo systemctl daemon-reload
+REGRA=pausa          # a regra DESTA janela — ver abaixo, são três
+for r in base "$REGRA"; do sudo systemctl start pulsearb-shadow-maker@$r; done
+
+# O relógio só começou se os diários nasceram AGORA e vazios.
+sleep 20 && ls -l data/diarios/
+```
+
+O registro de risco vai junto porque o ensaio do 4.2 sobe com registro
+limpo — é o procedimento das rodadas r7 em diante, e um registro com
+exposição herdada da medida de capacidade faria o portão recusar por um
+motivo que não é do ensaio.
+
+**A conferência que fecha isto:** `ls -l data/diarios/` logo depois tem de
+mostrar arquivos novos e pequenos. Diário grande ali é diário antigo que não
+foi afastado — e o resultado de 14 dias sairia somado com a medida de
+capacidade.
+
+### 10.1h. O plano B são TRÊS janelas de 14 dias, não uma
+
+Achado P1 do Codex, quarta rodada do #170. A primeira versão do §10.1g subia
+`base` e `pausa` e parava por aí — e `recolher` e `ancora`, paradas na medida
+de capacidade, **nunca voltavam a ser agendadas**. Seguir aquele
+procedimento daria resultado de 14 dias para **uma** das três regras e
+deixaria o 4.2 incompleto, sem nada no runbook dizendo que faltava.
+
+O §10.1c define **três** regras experimentais (`recolher`, `ancora`,
+`pausa`), e cada uma precisa de uma `base` correndo no MESMO intervalo. Duas
+por vez, portanto, são **três janelas**:
+
+| janela | sobe | dias |
+|---|---|---|
+| 1 | `base` + `pausa` | 14 |
+| 2 | `base` + `ancora` | 14 |
+| 3 | `base` + `recolher` | 14 |
+| | | **42 no total** |
+
+**Cada janela repete o §10.1g inteiro** — afastar diários e registros,
+prazo novo, conferir que os diários nasceram vazios — trocando só o
+`REGRA=`. A `base` de cada janela é uma base NOVA, e é isso que faz a
+comparação valer: a regra é medida contra um controle do seu próprio
+intervalo de mercado.
+
+**O que o plano B dá e o que ele NÃO dá.** Dá cada regra contra a sua
+própria base, que é a comparação que o 4.2 exige e é o motivo de o §10.1c
+aceitar esta saída. **Não dá regra contra regra:** `pausa` e `recolher`
+terão corrido com 28 dias de distância, e ranquear uma contra a outra
+mediria o mercado, não a regra — a mesma confusão que o §10.1c recusa,
+apenas empurrada para um nível acima.
+
+**A escolha, então, é esta — e é sua, não minha:**
+
+| | plano B nesta VPS | máquina maior |
+|---|---|---|
+| tempo | **42 dias** | **14 dias** |
+| custo | zero | o preço da VPS por ~1 mês |
+| regra vs. base | ✅ limpo nas três | ✅ limpo nas três |
+| regra vs. regra | ❌ 28 dias de distância | ✅ mesmo intervalo |
+
+E as duas dependem do ensaio de duas rodadas do §10.1f passar: se ele
+reprovar, o plano B cai junto e sobra só a máquina maior.
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
