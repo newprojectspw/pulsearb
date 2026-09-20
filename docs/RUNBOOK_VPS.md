@@ -2017,6 +2017,81 @@ A segunda saída traz o campo `motivo`, que é a recusa crua. É ela que diz
 se é o `500 __subscriptions does not exist` já conhecido (§6 do
 `API_NOTES`, "o servidor quebrado do lado dele") ou algo novo.
 
+### 10.1f-septies. A causa tem nome: `42P01` no banco do RTDS
+
+Medido em `2026-09-20 ~23:20 UTC`, 60 min, com o código do #178.
+
+**Por conexão** (duas amostras seguidas):
+
+```
+      8 "conexao":"clob[updown]"       ← os `slow consumer`, do servidor, conhecidos
+     13 "conexao":"rtds[shadow:0]"
+     12 "conexao":"rtds[shadow:1]"
+```
+
+**Não é o CLOB. São as duas conexões do RTDS**, ~25 quedas/h somadas. Todas
+as seções anteriores trataram as quedas como se fossem de um feed só, e
+metade do raciocínio foi feito olhando o feed errado.
+
+**E a recusa crua, verbatim:**
+
+```
+statusCode 500: leger AddSubscriptions error: rpc error: code = Internal
+desc = ERROR #42P01 relation "__subscriptions" does not exist
+```
+
+`42P01` é `undefined_table` do PostgreSQL. **A tabela de assinaturas não
+existe no banco do RTDS** — é o servidor quebrado do lado deles, e o
+`API_NOTES` §6.2b já registrava exatamente esta mensagem desde a gravação
+M2_72H de **2026-09-09**. Ela está em `tests/fixtures/rtds_recusas_reais.json`
+como `recusa_500`.
+
+**Então a cadeia inteira é esta:** o RTDS responde 500 → `e_de_assinatura`
+classifica como recusa → `_derrubar_por_recusa` fecha a conexão com 1012 →
+o carimbo (antes de ser consertado) dizia "servidor" → eu li como "o CLOB
+recicla conexões". **Nenhum elo era o que eu disse que era, e o primeiro é
+um defeito do servidor deles, de onze dias atrás.**
+
+#### A pergunta que sobra, e ela NÃO está respondida
+
+Derrubar a conexão a cada 500 resolve alguma coisa? O argumento a favor:
+se a tabela não existe, a assinatura não se registra, o tópico vai calar —
+então derrubar e refazer é a única coisa que ainda muda algo, que é o
+raciocínio escrito em `_registrar_erro_do_servidor` e fixado no teste
+`test_as_duas_recusas_reais_pedem_derrubar`.
+
+O argumento contra: **`42P01` é determinístico**. Reconectar não cria
+tabela, e entre uma recusa e outra o feed continua entregando dado — o que
+sugere que a assinatura inicial funciona e só a REASSINATURA periódica bate
+no caminho quebrado. Se for isso, estamos derrubando 25 conexões saudáveis
+por hora por causa de um seguro que falhou.
+
+**Não dá para decidir isso pelo log**, e é por isso que este runbook não
+traz a mudança: seria trocar uma decisão deliberada, testada e ancorada em
+fixture real por uma preferência minha. **A segunda linha de defesa já
+existe** — se a assinatura caducar de verdade, o tópico cala,
+`_reassinatura_urgente` detecta e `_escalar_se_sem_efeito` derruba.
+
+**O ensaio que decide, e ele precisa de uma rodada de teste, não da que
+vale:** subir uma instância com `PULSEARB_RTDS_REASSINATURA_INTERVALO_S`
+desligado (ou muito longo), de forma que a reassinatura periódica não
+rode, e medir por uma hora:
+
+```bash
+journalctl -u <unidade-de-teste> --since '-60min' --no-pager \
+  | grep -c 'conexão caiu'
+journalctl -u <unidade-de-teste> --since '-60min' --no-pager \
+  | grep -c 'tópico mudo com a conexão viva'
+```
+
+Se as quedas sumirem **e** o tópico não calar, o 500 vinha só da
+reassinatura e derrubar por causa dele é dano puro. Se o tópico calar, a
+decisão atual está certa e o item fecha como limitação do servidor.
+
+**Enquanto isso, o custo entra na cobertura:** ~25 quedas/h × o tempo até a
+primeira mensagem depois de cada uma. Esse número continua sem medida, e é
+ele que precisa aparecer no relato das 14 dias.
+
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
 Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
