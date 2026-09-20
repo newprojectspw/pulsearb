@@ -227,9 +227,13 @@ class ReconnectingFeed:
             if self._stopped.is_set():
                 return
             self.reconnect_count += 1
-            espera = max(backoff, self._espera_minima(motivo))
+            # O piso sobe o PRÓPRIO backoff, não só esta espera: assim a
+            # duplicação abaixo parte dele, e um segundo `1013` seguido
+            # espera 10 s em vez de voltar aos 5 s. Quem pediu paciência
+            # duas vezes recebe mais, não a mesma.
+            backoff = max(backoff, self._espera_minima(motivo))
             # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
-            await asyncio.sleep(espera * (0.5 + random.random()))
+            await asyncio.sleep(backoff * (0.5 + random.random()))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
     #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket

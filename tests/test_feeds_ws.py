@@ -489,12 +489,23 @@ def test_1013_do_servidor_nao_e_respondido_em_meio_segundo():
 
 
 def test_espera_minima_nao_encurta_um_backoff_ja_grande():
-    """O piso é PISO, não substituição: depois de muitas quedas seguidas o
-    backoff exponencial já passa dos 5 s, e aplicar o piso no lugar dele
-    faria a reconexão ficar MAIS agressiva justamente quando o servidor está
-    pior. O laço usa `max(backoff, piso)` — este teste fixa essa escolha.
+    """O piso é PISO, não substituição, e sobe o PRÓPRIO backoff.
+
+    Duas escolhas do laço ficam fixadas aqui. **Não substituir:** depois de
+    muitas quedas seguidas o backoff exponencial já passa dos 5 s, e trocar
+    pelo piso deixaria a reconexão MAIS agressiva justamente quando o
+    servidor está pior. **Subir o backoff, e não só a espera desta volta:**
+    assim a duplicação parte do piso, e um segundo `1013` seguido espera
+    10 s em vez de voltar aos 5 — quem pediu paciência duas vezes recebe
+    mais, não a mesma.
     """
     feed = _feed_qualquer()
     piso = feed._espera_minima({"close_code": 1013})
+
     backoff_grande = 30.0
     assert max(backoff_grande, piso) == backoff_grande
+
+    # a escalada depois de dois 1013 seguidos
+    backoff = feed.reconnect_initial_seconds          # 0,5 s
+    backoff = min(max(backoff, piso) * 2, feed.reconnect_max_seconds)
+    assert backoff == 10.0, "o segundo 1013 tem de esperar mais que o primeiro"

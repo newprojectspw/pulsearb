@@ -1912,7 +1912,10 @@ Corrigido com um **piso de espera por código**, e a assimetria é o ponto:
 
 É `max(backoff, piso)`, não substituição: depois de muitas quedas seguidas
 o backoff exponencial já passa de 5 s, e trocar pelo piso deixaria a
-reconexão **mais** agressiva justamente quando o servidor está pior. Os
+reconexão **mais** agressiva justamente quando o servidor está pior. E o
+piso sobe o **próprio** `backoff`, não só a espera daquela volta — assim a
+duplicação parte dele, e um segundo `1013` seguido espera 10 s em vez de
+voltar aos 5. Quem pediu paciência duas vezes recebe mais, não a mesma. Os
 dois testes fixam as duas coisas, e o primeiro foi verificado por mutação.
 
 **O que segue em aberto:** o custo. ~24 quedas/h × tempo até a primeira
