@@ -1908,7 +1908,8 @@ Corrigido com um **piso de espera por código**, e a assimetria é o ponto:
 | código | piso | por quê |
 |---|---|---|
 | `1013` Try Again Later | **5 s** | o servidor pediu paciência; insistir é ignorar o pedido |
-| `1012` Service Restart | **nenhum** | ele diz que está VOLTANDO — voltar rápido é o certo |
+| `1012` Service Restart | **5 s**, dobrando | o padrão diz que o serviço ESTÁ REINICIANDO e pede 5–30 s aleatórios |
+| qualquer um, fechado por NÓS | **nenhum** | `_derrubar_por_recusa` e `_escalar_se_sem_efeito` fecham para reconectar rápido |
 
 É `max(backoff, piso)`, não substituição: depois de muitas quedas seguidas
 o backoff exponencial já passa do piso, e trocar por ele deixaria a
@@ -1958,6 +1959,63 @@ dois testes fixam as duas coisas, e o primeiro foi verificado por mutação.
 **O que segue em aberto:** o custo. ~24 quedas/h × tempo até a primeira
 mensagem depois de cada uma = tempo sem livro por hora, e é esse número que
 entra no relato de cobertura das 14 dias. Ainda não foi medido.
+
+### 10.1f-sexies. ERA NOSSO: 22 das 30 quedas são o `_derrubar_por_recusa`
+
+O `grep` em `close_reason` foi rodado (`2026-09-20 ~22:20 UTC`, 60 min) e
+**derruba o diagnóstico das duas seções anteriores**:
+
+```
+     22 "close_reason":"assinatura recusada pelo servidor"
+      8 "close_reason":"slow consumer: send buffer full"
+     22   ← grep -c 'derrubando a conexão'
+```
+
+| razão | de quem | o que é |
+|---|---|---|
+| `assinatura recusada pelo servidor` — **22** | **NOSSA** | `_derrubar_por_recusa`, que fecha com 1012 de propósito quando `_recusa_de_assinatura()` acusa. As 22 linhas de `derrubando a conexão` confirmam uma a uma |
+| `slow consumer: send buffer full` — **8** | **do servidor** | já documentado em `live/shadow.py:340`, medido em 2026-09-14: acontece **com consumidor vazio** e no mesmo instante em três processos paralelos, então **não é lentidão nossa** |
+
+**O que cai:**
+
+- ❌ "24 de 24 `close_origem: servidor`" — era o carimbo quebrado. A maioria
+  das quedas foi nossa.
+- ❌ "o CLOB recicla conexões por idade e anuncia como `1012`" — os `1012`
+  eram **os nossos**, mandados pelo `_derrubar_por_recusa`.
+- ❌ O período de ~300 s como "tempo de vida da conexão". Ele continua a ser
+  explicado, mas agora sobre outro fenômeno.
+
+**O que fica de pé:** que não é CPU (§10.1f-ter, janelas limpas), e que os
+`slow consumer` do `clob[updown]` são do servidor e conhecidos.
+
+**O fenômeno de verdade, e ele tem nome desde sempre:** o servidor recusa a
+nossa assinatura **22 vezes por hora**, e nós respondemos derrubando a
+conexão para refazê-la do zero — que é o comportamento que o §6 do
+`API_NOTES` descreve e que o contador `reconexoes_por_recusa` existe para
+medir. **Não é um defeito de reconexão. É um defeito de assinatura, com a
+reconexão como sintoma.**
+
+**Um detalhe que muda onde procurar:** `_recusa_de_assinatura` é
+implementado em `feeds/rtds.py`, não no `poly_ws`. Então as 22 quedas são
+provavelmente do **RTDS**, e não do CLOB — e toda a conversa das seções
+anteriores tratou as quedas como se fossem de um feed só. **Isto ainda não
+está medido.**
+
+**A próxima medida, e ela separa os feeds:**
+
+```bash
+echo "=== quedas por conexão ==="
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+  | grep 'conexão caiu' | grep -o '"conexao":"[^"]*"' | sort | uniq -c
+
+echo "=== e o que o servidor respondeu à assinatura ==="
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+  | grep 'servidor recusou a assinatura' | tail -3
+```
+
+A segunda saída traz o campo `motivo`, que é a recusa crua. É ela que diz
+se é o `500 __subscriptions does not exist` já conhecido (§6 do
+`API_NOTES`, "o servidor quebrado do lado dele") ou algo novo.
 
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
