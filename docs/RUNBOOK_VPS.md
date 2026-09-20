@@ -1368,16 +1368,28 @@ média cairia para perto de 1. Ela não cai. Os quatro estão permanentemente
 prontos — **cada um quer mais CPU do que recebe**. Os 24,5% não são o custo
 de uma rodada, são o teto que o escalonador impõe a ela.
 
-E isso explica as 601 reconexões/h do §10.1d sem precisar de mais nada: o
-laço de eventos não volta a tempo de responder o ping, e quem fecha a
-conexão é o nosso lado — exatamente o `"close_origem":"cliente"` com
-`no close frame received or sent` que o diário registra.
+> ⚠️ **ESTA SEÇÃO AFIRMAVA QUE A CPU EXPLICAVA AS RECONEXÕES. A MEDIDA
+> DESMENTIU.** O texto dizia que o laço de eventos não voltava a tempo de
+> responder o ping e que por isso o nosso lado fechava a conexão. Contando
+> `conexão caiu` na MESMA unidade, com o MESMO `grep` e janelas de 20 min:
+> **8 com as quatro disputando** (03:30–03:50) contra **9 e 10** nas leituras
+> feitas depois de parar três. **A reconexão não cai quando sobra CPU** — ela
+> tem causa própria, ainda não achada, e **máquina maior não vai resolvê-la**.
+> A comparação com janela solo inteiramente limpa está no fim do §10.1f e
+> ainda precisa ser rodada; as leituras de 9 e 10 pegaram a transição.
+>
+> De onde veio o engano: as "601/h" do §10.1d saíram de
+> `grep -ci "erro\|falhou\|Traceback"` sobre as QUATRO unidades, que casa
+> muito mais linha do que só reconexão. Contra as 8 por 20 min medidas
+> depois, o salto de 13× que eu inferi **nunca existiu** — eu comparei duas
+> contas diferentes e chamei a diferença de fenômeno.
 
-**Consequência, dita sem rodeio: o ensaio de 14 dias iniciado em
-2026-09-19 22:15 UTC não produz dado válido.** O `cotacoes_repousando` e o
-`meio_no_fill` das quatro carregam fila de escalonador junto com mercado, e
-o feed cai 150×/h em cada uma. Não é um ensaio ruim que se corrige na
-análise: é um instrumento medindo a si mesmo.
+**A consequência sobre o ensaio NÃO depende disso, e segue de pé: o ensaio
+de 14 dias iniciado em 2026-09-19 22:15 UTC não produz dado válido.** Ela se
+apoia só no `id = 0` com `r = 4` acima: o `cotacoes_repousando` e o
+`meio_no_fill` das quatro carregam fila de escalonador junto com mercado.
+Não é um ensaio ruim que se corrige na análise — é um instrumento medindo a
+si mesmo.
 
 **O que esta medida AINDA não diz, e é o que decide a saída:** quanto UMA
 rodada consome sozinha. Com `id = 0` não dá para inferir — o teto esconde a
@@ -1411,7 +1423,7 @@ Leia os dois resultados assim:
   um limite do CLOB por IP, e aí nem uma máquina maior resolve sozinha —
   isso precisaria entrar no relato de cobertura.
 
-### 10.1f. Uma rodada sozinha cabe, e o custo dela tem teto de ~40%
+### 10.1f. Uma rodada sozinha: média 42%, **pico 66%** — medido por PID
 
 Rodado em `2026-09-20 ~04:25 UTC`, com `recolher`, `ancora` e `pausa`
 paradas e a `base` sozinha:
@@ -1533,28 +1545,54 @@ contagem de reconexão subir contra a janela solo do §10.1f. **Passa** se
 sobrar `id` com folga e a reconexão não mudar — e então o plano B vale, sem
 gastar nada.
 
-**Os 38–48% da primeira linha são um TETO, não o custo da rodada** (achado
-P2 do Codex, quarta rodada do #170 — a versão anterior desta tabela dizia
-"~40% medido" enquanto a seção acima já explicava que o `us+sy` é da máquina
-inteira; a tabela contradizia o próprio texto). Como a carga do resto do
-host é ≥ 0, vale `custo_da_rodada ≤ 38–48%` **na janela amostrada**, e nada
-mais forte do que isso até a medida por PID rodar. As duas incertezas
-apontam para lados opostos: a **atribuição** faz o número ser alto demais
-(sobra host dentro dele), a **amostra curta** faz ser baixo demais (o pico
-de uma janela maior pode passar de 48%).
+#### A medida por PID foi feita, e o pico é o que muda tudo
+
+`2026-09-20 14:57 UTC`, `base` sozinha havia ~10 h. **Dois métodos
+independentes, o `pidstat` e o laço do `/proc`, em janelas diferentes:**
+
+| | amostras de 5 s (%CPU) | média | **pico** |
+|---|---|---|---|
+| `pidstat 5 12` | 48,0 · 42,8 · 32,8 · 37,2 · 32,2 · 39,6 · 50,0 · 46,8 · 40,8 · **66,2** · 40,8 · 33,8 | **42,6%** | **66,2%** |
+| `/proc`, janela seguinte | 23 · 35 · 24 · 21 · 32 · 30 · 19 · 60 · **61** · 49 · 37 · 45 | ~36% | **61%** |
+
+**Isso fecha a pergunta de atribuição** (achado P2 do Codex, quarta rodada
+do #170): o número agora é por PID, não da máquina. E os 38–48% que o
+`vmstat` tinha dado eram mesmo quase todos da rodada — o host contribui
+pouco.
+
+**Mas a medida por PID trouxe o que a de três amostras escondia: a rodada
+varia de 19% a 66%.** Dimensionar pela média de 42% subdimensiona em quase
+60%. É o pico que satura, e o pico é **66%**.
+
+**E os picos das rodadas tendem a coincidir.** As quatro assinam os MESMOS
+mercados e reagem aos MESMOS eventos de livro: quando o mercado se mexe,
+todas trabalham mais ao mesmo tempo. Isso é raciocínio sobre o desenho, não
+medida — mas é o lado conservador, e é o que vale para dimensionar.
 
 **O que JÁ está decidido, porque é aritmética e não extrapolação:** quatro
 rodadas em paralelo pedem mais de um núcleo, e nenhuma máquina de 1 vCPU
 entrega isso — isso não depende de atribuição nenhuma, já que o regime de
 quatro foi medido direto com `id = 0` e `r = 4`.
 
-**O tamanho da máquina, esse ainda não está decidido.** Os `4 × 40% = 160%`
-saem do teto, então **4 vCPU é folgado com certeza, e pode ser folgado
-demais** — se a medida por PID der 25% por rodada, 2 vCPU resolve. ~560 MiB
-de RSS somados; 2 GiB de memória bastam pela conta e tiram o swap do zero.
-**Não compre por esta tabela: rode o `pidstat` primeiro**, e só então
-multiplique. E a compra só entra em cena se o ensaio de duas rodadas acima
-reprovar.
+**O tamanho da máquina, com o pico medido:**
+
+| | pela média (42%) | **pelo pico (66%)** |
+|---|---|---|
+| 4 rodadas pedem | 168% | **264%** |
+| 2 vCPU (200%) | ✅ caberia | ❌ **corta nos picos** |
+| 4 vCPU (400%) | folga grande | ✅ **66% de utilização no pico** |
+
+**São 4 vCPU, e a dúvida de "folgado demais" morreu aqui:** dimensionar
+pelos 42% de média levaria a 2 vCPU, e 2 vCPU não segura 264%. Memória:
+~560 MiB de RSS somados, 2 GiB bastam e o swap deixa de ser zero.
+
+**E o mesmo pico muda o prognóstico de duas rodadas:** 2 × 66% = **132%**,
+que não cabe em 1 vCPU. Isso **não** reprova o plano B — extrapolação não
+reprova nada, e é a terceira vez que este runbook diz isso — mas diz o que
+procurar no ensaio do §10.1f: não olhe só a média do `id`, olhe se ele
+**encosta em 0 nos picos**. Uma média confortável com estouro nos momentos
+de mercado agitado é o pior caso possível, porque é exatamente nesses
+momentos que a cotação decide.
 
 **O que NÃO está medido aqui, e precisa estar antes de comprar:** os 38–48%
 saem de **três amostras de 5 s** da máquina inteira. Faltam as duas coisas:
