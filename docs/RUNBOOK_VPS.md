@@ -1463,18 +1463,32 @@ pidstat -p "$(pgrep -f 'shadow.*-base\.jsonl' | head -1)" 5 12
 ```
 
 Sem `pidstat` (pacote `sysstat`), o mesmo pela contabilidade do kernel —
-`utime + stime` do `/proc`, que é exatamente o que o `pidstat` lê:
+`utime + stime` do `/proc`, que é exatamente o que o `pidstat` lê. **Com o
+mesmo intervalo curto, e guardando CADA amostra:**
 
 ```bash
 pid=$(pgrep -f 'shadow.*-base\.jsonl' | head -1)
 tick=$(getconf CLK_TCK)
 ler() { awk '{print $14+$15}' /proc/"$pid"/stat; }
-a=$(ler); sleep 60; b=$(ler)
-echo "CPU da rodada no minuto: $(( (b - a) * 100 / (60 * tick) ))%"
+a=$(ler)
+for i in $(seq 12); do
+    sleep 5
+    b=$(ler)
+    echo "amostra $i: $(( (b - a) * 100 / (5 * tick) ))%"
+    a=$b
+done
 ```
 
-O número que dimensiona hardware é **esse**, não o `us+sy`. Repita algumas
-vezes: o que satura é o pico, não a média.
+**Por que 12 × 5 s e não um delta de 60 s.** Um único intervalo de um minuto
+devolve UMA média, e repetir só dá mais médias de minuto: o pico de 5 s
+desaparece dentro delas. É o pico que satura, e as próprias amostras de 5 s
+do `vmstat` já variaram de 38 a 48 — uma média de minuto teria escondido
+essa variação e subdimensionado a máquina (achado P2 do Codex, segunda
+rodada do #170). O `pidstat 5 12` acima tem exatamente essa forma; o
+fallback tem de ter a mesma.
+
+O número que dimensiona hardware é **esse**, não o `us+sy` — e é o **maior**
+das amostras, não a média delas.
 
 **Memória:** `free` subiu de ~85 MiB para ~505 MiB. Três rodadas a menos
 liberaram ~420 MiB, ou seja **~140 MiB por rodada** — bate com os 14,6% de
@@ -1599,16 +1613,39 @@ quatro unidades), que casa mais linhas que só as de reconexão. **Os dois
 números não se comparam.** A comparação limpa é a mesma unidade, o mesmo
 `grep` e a mesma duração, numa janela de cada regime:
 
+> ⚠️ **ORDEM IMPORTA, e `--since '-20min'` aqui é uma armadilha** (achado
+> P2 do Codex, segunda rodada do #170). Quem lê este runbook de cima para
+> baixo já subiu a segunda rodada no ensaio do §10.1f e religou as duas no
+> §10.1g antes de chegar aqui — uma janela RELATIVA pegaria dois processos e
+> reinícios, e a comparação "solo" mediria outra coisa. **Faça esta medida
+> ANTES de subir a segunda rodada, e com limites ABSOLUTOS.**
+
 ```bash
-# solo — rode depois de 30 min com uma rodada só
-journalctl -u pulsearb-shadow-maker@base --since '-20min' --no-pager \
+# 1. com UMA rodada só de pé, marque o início e NÃO suba a segunda
+date -u +'%Y-%m-%d %H:%M:%S'
+# anote o que saiu; a sessão pode cair e este valor não se recupera
+```
+
+Volte 20 minutos depois — sem `sleep` longo, que já derrubou sessão aqui — e
+use os dois limites:
+
+```bash
+INICIO_SOLO='2026-09-20 04:25:00'      # o que você anotou
+FIM_SOLO='2026-09-20 04:45:00'         # 20 min depois
+
+# solo
+journalctl -u pulsearb-shadow-maker@base \
+  --since "$INICIO_SOLO" --until "$FIM_SOLO" --no-pager \
   | grep -c 'conexão caiu'
 
-# disputa — a MESMA conta, numa janela em que as quatro rodavam
+# disputa — a MESMA unidade, o MESMO grep, 20 min também
 journalctl -u pulsearb-shadow-maker@base \
   --since '2026-09-20 03:30' --until '2026-09-20 03:50' --no-pager \
   | grep -c 'conexão caiu'
 ```
+
+A janela de disputa está dentro do intervalo em que as quatro rodavam
+(19/09 22:15 até 20/09 ~04:23), então ela é boa como está.
 
 Se o solo for muito menor, a reconexão era CPU. Se os dois forem parecidos,
 há uma causa independente da carga, e máquina maior não a resolve.
