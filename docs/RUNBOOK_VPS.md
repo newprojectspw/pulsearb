@@ -1445,22 +1445,50 @@ liberaram ~420 MiB, ou seja **~140 MiB por rodada** — bate com os 14,6% de
 
 **A conta de capacidade, então:**
 
-| arranjo | CPU pedida | cabe em 1 vCPU? |
+| arranjo | CPU pedida | veredito |
 |---|---|---|
-| 1 rodada | ~40% | ✅ com folga |
-| **base + uma regra** (a saída do §10.1c) | **~80%** | ❌ **não com folga** — 80% sustentado, com picos a 96% (2 × 48%), é a mesma beira onde a reconexão apareceu |
-| as quatro em paralelo | ~160% | ❌ impossível |
+| 1 rodada | ~40% **medido** | ✅ cabe com folga, `id` 52–62% |
+| **base + uma regra** (a saída do §10.1c) | ~80%, pico extrapolado ~96% | ❓ **NÃO MEDIDO** — ver abaixo |
+| as quatro em paralelo | ~160% | ❌ **medido e reprovado**: `id=0`, `r=4` |
 
-**Isto muda a saída do §10.1c nesta máquina.** "Base + uma regra" foi
-escrita como o plano B de disco e de processo, não contra um teto de CPU
-medido: a 80% de um núcleo ela repete o defeito com menos margem. **Numa
-VPS de 1 vCPU o ensaio honesto é UMA rodada por vez** — e isso é o
-sequencial de 56 dias que o §10.1c recusa por comparar regra com mercado.
+**A linha do meio é extrapolação, e extrapolação não reprova nada.** A
+primeira versão desta seção a marcava ❌ com o argumento de que 80%
+sustentado e picos de 96% são "a mesma beira" que derrubou as quatro. Isso
+não se sustenta: o regime que falhou pedia ~160% de um núcleo e mostrava
+`id = 0` **sem folga nenhuma**; 80–96% ainda tem CPU sobrando, e a 96% o
+laço de eventos continua sendo escalonado. O 96% saiu de dobrar a **maior**
+das três amostras de 5 s, que é a extrapolação mais frouxa possível.
 
-**Logo: o desenho de quatro rodadas paralelas exige máquina maior.** Quatro
-× 40% = 160% de CPU e ~560 MiB de RSS. **4 vCPU** deixa o ensaio a ~40% de
-utilização, que é onde ele deve ficar; 2 vCPU o deixaria a ~80%, na mesma
-beira. Memória: 2 GiB já bastam pela conta, e swap deixa de ser zero.
+Isso importa porque esta tabela decide o experimento: marcar o plano B como
+impossível, sem medir, empurra para o sequencial de 56 dias (que o §10.1c
+recusa) ou para comprar máquina — **duas saídas caras escolhidas a partir de
+uma conta, não de uma medida.** Vale a regra do quadro nos dois sentidos:
+❌ é "medido e reprovado", não "estimado e reprovado".
+
+**O ensaio que decide — suba a SEGUNDA rodada e meça:**
+
+```bash
+sudo systemctl start pulsearb-shadow-maker@pausa   # base + uma regra
+sleep 600                                          # 10 min, não 2
+
+vmstat 5 12                    # id e r sob DOIS processos
+ps -o pid,stat,pcpu,args -C python --sort=-pcpu | head -4
+journalctl -u pulsearb-shadow-maker@base --since '-10min' --no-pager \
+  | grep -c 'conexão caiu'
+```
+
+Reprova (e aí sim ❌) se: `id` encostar em 0, `r` ficar em 2 constante, ou a
+contagem de reconexão subir contra a janela solo do §10.1f. **Passa** se
+sobrar `id` com folga e a reconexão não mudar — e então o plano B vale, sem
+gastar nada.
+
+**O que JÁ está decidido, porque é aritmética e não extrapolação:** quatro
+rodadas em paralelo pedem ~160% de um núcleo, e nenhuma máquina de 1 vCPU
+entrega isso. **Se o desenho de quatro rodadas simultâneas for inegociável,
+ele exige máquina maior** — 4 × 40% = 160% de CPU e ~560 MiB de RSS; 4 vCPU
+deixa o ensaio a ~40% de utilização, 2 vCPU a ~80%. Memória: 2 GiB bastam
+pela conta, e o swap deixa de ser zero. **Mas essa compra só é necessária se
+o ensaio de duas rodadas acima reprovar** — meça antes de gastar.
 
 **O que NÃO está medido aqui, e precisa estar antes de comprar:** os ~40%
 saem de **três amostras de 5 s**, e elas já variam de 38 a 48 conforme o
