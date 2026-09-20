@@ -47,6 +47,17 @@ class FeedEvent:
 OnEvent = Callable[[FeedEvent], Awaitable[None] | None]
 
 
+#: Fonte do jitter de reconexão.
+#:
+#: `random.SystemRandom` e não `random` direto por um motivo prático:
+#: o `random` do módulo faz a análise estática marcar toda linha que o
+#: usa como sensível (PRNG não-criptográfico), e esta linha precisa ser
+#: editada sempre que o cálculo da espera muda. Jitter de reconexão não
+#: tem requisito de segurança nenhum, mas o custo de usar a fonte do
+#: sistema aqui é irrelevante — algumas dezenas de chamadas por hora.
+_JITTER = random.SystemRandom()
+
+
 class ReconnectingFeed:
     """Loop de conexão WS com resubscribe automático.
 
@@ -228,12 +239,10 @@ class ReconnectingFeed:
                 return
             self.reconnect_count += 1
             # O piso sobe o PRÓPRIO backoff, não só esta espera: assim a
-            # duplicação abaixo parte dele, e um segundo `1013` seguido
-            # espera 10 s em vez de voltar aos 5 s. Quem pediu paciência
-            # duas vezes recebe mais, não a mesma.
+            # duplicação abaixo parte dele, e um segundo pedido de paciência
+            # seguido espera mais que o primeiro, não a mesma coisa.
             backoff = max(backoff, self._espera_minima(motivo))
-            # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
-            await asyncio.sleep(backoff * (0.5 + random.random()))
+            await asyncio.sleep(self.espera_da_volta(backoff, motivo))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
 
     #: Ninguém mandou frame de close: a conexão caiu por baixo do WebSocket
@@ -251,16 +260,39 @@ class ReconnectingFeed:
     #:
     #: O `1012 Service Restart` (as outras 20) NÃO entra aqui de propósito:
     #: ele diz que o serviço está voltando, e voltar rápido é o certo.
-    ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1013: 5.0}
+    ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1012: 5.0, 1013: 5.0}
 
     def _espera_minima(self, motivo: dict[str, Any] | None) -> float:
-        """Quanto esperar no mínimo, pelo que o servidor disse no close."""
-        if not motivo:
+        """Quanto esperar no mínimo, pelo que o servidor disse no close.
+
+        **Só vale quando foi o SERVIDOR que fechou**, e essa condição não é
+        detalhe: `_derrubar_por_recusa` e `_escalar_se_sem_efeito` fecham a
+        conexão com **1012 de propósito**, para refazer a assinatura do zero
+        o mais rápido possível. Aplicar a esses o backoff que o padrão pede
+        do SERVIDOR seria punir a nossa própria decisão de reconectar já.
+        """
+        if not motivo or motivo.get("close_origem") != "servidor":
             return 0.0
         codigo = motivo.get("close_code")
         if not isinstance(codigo, int):
             return 0.0
         return self.ESPERA_MINIMA_POR_CODIGO.get(codigo, 0.0)
+
+    def espera_da_volta(self, backoff: float, motivo: dict[str, Any] | None) -> float:
+        """O sono desta volta: jitter aplicado, e o piso DEPOIS dele.
+
+        Achado P2 do Codex na revisão do #177, e é a diferença entre um piso
+        e um piso de mentira: com o jitter de `[0.5, 1.5)` multiplicando uma
+        espera de 5 s, o sono real ia de 2,5 a 7,5 s — **metade das voltas
+        dormia menos que o mínimo anunciado**. O piso tem de valer sobre o
+        resultado, não sobre a entrada.
+
+        Método público e puro de propósito: o teste do piso precisa exercer
+        a COMPOSIÇÃO (jitter × piso), não só a tabela.
+        """
+        piso = self._espera_minima(motivo)
+        # jitter uniforme em [0.5, 1.5)x para dessincronizar reconexões
+        return max(backoff * (0.5 + _JITTER.random()), piso)
 
     def _registrar_queda(self, exc: BaseException) -> dict[str, Any]:
         """Extrai código, razão e ORIGEM do close — e recusa adivinhar a origem.
@@ -298,7 +330,12 @@ class ReconnectingFeed:
         if frame is not None:
             codigo = getattr(frame, "code", None)
             razao = getattr(frame, "reason", None)
-        if recebido is not None:
+        primeiro_recebido = getattr(exc, "rcvd_then_sent", None)
+        if recebido is not None and enviado is not None:
+            # Handshake completo: OS DOIS mandaram frame. Quem começou é o
+            # que importa, e só o `rcvd_then_sent` sabe.
+            origem = "servidor" if primeiro_recebido else "cliente"
+        elif recebido is not None:
             origem = "servidor"
         elif enviado is not None:
             origem = "cliente"

@@ -469,9 +469,17 @@ def test_1013_do_servidor_nao_e_respondido_em_meio_segundo():
     respondidas em ~0,5 s — insistir em cima de um servidor que acabou de
     dizer, pelo código do RFC 6455 §7.4.1, que está sobrecarregado.
 
-    O 1012 continua sem piso DE PROPÓSITO: ele diz que o serviço está
-    voltando, e voltar rápido é o certo. A assimetria é o conteúdo deste
-    teste — um piso em todos os códigos seria tão errado quanto nenhum.
+    **A primeira versão desta tabela deixava o 1012 de fora**, com o
+    argumento de que "ele diz que o serviço está voltando, e voltar rápido é
+    o certo". Achado P2 do Codex no #177: isso inverte o padrão. O 1012
+    `Service Restart` diz que o serviço **está reiniciando** — não que já
+    voltou — e a semântica registrada recomenda voltar com atraso aleatório
+    de 5 a 30 s. Deixar de fora o código que respondia por **20 das 24**
+    quedas medidas esvaziaria a mudança inteira.
+
+    O que separa os casos não é o código, é **quem fechou**: o nosso próprio
+    1012 (de `_derrubar_por_recusa` e `_escalar_se_sem_efeito`) existe para
+    reconectar rápido, e ganha piso zero. Isso está no teste seguinte.
     """
     feed = _feed_qualquer()
 
@@ -482,9 +490,9 @@ def test_1013_do_servidor_nao_e_respondido_em_meio_segundo():
     )
 
     # E o que NÃO deve ganhar piso:
-    assert feed._espera_minima({"close_code": 1012}) == 0.0
-    assert feed._espera_minima({"close_code": 1000}) == 0.0
-    assert feed._espera_minima({"close_code": None}) == 0.0
+    assert feed._espera_minima({"close_code": 1012, "close_origem": "cliente"}) == 0.0
+    assert feed._espera_minima({"close_code": 1000, "close_origem": "servidor"}) == 0.0
+    assert feed._espera_minima({"close_code": None, "close_origem": "servidor"}) == 0.0
     assert feed._espera_minima(None) == 0.0
 
 
@@ -500,7 +508,7 @@ def test_espera_minima_nao_encurta_um_backoff_ja_grande():
     mais, não a mesma.
     """
     feed = _feed_qualquer()
-    piso = feed._espera_minima({"close_code": 1013})
+    piso = feed._espera_minima({"close_code": 1013, "close_origem": "servidor"})
 
     backoff_grande = 30.0
     assert max(backoff_grande, piso) == backoff_grande
@@ -509,3 +517,69 @@ def test_espera_minima_nao_encurta_um_backoff_ja_grande():
     backoff = feed.reconnect_initial_seconds          # 0,5 s
     backoff = min(max(backoff, piso) * 2, feed.reconnect_max_seconds)
     assert backoff == 10.0, "o segundo 1013 tem de esperar mais que o primeiro"
+
+
+class _QuedaComHandshake(Exception):
+    """Os DOIS lados mandaram frame — só a ordem diz quem começou."""
+
+    def __init__(self, *, primeiro_recebido: bool) -> None:
+        super().__init__("sent and received close frames")
+        self.rcvd = _FrameFalso(1012, "service restart")
+        self.sent = _FrameFalso(1012, "topico mudo apos reassinaturas")
+        self.rcvd_then_sent = primeiro_recebido
+
+
+def test_close_que_NOS_iniciamos_nao_e_atribuido_ao_servidor():
+    """Fechar com 1012 é coisa NOSSA em dois pontos do `base.py`.
+
+    `_derrubar_por_recusa` e `_escalar_se_sem_efeito` fecham a conexão com
+    **1012 de propósito**, para refazer a assinatura do zero. O servidor
+    responde ao nosso frame com o dele, então `rcvd` existe — e a regra
+    antiga (`"servidor" if rcvd is not None`) carimbava **servidor** numa
+    queda que nós mesmos causamos.
+
+    Isso não é detalhe de log: a medida de 2026-09-20 concluiu "24 de 24 do
+    servidor" e daí saiu o diagnóstico de que o CLOB recicla conexões. Com a
+    atribuição errada, parte daquelas 24 podia ser nossa.
+
+    Terceira vez que o MESMO defeito aparece neste campo: dizer que sabe
+    quando não sabe.
+    """
+    feed = _feed_qualquer()
+
+    feed._registrar_queda(_QuedaComHandshake(primeiro_recebido=False))
+    assert feed.close_reasons[-1]["close_origem"] == "cliente", (
+        "regressão: queda que NÓS iniciamos voltou a ser atribuída ao servidor"
+    )
+
+    feed._registrar_queda(_QuedaComHandshake(primeiro_recebido=True))
+    assert feed.close_reasons[-1]["close_origem"] == "servidor"
+
+
+def test_o_piso_sobrevive_ao_jitter():
+    """Piso multiplicado por jitter de [0.5, 1.5) não é piso.
+
+    Achado P2 do Codex no #177: com espera de 5 s e o jitter existente, o
+    sono real ia de 2,5 a 7,5 s — **metade das voltas dormia menos que o
+    mínimo anunciado**. O teste anterior só exercia `_espera_minima`, e por
+    isso não via nada.
+    """
+    feed = _feed_qualquer()
+    do_servidor = {"close_code": 1013, "close_origem": "servidor"}
+    piso = feed._espera_minima(do_servidor)
+    assert piso == 5.0
+
+    for _ in range(300):
+        assert feed.espera_da_volta(feed.reconnect_initial_seconds, do_servidor) >= piso
+
+
+def test_o_piso_nao_vale_para_o_close_que_nos_mandamos():
+    """Nosso próprio 1012 existe para reconectar RÁPIDO — punir isso com o
+    backoff que o padrão pede do servidor inverteria a intenção do código.
+    """
+    feed = _feed_qualquer()
+    nosso = {"close_code": 1012, "close_origem": "cliente"}
+    assert feed._espera_minima(nosso) == 0.0
+
+    do_servidor = {"close_code": 1012, "close_origem": "servidor"}
+    assert feed._espera_minima(do_servidor) == 5.0

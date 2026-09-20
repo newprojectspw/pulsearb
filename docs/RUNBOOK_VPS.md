@@ -1918,6 +1918,34 @@ duplicação parte dele, e um segundo `1013` seguido espera 10 s em vez de
 voltar aos 5. Quem pediu paciência duas vezes recebe mais, não a mesma. Os
 dois testes fixam as duas coisas, e o primeiro foi verificado por mutação.
 
+> ⚠️ **O DIAGNÓSTICO ACIMA ESTÁ SOB SUSPEITA, e a suspeita é minha.** A
+> revisão do #177 achou que `_registrar_queda` atribuía a origem por
+> `"servidor" if rcvd is not None`. Num close que **NÓS** iniciamos o
+> servidor responde com o frame dele, então `rcvd` existe — e a queda saía
+> carimbada **servidor**. E nós fechamos com **1012 de propósito** em dois
+> pontos (`_derrubar_por_recusa` e `_escalar_se_sem_efeito`).
+>
+> Ou seja: parte das "20 de 24 com 1012 do servidor" pode ter sido nossa.
+> Corrigido com `rcvd_then_sent`, que é o atributo do `websockets` que diz
+> quem mandou o frame primeiro — **terceira vez que este mesmo campo diz
+> saber o que não sabe**.
+>
+> **O teste que decide, e não precisa de código novo:** as duas quedas
+> nossas carregam razão própria no frame.
+>
+> ```bash
+> journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+>   | grep 'conexão caiu' | grep -o '"close_reason":"[^"]*"' | sort | uniq -c
+>
+> journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager \
+>   | grep -c 'derrubando a conexão'
+> ```
+>
+> `topico mudo apos reassinaturas` ou `assinatura recusada pelo servidor` na
+> primeira saída, ou qualquer número acima de zero na segunda, e as quedas
+> são nossas. Vazio nas duas e o diagnóstico do ciclo do servidor se
+> sustenta.
+
 **O que segue em aberto:** o custo. ~24 quedas/h × tempo até a primeira
 mensagem depois de cada uma = tempo sem livro por hora, e é esse número que
 entra no relato de cobertura das 14 dias. Ainda não foi medido.
