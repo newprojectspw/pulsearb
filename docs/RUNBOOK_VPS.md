@@ -2195,6 +2195,22 @@ for r in base "$REGRA"; do sudo systemctl start pulsearb-shadow-maker@$r; done
 
 # O relógio só começou se os diários nasceram AGORA e vazios.
 sleep 20 && ls -l data/diarios/
+
+# E o PORTÃO tem de estar aberto. Acrescentado em 2026-09-21 (§10.1l): a
+# conferência acima olhava só os diários, e uma rodada com o disjuntor
+# armado passava por ela cotando ZERO em silêncio por dois dias.
+for r in base pausa ancora recolher; do
+  f=data/risco/registro_maker_$r.shadow.json
+  [ -f "$f" ] || continue
+  python3 -c "
+import json, sys
+d = json.load(open('$f'))
+if d.get('disjuntor_armado'):
+    print('DISJUNTOR ARMADO em $r:', d.get('disjuntor_motivo'))
+    sys.exit(1)
+print('$r: portao aberto')
+"
+done
 ```
 
 O registro de risco vai junto porque o ensaio do 4.2 sobe com registro
@@ -2202,7 +2218,10 @@ limpo — é o procedimento das rodadas r7 em diante, e um registro com
 exposição herdada da medida de capacidade faria o portão recusar por um
 motivo que não é do ensaio.
 
-**A conferência que fecha isto:** `ls -l data/diarios/` logo depois tem de
+**A conferência que fecha isto são DUAS**, e a segunda entrou em
+2026-09-21 porque a primeira sozinha deixou passar uma rodada que não cotava
+(§10.1l): o laço acima não pode imprimir nenhum `DISJUNTOR ARMADO`. E
+`ls -l data/diarios/` logo depois tem de
 mostrar arquivos novos e pequenos. Diário grande ali é diário antigo que não
 foi afastado — e o resultado de 14 dias sairia somado com a medida de
 capacidade.
@@ -2849,6 +2868,28 @@ done
 ```
 
 **Nenhuma janela do 4.2 começa com um `DISJUNTOR ARMADO` nessa saída.**
+
+#### ✅ As duas travas, fechadas em 2026-09-21
+
+1. **O teto foi escolhido pelo operador: 5000 USDC**, escrito em `comum.env`
+   com a razão junto. Não é número novo — o default de 25 é
+   `5 x stake_max_por_trade` de 5 USDC ("cinco trades ruins e para"), e 5000
+   é a **mesma razão** sobre o stake de 1000 deste perfil.
+2. **A conferência do disjuntor entrou no §10.1g**, ao lado da dos diários.
+
+E o defeito ganhou teste — `tests/test_perfil_do_ensaio.py`, três, todos
+verificados por mutação:
+
+| mutação | o que reprova |
+|---|---|
+| tirar a linha do `comum.env` (o defeito original) | `KeyError` com a mensagem apontando o §10.1l |
+| pôr o default do taker, 25 | `assert 25.0 >= (5.0 * 1000.0)` |
+| pôr 999999 — subir virando desligar | teto acima da exposição não arma nunca |
+
+A terceira existe porque o conserto tem um jeito errado de ser feito: um teto
+alto o bastante para nunca armar **não exercita o portão**, e exercitá-lo é
+metade do motivo de o SHADOW existir (`caminho_do_registro_do_modo`, achado
+do Codex no #52).
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
