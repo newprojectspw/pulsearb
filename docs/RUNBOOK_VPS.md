@@ -2726,9 +2726,48 @@ Se `clob[pools]` estiver limpo nesta mesma janela, os 390 s/h são custo do
 `clob[pools]` também estiver caindo, o assunto passa a ser do 4.2 e volta à
 mesa com prioridade.
 
-**Medida pendente:** o agregado por conexão da mesma janela. Enquanto ele
-não chegar, esta seção não conclui nada sobre o 4.2 — só sobre o
-`clob[updown]`.
+#### ✅ O agregado chegou: o livro do maker não caiu uma vez
+
+Mesma janela, por conexão:
+
+| conexão | quedas | s sem livro |
+|---|---|---|
+| `clob[updown]` | 23 | **322,6** |
+| `rtds[shadow:0]` | 13 | 8,1 |
+| `rtds[shadow:1]` | 11 | 7,4 |
+| **`clob[pools]`** | **0** | **0,0** |
+
+**95% do tempo cego está na conexão do taker.** O RTDS somou 24 quedas por
+15,5 s — 0,65 s de média, o mesmo regime de sempre, e mais uma confirmação
+de que o nosso próprio 1012 tem piso zero.
+
+**E o zero do `clob[pools]` é MEDIDO, não uma linha que faltou.** A
+diferença importa: um agregado fica idêntico quer a conexão tenha ficado
+perfeita, quer nunca tenha subido. Conferido:
+
+- `grep -c 'clob\[pools\]'` na hora = **1** — uma única linha, o
+  `conectado` das 18:40:42. Se tivesse caído, haveria `conexão caiu` com
+  esse rótulo;
+- a descoberta segue publicando: `janelas: 53` e `52`, com
+  `descartes: {nao_pontua_com_este_tamanho: 7}`.
+
+#### O que isto conclui
+
+A separação de conexões feita em 2026-09-14 está entregando o que prometeu:
+os Up/Down levam as quedas, e o livro que o maker cota fica de fora. **O
+efeito colateral do #181 não toca o 4.2** — ele encarece a rota taker, que
+está medida, reprovada (quadro 1.1/1.4/1.5) e que o plano do 4.2 prevê
+desligar.
+
+**Isso reforça a fase 1 do `PLANO_4_2_NUM_PROCESSO.md`:** desligar o taker
+tira de uma vez três coisas — o acoplamento de orçamento no portão de risco,
+os 54% de tráfego, e estes 322,6 s cegos por hora.
+
+> ❓ **O que este agregado NÃO prova:** que o livro de pool está *chegando*.
+> Ele prova que a conexão não caiu. Conexão viva e muda produz o mesmo zero,
+> e o projeto tem watchdog para isso (`stale_after_seconds_book`) justamente
+> porque esse caso existe. O que fecharia: o relato de 60 s do maker, com
+> cotações publicadas em vez de recusas por `sem_livro`.
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
