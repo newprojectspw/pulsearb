@@ -2092,6 +2092,56 @@ decisão atual está certa e o item fecha como limitação do servidor.
 primeira mensagem depois de cada uma. Esse número continua sem medida, e é
 ele que precisa aparecer no relato das 14 dias.
 
+### 10.1f-octies. O custo da reconexão: 23,6 s/h — LINHA DE BASE
+
+Medido em `2026-09-21 ~01:37 UTC`, 60 min. **É o código ANTERIOR ao #177**:
+a janela cobre 00:37–01:37 e o restart com o código novo foi às 01:36, então
+cinquenta e nove dos sessenta minutos são do comportamento antigo.
+
+| conexão | quedas | tempo sem livro |
+|---|---|---|
+| `clob[updown]` | 7 | 9,2 s |
+| `rtds[shadow:0]` | 12 | 7,3 s |
+| `rtds[shadow:1]` | 11 | 7,1 s |
+| **hora inteira** | **30** | **23,6 s = 0,65% da hora** |
+
+Média de 0,79 s por reconexão, pior caso 5,2 s.
+
+**O que este número é:** limite inferior. Conta da queda até o `conectado`,
+e depois ainda há a ida e volta da assinatura antes de o dado voltar.
+
+**O que ele NÃO é:** o comportamento atual. O #177 pôs piso de 5 s nas
+quedas em que o SERVIDOR fecha com 1012/1013. Das 30 quedas, ~22 são nossas
+(piso zero) e ~8 são `1013 slow consumer` do servidor no `clob[updown]`
+(piso 5 s). **Previsão, não medida:** o tempo sem livro sobe para ~70 s/h,
+uns 2% da hora — o triplo. Se isso é bom troco, ainda não se sabe: a perda
+é no `updown`, que tem conexão própria justamente para não levar o livro
+dos pools junto, e é o livro dos pools que o maker cota.
+
+**Para fechar, repita a mesma conta com a hora inteira no código novo.** O
+comando está em `/root/custo_reconexao.sh` na VPS; a saída vai para
+`/root/custo_reconexao.txt`.
+
+```bash
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-unix \
+  | grep -E 'conexão caiu|"msg": *"conectado"' \
+  | awk '{
+      t = $1 + 0
+      conexao = "?"
+      if (match($0, /"conexao": *"[^"]*"/)) conexao = substr($0, RSTART, RLENGTH)
+      if ($0 ~ /conexão caiu/) { caiu[conexao] = t }
+      else if (conexao in caiu) {
+          d = t - caiu[conexao]; delete caiu[conexao]
+          total += d; n++; soma[conexao] += d; vezes[conexao]++
+          if (d > pior) pior = d
+      }
+  } END {
+      for (c in soma) printf "%-28s %3d quedas, %7.1f s\n", c, vezes[c], soma[c]
+      printf "\n%d reconexões, %.1f s (%.2f%% da hora), pior %.1f s\n",
+             n, total, total/36, pior
+  }'
+```
+
 ### 10.1g. Medir a capacidade NÃO inicia o ensaio — os artefatos vão fora
 
 Achado P1 do Codex na revisão do #170, e ao conferir no código ele é pior do
