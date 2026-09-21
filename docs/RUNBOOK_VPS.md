@@ -2286,11 +2286,25 @@ todas o mesmo carimbo:
 "close_code":1013 "close_origem":"servidor" "close_reason":"slow consumer: send buffer full"
 ```
 
-O 1013 do RFC 6455 quer dizer "estou sobrecarregado"; o `reason` diz outra
-coisa — **o buffer de envio do servidor encheu porque o NOSSO cliente não
-drenava o socket**. É a starvation de CPU do §10.1f aparecendo na ponta do
-WebSocket. Esperar 30 s não conserta isso: voltamos e enchemos de novo — a
-conexão aguentou 24,7 s e depois 70,0 s antes de cair outra vez.
+O 1013 do RFC 6455 quer dizer "estou sobrecarregado"; o `reason` fala em
+buffer de envio cheio. Esperar 30 s não conserta isso: a conexão aguentou
+24,7 s e depois 70,0 s antes de cair outra vez.
+
+> ❌ **CORRIGIDO em 2026-09-21.** A primeira versão deste parágrafo dizia que
+> o buffer enchia **porque o nosso cliente não drenava o socket**, e chamava
+> isso de "a starvation de CPU do §10.1f aparecendo na ponta do WebSocket".
+> **Está errado, e o projeto já tinha a medida que o refuta** — de
+> 2026-09-14, escrita em `live/shadow.py` junto de `clob[updown]`: a queda
+> **acontece igual com consumidor vazio**, e no mesmo instante em três
+> processos paralelos. Não é o nosso processo. O que a causa é o tráfego dos
+> Up/Down: **dois mercados de 5 min são 54% do tráfego, em rajadas de
+> 4 MB/s**, contra 50–120 msg/s dos tokens de pool, que nunca caíram.
+>
+> Eu deduzi a causa do nome do campo em vez de procurar o que já estava
+> medido — o erro que o CLAUDE.md chama de "fato de API assumido a partir do
+> que parecia razoável". O conserto do #181 (reset da escalada por saúde)
+> **não depende disto e continua de pé**: ele foi medido contra o sono real,
+> não contra a causa da queda.
 
 **O número que vale para a rota maker não é 3,24%.** Durante a rajada foram
 **100,7 s cegos em 195,6 s de relógio — 51% do tempo sem livro do
@@ -2499,15 +2513,76 @@ PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
 | motor de cotação / decisão | a hipótese está errada; o custo é por mercado de outra forma, e o alvo é outro |
 | espalhado, sem topo claro | não há alvo — e aí o 4.2 fica parado nesta máquina, sem eufemismo |
 
+#### O alvo que apareceu ao ler o código, e que vale mais que a hipótese
+
+Lendo `live/shadow.py` para interpretar o perfil, apareceu o que nenhuma das
+medidas anteriores tinha olhado: **cada rodada carrega a rota taker
+inteira**, e ela não é opt-in.
+
+| o que sobe | condicional? |
+|---|---|
+| `self.poly.start()` — conexão `clob[updown]` | ❌ incondicional |
+| `laco_de_descoberta` (mercados do taker) | ❌ incondicional |
+| `laco_de_decisao` (`passo()` do taker) | ❌ incondicional |
+| `self.poly_pools.start()` + `laco_de_descoberta_de_pools` | ✅ opt-in |
+
+E o `clob[updown]` é, pela medida de 2026-09-14 gravada no próprio código,
+**54% do tráfego, em rajadas de 4 MB/s**, contra 50–120 msg/s dos pools.
+
+**Junte com a reprovação dos 20 pools e ela para de ser um mistério:**
+`TOP_DE_POOLS_DE_REWARD` mexe só na conexão `clob[pools]`. A medida cortou a
+metade PEQUENA do tráfego e deixou a grande intacta. Que o custo não tenha
+mudado é, agora, o resultado esperado — e a minha leitura de que "o custo
+não está no processamento de livro" foi longe demais: ela não foi testada.
+
+**O que isso significa para o 4.2:** as duas rodadas pagam a rota taker
+inteira — a conexão mais pesada da casa — **para medir a rota maker**. E o
+taker está medido e REPROVADO (quadro 1.1/1.4/1.5, −195,25 USDC em 2.069
+trades). É custo pago por um dado que já existe e já reprovou.
+
+#### A medida que decide isto, sem tocar em código
+
+Comparar a MESMA rodada, sozinha, com e sem a rota de pools. Os dois números
+separam o custo do taker do custo do maker:
+
+```bash
+cd /opt/pulsearb
+medir() {
+  sudo systemctl stop 'pulsearb-shadow-maker@*'
+  sudo sed -i "s/^PULSEARB_DESCOBRIR_POOLS_DE_REWARD=.*/PULSEARB_DESCOBRIR_POOLS_DE_REWARD=$1/" \
+      deploy/rodadas/comum.env
+  sudo systemctl daemon-reload
+  sudo systemctl start pulsearb-shadow-maker@base
+  sleep 180
+  PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
+  echo "=== pools=$1 ==="
+  pidstat -u -p $PID 5 24 | tail -1
+}
+medir true
+medir false
+```
+
+| leitura | o que significa |
+|---|---|
+| `pools=false` ≈ `pools=true` | o taker é quase todo o custo. Uma rodada **maker-only** seria barata, e o 4.2 volta a caber em 1 vCPU — ao preço de escrever a trava que desliga a rota taker |
+| `pools=false` ≪ `pools=true` | o maker é que é caro; desligar o taker não salva, e o alvo volta a ser o laço de cotação |
+| os dois altos e parecidos com `%CPU` ~40% | o custo é fixo e não é de nenhuma das rotas — feeds de base, RTDS, relógio |
+
+**Ao terminar, o `comum.env` tem de voltar ao que está versionado**
+(`PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`,
+`PULSEARB_TOP_DE_POOLS_DE_REWARD=60`), e o §10.1g vale inteiro antes de
+qualquer ensaio valer.
+
 #### Se 20 pools não couber
 
 Resta a terceira linha do §10.1f, a que ele chamou de investigação inteira:
-por que uma rodada custa 40% de um núcleo para cotar em 60 mercados. Os
-sinais de que há o que cortar são `in` ~2.000–3.000/s e `cs` ~1.000/s — e
-agora há um terceiro, do §10.1i: `1013 slow consumer: send buffer full`, o
-servidor dizendo que este processo não drena o socket. **Nada garante que
-caiba em 1 vCPU no fim**, e por isso ela não é um plano, é uma aposta de
-duração desconhecida.
+por que uma rodada custa 40% de um núcleo. Os sinais de que há o que cortar
+são `in` ~2.000–3.000/s e `cs` ~1.000/s.
+
+> A primeira versão citava aqui um terceiro sinal — o `1013 slow consumer`
+> como prova de que o processo não drena o socket. **Foi retirado: é falso**,
+> ver a correção no §10.1i. O sinal que ficou no lugar dele é melhor, e está
+> logo abaixo.
 
 #### O que dá para fechar sem nada disso
 
