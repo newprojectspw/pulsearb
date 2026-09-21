@@ -193,6 +193,9 @@ class ReconnectingFeed:
             # exceção (o `_receive_loop` retornando) chegaria na espera com
             # `motivo` inexistente.
             motivo: dict[str, Any] | None = None
+            # Quando esta conexão entrou no ar. `None` até o socket abrir, de
+            # modo que um connect que FALHA não conta como saúde nenhuma.
+            no_ar_desde: float | None = None
             try:
                 async with websockets.connect(
                     self.url,
@@ -211,6 +214,7 @@ class ReconnectingFeed:
                 ) as ws:
                     self._ws = ws
                     self._connected = True
+                    no_ar_desde = time.monotonic()
                     self.log.info("conectado", url=self.url, conexao=self.rotulo)
                     await self._on_connected(ws)
                     backoff = self.reconnect_initial_seconds  # conexão boa zera o backoff
@@ -240,7 +244,8 @@ class ReconnectingFeed:
             if self._stopped.is_set():
                 return
             self.reconnect_count += 1
-            piso = self._piso_da_volta(motivo)
+            tempo_no_ar = 0.0 if no_ar_desde is None else time.monotonic() - no_ar_desde
+            piso = self._piso_da_volta(motivo, tempo_no_ar)
             backoff = max(backoff, piso)
             await asyncio.sleep(self.espera_da_volta(backoff, piso))
             backoff = min(backoff * 2, self.reconnect_max_seconds)
@@ -268,6 +273,26 @@ class ReconnectingFeed:
     #: `_espera_minima`. O nosso próprio 1012 tem piso zero.
     ESPERA_MINIMA_POR_CODIGO: ClassVar[dict[int, float]] = {1012: 5.0, 1013: 5.0}
 
+    #: Quanto tempo no ar prova que o pedido de paciência já foi atendido.
+    #:
+    #: A escalada de `_piso_da_volta` existe para não insistir em cima de um
+    #: servidor sob pressão. Mas a primeira versão só a zerava numa queda SEM
+    #: piso — nada media o "seguidos" do nome. Medido na VPS em 2026-09-21,
+    #: quatro horas de `clob[updown]`: as nove quedas dormiram entre 30,9 e
+    #: 42,0 s, **todas no teto**, inclusive uma que veio depois de 77,1 min
+    #: de conexão saudável. O contador subiu em algum ponto das 27 h de
+    #: processo e nunca mais desceu.
+    #:
+    #: O valor fica ACIMA de `reconnect_max_seconds` (30 s) de propósito: um
+    #: servidor que nos aceita por pouco mais que a nossa própria espera e
+    #: fecha de novo NÃO zera a conta — senão a escalada oscilaria para
+    #: sempre e voltaríamos a bater na porta a cada ~36 s.
+    #:
+    #: A medida decide só os extremos: 34,6 min e 77,1 min têm de zerar,
+    #: 24,7 s não pode zerar. Entre os dois é escolha, e esta escolha põe o
+    #: caso de 70,0 s do lado que zera.
+    SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS: ClassVar[float] = 60.0
+
     def _espera_minima(self, motivo: dict[str, Any] | None) -> float:
         """Quanto esperar no mínimo, pelo que o servidor disse no close.
 
@@ -284,7 +309,9 @@ class ReconnectingFeed:
             return 0.0
         return self.ESPERA_MINIMA_POR_CODIGO.get(codigo, 0.0)
 
-    def _piso_da_volta(self, motivo: dict[str, Any] | None) -> float:
+    def _piso_da_volta(
+        self, motivo: dict[str, Any] | None, tempo_no_ar: float = 0.0
+    ) -> float:
         """O piso desta volta, DOBRANDO a cada pedido de paciência seguido.
 
         **Por que um contador próprio, e não o `backoff`** (achado P2 do
@@ -299,7 +326,13 @@ class ReconnectingFeed:
         Zera em qualquer queda que NÃO seja pedido de paciência: se o
         servidor fechou por outro motivo, ele não está mais sobrecarregado
         do ponto de vista desta conta.
+
+        Zera TAMBÉM quando a conexão que acabou de cair tinha passado da
+        `SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS` no ar — ver a constante para a
+        medida que obrigou isto.
         """
+        if tempo_no_ar >= self.SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS:
+            self.pedidos_de_paciencia_seguidos = 0
         piso = self._espera_minima(motivo)
         if piso <= 0.0:
             self.pedidos_de_paciencia_seguidos = 0

@@ -2245,6 +2245,115 @@ apenas empurrada para um nível acima.
 E as duas dependem do ensaio de duas rodadas do §10.1f passar: se ele
 reprovar, o plano B cai junto e sobra só a máquina maior.
 
+### 10.1i. O custo das reconexões no código novo — MEDIDO em 2026-09-21
+
+Primeira medida do custo de reconexão **depois** do #177/#178 (piso e
+escalada). A linha de base, código antigo, está no §10.1f: 30 reconexões,
+23,6 s sem livro, 0,65% da hora, pior 5,2 s.
+
+Uma hora de `pulsearb-shadow-maker@base`, 1 vCPU, quatro rodadas no ar:
+
+| conexão | quedas | s sem livro | média |
+|---|---|---|---|
+| `clob[updown]` | 3 | **100,7** | 33,6 s |
+| `rtds[shadow:0]` | 11 | 7,4 | 0,67 s |
+| `rtds[shadow:1]` | 13 | 8,6 | 0,66 s |
+| **total** | **27** | **116,8** | 4,32 s |
+
+**3,24% da hora, pior buraco 37,1 s.**
+
+**O que a média esconde.** 86% do custo veio de TRÊS quedas. As 24 quedas do
+RTDS custaram 16 s — 0,67 s de média, contra 0,79 s da linha de base. O
+escopo que o #178 testou vale em produção: o 1012 que **nós** mandamos em
+`_derrubar_por_recusa` tem piso zero, então o conserto do RTDS não pagou
+pedágio nenhum.
+
+**A previsão errou.** Estava escrito, antes da medida, ~70 s/h. Veio 116,8
+s/h — 67% a mais — e errou sobretudo o LUGAR: previa o custo espalhado pelas
+quedas do RTDS, e ele se concentrou no CLOB.
+
+**O que o CLOB disse.** As três quedas são uma rajada de 3,3 min e trazem
+todas o mesmo carimbo:
+
+```
+"close_code":1013 "close_origem":"servidor" "close_reason":"slow consumer: send buffer full"
+```
+
+O 1013 do RFC 6455 quer dizer "estou sobrecarregado"; o `reason` diz outra
+coisa — **o buffer de envio do servidor encheu porque o NOSSO cliente não
+drenava o socket**. É a starvation de CPU do §10.1f aparecendo na ponta do
+WebSocket. Esperar 30 s não conserta isso: voltamos e enchemos de novo — a
+conexão aguentou 24,7 s e depois 70,0 s antes de cair outra vez.
+
+**O número que vale para a rota maker não é 3,24%.** Durante a rajada foram
+**100,7 s cegos em 195,6 s de relógio — 51% do tempo sem livro do
+`updown`**, com um buraco de 37,1 s. Um maker com ordens no livro nesses 37 s
+não sabe o que aconteceu com elas.
+
+#### O defeito que a janela de 4 h revelou
+
+Nove quedas de `clob[updown]` em quatro horas, e o sono que veio depois de
+cada uma:
+
+| queda | saúde antes | dormiu |
+|---|---|---|
+| +0,00 min | — | 31,9 s |
+| +34,64 min | **34,6 min** | 30,9 s |
+| +51,39 min | 16,2 min | 32,4 s |
+| +52,53 min | 0,6 min | 35,0 s |
+| +59,33 min | 6,2 min | 41,7 s |
+| +62,05 min | 2,0 min | 42,0 s |
+| +139,19 min | **77,1 min** | 32,3 s |
+| +140,14 min | 0,4 min | 31,3 s |
+| +141,82 min | 1,2 min | 37,1 s |
+
+Nenhum sono abaixo de 30 s. Com `reconnect_max_seconds: 30`, a faixa de
+sorteio `[30, 45)` tem média 37,5 — ou seja, o contador
+`pedidos_de_paciencia_seguidos` **já estava no teto** e nunca mais desceu.
+Uma conexão que trabalhou 77,1 min, caiu uma vez, e esperou 32,3 s.
+
+`_piso_da_volta` só zerava numa queda SEM piso. **Nada media o "seguidos" do
+nome.** Consertado com `SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS` (60 s, acima do
+teto de propósito) e dois testes verificados por mutação. A medida decide só
+os extremos — 34,6 min e 77,1 min têm de zerar, 24,7 s não pode zerar; o
+caso de 70,0 s é escolha, e a constante o põe do lado que zera.
+
+**O que NÃO foi mexido, e por quê.** O piso, o teto e a tabela de códigos
+ficam como estão. A causa do 1013 aqui é literalmente a lentidão desta
+máquina, que já está medida e condenada no §10.1f. Calibrar a política de
+backoff com o número produzido pela causa que vamos remover seria consertar
+o sintoma com o dado contaminado. O reset por saúde é outra coisa: é defeito
+de mecanismo, e a evidência (77,1 min ainda no teto) não depende de CPU
+nenhuma.
+
+#### Repetir na máquina de 4 vCPU
+
+Com os mesmos comandos, uma hora limpa:
+
+```bash
+journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-unix \
+  | grep -E 'conexão caiu|"msg": *"conectado"' \
+  | awk '{
+      t = $1 + 0
+      conexao = "?"
+      if (match($0, /"conexao": *"[^"]*"/)) conexao = substr($0, RSTART, RLENGTH)
+      if ($0 ~ /conexão caiu/) { caiu[conexao] = t }
+      else if (conexao in caiu) {
+          d = t - caiu[conexao]; delete caiu[conexao]
+          total += d; n++; soma[conexao] += d; vezes[conexao]++
+          if (d > pior) pior = d
+      }
+  } END {
+      for (c in soma) printf "%-28s %3d quedas, %7.1f s sem livro\n", c, vezes[c], soma[c]
+      printf "%d reconexões, %.1f s sem livro (%.2f%% da hora), pior %.1f s\n",
+             n, total, total/36, pior
+  }'
+```
+
+**O que a repetição decide:** se o `slow consumer` sumir, ele era CPU e a
+política de backoff nunca foi o assunto. Se persistir em 4 vCPU, aí a
+política volta à mesa — e o suspeito seguinte é o teto de 30 s, não o piso.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro

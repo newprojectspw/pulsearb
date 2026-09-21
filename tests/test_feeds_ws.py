@@ -613,6 +613,62 @@ def test_a_escalada_do_piso_sobrevive_ao_reset_do_backoff():
     assert feed._piso_da_volta(sobrecarga) == 5.0
 
 
+def test_uma_conexao_saudavel_zera_a_escalada():
+    """77 minutos no ar não são "mais um pedido de paciência seguido".
+
+    Medido na VPS em 2026-09-21 (runbook §10.1i). Quatro horas de
+    `clob[updown]`: NOVE quedas, todas `1013 slow consumer`, e todas as
+    esperas entre 30,9 s e 42,0 s — o teto. Uma delas veio depois de 77,1
+    min de conexão saudável e ainda assim dormiu 32,3 s, porque nada no
+    código zerava o contador por uma conexão que tinha trabalhado. O campo
+    se chamava `pedidos_de_paciencia_seguidos` e o "seguidos" não era
+    medido em lugar nenhum.
+    """
+    feed = _feed_qualquer()
+    sobrecarga = {"close_code": 1013, "close_origem": "servidor"}
+
+    # a escalada sobe até o teto e fica lá, como em produção
+    for _ in range(6):
+        feed._piso_da_volta(sobrecarga, tempo_no_ar=1.0)
+    assert feed._piso_da_volta(sobrecarga, tempo_no_ar=1.0) == feed.reconnect_max_seconds
+
+    # e então a conexão trabalha 77,1 minutos antes de cair
+    assert feed._piso_da_volta(sobrecarga, tempo_no_ar=77.1 * 60) == 5.0, (
+        "regressão: uma conexão que ficou mais de uma hora no ar continuou "
+        "sendo tratada como pedido de paciência seguido"
+    )
+
+
+def test_queda_rapida_nao_zera_a_escalada():
+    """O outro lado: o servidor que nos aceita e derruba logo NÃO zera.
+
+    Se bastasse reconectar para zerar a conta, a escalada oscilaria para
+    sempre — voltaríamos a bater na porta a cada ~36 s de um servidor que
+    já disse duas vezes que não aguenta. O 24,7 s medido na rajada de
+    +139 min é o caso concreto que esta regra tem de rejeitar.
+    """
+    feed = _feed_qualquer()
+    sobrecarga = {"close_code": 1013, "close_origem": "servidor"}
+
+    assert feed._piso_da_volta(sobrecarga, tempo_no_ar=0.0) == 5.0
+    assert feed._piso_da_volta(sobrecarga, tempo_no_ar=24.7) == 10.0, (
+        "regressão: 24,7 s no ar zeraram a escalada — a conexão caiu antes "
+        "de viver o tempo que a constante exige"
+    )
+    assert feed._piso_da_volta(sobrecarga, tempo_no_ar=59.9) == 20.0
+
+
+def test_a_saude_que_zera_fica_acima_do_teto_do_backoff():
+    """Zerar por saúde não pode ser mais fácil que a própria espera.
+
+    Se a constante fosse MENOR que `reconnect_max_seconds`, um servidor que
+    nos admite por pouco mais que o nosso próprio sono zeraria a conta toda
+    vez, e a escalada nunca existiria de fato.
+    """
+    feed = _feed_qualquer()
+    assert feed.SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS > feed.reconnect_max_seconds
+
+
 def test_nosso_proprio_close_nao_alimenta_a_escalada():
     """Derrubar a conexão de propósito não é o servidor pedindo paciência."""
     feed = _feed_qualquer()
