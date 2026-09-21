@@ -2429,15 +2429,75 @@ PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
 pidstat -u -p $PID 5 24
 ```
 
-| `%wait` medido | o que significa |
+| `%wait` previsto | o que significaria |
 |---|---|
-| ~0,4% | cabe. 4.2 em três janelas de 14 dias, escopo reduzido, custo zero |
+| ~0,4% | caberia. 4.2 em três janelas de 14 dias, escopo reduzido, custo zero |
 | 15–35% | 20 pools não resolveu, e a conta não é linear — sobra a investigação abaixo |
-| entre os dois | não decide sozinho; precisa de um segundo ponto (ex.: 35 pools) |
+| entre os dois | não decidiria sozinho; precisaria de um segundo ponto (ex.: 35 pools) |
+
+> **Rodou em 2026-09-21 e caiu na segunda linha: 28,59%.** A tabela fica
+> como foi escrita, ANTES do resultado — é assim que se vê que a leitura não
+> foi ajustada depois de conhecer o número. O veredito está logo abaixo.
 
 **Depois da medida, o §10.1g vale inteiro** — afastar diários e registros,
 prazo novo, conferir que nasceram vazios. Medir capacidade não inicia
 ensaio, e esta medida suja os diários como qualquer outra.
+
+#### ❌ A medida rodou, e 20 pools REPROVOU — 2026-09-21
+
+`base` + `pausa`, `PULSEARB_TOP_DE_POOLS_DE_REWARD=20`, 24 amostras de 5 s:
+
+| `%wait` da `base` | mínimo | máximo | média |
+|---|---|---|---|
+| sozinha, 60 pools (§10.1f) | 0,00 | 1,20 | **0,38%** |
+| com a `pausa`, 60 pools (§10.1f) | 23,20 | 50,20 | **35,97%** |
+| **com a `pausa`, 20 pools** | 3,80 | 47,00 | **28,59%** |
+
+**A variável pegou** — conferido, não suposto: `"msg":"descoberta de
+pools","janelas":20`. (`systemctl show -p Environment` vir vazio é esperado
+e não desmente nada: ele só lista diretivas `Environment=`, e o valor vem do
+`EnvironmentFile`, que é o motivo de o `comum.env` existir.)
+
+**Três vezes menos pools, o mesmo custo:** `%CPU` 38,35% contra os ~40%
+medidos a 60. A proposta desta seção — encolher o escopo para caber —
+**está morta, e teria custado um veredito mais estreito por nada.**
+
+#### O que a reprovação ensinou, e que a proposta errada não sabia
+
+Duas leituras do mesmo `pidstat`, que juntas mudam o alvo:
+
+1. **O custo não escala com pools.** Não está no laço que percorre mercados.
+2. **`%usr` 36,07% contra `%system` 2,27%.** É cálculo em Python no espaço
+   de usuário — não syscall, não I/O, não rede.
+
+Sobra o que acontece **por evento de livro**, não por mercado. E aí entra o
+que a tabela do §10.1f também não via: `base` e `pausa` são dois processos
+separados que descobrem os MESMOS pools, assinam os MESMOS tokens e
+processam o MESMO livro, cada um por conta própria. **O trabalho caro é
+feito duas vezes.** É também a explicação de por que o `id` do `vmstat`
+nunca pegou a contenção que o `%wait` pegou: as duas acordam no mesmo evento
+e disputam o mesmo milissegundo.
+
+**A hipótese que isso levanta** — um processo, uma assinatura de livro, as
+regras em paralelo dentro dele — sairia de graça em hardware e em escopo, e
+deixaria a comparação MAIS limpa que hoje, porque as variantes veriam byte a
+byte a mesma entrada. **Mas é hipótese**, e a hipótese anterior desta mesma
+seção (encolher os pools) reprovou. Não se reescreve a topologia do ensaio
+por dedução.
+
+#### A medida que decide: perguntar ao processo
+
+```bash
+/opt/pulsearb/.venv/bin/python -m pip install py-spy
+PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
+/opt/pulsearb/.venv/bin/py-spy top --pid $PID --duration 60 --nonblocking
+```
+
+| topo do perfil | o que significa |
+|---|---|
+| parsing de livro nos feeds | a hipótese está certa: um processo com feed compartilhado é o caminho |
+| motor de cotação / decisão | a hipótese está errada; o custo é por mercado de outra forma, e o alvo é outro |
+| espalhado, sem topo claro | não há alvo — e aí o 4.2 fica parado nesta máquina, sem eufemismo |
 
 #### Se 20 pools não couber
 
