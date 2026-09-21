@@ -1694,9 +1694,15 @@ aqui, e com ele a última saída gratuita.
 | uma rodada por vez | 56 dias | ❌ o §10.1c já recusa: compara regra com mercado |
 | baratear a rodada | trabalho não medido | 40% de um núcleo para cotar em 60 mercados em SHADOW é muito; `in` ~2.000–3.000/s e `cs` ~1.000/s sugerem que há o que cortar. **Mas isso é uma investigação inteira, não um ajuste** — e nada garante que caiba em 1 vCPU no fim |
 
-**A recomendação é a primeira linha**, e a razão é de risco, não de
+**A recomendação era a primeira linha**, e a razão era de risco, não de
 preferência: as outras duas gastam semanas para talvez chegar ao mesmo
 lugar, e o 4.2 é pré-requisito de LIVE.
+
+> ⚠️ **O operador RECUSOU a máquina maior em 2026-09-21.** A recomendação
+> acima fica registrada como foi feita — não se apaga recomendação por ela
+> não ter sido seguida —, mas ela **não é mais o plano**. O que sobrou está
+> no §10.1j, e a tabela desta seção continua valendo: com a rodada do
+> tamanho atual, o 4.2 não tem caminho nesta máquina.
 
 ### 10.1f-ter. A reconexão NÃO é CPU — agora com janelas limpas
 
@@ -2233,7 +2239,8 @@ terão corrido com 28 dias de distância, e ranquear uma contra a outra
 mediria o mercado, não a regra — a mesma confusão que o §10.1c recusa,
 apenas empurrada para um nível acima.
 
-**A escolha, então, é esta — e é sua, não minha:**
+**A escolha era esta — e era sua, não minha** (decidida em 2026-09-21
+contra a máquina maior; ver §10.1j):
 
 | | plano B nesta VPS | máquina maior |
 |---|---|---|
@@ -2279,11 +2286,25 @@ todas o mesmo carimbo:
 "close_code":1013 "close_origem":"servidor" "close_reason":"slow consumer: send buffer full"
 ```
 
-O 1013 do RFC 6455 quer dizer "estou sobrecarregado"; o `reason` diz outra
-coisa — **o buffer de envio do servidor encheu porque o NOSSO cliente não
-drenava o socket**. É a starvation de CPU do §10.1f aparecendo na ponta do
-WebSocket. Esperar 30 s não conserta isso: voltamos e enchemos de novo — a
-conexão aguentou 24,7 s e depois 70,0 s antes de cair outra vez.
+O 1013 do RFC 6455 quer dizer "estou sobrecarregado"; o `reason` fala em
+buffer de envio cheio. Esperar 30 s não conserta isso: a conexão aguentou
+24,7 s e depois 70,0 s antes de cair outra vez.
+
+> ❌ **CORRIGIDO em 2026-09-21.** A primeira versão deste parágrafo dizia que
+> o buffer enchia **porque o nosso cliente não drenava o socket**, e chamava
+> isso de "a starvation de CPU do §10.1f aparecendo na ponta do WebSocket".
+> **Está errado, e o projeto já tinha a medida que o refuta** — de
+> 2026-09-14, escrita em `live/shadow.py` junto de `clob[updown]`: a queda
+> **acontece igual com consumidor vazio**, e no mesmo instante em três
+> processos paralelos. Não é o nosso processo. O que a causa é o tráfego dos
+> Up/Down: **dois mercados de 5 min são 54% do tráfego, em rajadas de
+> 4 MB/s**, contra 50–120 msg/s dos tokens de pool, que nunca caíram.
+>
+> Eu deduzi a causa do nome do campo em vez de procurar o que já estava
+> medido — o erro que o CLAUDE.md chama de "fato de API assumido a partir do
+> que parecia razoável". O conserto do #181 (reset da escalada por saúde)
+> **não depende disto e continua de pé**: ele foi medido contra o sono real,
+> não contra a causa da queda.
 
 **O número que vale para a rota maker não é 3,24%.** Durante a rajada foram
 **100,7 s cegos em 195,6 s de relógio — 51% do tempo sem livro do
@@ -2353,6 +2374,226 @@ journalctl -u pulsearb-shadow-maker@base --since '-60min' --no-pager -o short-un
 **O que a repetição decide:** se o `slow consumer` sumir, ele era CPU e a
 política de backoff nunca foi o assunto. Se persistir em 4 vCPU, aí a
 política volta à mesa — e o suspeito seguinte é o teto de 30 s, não o piso.
+
+### 10.1j. A máquina maior foi recusada — o que sobra para o 4.2
+
+Decisão do operador em **2026-09-21**: a VPS não será aumentada. Isto não é
+uma revisão da medida do §10.1f; a medida continua de pé. É uma restrição
+nova, e ela fecha, de uma vez, os três caminhos que o §10.1f listou:
+
+| caminho | estado |
+|---|---|
+| quatro rodadas em paralelo, 14 dias | ❌ `id=0`, `r=4` — medido (§10.1e) |
+| plano B: `base` + 1 regra, três janelas | ❌ `%wait` 0,38% → 16,70% → 35,97% (§10.1f) |
+| VPS de 4 vCPU | ❌ **recusada pelo operador** |
+| uma rodada por vez, 56 dias | ❌ o §10.1c recusa: compara regra com mercado |
+
+**Dito sem eufemismo: o 4.2, do jeito que está especificado, não tem caminho
+em 1 vCPU.** Quem ler este runbook procurando como rodá-lo nesta máquina tem
+de encontrar esta frase, não uma sequência de passos que termina em dado
+inválido.
+
+#### O que NÃO estava na tabela do §10.1f
+
+A tabela tratou "a rodada" como um bloco de tamanho fixo. Ela não é. O
+`comum.env` cota em `PULSEARB_TOP_DE_POOLS_DE_REWARD=60`, e é esse número
+que compra os ~40% de núcleo por rodada.
+
+Baixá-lo **nas duas rodadas da janela** não quebra o que o 4.2 exige. O
+próprio `comum.env` diz por quê: o perfil tem de ser igual **entre** as
+rodadas, porque o que se compara é a REGRA. Um perfil menor, igual nas duas,
+no mesmo intervalo de mercado, mantém a regra medida contra um controle
+contemporâneo — que é a condição do §10.1c, e a única que o plano B
+conseguia cumprir.
+
+**O preço disso, escrito antes de pagá-lo:**
+
+1. **O veredito muda de escopo.** O 4.2 passaria a dizer "a regra ajuda nos
+   N melhores pools de reward", não nos 60. Isso precisa sair no relatório,
+   não só aqui.
+2. **Menos pools, menos cotações.** Catorze dias podem não carregar o mesmo
+   peso estatístico. A conta sai dos diários das rodadas r4–r8, no Mac:
+   cotações por pool por dia. **Não medido** — e é o que decide se a janela
+   continua sendo de 14 dias ou precisa ser maior.
+3. **Não está medido que 20 pools cabem.** A relação entre número de pools e
+   CPU pode não ser linear — descoberta, assinaturas e livro escalam
+   diferente do laço de cotação.
+
+#### A medida de 20 minutos que decide
+
+Custa zero e separa três futuros. É `%wait`, a mesma coluna que reprovou o
+plano B, com a régua do §10.1f (sozinha 0,38%; com a `pausa` a 60 pools
+16,70% e 35,97%):
+
+```bash
+cd /opt/pulsearb
+sudo systemctl stop 'pulsearb-shadow-maker@*'
+
+# TEMPORÁRIO — isto é medida, não ensaio. Não commitar ainda.
+sudo sed -i 's/^PULSEARB_TOP_DE_POOLS_DE_REWARD=.*/PULSEARB_TOP_DE_POOLS_DE_REWARD=20/' \
+    deploy/rodadas/comum.env
+FIM=$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)
+sudo sed -i "s|^PULSEARB_RODADA_TERMINA_EM=.*|PULSEARB_RODADA_TERMINA_EM=$FIM|" \
+    deploy/rodadas/comum.env
+sudo systemctl daemon-reload
+for r in base pausa; do sudo systemctl start pulsearb-shadow-maker@$r; done
+
+sleep 180   # estabilizar
+PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
+pidstat -u -p $PID 5 24
+```
+
+| `%wait` previsto | o que significaria |
+|---|---|
+| ~0,4% | caberia. 4.2 em três janelas de 14 dias, escopo reduzido, custo zero |
+| 15–35% | 20 pools não resolveu, e a conta não é linear — sobra a investigação abaixo |
+| entre os dois | não decidiria sozinho; precisaria de um segundo ponto (ex.: 35 pools) |
+
+> **Rodou em 2026-09-21 e caiu na segunda linha: 28,59%.** A tabela fica
+> como foi escrita, ANTES do resultado — é assim que se vê que a leitura não
+> foi ajustada depois de conhecer o número. O veredito está logo abaixo.
+
+**Depois da medida, o §10.1g vale inteiro** — afastar diários e registros,
+prazo novo, conferir que nasceram vazios. Medir capacidade não inicia
+ensaio, e esta medida suja os diários como qualquer outra.
+
+#### ❌ A medida rodou, e 20 pools REPROVOU — 2026-09-21
+
+`base` + `pausa`, `PULSEARB_TOP_DE_POOLS_DE_REWARD=20`, 24 amostras de 5 s:
+
+| `%wait` da `base` | mínimo | máximo | média |
+|---|---|---|---|
+| sozinha, 60 pools (§10.1f) | 0,00 | 1,20 | **0,38%** |
+| com a `pausa`, 60 pools (§10.1f) | 23,20 | 50,20 | **35,97%** |
+| **com a `pausa`, 20 pools** | 3,80 | 47,00 | **28,59%** |
+
+**A variável pegou** — conferido, não suposto: `"msg":"descoberta de
+pools","janelas":20`. (`systemctl show -p Environment` vir vazio é esperado
+e não desmente nada: ele só lista diretivas `Environment=`, e o valor vem do
+`EnvironmentFile`, que é o motivo de o `comum.env` existir.)
+
+**Três vezes menos pools, o mesmo custo:** `%CPU` 38,35% contra os ~40%
+medidos a 60. A proposta desta seção — encolher o escopo para caber —
+**está morta, e teria custado um veredito mais estreito por nada.**
+
+#### O que a reprovação ensinou, e que a proposta errada não sabia
+
+Duas leituras do mesmo `pidstat`, que juntas mudam o alvo:
+
+1. **O custo não escala com pools.** Não está no laço que percorre mercados.
+2. **`%usr` 36,07% contra `%system` 2,27%.** É cálculo em Python no espaço
+   de usuário — não syscall, não I/O, não rede.
+
+Sobra o que acontece **por evento de livro**, não por mercado. E aí entra o
+que a tabela do §10.1f também não via: `base` e `pausa` são dois processos
+separados que descobrem os MESMOS pools, assinam os MESMOS tokens e
+processam o MESMO livro, cada um por conta própria. **O trabalho caro é
+feito duas vezes.** É também a explicação de por que o `id` do `vmstat`
+nunca pegou a contenção que o `%wait` pegou: as duas acordam no mesmo evento
+e disputam o mesmo milissegundo.
+
+**A hipótese que isso levanta** — um processo, uma assinatura de livro, as
+regras em paralelo dentro dele — sairia de graça em hardware e em escopo, e
+deixaria a comparação MAIS limpa que hoje, porque as variantes veriam byte a
+byte a mesma entrada. **Mas é hipótese**, e a hipótese anterior desta mesma
+seção (encolher os pools) reprovou. Não se reescreve a topologia do ensaio
+por dedução.
+
+#### A medida que decide: perguntar ao processo
+
+```bash
+/opt/pulsearb/.venv/bin/python -m pip install py-spy
+PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
+/opt/pulsearb/.venv/bin/py-spy top --pid $PID --duration 60 --nonblocking
+```
+
+| topo do perfil | o que significa |
+|---|---|
+| parsing de livro nos feeds | a hipótese está certa: um processo com feed compartilhado é o caminho |
+| motor de cotação / decisão | a hipótese está errada; o custo é por mercado de outra forma, e o alvo é outro |
+| espalhado, sem topo claro | não há alvo — e aí o 4.2 fica parado nesta máquina, sem eufemismo |
+
+#### O alvo que apareceu ao ler o código, e que vale mais que a hipótese
+
+Lendo `live/shadow.py` para interpretar o perfil, apareceu o que nenhuma das
+medidas anteriores tinha olhado: **cada rodada carrega a rota taker
+inteira**, e ela não é opt-in.
+
+| o que sobe | condicional? |
+|---|---|
+| `self.poly.start()` — conexão `clob[updown]` | ❌ incondicional |
+| `laco_de_descoberta` (mercados do taker) | ❌ incondicional |
+| `laco_de_decisao` (`passo()` do taker) | ❌ incondicional |
+| `self.poly_pools.start()` + `laco_de_descoberta_de_pools` | ✅ opt-in |
+
+E o `clob[updown]` é, pela medida de 2026-09-14 gravada no próprio código,
+**54% do tráfego, em rajadas de 4 MB/s**, contra 50–120 msg/s dos pools.
+
+**Junte com a reprovação dos 20 pools e ela para de ser um mistério:**
+`TOP_DE_POOLS_DE_REWARD` mexe só na conexão `clob[pools]`. A medida cortou a
+metade PEQUENA do tráfego e deixou a grande intacta. Que o custo não tenha
+mudado é, agora, o resultado esperado — e a minha leitura de que "o custo
+não está no processamento de livro" foi longe demais: ela não foi testada.
+
+**O que isso significa para o 4.2:** as duas rodadas pagam a rota taker
+inteira — a conexão mais pesada da casa — **para medir a rota maker**. E o
+taker está medido e REPROVADO (quadro 1.1/1.4/1.5, −195,25 USDC em 2.069
+trades). É custo pago por um dado que já existe e já reprovou.
+
+#### A medida que decide isto, sem tocar em código
+
+Comparar a MESMA rodada, sozinha, com e sem a rota de pools. Os dois números
+separam o custo do taker do custo do maker:
+
+```bash
+cd /opt/pulsearb
+medir() {
+  sudo systemctl stop 'pulsearb-shadow-maker@*'
+  sudo sed -i "s/^PULSEARB_DESCOBRIR_POOLS_DE_REWARD=.*/PULSEARB_DESCOBRIR_POOLS_DE_REWARD=$1/" \
+      deploy/rodadas/comum.env
+  sudo systemctl daemon-reload
+  sudo systemctl start pulsearb-shadow-maker@base
+  sleep 180
+  PID=$(systemctl show -p MainPID --value pulsearb-shadow-maker@base)
+  echo "=== pools=$1 ==="
+  pidstat -u -p $PID 5 24 | tail -1
+}
+medir true
+medir false
+```
+
+| leitura | o que significa |
+|---|---|
+| `pools=false` ≈ `pools=true` | o taker é quase todo o custo. Uma rodada **maker-only** seria barata, e o 4.2 volta a caber em 1 vCPU — ao preço de escrever a trava que desliga a rota taker |
+| `pools=false` ≪ `pools=true` | o maker é que é caro; desligar o taker não salva, e o alvo volta a ser o laço de cotação |
+| os dois altos e parecidos com `%CPU` ~40% | o custo é fixo e não é de nenhuma das rotas — feeds de base, RTDS, relógio |
+
+**Ao terminar, o `comum.env` tem de voltar ao que está versionado**
+(`PULSEARB_DESCOBRIR_POOLS_DE_REWARD=true`,
+`PULSEARB_TOP_DE_POOLS_DE_REWARD=60`), e o §10.1g vale inteiro antes de
+qualquer ensaio valer.
+
+#### Se 20 pools não couber
+
+Resta a terceira linha do §10.1f, a que ele chamou de investigação inteira:
+por que uma rodada custa 40% de um núcleo. Os sinais de que há o que cortar
+são `in` ~2.000–3.000/s e `cs` ~1.000/s.
+
+> A primeira versão citava aqui um terceiro sinal — o `1013 slow consumer`
+> como prova de que o processo não drena o socket. **Foi retirado: é falso**,
+> ver a correção no §10.1i. O sinal que ficou no lugar dele é melhor, e está
+> logo abaixo.
+
+#### O que dá para fechar sem nada disso
+
+Uma `base` sozinha roda limpa nesta máquina (`%wait` 0,38%). Catorze dias
+dela entregam o que o §10.2 lista: que a rota sobrevive 24 h × 14 sem
+derrubar o processo, quantas cotações repousam e por quanto tempo, e qual
+fração das janelas com pool o portão deixa cotar. **É parte do que o 4.2
+exige e não existe hoje** — e não decide regra nenhuma. Serve como piso, não
+como conclusão, e começá-la agora conflita com o escopo reduzido (a `base`
+de 60 pools não compara com uma janela de 20). Por isso ela espera a medida
+acima.
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
