@@ -2662,6 +2662,113 @@ como conclusão, e começá-la agora conflita com o escopo reduzido (a `base`
 de 60 pools não compara com uma janela de 20). Por isso ela espera a medida
 acima.
 
+### 10.1k. O #181 no ar — a regra funciona, e o resultado piorou
+
+Primeira janela com o reset da escalada por saúde (#181) em produção.
+`clob[updown]`, 48 minutos, 22 reconexões.
+
+**A regra faz o que foi escrito.** Saúde acima de
+`SAUDE_QUE_ZERA_A_ESCALADA_SEGUNDOS` zera e o sono volta à faixa de 5–7,5 s;
+saúde curta escala 5 → 10 → 20 → 30:
+
+| queda | saúde antes | dormiu | antes do #181 daria |
+|---|---|---|---|
+| +11,57 min | 9,7 min | **7,2 s** | ~32 s |
+| +18,16 min | 30 s | 14,5 s | ~32 s |
+| +18,93 min | 32 s | 22,6 s | ~32 s |
+| +26,25 min | 6,9 min | **6,5 s** | ~32 s |
+
+**E o resultado piorou:**
+
+| código | quedas/h | s sem livro/h | % da hora |
+|---|---|---|---|
+| #177/#178 (janela de 4 h, §10.1i) | 2,25 | 78,7 | 2,2% |
+| **#181 (janela de 48 min)** | **27,2** | **390,6** | **10,8%** |
+
+O total de sono é quase idêntico nas duas janelas (314,6 s contra 315,6 s);
+o que mudou foi a compressão — o mesmo tempo cego em um oitavo do relógio.
+
+#### A leitura que desfavorece o meu próprio conserto
+
+Os sonos de 30–45 s estavam **suprimindo as quedas**. Voltar em 5 s significa
+reassinar no meio da rajada de 4 MB/s, não drenar, e levar outro `1013`. A
+paciência involuntária estava fazendo trabalho real, e o #181 a removeu.
+
+O que sustenta isso é um número que já estava no repositório antes de
+qualquer piso existir: em **2026-09-14**, o `clob[updown]` caía **até 6
+vezes em 7 min** — ~51/h. Os 27/h de agora estão DENTRO da faixa nativa
+desta conexão. **Os 2,25/h da janela de 4 h é que eram a anomalia**,
+produzida pelo contador travado no teto.
+
+#### Por que o #181 fica
+
+O defeito que ele consertou é real e independente disto: um contador chamado
+`pedidos_de_paciencia_seguidos` em que nada media "seguidos", e que por isso
+dormia 32 s depois de 77 minutos de conexão saudável. Manter um acerto pelo
+efeito colateral seria guardar a coisa certa pelo motivo errado — e o motivo
+errado não sobrevive à próxima mudança que o toque.
+
+**O que se pode fazer com esta medida, se ela se confirmar,** é tratar a
+espera como o que ela é nesta conexão: não um pedido de paciência do
+servidor, mas o tempo que o nosso lado precisa para não voltar no meio da
+rajada. Isso é outro mecanismo, com outro nome e outro teste — não é
+reverter o #181.
+
+#### ❓ O que falta antes de decidir qualquer coisa
+
+**O maker NÃO cota no `clob[updown]`.** Ele cota no `clob[pools]`, que ganhou
+conexão própria em 2026-09-14 exatamente para não pagar isto, e naquela
+medida os tokens de pool "nunca caíram" (`live/shadow.py`, junto de
+`self.poly_pools`).
+
+Se `clob[pools]` estiver limpo nesta mesma janela, os 390 s/h são custo do
+**taker** — medido, reprovado, e que o plano do 4.2 prevê desligar. Se
+`clob[pools]` também estiver caindo, o assunto passa a ser do 4.2 e volta à
+mesa com prioridade.
+
+#### ✅ O agregado chegou: o livro do maker não caiu uma vez
+
+Mesma janela, por conexão:
+
+| conexão | quedas | s sem livro |
+|---|---|---|
+| `clob[updown]` | 23 | **322,6** |
+| `rtds[shadow:0]` | 13 | 8,1 |
+| `rtds[shadow:1]` | 11 | 7,4 |
+| **`clob[pools]`** | **0** | **0,0** |
+
+**95% do tempo cego está na conexão do taker.** O RTDS somou 24 quedas por
+15,5 s — 0,65 s de média, o mesmo regime de sempre, e mais uma confirmação
+de que o nosso próprio 1012 tem piso zero.
+
+**E o zero do `clob[pools]` é MEDIDO, não uma linha que faltou.** A
+diferença importa: um agregado fica idêntico quer a conexão tenha ficado
+perfeita, quer nunca tenha subido. Conferido:
+
+- `grep -c 'clob\[pools\]'` na hora = **1** — uma única linha, o
+  `conectado` das 18:40:42. Se tivesse caído, haveria `conexão caiu` com
+  esse rótulo;
+- a descoberta segue publicando: `janelas: 53` e `52`, com
+  `descartes: {nao_pontua_com_este_tamanho: 7}`.
+
+#### O que isto conclui
+
+A separação de conexões feita em 2026-09-14 está entregando o que prometeu:
+os Up/Down levam as quedas, e o livro que o maker cota fica de fora. **O
+efeito colateral do #181 não toca o 4.2** — ele encarece a rota taker, que
+está medida, reprovada (quadro 1.1/1.4/1.5) e que o plano do 4.2 prevê
+desligar.
+
+**Isso reforça a fase 1 do `PLANO_4_2_NUM_PROCESSO.md`:** desligar o taker
+tira de uma vez três coisas — o acoplamento de orçamento no portão de risco,
+os 54% de tráfego, e estes 322,6 s cegos por hora.
+
+> ❓ **O que este agregado NÃO prova:** que o livro de pool está *chegando*.
+> Ele prova que a conexão não caiu. Conexão viva e muda produz o mesmo zero,
+> e o projeto tem watchdog para isso (`stale_after_seconds_book`) justamente
+> porque esse caso existe. O que fecharia: o relato de 60 s do maker, com
+> cotações publicadas em vez de recusas por `sem_livro`.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
