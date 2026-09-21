@@ -2769,6 +2769,87 @@ os 54% de tráfego, e estes 322,6 s cegos por hora.
 > porque esse caso existe. O que fecharia: o relato de 60 s do maker, com
 > cotações publicadas em vez de recusas por `sem_livro`.
 
+### 10.1l. ❌ O disjuntor estava armado há dois dias, e o 4.2 não cotava
+
+Descoberto em 2026-09-21 ao conferir o relato de 60 s. A `base` rodava,
+`falhou: null`, feeds saudáveis — e **`cotacoes_repousando: 0`**.
+
+O que o número sozinho não diria, e o dicionário `motivos` disse:
+
+```
+ganho_justifica_perder_a_fila    6489
+portao:disjuntor_armado          6489
+sem_pool_de_reward                772
+```
+
+Os dois primeiros batem porque são a mesma passada: `repouso.py` devolve
+`ganho_justifica_perder_a_fila` com ação `REPOSICIONAR` — **a estratégia
+achou onde cotar 6489 vezes** — e o portão recusou todas.
+
+**Isto é a nota do `resumo()` fazendo o seu trabalho:** *"`motivos` responde
+a pergunta que importa quando o bot não cota: ele não achou onde cotar, ou
+achou e a histerese segurou?"*. Sem ela, `cotacoes_repousando: 0` durante 14
+dias passaria por mercado quieto.
+
+#### O registro, lido ANTES da limpeza
+
+```json
+{ "dia": "2026-09-21", "pnl_realizado_usdc": 0.0,
+  "disjuntor_armado": true,
+  "disjuntor_motivo": "perda do dia em -25.35 USDC, teto 25.00",
+  "pausado_ate_epoch": 1789864357.0091906 }
+```
+
+`pausado_ate_epoch` converte para **2026-09-20 ~00:32 UTC**: o disjuntor
+estava armado havia quase dois dias. `pnl_realizado_usdc` é 0,0 porque o dia
+virou — e o disjuntor **gruda** por projeto (`gates.py`, cabeçalho). O motivo
+gravado é o único registro de por quê, e ele some quando o arquivo é
+afastado: por isso foi lido antes.
+
+#### A causa: o perfil do ensaio sobe quatro tetos e esquece o quinto
+
+| teto | default (taker) | `comum.env` | fator |
+|---|---|---|---|
+| `stake_max_por_trade_usdc` | 5 | 1000 | ×200 |
+| `stake_max_por_janela_usdc` | 15 | 2000 | ×133 |
+| `exposicao_max_usdc` | 50 | 120000 | ×2400 |
+| `posicoes_max_abertas` | 5 | 120 | ×24 |
+| **`perda_max_diaria_usdc`** | **25** | **ausente** | **×1** |
+
+O `comum.env` diz de si mesmo: *"o bot não sobe os tetos sozinho; quem sobe
+é o operador, e este arquivo é o operador escrevendo."* O operador subiu
+quatro e não subiu o disjuntor. Com cotação de 1000 shares, 25 USDC é uma
+execução ruim.
+
+**A limpeza do §10.1g NÃO conserta isto** — ela zera o registro, e o teto
+continua onde estava. A rodada seguinte arma o disjuntor de novo.
+
+#### As duas travas que faltam
+
+1. **O teto tem de ser escolhido, não herdado.** É número de risco, e a
+   decisão é do operador (quadro 4.0 (c)). Enquanto ele não for escrito em
+   `comum.env`, nenhuma janela de 14 dias vale.
+2. **Disjuntor armado tem de ser conferido no arranque.** A verificação do
+   §10.1g olha se os diários nasceram vazios; não olha o portão. Uma rodada
+   que sobe com o disjuntor armado produz zeros que parecem mercado.
+
+```bash
+# ACRESCENTE à conferência do §10.1g, depois de subir as instâncias:
+for r in base pausa ancora recolher; do
+  f=data/risco/registro_maker_$r.shadow.json
+  [ -f "$f" ] && python3 -c "
+import json,sys
+d=json.load(open('$f'))
+if d.get('disjuntor_armado'):
+    print('DISJUNTOR ARMADO em $r:', d.get('disjuntor_motivo'))
+    sys.exit(1)
+print('$r ok')
+"
+done
+```
+
+**Nenhuma janela do 4.2 começa com um `DISJUNTOR ARMADO` nessa saída.**
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
