@@ -2573,6 +2573,73 @@ medir false
 `PULSEARB_TOP_DE_POOLS_DE_REWARD=60`), e o §10.1g vale inteiro antes de
 qualquer ensaio valer.
 
+#### ✅ A medida rodou — a rota maker custa 2% de um núcleo — 2026-09-21
+
+`base` sozinha, 24 amostras de 5 s em cada regime:
+
+| regime | `%usr` | `%CPU` | `%wait` |
+|---|---|---|---|
+| `pools=true` (taker + maker) | 37,55 | **39,87** | 0,22 |
+| `pools=false` (só taker) | 35,89 | **37,88** | 0,18 |
+| **diferença = a rota maker inteira** | 1,66 | **1,99** | — |
+
+**A rota que o item 4.2 existe para medir — conexão `clob[pools]` própria,
+descoberta de pools e laço de cotação — custa 1,99 ponto percentual.** Os
+outros ~37,9% são o que sobe sem ninguém pedir.
+
+**E a leitura que eu tinha escrito para esta linha estava errada.** A tabela
+acima dizia, para `pools=false ≈ pools=true`: "o taker é quase todo o
+custo". Não segue. Os 37,9% são taker **mais** RTDS **mais** maquinaria fixa,
+e esta medida não os separa. O que ela prova é o outro lado: **o maker é
+barato**, que é uma afirmação diferente e mais útil.
+
+#### O que a aritmética passa a dizer
+
+As quatro rodadas do 4.2 diferem em **três escalares** e no caminho do
+registro de risco — nada mais (`deploy/rodadas/*.env`):
+
+| rodada | `RECOLHE_QUANDO_O_LIVRO_ANDA` | `TICKS_ABAIXO_DO_MICROPRICE` | `PAUSA_APOS_FILL_TOXICO_S` |
+|---|---|---|---|
+| `base` | false | — | — |
+| `pausa` | false | — | 30 |
+| `ancora` | false | 1 | — |
+| `recolher` | true | — | — |
+
+Hoje cada uma paga os ~38% de infraestrutura por conta própria: **4 × ~40% =
+~160% de um núcleo**, que é o dimensionamento que pediu 4 vCPU. Mas os 38%
+são trabalho IDÊNTICO — os mesmos mercados, os mesmos livros, as mesmas
+assinaturas — feito quatro vezes.
+
+**Se as quatro variantes dividissem um processo**, paga-se a infraestrutura
+uma vez: ~38%, mais os ~2% da rota de pools (que também é compartilhada:
+uma conexão `clob[pools]`, uma descoberta), mais o laço de cotação de cada
+variante. **Estimativa: ~40–46% de um núcleo para as quatro.**
+
+> ⚠️ Os 2% são MEDIDOS. Os 40–46% são **estimativa derivada deles**, não
+> medida — e o marginal por variante é menor que 2%, porque os 2% incluem a
+> conexão e a descoberta, que seriam pagas uma vez só. A estimativa não vira
+> ✅ no quadro; o que a fecharia é a medida sobre o processo já escrito.
+
+**Isto é o inverso do que o §10.1f concluiu.** Lá, o 4.2 não cabia em 1 vCPU
+e a recomendação era comprar máquina. A conclusão continua correta **para a
+topologia atual** — quatro processos. O que mudou é que a topologia deixou
+de ser um dado do problema: ela é uma escolha, e ninguém tinha medido o que
+ela custa.
+
+#### O preço desta saída, antes de pagá-lo
+
+1. **É mudança de código de verdade**, não configuração: N instâncias de
+   `LacoMaker` com os seus três botões, o seu registro de risco e o seu
+   diário, sobre um `Ciclo` e feeds compartilhados.
+2. **Perde-se isolamento.** Hoje uma variante que morre não leva as outras.
+   Num processo só, leva — e 14 dias de ensaio morrem juntos.
+3. **Risco de contaminação cruzada.** Um estado compartilhado por engano
+   entre variantes faria uma regra parecer melhor por bug, não por mérito —
+   e é justamente uma comparação entre regras que está em jogo.
+4. **Em troca, a comparação fica MAIS limpa que hoje:** as variantes veriam
+   byte a byte a mesma entrada de livro, no mesmo instante, em vez de quatro
+   conexões que recebem o mesmo mercado com microdiferenças de chegada.
+
 #### Se 20 pools não couber
 
 Resta a terceira linha do §10.1f, a que ele chamou de investigação inteira:
