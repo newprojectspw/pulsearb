@@ -3148,6 +3148,38 @@ de 1886 para 1884, e esse foi o único indício.
 4. **Contar os testes.** A suíte caindo de 1886 para 1884 foi o que denunciou
    a perda invisível. O `test_quadro_nao_mente` já faz isso por arquivo
    citado no quadro; `test_4_2_caixa_maker.py` não está entre eles.
+5. **Todo `git pull` que toca `src/` confere se o módulo COMPILA antes de
+   `systemctl start`.** Custa dois segundos e teria evitado o laço de
+   restart de hoje:
+
+   ```bash
+   cd /opt/pulsearb && sudo git pull --ff-only
+   python3 -c "import ast; ast.parse(open('src/pulsearb/live/caixa_maker.py').read())" \
+     && echo COMPILA || echo "NAO SOBE — nao inicie"
+   sudo systemctl start pulsearb-shadow-maker@base
+   ```
+
+#### ❌ E o conserto falhou na primeira tentativa, pelo mesmo mecanismo
+
+O #189 foi mergeado e **o `main` continuou quebrado**: o squash levou 68 das
+113 linhas e deixou o `if` sem corpo outra vez.
+
+A razão é a base de merge. Em `1215d77` aquelas três linhas existiam; a
+branch as MODIFICOU; o `main` (via #188) as APAGOU. Todo merge de três vias
+vê "modificado de um lado, apagado do outro" e resolve pela deleção — e
+repetiria isso indefinidamente enquanto a branch carregasse histórico
+anterior à deleção.
+
+**A saída é tirar a ambiguidade:** partir do `main` como ele está, resolver o
+conflito de verdade (aqui ele finalmente apareceu, em vez de ser
+auto-resolvido), e deixar o diff como **adição pura**. Com zero linhas
+removidas, não há deleção para o squash honrar.
+
+Confira antes de mergear qualquer conserto deste tipo:
+
+```bash
+git diff origin/main..HEAD | grep -c "^-[^-]"    # tem de ser 0
+```
 
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
