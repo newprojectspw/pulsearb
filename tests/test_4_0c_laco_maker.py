@@ -1546,3 +1546,76 @@ class TestReconciliacaoNoArranque:
         with pytest.raises(ErroDeLeitura):
             await laco.reconciliar_no_arranque()
         assert laco.ultima_reconciliacao is None, "não rodou ≠ rodou e achou zero"
+
+
+class TestPernaQueSaiDoLivro:
+    """Mercado a 0,99 não é bug nosso, e a recusa não pode dizer que é.
+
+    Medido em 2026-09-22 (runbook §10.1m): 1.899 recusas com
+    `ordem_mal_formada` em 18 h de rodada. Esse motivo é documentado no
+    `risk/gates.py` como **"defeito de quem chamou"** — e quem lê um relato
+    de 14 dias com 1.899 deles vai caçar um bug de construção de ordem que
+    não existe.
+
+    A causa é a forma do mercado: a perna Down é um bid no livro DELA, cujo
+    meio é `1 − meio_up`. Num mercado a 0,99 esse meio é 0,01, e recuar um
+    tick o põe em zero.
+    """
+
+    def test_o_preco_zero_vem_da_aritmetica_do_meio(self):
+        """O mecanismo, guardado — e por que não se conserta no preço.
+
+        Se este teste passar a falhar, `Cotacao.preco` ganhou piso. Isso
+        **move a cotação**, e mover a cotação é mudar a estratégia: o score
+        (`estimar_retorno`) e a ordem enviada têm de ver o mesmo número, que
+        é a razão de o preço ser calculado lá e não em quem envia.
+        """
+        cotacao = Cotacao(distancia_ticks=1, tamanho=50.0, dois_lados=True)
+        perna_up = cotacao.preco(meio=0.99, tick_size=0.01, do_lado_bid=True)
+        perna_down = cotacao.preco(meio=1.0 - 0.99, tick_size=0.01, do_lado_bid=True)
+
+        assert perna_up == 0.98, "a perna cara fica dentro do livro"
+        assert perna_down == 0.0, (
+            "a perna barata cai no chão — e 0,0 não é ordem, é ausência dela"
+        )
+
+    def test_a_recusa_tem_o_nome_do_mercado_e_nao_o_de_bug_nosso(self, tmp_path):
+        portao = _PortaoDuble()
+        laco = _laco(tmp_path, portao=portao)
+
+        motivo = laco._portao_recusa(
+            Cotacao(distancia_ticks=1, tamanho=50.0, dois_lados=True),
+            _janela(),
+            livro=_livro(mid=0.99),
+            meio=0.99,
+            feeds_saudaveis=True,
+        )
+
+        assert motivo == "sem_espaco_para_recuar", (
+            "regressão: a perna que saiu do livro voltou a ser chamada de "
+            "ordem_mal_formada, que o gates.py define como defeito nosso"
+        )
+        assert portao.consultas == [], (
+            "não se pergunta ao portão por uma perna que não é ordem"
+        )
+
+    def test_a_perna_que_cabe_no_livro_continua_indo_ao_portao(self, tmp_path):
+        """A trava nova não pode engolir o que é defeito nosso de verdade.
+
+        Com as duas pernas dentro de (0, 1), quem decide é o portão — e o
+        `ordem_mal_formada` dele (shares <= 0, por exemplo) continua
+        chegando ao relato com o nome certo.
+        """
+        portao = _PortaoDuble(pode=False, motivo="ordem_mal_formada")
+        laco = _laco(tmp_path, portao=portao)
+
+        motivo = laco._portao_recusa(
+            Cotacao(distancia_ticks=1, tamanho=50.0, dois_lados=True),
+            _janela(),
+            livro=_livro(mid=0.50),
+            meio=0.50,
+            feeds_saudaveis=True,
+        )
+
+        assert motivo == "ordem_mal_formada"
+        assert portao.consultas, "o portão TEM de ser consultado quando há ordem"

@@ -2891,6 +2891,67 @@ alto o bastante para nunca armar **não exercita o portão**, e exercitá-lo é
 metade do motivo de o SHADOW existir (`caminho_do_registro_do_modo`, achado
 do Codex no #52).
 
+### 10.1m. 1.899 recusas com o nome errado — 2026-09-22
+
+Achado ao ler o `motivos` da rodada de 18 h. Entre 451.116 passadas:
+
+```
+portao:ordem_mal_formada   1899
+portao:preco_fora_da_faixa  409
+```
+
+`ORDEM_MAL_FORMADA` dispara com `shares <= 0` **ou**
+`not (0.0 < preco_limite < 1.0)`, e o comentário do `risk/gates.py` diz o
+que ele significa: **"um pedido inválido é defeito de quem chamou"**.
+
+**Não era defeito nosso — era a forma do mercado**, e a aritmética
+reproduz:
+
+| meio do Up | tick | perna Up | perna Down |
+|---|---|---|---|
+| 0,99 | 0,01 | 0,98 ✅ | **0,00 ❌** |
+| 0,999 | 0,001 | 0,998 ✅ | **0,00 ❌** |
+
+A perna Down é um bid no livro DELA, cujo meio é `1 − meio_up`. Num mercado
+a 0,99 esse meio é 0,01, e recuar **um tick** o põe em zero. `Cotacao.preco`
+não tem piso. E os pools de reward incluem exatamente esses mercados — a
+lista do relato traz *"Will Anthropic announce bankruptcy by December 31,
+2027?"*, *"Will NuScale announce bankruptcy…"*, *"Xi Jinping out before
+2027?"*, que negociam a 0,01–0,02.
+
+**Por que isso importa mais do que parece.** `ORDEM_MAL_FORMADA` é checado
+ANTES de `PRECO_FORA_DA_FAIXA`, então essas 1.899 nunca chegavam ao motivo
+que as descreveria. Quem lesse um relato de 14 dias com 1.899 "defeitos de
+quem chamou" iria caçar um bug de construção de ordem que não existe. É a
+regra do CLAUDE.md invertida: aqui a recusa TEM nome, e o nome está errado —
+o que é pior que anônimo, porque manda a investigação para o lado oposto.
+
+#### O conserto, e o que ele deliberadamente NÃO faz
+
+O maker passa a reconhecer a perna que saiu de `(0, 1)` **antes** de
+perguntar ao portão, e conta `sem_espaco_para_recuar`.
+
+**Nenhum mercado passa a ser cotado ou deixa de ser.** Estas cotações já
+eram recusadas; o que muda é o nome. E `ordem_mal_formada` volta a
+significar o que diz — `shares <= 0` continua indo para ele, porque AQUELE
+seria defeito nosso de verdade.
+
+**Não se consertou o preço**, e a razão está no próprio `Cotacao.preco`: pôr
+um piso ali **move a cotação**, e mover a cotação é mudar a estratégia. O
+score (`estimar_retorno`) e a ordem enviada têm de ver o mesmo número — é a
+razão de o preço ser calculado lá e não em quem envia (§6.1b).
+
+Três testes em `test_4_0c_laco_maker.py::TestPernaQueSaiDoLivro`, dois
+verificados por mutação:
+
+| mutação | o que reprova |
+|---|---|
+| tirar a trava (o estado de antes) | `assert None == 'sem_espaco_para_recuar'` |
+| trava larga demais (`if True`) | `'sem_espaco_para_recuar' != 'ordem_mal_formada'` |
+
+O terceiro guarda o **mecanismo**: se `Cotacao.preco` ganhar piso algum dia,
+ele falha — e essa falha é o lembrete de que a cotação se moveu.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro

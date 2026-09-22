@@ -687,6 +687,25 @@ class LacoMaker:
                     janela, meio=meio, lado_up=False, ancora=ancora
                 )(nova)
             )
+        # ANTES de perguntar ao portão: uma perna cujo preço saiu de (0, 1)
+        # não é ordem, e perguntar por ela devolve `ordem_mal_formada` — um
+        # motivo que o próprio `gates.py` documenta como "defeito de quem
+        # chamou". Não é defeito nosso: é a FORMA do mercado.
+        #
+        # Medido em 2026-09-22 (runbook §10.1m): 1.899 recusas assim em 18 h.
+        # A perna Down é um bid no livro dela, cujo meio é `1 − meio_up`; num
+        # mercado a 0,99 esse meio é 0,01, e recuar UM tick o põe em zero.
+        # `Cotacao.preco` não tem piso, e os pools de reward incluem mercados
+        # a 0,01–0,02 ("Will X announce bankruptcy by 2029?").
+        #
+        # Por que renomear em vez de consertar o preço: consertar seria mover
+        # a cotação, e mover a cotação é mudar a estratégia. Estas já eram
+        # recusadas; o que muda é que a recusa para de vestir o nome de um bug
+        # nosso. `ordem_mal_formada` volta a significar o que diz — e
+        # `shares <= 0` continua indo para ele, porque AQUELE seria defeito
+        # nosso de verdade.
+        if any(not 0.0 < ordem.preco_limite < 1.0 for ordem in pernas):
+            return "sem_espaco_para_recuar"
         for ordem in pernas:
             decisao = self.portao.avaliar_risco(
                 ordem,
