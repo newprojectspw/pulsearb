@@ -207,6 +207,15 @@ class CaixaDoMaker:
     #: não média, porque o que se quer saber é *quantas vezes* o modelo nos
     #: deu o pool inteiro — uma média baixa esconderia um punhado delas.
     passadas_com_fatia_quase_inteira: int = 0
+    #: Quanto do reward veio DAQUELAS passadas.
+    #:
+    #: A contagem sozinha não responde a pergunta que decide o 4.2. Uma
+    #: passada com fatia 1,0 num pool de `daily_rate` alto pesa muito mais
+    #: que a sua fração na contagem — 12% das passadas podem ser 80% do
+    #: resultado. Distribuição da premissa e contribuição dela para o número
+    #: são perguntas diferentes, e só a segunda diz se o item mede estratégia
+    #: ou mede mercado deserto.
+    rewards_de_fatia_quase_inteira: float = 0.0
     segundos_repousando: float = 0.0
     segundos_pontuando: float = 0.0
     acertos: int = 0
@@ -330,6 +339,7 @@ class CaixaDoMaker:
         )
         if estimado.fracao_do_pool >= FATIA_QUASE_INTEIRA:
             self.passadas_com_fatia_quase_inteira += 1
+            self.rewards_de_fatia_quase_inteira += pro_rata_da_passada
         return estimado
 
     # ────────────────────────────────────────────────────────────── execuções
@@ -568,6 +578,18 @@ class CaixaDoMaker:
                 ),
                 "maxima": round(self.fracao_do_pool_maxima, 4),
                 "passadas_quase_inteiras": self.passadas_com_fatia_quase_inteira,
+                "rewards_dessas_passadas": round(
+                    self.rewards_de_fatia_quase_inteira, 4
+                ),
+                "fracao_do_total_que_vem_delas": (
+                    round(
+                        self.rewards_de_fatia_quase_inteira
+                        / self.rewards_pro_rata_usdc,
+                        4,
+                    )
+                    if self.rewards_pro_rata_usdc > 0
+                    else None
+                ),
                 "nota": (
                     "A PREMISSA do numero acima. `rewards` e "
                     "`daily_rate * horas/24 * fracao`, entao o resultado do "
