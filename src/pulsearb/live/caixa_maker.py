@@ -162,6 +162,15 @@ def _atraso_do_print_s(negocio: Any, agora_ns: int) -> float | None:
     return round(agora_ns / 1e9 - servidor_ms / 1e3, 3)
 
 
+#: A partir daqui o modelo está nos dando o pool praticamente inteiro.
+#:
+#: 0,9 não é um limiar de decisão — nada recusa por causa dele. É o corte do
+#: CONTADOR do relato, e existe para separar "somos uma fatia grande" de
+#: "somos o livro todo", que são afirmações muito diferentes sobre quanto do
+#: resultado é estratégia e quanto é tamanho de cotação.
+FATIA_QUASE_INTEIRA = 0.9
+
+
 @dataclass
 class CaixaDoMaker:
     """As somas do 4.2, por rodada. Sem I/O: quem tem o livro injeta."""
@@ -171,6 +180,33 @@ class CaixaDoMaker:
 
     rewards_pro_rata_usdc: float = 0.0
     rewards_com_captura_usdc: float = 0.0
+    #: A FATIA, e ela é a premissa que domina o número acima.
+    #:
+    #: `estimar_retorno` calcula
+    #: `daily_rate * (horas/24) * fracao * fator_de_captura`, e o `pro_rata`
+    #: usa `fator = 1`. Então o resultado do 4.2 é, na prática, uma função de
+    #: `fracao` — a nossa fatia estimada do score do livro.
+    #:
+    #: E o `cotacao.py` declara no cabeçalho que ela é ESTIMATIVA: o WS
+    #: entrega níveis agregados, não ordens, então ninguém aqui sabe a posição
+    #: na fila. Cotar 1.000 shares (×200 o default do projeto) contra livros
+    #: de pool finos aproxima a fatia de 1 — e aí o número diz que levamos o
+    #: pool inteiro de dezenas de mercados ao mesmo tempo.
+    #:
+    #: Até 2026-09-22 nada disso saía em lugar nenhum: nem no relato, nem no
+    #: diário (que grava só a ordem). Catorze dias produziriam um número e
+    #: nenhuma forma de conferir de onde ele veio — "número sintético não
+    #: fecha item" aplicado ao próprio instrumento do item.
+    #:
+    #: A média é ponderada pelo MESMO intervalo que ponderou o reward. Média
+    #: simples por passada seria outro número, e não o que produziu a conta.
+    fracao_ponderada_x_segundos: float = 0.0
+    segundos_com_fatia: float = 0.0
+    fracao_do_pool_maxima: float = 0.0
+    #: Passadas em que a fatia passou de `FATIA_QUASE_INTEIRA`. Contagem, e
+    #: não média, porque o que se quer saber é *quantas vezes* o modelo nos
+    #: deu o pool inteiro — uma média baixa esconderia um punhado delas.
+    passadas_com_fatia_quase_inteira: int = 0
     segundos_repousando: float = 0.0
     segundos_pontuando: float = 0.0
     acertos: int = 0
@@ -287,6 +323,14 @@ class CaixaDoMaker:
         self.rewards_com_captura_usdc += estimado.rewards_usdc
         if self.fator_de_captura > 0.0:
             self.rewards_pro_rata_usdc += estimado.rewards_usdc / self.fator_de_captura
+        # A premissa junto com o número que ela produziu — ver o campo.
+        self.fracao_ponderada_x_segundos += estimado.fracao_do_pool * intervalo
+        self.segundos_com_fatia += intervalo
+        self.fracao_do_pool_maxima = max(
+            self.fracao_do_pool_maxima, estimado.fracao_do_pool
+        )
+        if estimado.fracao_do_pool >= FATIA_QUASE_INTEIRA:
+            self.passadas_com_fatia_quase_inteira += 1
         return estimado
 
     # ────────────────────────────────────────────────────────────── execuções
@@ -517,6 +561,27 @@ class CaixaDoMaker:
             "rewards_pro_rata_usdc_por_hora_repousando": (
                 round(self.rewards_pro_rata_usdc / horas, 4) if horas > 0 else None
             ),
+            "fracao_do_pool": {
+                "media_ponderada": (
+                    round(self.fracao_ponderada_x_segundos / self.segundos_com_fatia, 4)
+                    if self.segundos_com_fatia > 0
+                    else None
+                ),
+                "maxima": round(self.fracao_do_pool_maxima, 4),
+                "passadas_quase_inteiras": self.passadas_com_fatia_quase_inteira,
+                "nota": (
+                    "A PREMISSA do numero acima. `rewards` e "
+                    "`daily_rate * horas/24 * fracao`, entao o resultado do "
+                    "4.2 e uma funcao desta fatia — e ela e ESTIMATIVA: o WS "
+                    "da niveis agregados, nao ordens, e ninguem aqui sabe a "
+                    "posicao na fila (`cotacao.py`). `media_ponderada` perto "
+                    "de 1 quer dizer que o modelo nos atribui o pool inteiro, "
+                    "e ai o numero mede o TAMANHO da cotacao, nao a "
+                    "estrategia. Media ponderada pelo mesmo intervalo que "
+                    "ponderou o reward; `maxima` e o pior caso para a "
+                    "credibilidade do total."
+                ),
+            },
             "segundos_repousando": round(self.segundos_repousando, 1),
             "segundos_pontuando": round(self.segundos_pontuando, 1),
             "acertos": self.acertos,

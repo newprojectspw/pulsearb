@@ -24,6 +24,7 @@ import pytest
 from tests.test_4_0c_laco_maker import _janela, _laco, _livro, _livro_de
 
 from pulsearb.analysis.rewards import ParametrosDeReward
+from pulsearb.backtest.book import OrderBook
 from pulsearb.live.caixa_maker import (
     INTERVALO_MAXIMO_POR_PASSADA_S,
     CaixaDoMaker,
@@ -627,3 +628,85 @@ class TestOReenvioDeDEPOISDaCotacao:
         caixa.esquecer("j")
 
         assert "j" not in caixa._negocios_contados
+
+
+def _livro_de_profundidade(tamanho: float, niveis: int = 1) -> OrderBook:
+    """Um livro cuja profundidade decide a nossa fatia do score."""
+    return OrderBook(
+        asset_id="tok-up",
+        bids=[(0.49 - 0.01 * i, tamanho) for i in range(niveis)],
+        asks=[(0.51 + 0.01 * i, tamanho) for i in range(niveis)],
+    )
+
+
+class TestAFatiaSaiNoRelato:
+    """A premissa que domina o número do 4.2 tem de ser publicada.
+
+    `rewards = daily_rate * horas/24 * fracao`, e o `pro_rata` usa
+    `fator = 1`. Então o resultado do item é, na prática, uma função de
+    `fracao` — que o `cotacao.py` declara ESTIMATIVA, porque o WS entrega
+    níveis agregados e ninguém sabe a posição na fila.
+
+    Até 2026-09-22 ela não saía em lugar nenhum: nem no relato, nem no
+    diário, que grava só a ordem. Catorze dias dariam um número e nenhuma
+    forma de conferir se ele veio de uma fatia plausível ou de o modelo nos
+    atribuir o pool inteiro de dezenas de mercados.
+    """
+
+    def test_a_media_e_ponderada_pelo_TEMPO_e_nao_por_passada(self):
+        """Ponderar por passada mediria outra coisa que não o reward.
+
+        O reward é integrado no intervalo; a fatia que o produziu tem de ser
+        somada com o mesmo peso. Uma passada curta com fatia enorme e uma
+        longa com fatia mínima dão médias muito diferentes nas duas contas —
+        e só uma delas descreve o número publicado.
+        """
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+        fino = _livro_de_profundidade(1.0)
+        grosso = _livro_de_profundidade(5000.0, niveis=2)
+
+        f_fino = estimar_retorno(aberta.cotacao, fino, PARAMS, horas=10 / 3600)
+        f_grosso = estimar_retorno(aberta.cotacao, grosso, PARAMS, horas=50 / 3600)
+        assert f_fino is not None and f_grosso is not None
+
+        caixa.acertar("j", aberta, fino, PARAMS, agora_epoch=1010.0)
+        caixa.acertar("j", aberta, grosso, PARAMS, agora_epoch=1060.0)
+
+        publicada = caixa.resumo()["fracao_do_pool"]["media_ponderada"]
+        ponderada = (
+            f_fino.fracao_do_pool * 10.0 + f_grosso.fracao_do_pool * 50.0
+        ) / 60.0
+        simples = (f_fino.fracao_do_pool + f_grosso.fracao_do_pool) / 2.0
+
+        assert publicada == pytest.approx(ponderada, abs=1e-4)
+        assert publicada != pytest.approx(simples, abs=1e-2), (
+            "o teste não separa as duas contas: escolha livros com fatias "
+            "mais distantes, senão ele passaria com a média errada"
+        )
+
+    def test_o_contador_separa_fatia_grande_de_livro_inteiro(self):
+        """Contagem, não média: um punhado de passadas com o pool inteiro
+        some numa média e é exatamente o que precisa aparecer."""
+        caixa = CaixaDoMaker()
+        aberta = _aberta(desde=1000.0)
+
+        caixa.acertar(
+            "j", aberta, _livro_de_profundidade(1.0), PARAMS, agora_epoch=1010.0
+        )
+        caixa.acertar(
+            "j",
+            aberta,
+            _livro_de_profundidade(5000.0, niveis=2),
+            PARAMS,
+            agora_epoch=1060.0,
+        )
+
+        fatia = caixa.resumo()["fracao_do_pool"]
+        assert fatia["passadas_quase_inteiras"] == 1
+        assert fatia["maxima"] == pytest.approx(1.0)
+
+    def test_sem_passada_nenhuma_a_media_e_None_e_nao_zero(self):
+        """Zero diria "a nossa fatia é nula", que é uma afirmação. `None`
+        diz "não medi" — a distinção que este projeto trata como central."""
+        assert CaixaDoMaker().resumo()["fracao_do_pool"]["media_ponderada"] is None
