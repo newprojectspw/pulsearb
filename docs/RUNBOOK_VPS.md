@@ -2952,6 +2952,105 @@ verificados por mutação:
 O terceiro guarda o **mecanismo**: se `Cotacao.preco` ganhar piso algum dia,
 ele falha — e essa falha é o lembrete de que a cotação se moveu.
 
+### 10.1n. O primeiro dado do 4.2, e a premissa que não saía em lugar nenhum
+
+2026-09-22, 19 min de `base` com o teto de 5000 e o registro limpo — a
+primeira vez que a rota cota desde que o disjuntor armou:
+
+| campo | valor |
+|---|---|
+| cotações repousando | 48 |
+| segundos repousando (soma por cotação) | 43.201,8 |
+| segundos **pontuando** | 43.201,8 — **100%** |
+| rodada no ar (parede) | 0,317 h, ciclo de trabalho **1,0** |
+| rewards pro-rata | 41,43 USDC |
+| **por hora de PAREDE** | **130,81 USDC/h** |
+| markout | **6 medidas**, +0,4665 c/share |
+
+130,81 USDC/h é **13× a barra do 1.12** (≥ 10 USDC/h). E é por ser tão bom
+que ele não foi escrito como resultado.
+
+#### A conta que obriga a desconfiar
+
+130,81 USDC/h são ~3.139 USDC/dia. Invertendo `estimar_retorno`:
+
+```python
+rewards = params.daily_rate * (horas / 24.0) * fracao * fator_de_captura
+```
+
+o `pro_rata` usa `fator = 1`, então `Σ(daily_rate × fracao) ≈ 3.137 USDC/dia`
+nas 48 janelas. Com `fracao ≈ 1` isso diz que cada pool paga ~65 USDC/dia **e
+levamos tudo**. O perfil do ensaio cota **1.000 shares** — ×200 o default —
+contra livros de pool finos, que é a receita para a fatia colar em 1.
+
+E o `cotacao.py` declara o limite no cabeçalho: *"`fracao_do_pool` é uma
+ESTIMATIVA pro-rata (…) o quanto dela vira execução de verdade depende de
+onde a nossa ordem está na fila, **que ninguém aqui pode afirmar**"*.
+
+#### ❌ E a premissa não era observável
+
+Conferido no artefato, não suposto. O diário grava **só a ordem**:
+
+```json
+{"evento":"cotacao_colocada","janela":"…","shares":1000.0,"preco_limite":0.32}
+```
+
+`fracao_do_pool`, `score_proprio` e `score_total_do_livro` não estavam no
+diário nem no relato. **Catorze dias produziriam um número e nenhuma forma de
+saber de onde ele veio** — "número sintético não fecha item" aplicado ao
+próprio instrumento do item.
+
+**Isto travava o relógio dos 14 dias**, e por isso foi consertado antes.
+
+#### O conserto: a caixa publica a fatia
+
+`CaixaDoMaker` passa a acumular a fatia **no mesmo lugar e com o mesmo peso**
+que acumula o reward, e o relato de 60 s traz:
+
+| campo | o que responde |
+|---|---|
+| `media_ponderada` | a fatia que de fato produziu o número (ponderada pelo intervalo, não por passada) |
+| `maxima` | o pior caso para a credibilidade do total |
+| `passadas_quase_inteiras` | quantas vezes o modelo nos deu ≥ 90% do pool — contagem, porque um punhado some numa média |
+| `media_ponderada: None` | **não medi** — e `None` não é zero, que seria afirmar fatia nula |
+
+Três testes em `TestAFatiaSaiNoRelato`, todos verificados por mutação:
+
+| mutação | o que reprova |
+|---|---|
+| média por passada em vez de ponderada pelo tempo | `0.504 != 0.1733` |
+| contador desligado | `0 != 1` |
+| `None` virando zero | `None != 0.1733` |
+
+#### O que fazer com os 130,81 USDC/h
+
+**Nada, ainda.** Ele fica registrado como MEDIDO e NÃO INTERPRETADO até o
+relato publicar a fatia e alguém olhar. São três razões, e qualquer uma
+basta: 19 minutos são 1/1300 do que o 4.2 pede; o `pro_rata` é estimativa
+com hipótese de fila; e 6 medidas de markout respondem por 11 dos 47 USDC do
+líquido, o que é ruído com aparência de resultado.
+
+**A conferência, depois do próximo restart:**
+
+```bash
+journalctl -u pulsearb-shadow-maker@base --since '-30min' --no-pager \
+  | grep '"msg":"shadow"' | tail -1 \
+  | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read().split("python[", 1)[1].split(": ", 1)[1])
+f = d["maker"]["caixa"]["fracao_do_pool"]
+print("fatia media (ponderada):", f["media_ponderada"])
+print("fatia maxima           :", f["maxima"])
+print("passadas com >= 90%%    :", f["passadas_quase_inteiras"])
+'
+```
+
+| leitura | o que significa |
+|---|---|
+| média perto de 1 | o número mede o TAMANHO da cotação, não a estratégia |
+| média baixa com `passadas_quase_inteiras` alto | poucos mercados desertos dominam o total |
+| média baixa e contador baixo | a fatia é plausível, e aí os 130 USDC/h merecem investigação de verdade |
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
