@@ -3050,6 +3050,105 @@ print("passadas com >= 90%%    :", f["passadas_quase_inteiras"])
 | média perto de 1 | o número mede o TAMANHO da cotação, não a estratégia |
 | média baixa com `passadas_quase_inteiras` alto | poucos mercados desertos dominam o total |
 | média baixa e contador baixo | a fatia é plausível, e aí os 130 USDC/h merecem investigação de verdade |
+
+#### ✅ A fatia foi medida — e a minha suspeita NÃO se confirmou
+
+2026-09-22, 5 min de rodada com o código novo:
+
+| campo | valor |
+|---|---|
+| fatia média (ponderada) | **0,3409** |
+| fatia máxima | **1,0** |
+| passadas com ≥ 90% | **84 de 716** (11,7%) |
+| rewards pro-rata | 8,81 USDC |
+| rewards com captura (fator 0,3) | 2,64 USDC |
+| markout | **3 medidas, 0,0 c/share** |
+
+**Eu esperava fatia perto de 1** — cotar 1.000 shares em livros finos parecia
+receita para isso — **e ela deu um terço**. A desconfiança estava certa em
+existir e errada no palpite; fica registrado assim, porque prever mal e
+acertar por sorte é pior que prever mal e saber.
+
+Refeita a conta com o denominador certo: **~98 USDC/h de parede**, ainda ~10×
+a barra do 1.12, agora com uma premissa que sobreviveu à conferência.
+
+#### ❌ E a contagem não respondia a pergunta que decide
+
+`passadas_quase_inteiras: 84 de 716` diz quantas vezes o modelo deu o pool
+inteiro. **Não diz quanto dos 8,81 USDC veio delas** — e uma passada com
+fatia 1,0 num pool de `daily_rate` alto pesa muito mais que a sua fração na
+contagem. Distribuição da premissa e contribuição dela para o número são
+perguntas diferentes, e eu tinha publicado só a primeira.
+
+Corrigido no mesmo dia: `rewards_dessas_passadas` e
+`fracao_do_total_que_vem_delas` entram no relato. O teste que os guarda
+produz o caso que justifica o campo — **uma passada de duas, 50% da
+contagem, responde por 95% do reward**.
+
+| leitura de `fracao_do_total_que_vem_delas` | o que significa |
+|---|---|
+| baixa | os mercados desertos são ruído; o resultado é da rota |
+| alta | o total vem de mercados vazios — **e mercado vazio deixa de ser vazio quando alguém cota nele** |
+
+#### ⚠️ O que o líquido é hoje: estimativa pura
+
+`liquido_pro_rata == rewards_pro_rata` porque o markout tem **3 medidas e
+0,0 c/share**. A única parcela MEDIDA do 4.2 não está contribuindo com nada,
+e as outras duas — fatia e `fator_de_captura = 0,3` — são hipóteses.
+
+Enquanto o markout não tiver amostra, **o número do 4.2 é 100% estimativa**,
+por mais bem instrumentada que ela esteja. É o que o cabeçalho da caixa já
+dizia: *"Nada aqui é lucro: é o número que pode REPROVAR a rota."*
+
+### 10.1o. ❌ Um merge de UI produziu Python que não compila — 2026-09-22
+
+O squash do #188 pôs no `main` um arquivo com `IndentationError`. Quem
+puxasse e reiniciasse ficava com o serviço em laço de restart.
+
+```python
+        self.rewards_com_captura_usdc += estimado.rewards_usdc
+        pro_rata_da_passada = 0.0
+        if self.fator_de_captura > 0.0:
+        self.fracao_ponderada_x_segundos += ...      # ← `if` sem corpo
+```
+
+A linha `self.rewards_pro_rata_usdc += ...` sumiu, e com ela o corpo do
+`if`.
+
+#### A causa: squash + "Update branch"
+
+`220b3c4` é um **merge do `main` na branch feito pela UI do GitHub**. O
+`main` trazia `1215d77`, o SQUASH do #187, com as mesmas mudanças que a
+branch já tinha em commits separados. O merge de três vias juntou os dois
+lados **sem conflito** e semanticamente errado.
+
+É a mesma armadilha do #175, com um resultado pior: lá o bloco sumiu, aqui
+o arquivo deixou de compilar. **Merge limpo não é merge correto** quando um
+dos lados é um squash do outro.
+
+#### O que torna esta falha difícil de ver
+
+| sinal | por que não pegou |
+|---|---|
+| `git show --stat` do merge | mostrou **3 arquivos**; o quarto era invisível |
+| o quarto arquivo | `tests/test_4_2_caixa_maker.py`, revertido para a versão do `main` — e como o `stat` compara CONTRA o `main`, um arquivo revertido a ele **não aparece** |
+| CI | o PR foi mergeado **4 s depois** de o `testes` começar |
+| Sonar | passou — ele analisa, não executa |
+
+**Dois testes sumiram sem deixar rastro no diff.** A contagem da suíte caiu
+de 1886 para 1884, e esse foi o único indício.
+
+#### As travas que isto pede
+
+1. **Nunca usar "Update branch" da UI numa branch cujo `main` levou squash.**
+   O caminho é `git merge origin/main` local, com `make check` depois.
+2. **Conferir o conteúdo ANTES do merge, não depois.** Já era a lição do
+   #175 e eu a apliquei tarde: conferi o `main` depois de mergeado.
+3. **Não mergear com o CI em andamento.** `testes` teria pegado em 90 s.
+4. **Contar os testes.** A suíte caindo de 1886 para 1884 foi o que denunciou
+   a perda invisível. O `test_quadro_nao_mente` já faz isso por arquivo
+   citado no quadro; `test_4_2_caixa_maker.py` não está entre eles.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
