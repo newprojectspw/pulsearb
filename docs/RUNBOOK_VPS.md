@@ -3050,7 +3050,6 @@ print("passadas com >= 90%%    :", f["passadas_quase_inteiras"])
 | média perto de 1 | o número mede o TAMANHO da cotação, não a estratégia |
 | média baixa com `passadas_quase_inteiras` alto | poucos mercados desertos dominam o total |
 | média baixa e contador baixo | a fatia é plausível, e aí os 130 USDC/h merecem investigação de verdade |
-
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro

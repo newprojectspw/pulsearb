@@ -321,9 +321,8 @@ class CaixaDoMaker:
         if estimado.pontua:
             self.segundos_pontuando += intervalo
         self.rewards_com_captura_usdc += estimado.rewards_usdc
+        pro_rata_da_passada = 0.0
         if self.fator_de_captura > 0.0:
-            self.rewards_pro_rata_usdc += estimado.rewards_usdc / self.fator_de_captura
-        # A premissa junto com o número que ela produziu — ver o campo.
         self.fracao_ponderada_x_segundos += estimado.fracao_do_pool * intervalo
         self.segundos_com_fatia += intervalo
         self.fracao_do_pool_maxima = max(
@@ -579,7 +578,6 @@ class CaixaDoMaker:
                     "e ai o numero mede o TAMANHO da cotacao, nao a "
                     "estrategia. Media ponderada pelo mesmo intervalo que "
                     "ponderou o reward; `maxima` e o pior caso para a "
-                    "credibilidade do total."
                 ),
             },
             "segundos_repousando": round(self.segundos_repousando, 1),
