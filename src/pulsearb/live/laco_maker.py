@@ -124,6 +124,18 @@ CADENCIA_DO_MAKER_S = 15.0
 GRADE_DE_TICKS = (1, 2, 3, 4, 5)
 
 
+def _cabe_no_livro(ordem: OrdemPretendida) -> bool:
+    """O preço desta perna é um preço que EXISTE no livro: `0 < p < 1`.
+
+    Afirmado pelo positivo de propósito. A forma invertida diz o que o preço
+    não é, e quem lê tem de negar de cabeça para saber o que se quer.
+
+    Vale para NaN sem caso especial: `0.0 < nan < 1.0` é `False`, então um
+    preço que não é número não cabe no livro — que é o lado certo de errar.
+    """
+    return 0.0 < ordem.preco_limite < 1.0
+
+
 class ClienteDeCotacao(Protocol):
     """O que o laço precisa de um cliente. `ClienteSombraDeOrdens` e
     `ClienteDeOrdens` satisfazem os dois — é o mesmo caminho."""
@@ -704,7 +716,7 @@ class LacoMaker:
         # nosso. `ordem_mal_formada` volta a significar o que diz — e
         # `shares <= 0` continua indo para ele, porque AQUELE seria defeito
         # nosso de verdade.
-        if any(not 0.0 < ordem.preco_limite < 1.0 for ordem in pernas):
+        if not all(_cabe_no_livro(ordem) for ordem in pernas):
             return "sem_espaco_para_recuar"
         for ordem in pernas:
             decisao = self.portao.avaliar_risco(
