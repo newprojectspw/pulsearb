@@ -76,13 +76,75 @@ O taker está **medido e reprovado** (quadro 1.1/1.4/1.5, −195,25 USDC em
 
 Hoje as três subidas são **incondicionais**; só a rota de pools tem trava.
 
-> ❓ **Pergunta aberta, e ela precede a implementação:** a rota maker depende
-> de algo que o laço do taker produz? `laco_de_descoberta_de_pools` alimenta
-> `ciclo.motor.rastreador`, e `laco_de_descoberta` alimenta
-> `ciclo.on_descoberta` — aparentam ser caminhos distintos, mas `aparentam`
-> não basta. O portão e o diário saem do executor do ciclo
-> (`_portao_do_ciclo`, `_caminho_do_executor`), que precisa continuar
-> existindo. **Isto se resolve lendo, antes de escrever a trava.**
+### ✅ Fase 0 respondida — 2026-09-22
+
+A pergunta era: *a rota maker depende de algo que o laço do taker produz?*
+Eu tinha escrito que os caminhos "aparentam ser distintos". **Aparentavam, e
+não são.** Existem duas dependências, e só uma é inofensiva.
+
+`laco_de_cotacao` passa cinco coisas ao `LacoMaker.passo` (`shadow.py:620`).
+Duas vêm de estado compartilhado com o taker:
+
+#### 1. O rastreador é UM só — e isso não atrapalha
+
+`ciclo.on_descoberta` chama `rastreador.atualizar(mercados)` e
+`_um_ciclo_de_pools` chama `rastreador.absorver(janelas)`: **o mesmo dict
+`self.janelas`**, e `abertas()` devolve tudo misturado. O maker recebe as
+janelas Up/Down do taker junto com os pools.
+
+Mas ele já as recusa, com motivo nomeado: `_passo_da_janela` chama
+`self._parametros(janela)` e, sem pool de reward, conta
+`sem_pool_de_reward` — **os 772 do relato de 2026-09-21 são exatamente
+isso**. Desligar o taker tira essas janelas do rastreador e portanto **não
+muda nada do que o maker cota**; só faz o contador parar de subir.
+
+Nenhum dos dois métodos aposenta o que o outro pôs (ambos documentam isso),
+então não há risco de a descoberta do taker apagar os pools.
+
+#### 2. `feeds_saudaveis` — e esta MATA o maker
+
+A cadeia, verificada de ponta a ponta:
+
+| passo | arquivo |
+|---|---|
+| `feeds_saudaveis=self.ciclo.feeds_saudaveis(...)` | `shadow.py:624` |
+| `if not self.ultimo_preco_ns: return False` | `ciclo.py:252` |
+| `ultimo_preco_ns[tick.asset] = ...`, só de tick `twap_sixty` filtrado por `ativos_operados` | `ciclo.py:153` |
+| `ativos_operados=frozenset(settings.assets)` | `shadow.py:168` |
+| `if not feeds_saudaveis: return Decisao(False, MOTIVOS.FEED_PARADO)` | `gates.py:559` |
+| `return await self._recusar(janela.slug, f"portao:{recusa}")` | `laco_maker.py:369` |
+
+**Esvaziar `settings.assets` para desligar o taker faria o maker recusar
+tudo com `portao:feed_parado`** — e produziria exatamente o quadro do
+§10.1l: rodada saudável, `falhou: null`, cotando zero, parecendo mercado
+quieto.
+
+#### O que isto obriga a fase 1 a fazer
+
+"Desligar o taker" não é uma coisa, são três — e só duas podem cair:
+
+| desligar | pode? | efeito no maker |
+|---|---|---|
+| `laco_de_decisao` (o `passo()` do taker) | ✅ | nenhum: o maker não lê nada que ele produza |
+| `laco_de_descoberta` + conexão `clob[updown]` | ✅ | para de receber janelas que já eram recusadas por `sem_pool_de_reward` |
+| feeds RTDS / `settings.assets` | ❌ **NUNCA** | `feeds_saudaveis` vira False e o maker recusa tudo |
+
+A trava da fase 1, portanto, **não pode ser `assets=[]`** — tem de ser um
+botão próprio que não toque no feed de preço. E o teste que a acompanha tem
+de exercer justamente isto: com o taker desligado, o maker continua cotando.
+
+#### A pergunta que este achado levanta, e que não é da fase 1
+
+Por que cotar *"vai chover em Wellington"* exige um preço de BTC fresco? O
+`feeds_saudaveis` é um conceito do **taker** — a frescura do feed-verdade do
+jogo TWAP. Para a rota maker sobre pools, a frescura que importa é a do
+livro do próprio pool, e essa já é vigiada em `_livro_para_o_maker` pela
+saúde da conexão `clob[pools]`.
+
+O portão está aplicando ao maker um critério que não é dele. Erra para o
+lado fechado, então **não é urgente** — mas é a razão pela qual um corte
+inocente em `assets` derrubaria o ensaio em silêncio. Fica registrado aqui e
+não vira trabalho agora.
 
 ## O que se perde: isolamento entre variantes
 
@@ -139,8 +201,8 @@ que faz a comparação ser sobre a REGRA.
 
 | fase | entrega | fecha o quê |
 |---|---|---|
-| 0 | responder a pergunta aberta acima, lendo o código | nada — habilita a 1 |
-| 1 | trava que desliga a rota taker + medida de `%CPU` | substitui a estimativa de 40–46 pp por medida |
+| 0 | ✅ **feito em 2026-09-22** — ver acima: o acoplamento existe e é no `feeds_saudaveis` | habilitou a 1, com uma restrição que ela não tinha |
+| 1 | trava que desliga `laco_de_decisao`, `laco_de_descoberta` e `clob[updown]` — **sem tocar em `assets`** — + medida de `%CPU` | substitui a estimativa de 40–46 pp por medida |
 | 2 | N variantes num processo, com as 6 travas e seus testes | o caminho do 4.2 nesta máquina |
 | 3 | uma hora de `%wait` com as quatro | ✅ ou ❌ para "cabe em 1 vCPU" |
 | 4 | §10.1g inteiro e o relógio dos 14 dias começa | o ensaio do 4.2 |
