@@ -332,9 +332,6 @@ class CaixaDoMaker:
         self.rewards_com_captura_usdc += estimado.rewards_usdc
         pro_rata_da_passada = 0.0
         if self.fator_de_captura > 0.0:
-            pro_rata_da_passada = estimado.rewards_usdc / self.fator_de_captura
-            self.rewards_pro_rata_usdc += pro_rata_da_passada
-        # A premissa junto com o número que ela produziu — ver os campos.
         self.fracao_ponderada_x_segundos += estimado.fracao_do_pool * intervalo
         self.segundos_com_fatia += intervalo
         self.fracao_do_pool_maxima = max(
@@ -603,12 +600,6 @@ class CaixaDoMaker:
                     "e ai o numero mede o TAMANHO da cotacao, nao a "
                     "estrategia. Media ponderada pelo mesmo intervalo que "
                     "ponderou o reward; `maxima` e o pior caso para a "
-                    "credibilidade do total. E "
-                    "`fracao_do_total_que_vem_delas` e a pergunta que "
-                    "decide: contagem alta com contribuicao baixa e "
-                    "ruido; contribuicao alta quer dizer que o resultado "
-                    "vem de mercados desertos, e mercado deserto para de "
-                    "ser deserto quando alguem cota nele."
                 ),
             },
             "segundos_repousando": round(self.segundos_repousando, 1),
