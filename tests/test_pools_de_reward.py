@@ -561,3 +561,149 @@ def test_livro_ausente_sai_COM_MOTIVO_e_nao_derruba() -> None:
     d, janelas = asyncio.run(_descobrir(fake, tamanho_da_cotacao=100.0))
     assert janelas == []
     assert d.descartes == {DESCARTE_SEM_LIVRO: 1}
+
+
+# ── §5.1: o relato DIZ como os pools foram escolhidos ────────────────────
+def _trades_com_fluxo() -> list[dict]:
+    """Dois trades numa hora: `_shares_por_hora` mede fluxo > 0."""
+    return [{"timestamp": 0, "size": 50}, {"timestamp": 3600, "size": 50}]
+
+
+def test_selecao_diz_reward_por_fluxo_quando_ha_fluxo() -> None:
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import ORDENADO_POR
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    fake.trades = {"0x1": _trades_com_fluxo(), "0x2": _trades_com_fluxo()}
+    d, _janelas = asyncio.run(_descobrir(fake, base_data="https://data.example"))
+    sel = d.selecao
+    assert sel["selector_de_pools"] == "reward_por_fluxo"
+    assert sel["base_data_configurado"] is True
+    assert sel["fallback_pool_bruto"] is False
+    assert sel["motivo_do_fallback"] is None
+    assert sel["mercados_ranqueados_por_fluxo"] == 2
+    assert sel["mercados_sem_fluxo"] == 0
+    assert sel["top_pool_reason"] == ORDENADO_POR
+
+
+def test_selecao_marca_fallback_quando_falta_base_data() -> None:
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import MOTIVO_SEM_BASE_DATA
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    d, janelas = asyncio.run(_descobrir(fake))  # sem base_data
+    sel = d.selecao
+    assert sel["selector_de_pools"] == "pool_bruto"
+    assert sel["base_data_configurado"] is False
+    assert sel["fallback_pool_bruto"] is True
+    assert sel["motivo_do_fallback"] == MOTIVO_SEM_BASE_DATA
+    # Fallback é PERMITIDO sem exigir_fluxo: as janelas saem.
+    assert len(janelas) == 2
+
+
+def test_selecao_flagra_degeneracao_silenciosa() -> None:
+    """base_data setado, mas a data-api veio VAZIA: ranking cai para pool
+    bruto. O antes-invisível que o §5.1 torna visível."""
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import MOTIVO_SEM_FLUXO_MEDIDO
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    # fake.trades vazio: /trades devolve [] para todo mercado.
+    d, janelas = asyncio.run(_descobrir(fake, base_data="https://data.example"))
+    sel = d.selecao
+    assert sel["selector_de_pools"] == "pool_bruto"
+    assert sel["base_data_configurado"] is True
+    assert sel["fallback_pool_bruto"] is True
+    assert sel["motivo_do_fallback"] == MOTIVO_SEM_FLUXO_MEDIDO
+    assert sel["mercados_ranqueados_por_fluxo"] == 0
+    assert sel["mercados_sem_fluxo"] == 2
+    # Sem exigir_fluxo, ainda cai no fallback e devolve janelas.
+    assert len(janelas) == 2
+
+
+# ── §5.2: no modo de decisão, falta de fluxo RECUSA (não fallback mudo) ───
+def test_exigir_fluxo_recusa_sem_base_data() -> None:
+    """MUTAÇÃO: sem o ramo `if self.exigir_fluxo: return []`, janelas > 0."""
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import MOTIVO_SEM_BASE_DATA
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    d, janelas = asyncio.run(_descobrir(fake, exigir_fluxo=True))
+    assert janelas == []
+    assert d.descartes[MOTIVO_SEM_BASE_DATA] == 1
+
+
+def test_exigir_fluxo_recusa_com_base_data_mas_sem_fluxo() -> None:
+    """MUTAÇÃO: a degeneração silenciosa vira recusa nomeada."""
+    import asyncio
+
+    from pulsearb.markets.pools_de_reward import MOTIVO_SEM_FLUXO_MEDIDO
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    # sem fake.trades: nenhum mercado tem fluxo medido.
+    d, janelas = asyncio.run(
+        _descobrir(fake, base_data="https://data.example", exigir_fluxo=True)
+    )
+    assert janelas == []
+    assert d.descartes[MOTIVO_SEM_FLUXO_MEDIDO] == 1
+
+
+def test_exigir_fluxo_NAO_recusa_quando_ha_fluxo() -> None:
+    """A trava fecha no caso ruim e SÓ nele: com fluxo, as janelas saem."""
+    import asyncio
+
+    fake = _HttpFake(
+        paginas=[_pagina(["0x1", "0x2"], "LTE=")],
+        mercados={c: _mercado() for c in ("0x1", "0x2")},
+    )
+    fake.trades = {"0x1": _trades_com_fluxo(), "0x2": _trades_com_fluxo()}
+    d, janelas = asyncio.run(
+        _descobrir(fake, base_data="https://data.example", exigir_fluxo=True)
+    )
+    assert len(janelas) == 2
+    assert d.selecao["selector_de_pools"] == "reward_por_fluxo"
+    assert d.descartes == {}
+
+
+def test_exigir_fluxo_filtra_mercado_sem_fluxo_parcial() -> None:
+    """No modo de decisão, fluxo parcial não deixa pool bruto entrar disfarçado.
+
+    Sem este filtro, basta UM mercado ter fluxo para a seleção publicar
+    `reward_por_fluxo`, mas os mercados sem fluxo continuam no fim da lista por
+    `daily_rate`. A rodada decisiva então mediria uma carteira parcialmente sem
+    dado real de fluxo.
+    """
+    import asyncio
+
+    fake = _HttpFake(
+        paginas=[_pagina(["com-fluxo", "sem-fluxo"], "LTE=")],
+        mercados={c: _mercado() for c in ("com-fluxo", "sem-fluxo")},
+    )
+    fake.trades = {"com-fluxo": _trades_com_fluxo()}
+    d, janelas = asyncio.run(
+        _descobrir(fake, base_data="https://data.example", exigir_fluxo=True)
+    )
+    assert [j.condition_id for j in janelas] == ["com-fluxo"]
+    assert d.selecao["selector_de_pools"] == "reward_por_fluxo"
+    assert d.selecao["mercados_ranqueados_por_fluxo"] == 1
+    assert d.selecao["mercados_sem_fluxo"] == 1
+    assert d.descartes == {}

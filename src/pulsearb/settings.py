@@ -210,6 +210,15 @@ class Settings(BaseSettings):
     # o taker nunca viu. A rodada de 24 h que produz o dado do taker não pode
     # mudar de comportamento por causa de um default novo.
     descobrir_pools_de_reward: bool = False
+    #: A rota de pools de DECISÃO exige ranquear por fluxo real. Sem
+    #: `endpoints.data_api`, ou com ele mas ZERO mercado com fluxo medido, a
+    #: ordenação degenera para pool bruto — e medir pool bruto achando que se
+    #: mede eficiência é o defeito do §5.2. Com esta flag, a seleção RECUSA
+    #: (motivo nomeado, 0 janelas) em vez do fallback mudo. Default `False`: a
+    #: análise histórica pode cair no fallback; o SHADOW de 24/72 h que produz
+    #: o veredito do 1.12 liga, e assim uma data-api vazia PARA a medição em
+    #: vez de contaminá-la em silêncio.
+    exigir_fluxo_nos_pools: bool = False
     #: Quantos mercados, do maior pool para o menor. O 1.12 mediu o ótimo em
     #: 95 — acima disso o líquido CAI, porque entram os de volume enorme e
     #: receita mínima (a eleição sueca negocia 54.014 shares/h e paga 1,86

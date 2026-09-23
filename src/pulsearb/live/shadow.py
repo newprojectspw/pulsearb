@@ -259,6 +259,10 @@ class ProcessoShadow:
         #: 60 s: zero aqui com a rota ligada é sintoma, e sintoma tem de ser
         #: visível sem abrir o JSON.
         self.pools_descobertos = 0
+        #: COMO os pools do último ciclo foram escolhidos (§5.1). Vazio até a
+        #: rota de pools correr. Vai no relato para o SHADOW provar que mediu
+        #: eficiência, e não pool bruto por a data-api ter vindo vazia.
+        self.selecao_de_pools: dict[str, Any] = {}
         #: Motivo pelo qual a rodada foi abortada, ou `None`. Quando existe,
         #: `main` sai com código != 0: uma rodada sem saída não é sucesso.
         self.falhou: str | None = None
@@ -451,6 +455,7 @@ class ProcessoShadow:
         janelas = await descoberta.descobrir()
         self.ciclo.motor.rastreador.absorver(janelas)
         self.pools_descobertos = len(janelas)
+        self.selecao_de_pools = dict(descoberta.selecao)
 
         # Assina os tokens para o laço maker ter livro. Sem livro, o
         # `_passo_da_janela` sai em `sem_livro` — e "não sei nada sobre ela" é
@@ -471,6 +476,7 @@ class ProcessoShadow:
             janelas=len(janelas),
             tokens_novos=len(novos),
             descartes=dict(descoberta.descartes),
+            selecao=self.selecao_de_pools,
             agora=agora,
         )
 
@@ -749,6 +755,10 @@ class ProcessoShadow:
             "maker": (
                 self.laco_maker.resumo() if self.laco_maker is not None else None
             ),
+            # Sai SEMPRE, `None` inclusive: um relato que só mostra o seletor
+            # quando ele é "reward_por_fluxo" esconde justamente o caso que o
+            # §5.1 existe para expor — o fallback silencioso para pool bruto.
+            "selector_de_pools": self.selecao_de_pools or None,
             **self.ciclo.resumo(agora_epoch=time.time(), agora_ns=time.time_ns()),
         }
 
@@ -860,6 +870,7 @@ class ProcessoShadow:
                                 tamanho_da_cotacao=(
                                     self.settings.tamanho_da_cotacao_maker_shares
                                 ),
+                                exigir_fluxo=self.settings.exigir_fluxo_nos_pools,
                             ),
                             deadline,
                             deadline_de_parede,
