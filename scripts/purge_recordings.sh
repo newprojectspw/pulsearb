@@ -62,7 +62,7 @@ echo
 # é motivo de recusa.
 set +e
 remotos=$(printf '%s\n' "$ORIGEM" \
-  | ssh "$HOST" 'read -r dir; stat -c "%s %n" "$dir"/*.jsonl.gz 2>/dev/null; exit 0')
+  | ssh "$HOST" 'read -r dir; for f in "$dir"/*.jsonl.gz; do [ -e "$f" ] || continue; tamanho=$(stat -c "%s" "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null) || exit 1; printf "%s %s\n" "$tamanho" "$f"; done; exit 0')
 status_do_ssh=$?
 set -e
 
@@ -124,7 +124,7 @@ fi
 # branco, e um caminho com espaço vira dois argumentos de um `rm` — apagando o
 # que não devia. Numa rotina cuja única função é apagar gravação, essa é a
 # linha que não pode errar.
-printf '%s\0' "${seguros[@]}" | ssh "$HOST" 'xargs -0 -r rm -f --'
+printf '%s\0' "${seguros[@]}" | ssh "$HOST" 'xargs -0 rm -f --'
 echo "==> apagados de $HOST"
 echo
 printf '%s\n' "$ORIGEM" | ssh "$HOST" 'read -r dir; df -h "$dir" | tail -1'

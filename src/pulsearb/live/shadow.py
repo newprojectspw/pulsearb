@@ -848,9 +848,14 @@ class ProcessoShadow:
                         self.laco_de_descoberta_de_pools(
                             DescobertaDePools(
                                 fazer_http_get_json(
-                                    http, bases=[self.settings.endpoints.clob]
+                                    http,
+                                    bases=[
+                                        self.settings.endpoints.clob,
+                                        self.settings.endpoints.data_api,
+                                    ],
                                 ),
                                 base_clob=self.settings.endpoints.clob,
+                                base_data=self.settings.endpoints.data_api,
                                 top=self.settings.top_de_pools_de_reward,
                                 tamanho_da_cotacao=(
                                     self.settings.tamanho_da_cotacao_maker_shares

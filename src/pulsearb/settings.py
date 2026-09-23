@@ -29,6 +29,7 @@ class Endpoints(BaseModel):
 
     gamma: str = "https://gamma-api.polymarket.com"
     clob: str = "https://clob.polymarket.com"
+    data_api: str = "https://data-api.polymarket.com"
     clob_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     rtds_ws: str = "wss://ws-live-data.polymarket.com"
 

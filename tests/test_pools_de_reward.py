@@ -213,6 +213,8 @@ class _HttpFake:
         self.mercados = mercados
         #: `token_id -> payload de /book`. Sem entrada, `/book` devolve None.
         self.livros: dict[str, dict] = {}
+        #: `condition_id -> lista de trades` da data-api.
+        self.trades: dict[str, list[dict]] = {}
         self.pedidos: list[str] = []
 
     async def __call__(self, url: str, params):
@@ -222,6 +224,8 @@ class _HttpFake:
             return self.paginas[min(n, len(self.paginas) - 1)]
         if url.endswith("/book"):
             return self.livros.get((params or {}).get("token_id"))
+        if url.endswith("/trades"):
+            return self.trades.get((params or {}).get("market"), [])
         cid = url.rsplit("/", 1)[-1]
         return self.mercados.get(cid)
 
@@ -248,7 +252,7 @@ async def _descobrir(fake, **kw):
     return d, await d.descobrir(agora_epoch=AGORA)
 
 
-def test_pagina_ate_o_cursor_final_e_ordena_por_pool() -> None:
+def test_pagina_ate_o_cursor_final_e_ordena_por_pool_sem_data_api() -> None:
     import asyncio
 
     fake = _HttpFake(
@@ -260,6 +264,41 @@ def test_pagina_ate_o_cursor_final_e_ordena_por_pool() -> None:
     # 0x3 tem pool 500; tem de vir primeiro.
     assert janelas[0].condition_id == "0x3"
     assert janelas[0].reward_daily_rate == 500.0
+
+
+def test_com_data_api_ordena_por_receita_por_fluxo_e_nao_pool_bruto() -> None:
+    """A decisão do quadro de 2026-09-18: pool grande atrai fluxo grande.
+
+    O primeiro mercado paga mais por dia, mas negocia 100x mais shares/h.
+    O segundo é o que o LIVE deve preferir: reward por unidade de fluxo que
+    pode nos atropelar, não reward bruto.
+    """
+    import asyncio
+
+    fake = _HttpFake(
+        paginas=[_pagina(["pool-grande", "pool-eficiente"], "LTE=", taxa_base=1000)],
+        mercados={c: _mercado() for c in ("pool-grande", "pool-eficiente")},
+    )
+    fake.trades = {
+        "pool-grande": [
+            {"timestamp": 0, "size": 5000},
+            {"timestamp": 3600, "size": 5000},
+        ],
+        "pool-eficiente": [
+            {"timestamp": 0, "size": 50},
+            {"timestamp": 3600, "size": 50},
+        ],
+    }
+    from pulsearb.markets.pools_de_reward import DescobertaDePools
+
+    d = DescobertaDePools(
+        fake,
+        base_clob="https://clob.example",
+        base_data="https://data.example",
+        top=1,
+    )
+    janelas = asyncio.run(d.descobrir(agora_epoch=AGORA))
+    assert [j.condition_id for j in janelas] == ["pool-eficiente"]
 
 
 def test_top_corta_pelos_MAIORES_pools() -> None:
