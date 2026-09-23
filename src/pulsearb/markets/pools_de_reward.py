@@ -64,6 +64,18 @@ JOGO_REWARD = "reward"
 DESCARTE_SEM_LIVRO = "sem_livro"
 DESCARTE_NAO_PONTUA = "nao_pontua_com_este_tamanho"
 
+#: A dimensão pela qual o seletor de pools ordena quando tem `base_data`.
+#: Fonte única do nome que vai no relato — o §5.1 do plano do 4.2 quer que o
+#: SHADOW DIGA por que escolheu, não deixe adivinhar.
+ORDENADO_POR = "receita_por_mil_shares"
+
+#: Motivos de recusa da SELEÇÃO de pools. Nomeados porque "0 janelas" mudo é
+#: o silêncio que este projeto já pagou duas vezes. Com `exigir_fluxo`, a
+#: seleção RECUSA em vez de cair no fallback por pool bruto: medir pool bruto
+#: achando que se mede eficiência é o defeito que o §5.2 fecha.
+MOTIVO_SEM_BASE_DATA = "selecao:sem_base_data"
+MOTIVO_SEM_FLUXO_MEDIDO = "selecao:sem_fluxo_medido"
+
 #: Quantos mercados considerar, do maior pool para o menor. O 1.12 mediu o
 #: ótimo em 95 mercados — acima disso o líquido CAI, porque entram os de
 #: volume enorme e receita mínima. 120 dá folga para os que fecharem.
@@ -233,11 +245,18 @@ class DescobertaDePools:
         base_data: str | None = None,
         top: int = TOP_PADRAO,
         tamanho_da_cotacao: float | None = None,
+        exigir_fluxo: bool = False,
     ) -> None:
         self._get = http_get_json
         self._base = base_clob.rstrip("/")
         self._base_data = base_data.rstrip("/") if base_data else None
         self.top = top
+        #: No modo de DECISÃO (o SHADOW que produz o veredito do 1.12), a
+        #: seleção EXIGE ranquear por fluxo real: sem `base_data`, ou com ele
+        #: mas zero mercado com fluxo, RECUSA com motivo nomeado em vez de cair
+        #: no pool bruto mudo. Default False: a análise histórica pode usar o
+        #: fallback; quem decide, liga. Ver §5.2.
+        self.exigir_fluxo = exigir_fluxo
         #: Com tamanho, a descoberta só devolve mercado onde a NOSSA cotação
         #: pontua hoje — medido com o mesmo `score_da_ordem` que a varredura
         #: do 1.12 usou, sobre o livro REST de agora. Sem tamanho, devolve
@@ -253,6 +272,10 @@ class DescobertaDePools:
         #: janelas" sem causa nomeada é o tipo de silêncio que este projeto
         #: já pagou para não ter.
         self.descartes: dict[str, int] = {}
+        #: COMO os pools do último ciclo foram escolhidos — o §5.1. Vazio até
+        #: `listar()` correr. Distingue "ranqueei por eficiência" de "caí no
+        #: pool bruto", que o relato antes não sabia diferenciar.
+        self.selecao: dict[str, Any] = {}
 
     def _descartar(self, motivo: str) -> None:
         self.descartes[motivo] = self.descartes.get(motivo, 0) + 1
@@ -283,26 +306,100 @@ class DescobertaDePools:
                 break
         todos.sort(key=lambda m: m.daily_rate, reverse=True)
         candidatos = todos[: max(self.top, self.top * 3)]
-        if self._base_data:
-            return await self._ordenar_por_reward_por_fluxo(candidatos)
-        return todos[: self.top]
+
+        if not self._base_data:
+            self._registrar_selecao(
+                selector="pool_bruto",
+                base_data_configurado=False,
+                motivo_do_fallback=MOTIVO_SEM_BASE_DATA,
+                ranqueados=0,
+                sem_fluxo=0,
+            )
+            if self.exigir_fluxo:
+                self._descartar(MOTIVO_SEM_BASE_DATA)
+                return []
+            return todos[: self.top]
+
+        ranqueadas, por_fluxo, sem_fluxo = await self._ordenar_por_reward_por_fluxo(
+            candidatos
+        )
+        if por_fluxo == 0:
+            # `base_data` setado, mas NENHUM mercado teve fluxo: a ordenação
+            # degenerou para `daily_rate`. Sem este ramo, o relato diria
+            # "reward_por_fluxo" para o que na verdade é pool bruto — o defeito
+            # silencioso que o §5.2 fecha.
+            self._registrar_selecao(
+                selector="pool_bruto",
+                base_data_configurado=True,
+                motivo_do_fallback=MOTIVO_SEM_FLUXO_MEDIDO,
+                ranqueados=0,
+                sem_fluxo=sem_fluxo,
+            )
+            if self.exigir_fluxo:
+                self._descartar(MOTIVO_SEM_FLUXO_MEDIDO)
+                return []
+            return ranqueadas
+
+        self._registrar_selecao(
+            selector="reward_por_fluxo",
+            base_data_configurado=True,
+            motivo_do_fallback=None,
+            ranqueados=por_fluxo,
+            sem_fluxo=sem_fluxo,
+        )
+        return ranqueadas
+
+    def _registrar_selecao(
+        self,
+        *,
+        selector: str,
+        base_data_configurado: bool,
+        motivo_do_fallback: str | None,
+        ranqueados: int,
+        sem_fluxo: int,
+    ) -> None:
+        """Publica COMO os pools foram escolhidos (§5.1).
+
+        Sem isto, "medi eficiência" e "caí no pool bruto porque a data-api veio
+        vazia" saem idênticos no relato — e uma rodada de 72 h mediria a tese
+        errada sem ninguém ver.
+        """
+        self.selecao = {
+            "selector_de_pools": selector,
+            "base_data_configurado": base_data_configurado,
+            "fallback_pool_bruto": motivo_do_fallback is not None,
+            "motivo_do_fallback": motivo_do_fallback,
+            "mercados_ranqueados_por_fluxo": ranqueados,
+            "mercados_sem_fluxo": sem_fluxo,
+            "top_pool_reason": ORDENADO_POR,
+            "exigir_fluxo": self.exigir_fluxo,
+        }
 
     async def _ordenar_por_reward_por_fluxo(
         self, mercados: list[MercadoComPool]
-    ) -> list[MercadoComPool]:
+    ) -> tuple[list[MercadoComPool], int, int]:
+        """Devolve `(lista ordenada, nº com fluxo real, nº sem fluxo)`.
+
+        As duas contagens sobem para a telemetria: "ranqueei por fluxo" só é
+        verdade se ALGUM mercado teve fluxo medido.
+        """
         chaves: list[tuple[float, float, MercadoComPool]] = []
+        por_fluxo = 0
+        sem_fluxo = 0
         for mercado in mercados:
             fluxo = await self._shares_por_hora(mercado.condition_id)
             # Sem fluxo medido vai para o fim, nunca para o começo. "Não vi
             # trade" é ausência de dado, não prova de custo zero.
-            eficiencia = (
-                -1.0
-                if fluxo is None or fluxo <= 0
-                else mercado.daily_rate / 24.0 / (fluxo / 1000.0)
-            )
+            if fluxo is None or fluxo <= 0:
+                eficiencia = -1.0
+                sem_fluxo += 1
+            else:
+                eficiencia = mercado.daily_rate / 24.0 / (fluxo / 1000.0)
+                por_fluxo += 1
             chaves.append((eficiencia, mercado.daily_rate, mercado))
         chaves.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [mercado for _, _, mercado in chaves[: self.top]]
+        lista = [mercado for _, _, mercado in chaves[: self.top]]
+        return lista, por_fluxo, sem_fluxo
 
     async def _shares_por_hora(self, condition_id: str) -> float | None:
         if not self._base_data:
