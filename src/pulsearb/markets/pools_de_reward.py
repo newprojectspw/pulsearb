@@ -69,6 +69,12 @@ DESCARTE_NAO_PONTUA = "nao_pontua_com_este_tamanho"
 #: volume enorme e receita mínima. 120 dá folga para os que fecharem.
 TOP_PADRAO = 120
 
+#: Quantos trades públicos olhar por mercado para estimar fluxo. É
+#: deliberadamente menor que o script offline (`conta_do_maker_nos_pools.py`):
+#: aqui isso roda dentro do SHADOW/LIVE, então serve para ordenar candidatos,
+#: não para publicar veredito.
+LIMITE_DE_TRADES_PARA_RANKING = 200
+
 #: Cursor de fim do CLOB (base64 de "-1").
 CURSOR_FINAL = "LTE="
 
@@ -224,11 +230,13 @@ class DescobertaDePools:
         http_get_json: Any,
         *,
         base_clob: str,
+        base_data: str | None = None,
         top: int = TOP_PADRAO,
         tamanho_da_cotacao: float | None = None,
     ) -> None:
         self._get = http_get_json
         self._base = base_clob.rstrip("/")
+        self._base_data = base_data.rstrip("/") if base_data else None
         self.top = top
         #: Com tamanho, a descoberta só devolve mercado onde a NOSSA cotação
         #: pontua hoje — medido com o mesmo `score_da_ordem` que a varredura
@@ -250,7 +258,15 @@ class DescobertaDePools:
         self.descartes[motivo] = self.descartes.get(motivo, 0) + 1
 
     async def listar(self) -> list[MercadoComPool]:
-        """Todos os mercados com pool, do maior para o menor, cortados no topo."""
+        """Mercados com pool, cortados no topo.
+
+        Sem `base_data`, mantém o fallback antigo: maior pool primeiro. Com
+        `base_data`, aplica a decisão do quadro de 2026-09-18: dentro de um
+        universo candidato, preferir reward por unidade de fluxo taker
+        (`receita_por_mil_shares`) em vez de pool bruto. Pool grande costuma
+        atrair justamente o fluxo que nos atropela; o selector novo evita
+        confundir receita alta com lucro alto.
+        """
         todos: list[MercadoComPool] = []
         cursor = ""
         # Teto de páginas: o cursor vem do FIO, e um servidor que devolvesse
@@ -266,7 +282,58 @@ class DescobertaDePools:
             if not cursor or not mercados:
                 break
         todos.sort(key=lambda m: m.daily_rate, reverse=True)
+        candidatos = todos[: max(self.top, self.top * 3)]
+        if self._base_data:
+            return await self._ordenar_por_reward_por_fluxo(candidatos)
         return todos[: self.top]
+
+    async def _ordenar_por_reward_por_fluxo(
+        self, mercados: list[MercadoComPool]
+    ) -> list[MercadoComPool]:
+        chaves: list[tuple[float, float, MercadoComPool]] = []
+        for mercado in mercados:
+            fluxo = await self._shares_por_hora(mercado.condition_id)
+            # Sem fluxo medido vai para o fim, nunca para o começo. "Não vi
+            # trade" é ausência de dado, não prova de custo zero.
+            eficiencia = (
+                -1.0
+                if fluxo is None or fluxo <= 0
+                else mercado.daily_rate / 24.0 / (fluxo / 1000.0)
+            )
+            chaves.append((eficiencia, mercado.daily_rate, mercado))
+        chaves.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [mercado for _, _, mercado in chaves[: self.top]]
+
+    async def _shares_por_hora(self, condition_id: str) -> float | None:
+        if not self._base_data:
+            return None
+        try:
+            bruto = await self._get(
+                f"{self._base_data}/trades",
+                {"market": condition_id, "limit": LIMITE_DE_TRADES_PARA_RANKING},
+            )
+        except Exception:
+            return None
+        if not isinstance(bruto, list) or not bruto:
+            return None
+        carimbos: list[float] = []
+        for t in bruto:
+            if not isinstance(t, dict):
+                continue
+            ts = t.get("timestamp")
+            if isinstance(ts, (int, float)):
+                carimbos.append(float(ts))
+        if len(carimbos) < 2:
+            return None
+        span_h = (max(carimbos) - min(carimbos)) / 3600.0
+        if span_h <= 0:
+            return None
+        shares = sum(
+            float(t.get("size") or 0.0)
+            for t in bruto
+            if isinstance(t, dict)
+        )
+        return shares / span_h
 
     async def descobrir(self, *, agora_epoch: float | None = None) -> list[JanelaAoVivo]:
         """As janelas cotáveis, já montadas."""
