@@ -682,3 +682,28 @@ def test_exigir_fluxo_NAO_recusa_quando_ha_fluxo() -> None:
     assert len(janelas) == 2
     assert d.selecao["selector_de_pools"] == "reward_por_fluxo"
     assert d.descartes == {}
+
+
+def test_exigir_fluxo_filtra_mercado_sem_fluxo_parcial() -> None:
+    """No modo de decisão, fluxo parcial não deixa pool bruto entrar disfarçado.
+
+    Sem este filtro, basta UM mercado ter fluxo para a seleção publicar
+    `reward_por_fluxo`, mas os mercados sem fluxo continuam no fim da lista por
+    `daily_rate`. A rodada decisiva então mediria uma carteira parcialmente sem
+    dado real de fluxo.
+    """
+    import asyncio
+
+    fake = _HttpFake(
+        paginas=[_pagina(["com-fluxo", "sem-fluxo"], "LTE=")],
+        mercados={c: _mercado() for c in ("com-fluxo", "sem-fluxo")},
+    )
+    fake.trades = {"com-fluxo": _trades_com_fluxo()}
+    d, janelas = asyncio.run(
+        _descobrir(fake, base_data="https://data.example", exigir_fluxo=True)
+    )
+    assert [j.condition_id for j in janelas] == ["com-fluxo"]
+    assert d.selecao["selector_de_pools"] == "reward_por_fluxo"
+    assert d.selecao["mercados_ranqueados_por_fluxo"] == 1
+    assert d.selecao["mercados_sem_fluxo"] == 1
+    assert d.descartes == {}

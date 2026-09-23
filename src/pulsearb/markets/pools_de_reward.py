@@ -393,6 +393,8 @@ class DescobertaDePools:
             if fluxo is None or fluxo <= 0:
                 eficiencia = -1.0
                 sem_fluxo += 1
+                if self.exigir_fluxo:
+                    continue
             else:
                 eficiencia = mercado.daily_rate / 24.0 / (fluxo / 1000.0)
                 por_fluxo += 1
