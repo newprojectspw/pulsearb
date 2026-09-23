@@ -331,3 +331,45 @@ def test_item_com_veredito_no_texto_nao_pode_ficar_com_marcador_aberto():
         "recebeu o resultado — e, se quiser preservar o estado antigo, escreva\n"
         "'era ⬜' no historico da propria celula, como o 4.1 faz."
     )
+
+
+#: Marcadores de conflito que NUNCA podem chegar ao repositório.
+#:
+#: `=======` fica de fora de propósito: em markdown ele é sublinhado de
+#: título (setext), e procurá-lo daria falso positivo num arquivo legítimo.
+#: Os outros dois não têm uso legítimo em nenhuma linguagem que este
+#: repositório usa.
+MARCADORES_DE_CONFLITO = ("<<<<<<< ", ">>>>>>> ")
+
+
+def test_nenhum_arquivo_versionado_tem_marcador_de_conflito():
+    """Um merge mal resolvido não pode passar por revisão de olho.
+
+    Em 2026-09-22 dois marcadores ficaram em `ESTADO_PARA_LIVE.md` e foram
+    EMPURRADOS: a suíte passou, o Sonar passou (ele não analisa markdown), e
+    o `make check` também — porque nada olhava para isso. O que os pegou foi
+    um `grep` manual, e o que quase os deixou passar foi eu conferir
+    marcadores só no arquivo `.py` do mesmo merge.
+
+    A sessão inteira daquele dia foi uma cadeia de merges de squash que
+    apagaram conteúdo em silêncio; este teste é a parte barata de impedir a
+    próxima.
+    """
+    saida = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=RAIZ, capture_output=True, text=True, timeout=60
+    )
+    arquivos = [a for a in saida.stdout.split("\0") if a]
+    assert arquivos, "git ls-files não devolveu nada — o teste não pode passar sem medir"
+
+    sujos: list[str] = []
+    for nome in arquivos:
+        caminho = RAIZ / nome
+        try:
+            texto = caminho.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError, FileNotFoundError):
+            continue  # binário ou link: não é onde um merge deixa marcador
+        for numero, linha in enumerate(texto.splitlines(), 1):
+            if linha.startswith(MARCADORES_DE_CONFLITO):
+                sujos.append(f"{nome}:{numero}: {linha[:60]}")
+
+    assert not sujos, "marcador de conflito no repositório:\n  " + "\n  ".join(sujos)

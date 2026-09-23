@@ -3181,6 +3181,31 @@ Confira antes de mergear qualquer conserto deste tipo:
 git diff origin/main..HEAD | grep -c "^-[^-]"    # tem de ser 0
 ```
 
+#### E o estrago era maior do que o arquivo que não compilava
+
+Ao conferir o resto, em 2026-09-23: o `ESTADO_PARA_LIVE.md` do `main` estava
+com **226 KB contra 294 KB** na branch. **Os squashes vinham derrubando
+conteúdo do QUADRO em silêncio** — dois dias de linhas, incluindo a medida
+dos 2%, o plano, a fase 0, o disjuntor e a fatia.
+
+E a minha branch carregava **dois marcadores de conflito** no quadro, que eu
+empurrei. Eles sobreviveram a tudo: `make check` passou, o Sonar passou (não
+analisa markdown), e a revisão de olho não os viu. O que os pegou foi um
+`grep` manual — e o que quase os deixou passar foi eu conferir marcadores
+**só no arquivo `.py`** do mesmo merge.
+
+**Como a linha 4.0 foi resolvida:** nenhum dos dois lados era superconjunto.
+Eles compartilhavam 27.215 caracteres de prefixo e divergiam em caudas
+COMPLEMENTARES — a do HEAD com a medida dos 2%, a do `main` com tudo do plano
+em diante. Escolher um lado perderia o outro. A resolução foi a **união**:
+prefixo + as duas caudas, conferida pela presença dos marcos de cada uma
+(`1,99`, `40–46`, `0,3409`, `130,81`, `fracao_do_total_que_vem_delas`).
+
+**A trava que entra:**
+`test_quadro_nao_mente.py::test_nenhum_arquivo_versionado_tem_marcador_de_conflito`
+varre `git ls-files` inteiro. `=======` fica de fora de propósito — em
+markdown é sublinhado de título. Verificado por mutação.
+
 ### 10.2. O que ainda NÃO está medido, e o que este passo mede
 
 - **Disco do diário:** ✅ **medido em 2026-09-20** — 3,04 MiB/h nas quatro
