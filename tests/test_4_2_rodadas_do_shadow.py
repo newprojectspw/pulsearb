@@ -49,21 +49,25 @@ ESPERADO: dict[str, dict[str, object]] = {
         "maker_recolhe_quando_o_livro_anda": False,
         "maker_ticks_abaixo_do_microprice": None,
         "maker_pausa_apos_fill_toxico_s": None,
+        "maker_fracao_maxima_do_pool": None,
     },
     "recolher": {
         "maker_recolhe_quando_o_livro_anda": True,
         "maker_ticks_abaixo_do_microprice": None,
         "maker_pausa_apos_fill_toxico_s": None,
+        "maker_fracao_maxima_do_pool": None,
     },
     "ancora": {
         "maker_recolhe_quando_o_livro_anda": False,
         "maker_ticks_abaixo_do_microprice": 1,
         "maker_pausa_apos_fill_toxico_s": None,
+        "maker_fracao_maxima_do_pool": None,
     },
     "pausa": {
         "maker_recolhe_quando_o_livro_anda": False,
         "maker_ticks_abaixo_do_microprice": None,
         "maker_pausa_apos_fill_toxico_s": 30.0,
+        "maker_fracao_maxima_do_pool": None,
     },
 }
 
@@ -111,12 +115,14 @@ def test_o_env_da_rodada_produz_a_regra_que_ele_promete(rodada, monkeypatch):
 
 
 @pytest.mark.parametrize("rodada", sorted(ESPERADO))
-def test_a_rodada_escreve_as_TRES_regras_inclusive_as_desligadas(rodada):
+def test_a_rodada_escreve_TODAS_as_regras_inclusive_as_desligadas(rodada):
     """Regra ausente por decisão não pode parecer regra ausente por esquecimento.
 
-    Os três nomes aparecem nos quatro arquivos, e é por isso que a string
+    Todos os nomes aparecem nos quatro arquivos, e é por isso que a string
     vazia precisou virar "desligada" no `Settings`: sem uma grafia para
-    desligado, a única forma de dizer "esta não" seria omitir a linha.
+    desligado, a única forma de dizer "esta não" seria omitir a linha — e uma
+    variável de máquina com esse nome vazaria para as quatro instâncias (o
+    `.env` da máquina é lido ANTES destes). É o defeito P2 do teto (#193).
     """
     escritas = set(_ler_env(RODADAS / f"{rodada}.env"))
     faltando = {
@@ -138,6 +144,7 @@ def test_nenhuma_rodada_liga_mais_de_uma_regra(rodada, monkeypatch):
             ("recolher", settings.maker_recolhe_quando_o_livro_anda is True),
             ("ancora", settings.maker_ticks_abaixo_do_microprice is not None),
             ("pausa", settings.maker_pausa_apos_fill_toxico_s is not None),
+            ("teto", settings.maker_fracao_maxima_do_pool is not None),
         ) if ligada
     ]
 

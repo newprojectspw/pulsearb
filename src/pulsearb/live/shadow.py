@@ -292,6 +292,12 @@ class ProcessoShadow:
                 recolhe_quando_o_livro_anda=settings.maker_recolhe_quando_o_livro_anda,
                 ticks_abaixo_do_microprice=settings.maker_ticks_abaixo_do_microprice,
                 pausa_apos_fill_toxico_s=settings.maker_pausa_apos_fill_toxico_s,
+                fracao_maxima_do_pool=settings.maker_fracao_maxima_do_pool,
+                # Diagnóstico de cobertura: separa conexão de pools caída de
+                # token mudo quando o maker fica sem livro. Só observação — não
+                # muda a regra, e a rota de pools desligada devolve `None` (sem
+                # conexão de pools a vigiar, cai em `sem_diagnostico`).
+                conexao_de_pools_ok=self._conexao_de_pools_esta_ok,
                 nossa_ordem_esta_no_livro=settings.mode is Mode.LIVE,
                 # O MESMO portão do taker. Sem ele a rota maker cotaria
                 # por fora do kill switch e do disjuntor — ver o
@@ -521,6 +527,20 @@ class ProcessoShadow:
                 # O livro também sai: `LivrosAoVivo` não expira sozinho, e
                 # 24 h de rotação deixariam milhares de `OrderBook` mortos.
                 self.ciclo.motor.livros.esquecer(token)
+
+    def _conexao_de_pools_esta_ok(self) -> bool | None:
+        """A conexão dos pools está de pé, para o diagnóstico de cobertura do
+        maker separar 'conexão caiu' de 'token mudo'.
+
+        `None` sem a rota de pools ligada: aí não há conexão de pools a vigiar,
+        e o maker registra `sem_diagnostico` em vez de inventar uma causa. Com
+        a rota ligada, é a MESMA condição de `_livro_para_o_maker` — conectada
+        e com mensagem (PONG conta) há menos que `pong_stale_seconds` —, para o
+        diagnóstico não discordar de quando o livro de fato foi entregue."""
+        if not self.settings.descobrir_pools_de_reward:
+            return None
+        feed = self.poly_pools
+        return feed.connected and feed.last_message_age_seconds <= feed.pong_stale_seconds
 
     def _livro_para_o_maker(self, token_id: str, *, agora_ns: int):
         """O livro de um token para o maker cotar — vigiado pela CONEXÃO.

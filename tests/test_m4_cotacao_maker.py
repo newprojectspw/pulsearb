@@ -17,6 +17,7 @@ from pulsearb.live.cotacao import (
     MARKOUT_CENTAVOS_POR_SHARE,
     AncoraDoMicroprice,
     Cotacao,
+    avaliar_grade,
     escolher_cotacao,
     estimar_retorno,
 )
@@ -400,3 +401,161 @@ class TestMicropriceEAncora:
         # 1 tick do meio pontua mais que 2 ticks: a âncora afastou a cotação.
         assert ancorado.score_proprio < solto.score_proprio
         assert ancorado.pontua
+
+
+class TestOTetoDeFracaoDoPool:
+    """O teto de participação estimada no pool, aplicado ANTES da escolha
+    final (`avaliar_grade`). Ele EXCLUI candidata; nunca move nenhuma.
+
+    Com `_livro(tamanho_por_nivel=100)` e cotação de 50 shares, a fração fica
+    limpa: 1 tick toma 0,2857 do pool, 2 ticks tomam 0,0909 — mais longe do
+    meio pontua menos, logo toma fatia menor. É essa monotonicidade que faz o
+    teto poder escolher a candidata mais distante.
+    """
+
+    def _livro_de_fracao_limpa(self):
+        return _livro(tamanho_por_nivel=100.0)
+
+    def test_sem_teto_mantem_o_resultado_de_sempre(self):
+        """Default `None` não muda nada: a escolhida é a mesma de
+        `escolher_cotacao` sem o parâmetro."""
+        livro = self._livro_de_fracao_limpa()
+        candidatas = [Cotacao(1, 50.0), Cotacao(2, 50.0)]
+
+        de_sempre = escolher_cotacao(candidatas, livro, PARAMS, horas=4.0)
+        com_none = avaliar_grade(candidatas, livro, PARAMS, horas=4.0, fracao_maxima=None)
+
+        assert com_none.escolhida.cotacao == de_sempre.cotacao
+        assert com_none.recusadas_por_teto == 0
+        assert not com_none.bloqueada_por_teto
+
+    def test_teto_exato_ACEITA(self):
+        """A candidata cuja fração BATE o teto é aceita — a exclusão é para
+        quem o ULTRAPASSA. Passar a fração exata da candidata prova a folga."""
+        livro = self._livro_de_fracao_limpa()
+        um_tick = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+
+        escolha = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS,
+            horas=4.0, fracao_maxima=um_tick.fracao_do_pool,
+        )
+
+        assert escolha.escolhida is not None
+        assert escolha.escolhida.cotacao.distancia_ticks == 1
+        assert escolha.recusadas_por_teto == 0
+
+    def test_acima_do_teto_RECUSA(self):
+        """Uma candidata sozinha, com fração acima do teto: nada é escolhido,
+        e a razão é o teto — `bloqueada_por_teto`, não falta de candidata."""
+        livro = self._livro_de_fracao_limpa()
+        um_tick = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+
+        escolha = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS,
+            horas=4.0, fracao_maxima=um_tick.fracao_do_pool - 0.01,
+        )
+
+        assert escolha.escolhida is None
+        assert escolha.pontuaram == 1
+        assert escolha.recusadas_por_teto == 1
+        assert escolha.bloqueada_por_teto
+
+    def test_candidata_alternativa_ABAIXO_do_teto_e_escolhida(self):
+        """1 tick (0,2857) excede o teto de 0,15; 2 ticks (0,0909) respeita.
+        A mais LONGE do meio é escolhida — é o ponto do teto."""
+        livro = self._livro_de_fracao_limpa()
+
+        escolha = avaliar_grade(
+            [Cotacao(1, 50.0), Cotacao(2, 50.0)], livro, PARAMS,
+            horas=4.0, fracao_maxima=0.15,
+        )
+
+        assert escolha.escolhida is not None
+        assert escolha.escolhida.cotacao.distancia_ticks == 2
+        assert escolha.recusadas_por_teto == 1
+        assert not escolha.bloqueada_por_teto
+
+    def test_todas_acima_do_teto_bloqueia_sem_confundir_com_sem_candidata(self):
+        """Teto minúsculo barra as duas: `bloqueada_por_teto`, distinto de
+        `pontuaram == 0` (que é 'não achei onde cotar')."""
+        livro = self._livro_de_fracao_limpa()
+
+        escolha = avaliar_grade(
+            [Cotacao(1, 50.0), Cotacao(2, 50.0)], livro, PARAMS,
+            horas=4.0, fracao_maxima=0.001,
+        )
+
+        assert escolha.escolhida is None
+        assert escolha.pontuaram == 2
+        assert escolha.recusadas_por_teto == 2
+        assert escolha.bloqueada_por_teto
+
+    def test_nada_pontua_NAO_e_bloqueio_por_teto(self):
+        """Grade que não pontua (fora do `max_spread`) com teto ligado: a
+        razão do vazio é falta de candidata, não o teto."""
+        livro = self._livro_de_fracao_limpa()
+
+        escolha = avaliar_grade(
+            [Cotacao(3, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.10,
+        )
+
+        assert escolha.escolhida is None
+        assert escolha.pontuaram == 0
+        assert escolha.recusadas_por_teto == 0
+        assert not escolha.bloqueada_por_teto
+
+    def test_denominador_para_teto_endurece_a_fracao(self):
+        """Em LIVE a nossa ordem repousando está no livro e no denominador; um
+        substituto a cancela, então a fatia que o teto barra é sobre o livro
+        SEM ela. `denominador_para_teto` menor sobe a fração pós-troca — e o
+        teto que ACEITAVA a estimativa crua passa a RECUSAR."""
+        livro = self._livro_de_fracao_limpa()
+        r = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+        do_livro = r.score_total_do_livro - r.score_proprio
+
+        # Sem desconto: fração ~0,2857, cabe num teto de 0,30.
+        sem = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.30
+        )
+        assert sem.escolhida is not None
+
+        # Com metade do denominador descontada (a outra metade era a nossa
+        # ordem), a fração pós-troca passa de 0,30 e o teto recusa.
+        com = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0,
+            fracao_maxima=0.30, denominador_para_teto=do_livro / 2,
+        )
+        assert com.escolhida is None
+        assert com.bloqueada_por_teto
+
+    def test_fracao_no_teto_carrega_a_fatia_que_o_teto_viu(self):
+        """`EscolhaDaGrade.fracao_no_teto` é a fatia COMO O TETO A VIU. Sem
+        desconto, igual à estimada; com desconto (LIVE), a pós-cancelamento —
+        maior que a `fracao_do_pool` crua, e é ELA que o relato publica, senão
+        subestimaria a fatia real (revisão do Codex, #193)."""
+        livro = self._livro_de_fracao_limpa()
+        r = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+        do_livro = r.score_total_do_livro - r.score_proprio
+
+        sem = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.99
+        )
+        assert sem.fracao_no_teto == pytest.approx(sem.escolhida.fracao_do_pool)
+
+        com = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0,
+            fracao_maxima=0.99, denominador_para_teto=do_livro / 2,
+        )
+        assert com.escolhida is not None
+        assert com.fracao_no_teto > com.escolhida.fracao_do_pool
+
+    def test_escolher_cotacao_repassa_o_teto(self):
+        """O atalho `escolher_cotacao` também respeita o teto — é a mesma
+        avaliação, só devolvendo a escolhida."""
+        livro = self._livro_de_fracao_limpa()
+        assert escolher_cotacao(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.001
+        ) is None
+        assert escolher_cotacao(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.99
+        ) is not None

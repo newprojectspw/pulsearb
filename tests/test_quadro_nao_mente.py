@@ -50,7 +50,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_5_2_job_docker.py": (8, "5.2 — job de build esperando"),
     "test_4_0c_cliente_sombra.py": (10, "4.0(c) — cliente sombra"),
     "test_4_0c_reward_ao_vivo.py": (10, "4.0(c) — reward ao vivo"),
-    "test_4_0c_laco_maker.py": (72, "4.0(c) — o laço maker"),
+    "test_4_0c_laco_maker.py": (88, "4.0(c) — o laço maker"),
     "test_m4_cliente_de_ordens.py": (71, "3.5 — cliente de ordens"),
     "test_m4_execucao_maker.py": (22, "4.0(c) — execução maker"),
     "test_m4_auth_clob.py": (42, "3.2 — auth do CLOB"),
@@ -63,7 +63,7 @@ CONTAGENS_NO_QUADRO: dict[str, tuple[int, str]] = {
     "test_maker_de_pares.py": (35, "1.6 — o maker de pares"),
     "test_maker_de_pares_nos_pools.py": (14, "1.12 — o maker de pares nos pools"),
     "test_arbitragem_por_identidade.py": (49, "1.13 — arbitragem por identidade"),
-    "test_resumo_da_rodada_maker.py": (78, "4.2 — o leitor da rodada"),
+    "test_resumo_da_rodada_maker.py": (80, "4.2 — o leitor da rodada"),
     "test_4_2_rodadas_do_shadow.py": (39, "4.2 — as quatro rodadas"),
 }
 

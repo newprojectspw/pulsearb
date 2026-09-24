@@ -258,6 +258,20 @@ class Settings(BaseSettings):
     #: dominaram o markout. Validado no carregamento pelo mesmo motivo do
     #: knob acima — o laço maker é tarefa própria e não derruba a rodada.
     maker_pausa_apos_fill_toxico_s: float | None = Field(default=None, ge=0)
+    #: Teto da participação estimada no pool, por cotação maker (`None` = sem
+    #: teto, o comportamento de sempre). Antes da escolha final, o laço exclui
+    #: da grade toda candidata cuja `fracao_do_pool` estimada passe deste valor,
+    #: e não cota quando todas as que pontuam excedem (motivo
+    #: `fracao_do_pool_acima_do_teto`). É a trava do achado SHADOW de que a
+    #: hipótese só é promissora com fatia baixa — 1.000 shares tomam a fatia
+    #: média de 57,77% do pool (máx 100%), 100 shares tomam 21,71%. Fração alta
+    #: é a nossa cotação levando o pool inteiro, e aí o número do 4.2 mede o
+    #: TAMANHO da cotação, não a estratégia (ver `caixa_maker.fracao_do_pool`).
+    #: Opt-in de propósito: `None` preserva integralmente a linha de base das
+    #: rodadas em curso, e o valor não é chumbado em lugar nenhum. Validado no
+    #: carregamento (`0 < v <= 1`) porque o laço maker roda como tarefa própria
+    #: e um valor absurdo no ambiente mataria a rota em silêncio por 14 dias.
+    maker_fracao_maxima_do_pool: float | None = Field(default=None, gt=0, le=1)
 
     # Cloudflare: sem User-Agent explícito = 403 error 1010 (API_NOTES 12.10).
     user_agent: str = "Mozilla/5.0 (X11; Linux x86_64) pulsearb/0.1"
@@ -288,6 +302,7 @@ class Settings(BaseSettings):
     @field_validator(
         "maker_ticks_abaixo_do_microprice",
         "maker_pausa_apos_fill_toxico_s",
+        "maker_fracao_maxima_do_pool",
         mode="before",
     )
     @classmethod
@@ -302,12 +317,14 @@ class Settings(BaseSettings):
         ausente por decisão fica idêntica a regra ausente por esquecimento.
         É a diferença que `deploy/rodadas/*.env` existe para manter.
 
-        Só vale para estes dois, e só para a string vazia: eles são opcionais
+        Só vale para estes três, e só para a string vazia: eles são opcionais
         (`None` é o valor desligado) e a string vazia não tem outro
         significado possível num arquivo de ambiente. `0` continua sendo um
-        valor LIGADO válido nos dois — âncora no microprice exato, pausa de
-        duração zero —, e é por isso que "desligado" precisava de uma grafia
-        própria em vez de aproveitar o zero.
+        valor LIGADO válido nos dois primeiros — âncora no microprice exato,
+        pausa de duração zero —, e é por isso que "desligado" precisava de uma
+        grafia própria em vez de aproveitar o zero. No teto de fração o `0` é
+        RECUSADO (`gt=0`): um teto de zero barraria toda cotação, o que não é o
+        mesmo que não ter teto.
 
         Espaço em branco entra junto porque `VAR= ` no arquivo chega como
         `" "`, e recusar a rodada inteira por um espaço seria recusar pelo
