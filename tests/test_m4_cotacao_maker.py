@@ -504,6 +504,30 @@ class TestOTetoDeFracaoDoPool:
         assert escolha.recusadas_por_teto == 0
         assert not escolha.bloqueada_por_teto
 
+    def test_denominador_para_teto_endurece_a_fracao(self):
+        """Em LIVE a nossa ordem repousando está no livro e no denominador; um
+        substituto a cancela, então a fatia que o teto barra é sobre o livro
+        SEM ela. `denominador_para_teto` menor sobe a fração pós-troca — e o
+        teto que ACEITAVA a estimativa crua passa a RECUSAR."""
+        livro = self._livro_de_fracao_limpa()
+        r = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+        do_livro = r.score_total_do_livro - r.score_proprio
+
+        # Sem desconto: fração ~0,2857, cabe num teto de 0,30.
+        sem = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.30
+        )
+        assert sem.escolhida is not None
+
+        # Com metade do denominador descontada (a outra metade era a nossa
+        # ordem), a fração pós-troca passa de 0,30 e o teto recusa.
+        com = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0,
+            fracao_maxima=0.30, denominador_para_teto=do_livro / 2,
+        )
+        assert com.escolhida is None
+        assert com.bloqueada_por_teto
+
     def test_escolher_cotacao_repassa_o_teto(self):
         """O atalho `escolher_cotacao` também respeita o teto — é a mesma
         avaliação, só devolvendo a escolhida."""

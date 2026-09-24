@@ -1726,6 +1726,39 @@ class TestTetoDeFracaoDoPool:
         assert ordens["n"] == 1
         assert ordens["maxima"] <= 0.10 + 1e-9
 
+    def test_em_LIVE_o_teto_desconta_a_ordem_repousando(self, tmp_path):
+        """Em LIVE a nossa ordem já está no livro; um reposicionamento a
+        substitui, então o teto avalia a fatia do substituto sobre o livro SEM
+        ela. Em SHADOW ela não está no livro — nada a descontar (revisão do
+        Codex, #193)."""
+        from pulsearb.analysis.rewards import ParametrosDeReward, denominador_pessimista
+        from pulsearb.live.repouso import CotacaoAberta
+
+        params = ParametrosDeReward(
+            daily_rate=100.0, min_size=5.0, max_spread=0.03, tick_size=0.01
+        )
+        livro = _livro()
+        aberta = CotacaoAberta(
+            cotacao=Cotacao(1, 50.0), desde_epoch=0.0, preco_up=0.49, preco_down=0.49
+        )
+
+        shadow = _laco(tmp_path, fracao_maxima_do_pool=0.10)
+        live = _laco(
+            tmp_path, fracao_maxima_do_pool=0.10, nossa_ordem_esta_no_livro=True
+        )
+
+        # SHADOW: a nossa ordem não está no livro — sem desconto.
+        assert shadow._denominador_para_teto(livro, aberta, params) is None
+        # LIVE com ordem repousando: desconta, e o denominador cai.
+        d_live = live._denominador_para_teto(livro, aberta, params)
+        assert d_live is not None
+        assert d_live < denominador_pessimista(livro, params)
+        # LIVE sem ordem repousando (entrada nova): não há o que descontar.
+        assert live._denominador_para_teto(livro, None, params) is None
+        # Sem teto configurado, nem em LIVE se calcula o desconto.
+        sem_teto = _laco(tmp_path, nossa_ordem_esta_no_livro=True)
+        assert sem_teto._denominador_para_teto(livro, aberta, params) is None
+
     async def test_MANTER_repetido_nao_infla_ordens_efetivas(self, tmp_path):
         """A fração ADMITIDA por avaliação sobe a cada passada (inclui MANTER);
         a de ORDENS EFETIVAS não — ela só conta COLOCADA/REPOSICIONADA. É o

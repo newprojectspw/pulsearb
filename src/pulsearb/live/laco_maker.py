@@ -83,7 +83,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from pulsearb.analysis.rewards import ParametrosDeReward
+from pulsearb.analysis.rewards import ParametrosDeReward, denominador_pessimista
 from pulsearb.backtest.book import OrderBook
 from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
@@ -367,9 +367,7 @@ class LacoMaker:
         livro, livro_down = dados.livro, dados.livro_down
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
-        melhor, encerrar = self._escolher_da_grade(
-            dados, params, ha_aberta=aberta is not None
-        )
+        melhor, encerrar = self._escolher_da_grade(dados, params, aberta)
         if encerrar:
             # Nada a decidir: sem cotação no livro e sem candidata cotável
             # (ausente por microprice, ou barrada pelo teto). Seguir daria
@@ -554,7 +552,10 @@ class LacoMaker:
         return agora_ns - ultimo < self.pausa_apos_fill_toxico_s * 1e9
 
     def _melhor_candidata(
-        self, dados: _DadosDaPassada, params: ParametrosDeReward
+        self,
+        dados: _DadosDaPassada,
+        params: ParametrosDeReward,
+        aberta: CotacaoAberta | None,
     ) -> EscolhaDaGrade | None:
         """O resultado da grade para este livro, ou `None`.
 
@@ -586,14 +587,48 @@ class LacoMaker:
             horas=dados.horas,
             ancora=dados.ancora,
             fracao_maxima=self.fracao_maxima_do_pool,
+            denominador_para_teto=self._denominador_para_teto(dados.livro, aberta, params),
         )
+
+    def _denominador_para_teto(
+        self,
+        livro: OrderBook,
+        aberta: CotacaoAberta | None,
+        params: ParametrosDeReward,
+    ) -> float | None:
+        """O denominador da fração SEM a nossa ordem repousando, ou `None`.
+
+        Só em LIVE (`nossa_ordem_esta_no_livro`) e num reposicionamento
+        (há `aberta`): ali a nossa ordem já está no livro e entra no
+        `denominador_pessimista`, mas um substituto a cancela antes de repousar,
+        então a fatia dele — a que o teto tem de barrar — é sobre o livro SEM
+        ela. Sem o desconto, uma troca simétrica num livro só nosso estimaria
+        ~50% e viraria 100% depois do cancelamento, furando o teto (revisão do
+        Codex, #193). Em SHADOW a nossa ordem NÃO está no livro (ninguém sabe
+        que ela existe), então isto devolve `None` e o teto usa a fatia normal
+        — a linha de base não muda. Exclui só a perna Up: ela é o único lado
+        nosso que está NESTE livro; a perna Down mora no livro do Down, que não
+        entra neste denominador. É a mesma exclusão do recolher
+        (`_sem_o_nosso_nivel`), e o meio/preço saem do livro REAL — o teto muda
+        só o denominador, nunca o preço avaliado (senão avaliaria um preço e
+        enviaria outro, o modo de falha do §6.1b)."""
+        if self.fracao_maxima_do_pool is None:
+            return None
+        if not (self.nossa_ordem_esta_no_livro and aberta is not None):
+            return None
+        if aberta.preco_up <= 0.0:
+            return None
+        bids = _sem_o_nosso_nivel(livro.bids, aberta.preco_up, aberta.cotacao.tamanho)
+        sem_a_nossa = OrderBook(
+            asset_id=livro.asset_id, bids=bids, asks=livro.asks, ts_ns=livro.ts_ns
+        )
+        return denominador_pessimista(sem_a_nossa, params)
 
     def _escolher_da_grade(
         self,
         dados: _DadosDaPassada,
         params: ParametrosDeReward,
-        *,
-        ha_aberta: bool,
+        aberta: CotacaoAberta | None,
     ) -> tuple[RetornoEstimado | None, bool]:
         """A cotação escolhida da grade e se a passada pode ENCERRAR aqui.
 
@@ -607,7 +642,8 @@ class LacoMaker:
         Registra de passagem a fração aceita (a escolhida) e a recusa por teto,
         para o relato de 60 s ter as duas pontas da trava.
         """
-        escolha = self._melhor_candidata(dados, params)
+        ha_aberta = aberta is not None
+        escolha = self._melhor_candidata(dados, params, aberta)
         if escolha is None:
             # sem_microprice, já contado em `_melhor_candidata`.
             return None, not ha_aberta

@@ -373,6 +373,22 @@ class EscolhaDaGrade:
         return self.escolhida is None and self.recusadas_por_teto > 0
 
 
+def _fracao_para_o_teto(
+    r: RetornoEstimado, denominador_para_teto: float | None
+) -> float:
+    """A fração a comparar com o teto. Sem `denominador_para_teto`, é a
+    estimada de sempre. COM ele, recalcula a fatia sobre um denominador que já
+    exclui a nossa ordem repousando — em LIVE ela está no livro e entra no
+    denominador, mas um reposicionamento a substitui, então a fatia do
+    substituto é a que ele terá DEPOIS do cancelamento (ver `laco_maker`).
+    `score_total_do_livro = denominador + score_proprio`, então o denominador
+    limpo mais o nosso próprio score é o total pós-troca."""
+    if denominador_para_teto is None:
+        return r.fracao_do_pool
+    total = denominador_para_teto + r.score_proprio
+    return r.score_proprio / total if total > 0 else 0.0
+
+
 def avaliar_grade(
     candidatas: list[Cotacao],
     livro: OrderBook,
@@ -383,6 +399,7 @@ def avaliar_grade(
     markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
     ancora: AncoraDoMicroprice | None = None,
     fracao_maxima: float | None = None,
+    denominador_para_teto: float | None = None,
 ) -> EscolhaDaGrade:
     """Avalia a grade inteira, aplica o teto de fração ANTES da escolha final,
     e devolve a melhor que sobra — com a contagem do que o teto barrou.
@@ -433,7 +450,11 @@ def avaliar_grade(
         aceitas = pontuam
         recusadas_por_teto = 0
     else:
-        aceitas = [r for r in pontuam if r.fracao_do_pool <= fracao_maxima + _EPS_FRACAO]
+        aceitas = [
+            r
+            for r in pontuam
+            if _fracao_para_o_teto(r, denominador_para_teto) <= fracao_maxima + _EPS_FRACAO
+        ]
         recusadas_por_teto = len(pontuam) - len(aceitas)
     escolhida = (
         max(aceitas, key=lambda r: (r.liquido_usdc, r.cotacao.distancia_ticks))
