@@ -104,15 +104,20 @@ CAMPO_DO_FALHOU = "falhou"
 #: `curta_demais` (revisão do Codex, #131).
 CAMPO_DO_FIM = "fim_da_rodada"
 
-#: Os três knobs experimentais, e como se lê "ligado" em cada um.
+#: Os knobs experimentais, e como se lê "ligado" em cada um.
 #:
 #: `is not None` e `is True`, NUNCA verdade booleana: `ticks_abaixo_do
 #: _microprice=0` e `pausa_apos_fill_toxico_s=0.0` são valores LIGADOS
 #: válidos (ambos `ge=0` nas configurações) e falsos em Python. Uma rodada
 #: com a âncora em 0 ticks passaria por rodada-base, e o que ela mediu
 #: entraria no quadro com o nome errado.
+#:
+#: `fracao_maxima_do_pool` entra aqui porque também MUDA o que é cotado
+#: (barra candidata por participação no pool): ligá-la junto com outra regra
+#: numa rodada de 14 dias confundiria as duas, que é o que este conjunto
+#: existe para recusar. `None` = desligada.
 REGRAS_EXPERIMENTAIS = ("recolhe_quando_o_livro_anda", "ticks_abaixo_do_microprice",
-                        "pausa_apos_fill_toxico_s")
+                        "pausa_apos_fill_toxico_s", "fracao_maxima_do_pool")
 
 #: 4.2 — "SHADOW ≥ 2 semanas". Em segundos de PAREDE, que é o relógio que
 #: conta duas semanas; o monotônico entra separado, no ciclo de trabalho.

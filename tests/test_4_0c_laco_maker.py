@@ -1619,3 +1619,188 @@ class TestPernaQueSaiDoLivro:
 
         assert motivo == "ordem_mal_formada"
         assert portao.consultas, "o portão TEM de ser consultado quando há ordem"
+
+
+def _livro_fino(mid=0.50, t=10.0):
+    """Livro raso: a nossa cotação de 50 shares toma fatia alta do pool
+    (1 tick ≈ 0,80). É onde o teto de fração morde."""
+    return OrderBook(
+        asset_id="tok-up",
+        bids=[(mid - 0.01, t), (mid - 0.02, t)],
+        asks=[(mid + 0.01, t), (mid + 0.02, t)],
+    )
+
+
+class TestTetoDeFracaoDoPool:
+    """A trava de participação máxima no pool, do lado do laço: ela barra
+    ENTRAR e reposicionar, nomeia a recusa, e — o ponto do item 2 — NÃO
+    cancela o que já repousa."""
+
+    async def test_sem_teto_a_janela_cota_como_sempre(self, tmp_path):
+        """Default `None`: comportamento idêntico ao de antes."""
+        laco = _laco(tmp_path)  # sem teto
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro_fino()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+        assert efeitos[0].resultado is ResultadoDaAcao.COLOCADA
+        assert laco.motivos.get("fracao_do_pool_acima_do_teto") is None
+
+    async def test_teto_baixo_barra_a_entrada_com_nome(self, tmp_path):
+        """Livro fino faz toda a grade exceder o teto: não cota, e a recusa
+        tem nome próprio (não `sem_candidata_que_pontue`)."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.10)
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro_fino()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert efeitos == []
+        assert laco.abertas == {}
+        assert laco.motivos.get("fracao_do_pool_acima_do_teto") == 1
+        # NÃO conta `sem_candidata_que_pontue`: havia candidata, o teto barrou.
+        assert laco.motivos.get("sem_candidata_que_pontue") is None
+
+    async def test_candidata_mais_longe_do_meio_respeita_o_teto(self, tmp_path):
+        """Livro profundo (fração baixa): a cotação passa. O teto entre a
+        fração de 1 e de 2 ticks escolheria a mais longe — aqui o livro fundo
+        deixa 1 tick passar, então cota normalmente."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.10)
+        # `_livro()` do arquivo tem profundidade 500: 1 tick toma só 0,074.
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+        assert efeitos[0].resultado is ResultadoDaAcao.COLOCADA
+        assert laco.motivos.get("fracao_do_pool_acima_do_teto") is None
+
+    async def test_cotacao_repousando_NAO_e_cancelada_pelo_teto(self, tmp_path):
+        """O ponto do item 2. Coloca com livro fundo (fração baixa, passa o
+        teto); o livro afina e toda candidata NOVA passa a exceder o teto — a
+        cotação que já repousa continua no livro, sem cancelamento."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.10)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        assert len(laco.abertas) == 1
+        repousadas_antes = dict(laco.cliente.repousadas)
+
+        efeitos = await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro_fino()), agora_epoch=2000.0, agora_ns=2
+        )
+
+        # Continua repousando, nada foi cancelado, e a recusa de ENTRADA nova
+        # é contada — bloqueia reposicionar, não a ordem que já está lá.
+        assert len(laco.abertas) == 1
+        assert laco.cliente.repousadas == repousadas_antes
+        assert all(e.resultado is not ResultadoDaAcao.CANCELADA for e in efeitos)
+        assert laco.motivos.get("fracao_do_pool_acima_do_teto") == 1
+
+    async def test_telemetria_do_teto_aparece_e_e_consistente(self, tmp_path):
+        """O relato de 60 s traz o teto, as recusas e a fração aceita — e os
+        números fecham entre si."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.10)
+        # Uma passada que ACEITA (livro fundo) e uma que BARRA (livro fino).
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        await laco.passo(
+            [_janela(slug="btc-updown-4h-2")],
+            livro_de=_livro_de(_livro_fino()),
+            agora_epoch=1000.0,
+            agora_ns=1,
+        )
+        resumo = laco.resumo()
+
+        assert resumo["regras"]["fracao_maxima_do_pool"] == 0.10
+        teto = resumo["teto_de_fracao_do_pool"]
+        assert teto["teto"] == 0.10
+        # As recusas do bloco batem com o motivo contado.
+        assert teto["recusas_por_teto"] == laco.motivos.get(
+            "fracao_do_pool_acima_do_teto"
+        )
+        # A fração ACEITA existe e fica sob o teto — é o que prova a trava agindo.
+        assert teto["fracao_aceita"]["cotacoes"] >= 1
+        assert teto["fracao_aceita"]["maxima"] <= 0.10 + 1e-9
+
+    async def test_sem_aceite_a_fracao_aceita_e_None_e_nao_zero(self, tmp_path):
+        """Nada aceito ainda: `None`, não zero — zero afirmaria fatia nula."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.001)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro_fino()), agora_epoch=1000.0, agora_ns=1
+        )
+        aceita = laco.resumo()["teto_de_fracao_do_pool"]["fracao_aceita"]
+        assert aceita["cotacoes"] == 0
+        assert aceita["media"] is None
+        assert aceita["maxima"] is None
+
+
+class TestDiagnosticoDeCoberturaDosPools:
+    """`livro_indisponivel` fica com um só motivo operacional (não cota, não
+    cancela); o diagnóstico separa, à parte e sem mudar a regra, a conexão dos
+    pools caída do token que emudeceu com a conexão viva."""
+
+    async def test_livro_disponivel_conta_cobertura(self, tmp_path):
+        laco = _laco(tmp_path)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert cobertura["livro_disponivel"] == 1
+        assert cobertura["sem_livro_total"] == 0
+
+    async def test_conexao_caida_e_atribuida_a_conexao(self, tmp_path):
+        """Sem livro E a conexão dos pools reportada como caída: a causa é a
+        conexão, não o token."""
+        laco = _laco(tmp_path, conexao_de_pools_ok=lambda: False)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(None), agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert laco.motivos.get("livro_indisponivel") == 1
+        assert cobertura["sem_livro_total"] == 1
+        assert cobertura["sem_livro_por_conexao_de_pools"] == 1
+        assert cobertura["sem_livro_por_token"] == 0
+
+    async def test_conexao_viva_e_token_mudo_e_atribuido_ao_token(self, tmp_path):
+        """Sem livro mas a conexão viva: o token emudeceu — mercado parado."""
+        laco = _laco(tmp_path, conexao_de_pools_ok=lambda: True)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(None), agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert cobertura["sem_livro_por_token"] == 1
+        assert cobertura["sem_livro_por_conexao_de_pools"] == 0
+
+    async def test_sem_callback_fica_sem_diagnostico(self, tmp_path):
+        """Sem sinal da conexão, a causa não é atribuída — `sem_diagnostico`,
+        nunca uma causa inventada (o defeito do `cobertura_da_gravacao`)."""
+        laco = _laco(tmp_path)  # conexao_de_pools_ok=None
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(None), agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert cobertura["sem_diagnostico"] == 1
+        assert cobertura["sem_livro_total"] == 1
+
+    async def test_callback_que_devolve_None_nao_vira_conexao_caida(self, tmp_path):
+        """`None` do callback é DESCONHECIDO, não `False`: `bool(None)` viraria
+        'conexão caída' e atribuiria a causa errada. Tem de cair em
+        `sem_diagnostico`."""
+        laco = _laco(tmp_path, conexao_de_pools_ok=lambda: None)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(None), agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert cobertura["sem_diagnostico"] == 1
+        assert cobertura["sem_livro_por_conexao_de_pools"] == 0
+
+    async def test_callback_que_levanta_nao_derruba_o_laco(self, tmp_path):
+        """Uma observação que derrubasse a rota seria pior que a ausência
+        dela: callback que levanta cai em `sem_diagnostico`."""
+        def explode():
+            raise RuntimeError("feed caiu")
+
+        laco = _laco(tmp_path, conexao_de_pools_ok=explode)
+        await laco.passo(
+            [_janela()], livro_de=_livro_de(None), agora_epoch=1000.0, agora_ns=1
+        )
+        assert laco.resumo()["cobertura_dos_pools"]["sem_diagnostico"] == 1

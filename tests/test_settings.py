@@ -118,6 +118,36 @@ def test_ticks_do_microprice_negativo_e_recusado_no_carregamento(tmp_path, monke
     assert Settings.load(tmp_path / "inexistente.yaml").maker_ticks_abaixo_do_microprice == 0
 
 
+def test_teto_de_fracao_do_pool_default_None_e_env_parseia(tmp_path, monkeypatch):
+    """Default `None` (sem teto, a linha de base); env parseia como fração."""
+    assert Settings.load(tmp_path / "x.yaml").maker_fracao_maxima_do_pool is None
+
+    monkeypatch.setenv("PULSEARB_MAKER_FRACAO_MAXIMA_DO_POOL", "0.10")
+    assert Settings.load(tmp_path / "x.yaml").maker_fracao_maxima_do_pool == 0.10
+
+
+def test_teto_de_fracao_do_pool_vazio_e_desligado(tmp_path, monkeypatch):
+    """`VAR=` numa unit quer dizer DESLIGADO — a mesma grafia dos outros
+    knobs experimentais —, não `int_parsing` que derruba a subida."""
+    monkeypatch.setenv("PULSEARB_MAKER_FRACAO_MAXIMA_DO_POOL", "")
+    assert Settings.load(tmp_path / "x.yaml").maker_fracao_maxima_do_pool is None
+
+
+def test_teto_de_fracao_do_pool_fora_da_faixa_e_recusado(tmp_path, monkeypatch):
+    """`0 < v <= 1`, e recusado no CARREGAMENTO pela mesma razão dos outros
+    knobs do maker: o laço é tarefa própria, e um valor absurdo mataria a rota
+    em silêncio por 14 dias. Zero barraria toda cotação; acima de 1 não é
+    fração."""
+    for invalido in ("0", "-0.1", "1.5"):
+        monkeypatch.setenv("PULSEARB_MAKER_FRACAO_MAXIMA_DO_POOL", invalido)
+        with pytest.raises(ValueError):
+            Settings.load(tmp_path / "x.yaml")
+
+    # O teto exato de 1,0 é válido (participação total permitida).
+    monkeypatch.setenv("PULSEARB_MAKER_FRACAO_MAXIMA_DO_POOL", "1")
+    assert Settings.load(tmp_path / "x.yaml").maker_fracao_maxima_do_pool == 1.0
+
+
 # ── todo teto de risco tem de estar ESCRITO no config.yaml versionado ─────────
 #
 # Auditoria de 2026-09-17, §2.8: nenhum dos treze campos de `RiskSettings`

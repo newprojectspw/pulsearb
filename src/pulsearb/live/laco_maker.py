@@ -79,6 +79,7 @@ uma cotação deixa de pontuar. A diferença é que aqui dá para nem começar.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -88,8 +89,9 @@ from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
     AncoraDoMicroprice,
     Cotacao,
+    EscolhaDaGrade,
     RetornoEstimado,
-    escolher_cotacao,
+    avaliar_grade,
     estimar_retorno_repousando,
 )
 from pulsearb.live.execucao_maker import (
@@ -178,6 +180,18 @@ class LacoMaker:
     #: Contadores para o relato de 60 s. Mesma disciplina do resto: o que o bot
     #: NÃO fez tem de ser tão legível quanto o que ele fez.
     motivos: dict[str, int] = field(default_factory=dict)
+    #: Cobertura dos livros de pool, por passada avaliada: quantas viram livro,
+    #: e quando NÃO viram, se foi a conexão dos pools que caiu ou só o token
+    #: que emudeceu. É diagnóstico, não regra — `livro_indisponivel` segue
+    #: contando o total e a passada segue sem cotar e sem cancelar. Ver
+    #: `_diagnosticar_cobertura`.
+    cobertura_dos_pools: dict[str, int] = field(default_factory=dict)
+    #: A fração do pool das cotações que o teto ACEITOU (as que foram
+    #: escolhidas). Soma×n para a média e o máximo, para o relato mostrar que as
+    #: aceitas ficam sob o teto — o complemento das `recusas_por_teto`.
+    _fracao_aceita_soma: float = field(default=0.0, repr=False)
+    _fracao_aceita_n: int = field(default=0, repr=False)
+    _fracao_aceita_max: float = field(default=0.0, repr=False)
     #: O relógio do 4.2: o que as cotações repousando teriam rendido e quantas
     #: vezes teriam executado. Ver `caixa_maker`.
     caixa: CaixaDoMaker = field(default_factory=CaixaDoMaker)
@@ -204,6 +218,22 @@ class LacoMaker:
     #: o mesmo do outro lado: 2 execuções atravessadas de 12 dominaram o
     #: markout (−22,85 USDC).
     pausa_apos_fill_toxico_s: float | None = None
+    #: Teto da participação estimada no pool, por cotação (`None` = sem teto, o
+    #: comportamento de sempre). Aplicado ANTES da escolha final, em
+    #: `avaliar_grade`: candidata cuja `fracao_do_pool` estimada excede o teto
+    #: sai da disputa, e se todas as que pontuam excederem não se cota
+    #: (`fracao_do_pool_acima_do_teto`). É trava de ENTRADA e de
+    #: reposicionamento novo — nunca cancela o que já repousa, porque não é uma
+    #: nova leitura do livro que deva criar churn (ver `_passo_da_janela`).
+    fracao_maxima_do_pool: float | None = None
+    #: Como saber se a CONEXÃO dos pools está de pé, para o diagnóstico de
+    #: cobertura separar "conexão de pools indisponível" de "livro/token
+    #: indisponível" quando `livro_de` devolve `None` (`None` = sem sinal, e o
+    #: diagnóstico só conta `sem_diagnostico`). É observação pura: NÃO muda a
+    #: regra — livro indisponível segue sem cancelar e sem cotar, por qualquer
+    #: das duas causas. O laço não deve afrouxar silêncio nem portão por causa
+    #: dela; ela só torna a causa visível no relato de 60 s.
+    conexao_de_pools_ok: Callable[[], bool | None] | None = None
     #: O que a reconciliação de arranque achou, para o relato de 60 s. `None`
     #: até ela rodar — e "não rodou" é diferente de "rodou e achou zero".
     ultima_reconciliacao: dict[str, Any] | None = None
@@ -327,12 +357,15 @@ class LacoMaker:
         livro, livro_down = dados.livro, dados.livro_down
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
-        melhor = self._melhor_candidata(dados, params)
-        if dados.sem_microprice and aberta is None:
-            # Nada a decidir: sem candidata e sem cotação no livro. Seguir
-            # daria `sem_candidata_que_pontue` por falta de dado NOSSO, e esse
-            # contador responde 'o bot não achou onde cotar' — inflá-lo aqui
-            # apagaria a diferença entre travado e sem trade (revisão adversa).
+        melhor, encerrar = self._escolher_da_grade(
+            dados, params, ha_aberta=aberta is not None
+        )
+        if encerrar:
+            # Nada a decidir: sem cotação no livro e sem candidata cotável
+            # (ausente por microprice, ou barrada pelo teto). Seguir daria
+            # `sem_candidata_que_pontue` por um motivo que já tem nome — inflá-lo
+            # aqui apagaria a diferença entre travado e sem trade (revisão
+            # adversa).
             return None
 
         atual = None
@@ -510,15 +543,20 @@ class LacoMaker:
 
     def _melhor_candidata(
         self, dados: _DadosDaPassada, params: ParametrosDeReward
-    ) -> RetornoEstimado | None:
-        """A melhor da grade para este livro, ou `None`.
+    ) -> EscolhaDaGrade | None:
+        """O resultado da grade para este livro, ou `None`.
 
-        `None` também quando a âncora está ligada e o microprice não está à
-        mão: aí não se COTA — cotar sob uma regra que não se conseguiu avaliar
-        é não ter a regra —, e só isso. Quem já repousa segue sendo contado
-        pela caixa e reavaliado pelo portão, senão um disjuntor que armasse
-        durante a falta não tiraria a ordem do livro (revisão do Codex, #127;
-        é a propriedade que o 4.0 registra ter custado caro para achar).
+        `None` quando a âncora está ligada e o microprice não está à mão: aí
+        não se COTA — cotar sob uma regra que não se conseguiu avaliar é não
+        ter a regra —, e só isso. Quem já repousa segue sendo contado pela
+        caixa e reavaliado pelo portão, senão um disjuntor que armasse durante
+        a falta não tiraria a ordem do livro (revisão do Codex, #127; é a
+        propriedade que o 4.0 registra ter custado caro para achar).
+
+        Fora isso devolve o `EscolhaDaGrade` INTEIRO, e não só a escolhida: o
+        laço precisa distinguir *nenhuma pontuou* de *o teto barrou todas* para
+        nomear o motivo certo no relato. O teto de fração entra aqui, ANTES da
+        escolha final — ver `avaliar_grade`.
 
         Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
         """
@@ -529,9 +567,49 @@ class LacoMaker:
             Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
             for t in self.grade_de_ticks
         ]
-        return escolher_cotacao(
-            candidatas, dados.livro, params, horas=dados.horas, ancora=dados.ancora
+        return avaliar_grade(
+            candidatas,
+            dados.livro,
+            params,
+            horas=dados.horas,
+            ancora=dados.ancora,
+            fracao_maxima=self.fracao_maxima_do_pool,
         )
+
+    def _escolher_da_grade(
+        self,
+        dados: _DadosDaPassada,
+        params: ParametrosDeReward,
+        *,
+        ha_aberta: bool,
+    ) -> tuple[RetornoEstimado | None, bool]:
+        """A cotação escolhida da grade e se a passada pode ENCERRAR aqui.
+
+        Encerra cedo só quando NÃO há cotação no livro e também não há
+        candidata cotável — porque o microprice faltou (`sem_microprice`, já
+        contado) ou porque o teto de fração barrou todas
+        (`fracao_do_pool_acima_do_teto`). Com algo repousando nunca encerra: a
+        candidata fica `None` e a decisão cai em MANTER, sem cancelar — o teto
+        barra ENTRAR e reposicionar, não cria churn no que já está no livro.
+
+        Registra de passagem a fração aceita (a escolhida) e a recusa por teto,
+        para o relato de 60 s ter as duas pontas da trava.
+        """
+        escolha = self._melhor_candidata(dados, params)
+        if escolha is None:
+            # sem_microprice, já contado em `_melhor_candidata`.
+            return None, not ha_aberta
+        if escolha.escolhida is not None:
+            self._contar_fracao_aceita(escolha.escolhida.fracao_do_pool)
+            return escolha.escolhida, False
+        if escolha.bloqueada_por_teto:
+            # Havia candidata que pontua, mas TODAS excederiam a nossa
+            # participação máxima. Nome próprio, para não virar
+            # `sem_candidata_que_pontue`, que diz o oposto — 'não achei onde
+            # cotar'.
+            self._contar("fracao_do_pool_acima_do_teto")
+            return None, not ha_aberta
+        return None, False
 
     def _dados_da_passada(
         self,
@@ -551,7 +629,9 @@ class LacoMaker:
         """
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
         if livro is None:
+            self._diagnosticar_cobertura(disponivel=False)
             return None, "livro_indisponivel"
+        self._diagnosticar_cobertura(disponivel=True)
         horas = max(janela.seconds_left(agora_epoch), 0.0) / 3600.0
         if horas <= 0.0:
             return None, "janela_sem_tempo"
@@ -1051,6 +1131,62 @@ class LacoMaker:
     def _contar(self, motivo: str) -> None:
         self.motivos[motivo] = self.motivos.get(motivo, 0) + 1
 
+    def _contar_fracao_aceita(self, fracao: float) -> None:
+        """Anota a fração do pool de uma cotação que o teto ACEITOU (a
+        escolhida da passada). Média e máximo saem daqui para o relato provar
+        que as aceitas ficam sob o teto — é o complemento das recusas."""
+        self._fracao_aceita_soma += fracao
+        self._fracao_aceita_n += 1
+        self._fracao_aceita_max = max(self._fracao_aceita_max, fracao)
+
+    def _diagnosticar_cobertura(self, *, disponivel: bool) -> None:
+        """Torna a causa de `livro_indisponivel` OBSERVÁVEL, sem mudar a regra.
+
+        Livro disponível conta `livro_disponivel`. Indisponível, a causa se
+        separa em duas quando dá — e `livro_indisponivel` segue sendo o motivo
+        operacional, contado à parte, que não cota e não cancela:
+
+        - conexão dos pools caída (`conexao_de_pools_ok()` devolve `False`) →
+          `sem_livro_por_conexao_de_pools`: nenhum token de pool tem livro
+          porque o cano fechou;
+        - conexão viva → `sem_livro_por_token`: o cano está aberto e ESTE token
+          emudeceu — mercado parado, não feed morto;
+        - sem sinal da conexão (rota de pools desligada, ou o callback
+          levantou) → `sem_diagnostico`, porque afirmar a causa sem base seria
+          o defeito de `cobertura_da_gravacao` que o M2 já pagou.
+
+        NÃO afrouxa silêncio, portão nem heartbeat: a decisão de não cotar é a
+        mesma; só a leitura de 60 s passa a dizer POR QUE não havia livro.
+        """
+        if disponivel:
+            self._contar_cobertura("livro_disponivel")
+            return
+        estado = self._conexao_de_pools_esta_ok()
+        if estado is None:
+            self._contar_cobertura("sem_diagnostico")
+        elif estado:
+            self._contar_cobertura("sem_livro_por_token")
+        else:
+            self._contar_cobertura("sem_livro_por_conexao_de_pools")
+
+    def _conexao_de_pools_esta_ok(self) -> bool | None:
+        """A conexão dos pools está de pé? `None` quando não há como saber —
+        sem callback, callback que devolve `None` (rota de pools desligada), ou
+        callback que levantou. `None` NÃO é `False`: um `bool(None)` viraria
+        'conexão caída' e atribuiria a causa errada, então o resultado do
+        callback passa cru, sem coerção."""
+        if self.conexao_de_pools_ok is None:
+            return None
+        try:
+            return self.conexao_de_pools_ok()
+        except Exception:
+            # O diagnóstico nunca derruba o laço: uma observação que derrubasse
+            # a rota seria pior que a ausência dela.
+            return None
+
+    def _contar_cobertura(self, chave: str) -> None:
+        self.cobertura_dos_pools[chave] = self.cobertura_dos_pools.get(chave, 0) + 1
+
     async def reconciliar_no_arranque(
         self, *, cancelar_orfas_achadas: bool = True
     ) -> Reconciliacao:
@@ -1104,6 +1240,52 @@ class LacoMaker:
         registrar("reconciliacao do maker no arranque", **self.ultima_reconciliacao)
         return rec
 
+    def _resumo_do_teto(self) -> dict[str, Any]:
+        """A história do teto de fração no relato de 60 s: o teto em vigor, as
+        recusas que ele produziu, e a fração das cotações que ele ACEITOU — que
+        precisa ficar sob o teto para provar que a trava está agindo.
+
+        `fracao_aceita` é `None` quando nada foi aceito ainda: zero ali seria
+        afirmar fatia zero, e o que houve foi ausência de aceite."""
+        n = self._fracao_aceita_n
+        return {
+            "teto": self.fracao_maxima_do_pool,
+            "recusas_por_teto": self.motivos.get("fracao_do_pool_acima_do_teto", 0),
+            "fracao_aceita": {
+                "media": round(self._fracao_aceita_soma / n, 4) if n > 0 else None,
+                "maxima": round(self._fracao_aceita_max, 4) if n > 0 else None,
+                "cotacoes": n,
+            },
+            "nota": (
+                "`teto` None e a rota sem trava (linha de base). "
+                "`recusas_por_teto` conta as passadas em que TODA candidata que "
+                "pontua excedia o teto (motivo `fracao_do_pool_acima_do_teto`); "
+                "`fracao_aceita` e a fatia das cotacoes escolhidas, e com teto "
+                "ativo a maxima tem de ficar <= teto."
+            ),
+        }
+
+    def _resumo_da_cobertura(self) -> dict[str, Any]:
+        """A cobertura dos livros de pool no relato de 60 s — diagnóstico, não
+        regra. `sem_livro_total` bate com `motivos['livro_indisponivel']`; as
+        duas causas o repartem quando há sinal da conexão, e `sem_diagnostico`
+        conta o que não deu para atribuir."""
+        c = self.cobertura_dos_pools
+        return {
+            "livro_disponivel": c.get("livro_disponivel", 0),
+            "sem_livro_total": self.motivos.get("livro_indisponivel", 0),
+            "sem_livro_por_conexao_de_pools": c.get("sem_livro_por_conexao_de_pools", 0),
+            "sem_livro_por_token": c.get("sem_livro_por_token", 0),
+            "sem_diagnostico": c.get("sem_diagnostico", 0),
+            "nota": (
+                "Separa, na medida do possivel e SEM mudar a regra, a conexao "
+                "de pools caida (nenhum token tem livro) do token que emudeceu "
+                "com a conexao viva (mercado parado). `livro_indisponivel` "
+                "segue sem cotar e sem cancelar nas duas; isto so torna a causa "
+                "visivel. `sem_diagnostico` = sem sinal da conexao."
+            ),
+        }
+
     def resumo(self) -> dict[str, Any]:
         """O que sai no relato de 60 s do SHADOW."""
         return {
@@ -1118,7 +1300,10 @@ class LacoMaker:
                 "recolhe_quando_o_livro_anda": self.recolhe_quando_o_livro_anda,
                 "ticks_abaixo_do_microprice": self.ticks_abaixo_do_microprice,
                 "pausa_apos_fill_toxico_s": self.pausa_apos_fill_toxico_s,
+                "fracao_maxima_do_pool": self.fracao_maxima_do_pool,
             },
+            "teto_de_fracao_do_pool": self._resumo_do_teto(),
+            "cobertura_dos_pools": self._resumo_da_cobertura(),
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),
             "reconciliacao_no_arranque": self.ultima_reconciliacao,

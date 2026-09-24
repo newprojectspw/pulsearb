@@ -339,7 +339,41 @@ def _retorno_a_precos(
     )
 
 
-def escolher_cotacao(
+#: Folga na comparação da fração com o teto. A fração sai de uma divisão de
+#: floats (`proprio / total`), e o teto exato tem de ACEITAR — sem a folga,
+#: `0,10 <= 0,10` poderia dar falso pelo último bit e recusar a candidata que
+#: bate o teto na conta certa. É a mesma escolha do epsilon de `Cotacao.preco`.
+_EPS_FRACAO = 1e-9
+
+
+@dataclass(frozen=True, slots=True)
+class EscolhaDaGrade:
+    """O que a grade produziu — a escolhida e o porquê, para o laço decidir e
+    para o relato de 60 s.
+
+    Separar a escolhida da contagem é o que deixa o laço distinguir *não achei
+    candidata que pontue* (`pontuaram == 0`) de *achei e o teto barrou todas*
+    (`bloqueada_por_teto`). Os dois pedem motivos diferentes no relato, e
+    somá-los apagaria justamente a informação que o teto existe para produzir.
+    """
+
+    escolhida: RetornoEstimado | None
+    #: Quantas candidatas pontuaram (antes do teto).
+    pontuaram: int
+    #: Quantas pontuaram mas foram excluídas por exceder o teto de fração.
+    recusadas_por_teto: int
+    #: O teto em vigor nesta avaliação (`None` = sem teto).
+    teto: float | None
+
+    @property
+    def bloqueada_por_teto(self) -> bool:
+        """Todas as que pontuam excederam o teto — não há o que cotar, e a
+        razão é o teto, não a falta de candidata. Distinto de `pontuaram == 0`.
+        """
+        return self.escolhida is None and self.recusadas_por_teto > 0
+
+
+def avaliar_grade(
     candidatas: list[Cotacao],
     livro: OrderBook,
     params: ParametrosDeReward,
@@ -348,13 +382,25 @@ def escolher_cotacao(
     fator_de_captura: float = FATOR_DE_CAPTURA_PADRAO,
     markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
     ancora: AncoraDoMicroprice | None = None,
-) -> RetornoEstimado | None:
-    """A melhor candidata pelo líquido, ou `None` se nenhuma pontua.
+    fracao_maxima: float | None = None,
+) -> EscolhaDaGrade:
+    """Avalia a grade inteira, aplica o teto de fração ANTES da escolha final,
+    e devolve a melhor que sobra — com a contagem do que o teto barrou.
 
     **Não inventa candidata.** Quem chama passa a grade que quer avaliar, e o
     módulo não decide sozinho que uma distância não oferecida seria melhor —
     varrer o espaço inteiro aqui dentro esconderia, de quem lê o resultado,
     qual grade foi de fato considerada.
+
+    **O teto exclui candidata, ele nunca move nenhuma.** Cada candidata é
+    avaliada como sempre; o `fracao_maxima` só remove da disputa as que a nossa
+    fatia estimada (`fracao_do_pool`) faria passar do teto. Se uma candidata
+    mais LONGE do meio — que pontua menos e por isso toma uma fatia menor —
+    ainda respeitar o teto, é ela que vence. Se todas as que pontuam excederem,
+    não há escolhida, e `bloqueada_por_teto` diz que a razão foi o teto.
+
+    O teto é comparado com uma folga (`_EPS_FRACAO`): a candidata cuja fração
+    BATE o teto é aceita — a exclusão é para quem o ULTRAPASSA.
 
     Empate resolve pela cotação mais LONGE do meio: mesmo líquido com menos
     exposição a execução adversa é a mesma aposta com menos risco, e o
@@ -362,11 +408,11 @@ def escolher_cotacao(
     podem colapsar no MESMO preço (todas presas ao microprice) — aí o empate
     é real e o desempate não muda a ordem que sai.
 
-    **Nenhuma pontuando devolve `None`, também com âncora.** Se o microprice
-    empurrar a cotação para fora da faixa de reward, o certo é não cotar: a
-    cotação que não pontua paga risco de execução por zero.
+    **Nenhuma pontuando devolve escolhida `None`, também com âncora.** Se o
+    microprice empurrar a cotação para fora da faixa de reward, o certo é não
+    cotar: a cotação que não pontua paga risco de execução por zero.
     """
-    avaliadas = [
+    pontuam = [
         r
         for c in candidatas
         if (
@@ -383,9 +429,47 @@ def escolher_cotacao(
         is not None
         and r.pontua
     ]
-    if not avaliadas:
-        return None
-    return max(
-        avaliadas,
-        key=lambda r: (r.liquido_usdc, r.cotacao.distancia_ticks),
+    if fracao_maxima is None:
+        aceitas = pontuam
+        recusadas_por_teto = 0
+    else:
+        aceitas = [r for r in pontuam if r.fracao_do_pool <= fracao_maxima + _EPS_FRACAO]
+        recusadas_por_teto = len(pontuam) - len(aceitas)
+    escolhida = (
+        max(aceitas, key=lambda r: (r.liquido_usdc, r.cotacao.distancia_ticks))
+        if aceitas
+        else None
     )
+    return EscolhaDaGrade(
+        escolhida=escolhida,
+        pontuaram=len(pontuam),
+        recusadas_por_teto=recusadas_por_teto,
+        teto=fracao_maxima,
+    )
+
+
+def escolher_cotacao(
+    candidatas: list[Cotacao],
+    livro: OrderBook,
+    params: ParametrosDeReward,
+    *,
+    horas: float,
+    fator_de_captura: float = FATOR_DE_CAPTURA_PADRAO,
+    markout_centavos: float = MARKOUT_CENTAVOS_POR_SHARE,
+    ancora: AncoraDoMicroprice | None = None,
+    fracao_maxima: float | None = None,
+) -> RetornoEstimado | None:
+    """A melhor candidata pelo líquido, ou `None` se nenhuma pontua (ou se o
+    teto de fração barrou todas). É a `avaliar_grade` para quem só quer a
+    escolhida — o laço usa a `avaliar_grade` inteira, que carrega o porquê.
+    """
+    return avaliar_grade(
+        candidatas,
+        livro,
+        params,
+        horas=horas,
+        fator_de_captura=fator_de_captura,
+        markout_centavos=markout_centavos,
+        ancora=ancora,
+        fracao_maxima=fracao_maxima,
+    ).escolhida
