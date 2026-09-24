@@ -121,7 +121,15 @@ def projetar_armazenamento(
     `exigido` é a projeção VEZES a margem: a folga cobre picos e o que não é
     gravação (log, sistema). `cabe` é o veredito; quem chama recusa se falso.
     """
-    horas = max(duracao_s / 3600.0, 0.0)
+    if bytes_por_hora <= 0:
+        raise ValueError("bytes_por_hora deve ser maior que zero")
+    if duracao_s < 0:
+        raise ValueError("duracao_s não pode ser negativa")
+    if margem < 1:
+        raise ValueError("margem deve ser maior ou igual a 1")
+    if livre_bytes < 0:
+        raise ValueError("livre_bytes não pode ser negativo")
+    horas = duracao_s / 3600.0
     projetado = bytes_por_hora * horas
     exigido = projetado * margem
     return {
@@ -572,7 +580,11 @@ class Recorder:
             janelas=len(markets),
             no_escopo=escopo["janelas_no_escopo"],
             cortadas=escopo["janelas_cortadas"],
-            operaveis=sum(1 for m in markets if m.operable),
+            # `markets` inclui janelas cortadas pelo escopo. Contar essas
+            # janelas como operáveis faria o log prometer mais cobertura do
+            # que foi efetivamente assinada; o snapshot continua registrando
+            # a descoberta completa e o corte separadamente.
+            operaveis=sum(1 for m in no_escopo if m.operable),
             novas=len(novos),
             encerradas=len(encerrados),
             assinadas=len(self.poly.token_ids),

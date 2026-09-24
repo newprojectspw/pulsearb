@@ -292,7 +292,7 @@ máquina, limite o número de tokens assinados no `config.yaml`:
 
 ```yaml
 recorder:
-  max_tokens_assinados: 40   # 20 janelas inteiras; null (padrão) = tudo
+  max_tokens_assinados: 40   # par >= 2; 20 janelas inteiras; null = tudo
 ```
 
 O corte é determinístico (por slug), mantém janelas inteiras (Up+Down) e

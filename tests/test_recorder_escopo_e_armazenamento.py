@@ -121,6 +121,20 @@ def test_preflight_nao_barra_rodada_curta(tmp_path):
     assert proj["aplicavel"] is False  # não levanta, mesmo sem caber
 
 
+@pytest.mark.parametrize(
+    "argumentos",
+    [
+        {"bytes_por_hora": 0, "duracao_s": 3600, "margem": 1.2, "livre_bytes": 1},
+        {"bytes_por_hora": -1, "duracao_s": 3600, "margem": 1.2, "livre_bytes": 1},
+        {"bytes_por_hora": 1, "duracao_s": 3600, "margem": 0.99, "livre_bytes": 1},
+        {"bytes_por_hora": 1, "duracao_s": -1, "margem": 1.2, "livre_bytes": 1},
+    ],
+)
+def test_projecao_rejeita_entrada_invalida(argumentos):
+    with pytest.raises(ValueError):
+        projetar_armazenamento(**argumentos)
+
+
 def test_relatorio_traz_projecao_de_armazenamento(tmp_path):
     """Req 13: taxa medida de bytes/hora e projeção 72 h no relatório."""
     rec = _recorder(tmp_path)

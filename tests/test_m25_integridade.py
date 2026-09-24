@@ -658,3 +658,62 @@ class TestPoliticaDeResync:
         assert m.consumir_resync() == {}
         assert m.resyncs_por_material == 0
         assert m.resyncs_por_persistencia == 0
+
+    def test_corrida_best_bid_ask_e_price_change_nao_pede_resync(self):
+        """Fixture reduzida da corrida observada na gravação da VPS.
+
+        O BBA chega afirmando um topo de um tick que ainda não está no nosso
+        histórico; o evento seguinte avança o relógio e permite resolver a
+        afirmação. Quando a próxima afirmação volta a bater, a sequência é
+        fechada e nenhum resync destrutivo é pedido.
+        """
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+
+        m.observar(_bba(1500, "0.50", "0.51"), 2_000_000_000)
+        m.observar(
+            _delta(
+                2000,
+                price="0.48",
+                size="10",
+                side="BUY",
+                best_bid="0.49",
+                best_ask="0.51",
+            ),
+            3_000_000_000,
+        )
+        assert m.consumir_resync() == {}
+
+        m.observar(_bba(2500, "0.49", "0.51"), 4_000_000_000)
+        m.observar(
+            _delta(
+                3000,
+                price="0.48",
+                size="10",
+                side="BUY",
+                best_bid="0.49",
+                best_ask="0.51",
+            ),
+            5_000_000_000,
+        )
+        assert m.consumir_resync() == {}
+        assert m.resyncs_por_persistencia == 0
+
+    def test_corrida_de_um_tick_confirmada_continua_pede_resync(self):
+        """A mesma forma de evento, sem correção, continua fail-closed."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        for bba_ts, evento_ts in ((1500, 2000), (2500, 3000)):
+            m.observar(_bba(bba_ts, "0.50", "0.51"), evento_ts * 1_000_000)
+            m.observar(
+                _delta(
+                    evento_ts,
+                    price="0.48",
+                    size="10",
+                    side="BUY",
+                    best_bid="0.50",
+                    best_ask="0.51",
+                ),
+                (evento_ts + 1) * 1_000_000,
+            )
+        assert m.consumir_resync() == {ASSET: "divergencia_persistente"}

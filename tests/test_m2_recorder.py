@@ -141,6 +141,39 @@ async def test_snapshot_e_gravado_a_cada_ciclo(recorder, tmp_path):
     assert snapshots[0]["janelas"][0]["_seconds_left"] is not None
 
 
+async def test_log_de_descoberta_conta_operaveis_dentro_do_escopo(
+    recorder, monkeypatch
+):
+    """A telemetria deve refletir as janelas realmente assinadas."""
+    from pulsearb.recorder import __main__ as recorder_main
+
+    recorder.settings.recorder.max_tokens_assinados = 2
+    eventos: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        recorder_main.log,
+        "info",
+        lambda mensagem, **campos: eventos.append((mensagem, campos)),
+    )
+    fake = FakeDiscovery([[_janela(1), _janela(2)]])
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    descoberta = next(
+        campos for mensagem, campos in eventos if mensagem == "descoberta"
+    )
+    assert descoberta["janelas"] == 2
+    assert descoberta["no_escopo"] == 1
+    assert descoberta["cortadas"] == 1
+    assert descoberta["operaveis"] == 1
+
+
 async def test_eventos_de_feed_chegam_ao_arquivo(recorder, server, tmp_path):  # noqa: F811
     server.to_send = [
         json.dumps(
