@@ -360,7 +360,7 @@ class LacoMaker:
             janela, livro_de=livro_de, agora_epoch=agora_epoch, agora_ns=agora_ns
         )
         if dados is None:
-            # Todo motivo daqui é falta de dado NOSSO, e nenhum cancela: o
+            # Cada motivo daqui é falta de dado NOSSO, e nenhum cancela: o
             # livro volta no passo seguinte, e sair perderia a fila de graça.
             self._contar(recusa)
             return None
@@ -490,7 +490,8 @@ class LacoMaker:
         efetivos. A decisão de COTAR segue nos 15 s.
         """
         efeitos: list[Efeito] = []
-        for slug, aberta in list(self.abertas.items()):
+        # `_sair_por_fill_toxico` pode remover a cotação durante o laço.
+        for slug, aberta in tuple(self.abertas.items()):
             tokens = self._tokens.get(slug)
             if tokens is None or self._negocios_desde is None:
                 continue
@@ -949,12 +950,13 @@ class LacoMaker:
         if not self.recolhe_quando_o_livro_anda:
             return []
         efeitos: list[Efeito] = []
-        for slug, aberta in list(self.abertas.items()):
+        # `_recolher` pode remover a cotação durante o laço.
+        for slug, aberta in tuple(self.abertas.items()):
             tokens = self._tokens.get(slug)
             if tokens is None:
                 continue
             livros = [livro_de(token_id, agora_ns=agora_ns) for token_id in tokens]
-            if self._o_mercado_andou_contra(slug, aberta, tokens, livros):
+            if self._o_mercado_andou_contra(slug, aberta, livros):
                 efeitos.append(
                     await self._recolher(
                         slug, aberta, tokens, livros,
@@ -968,7 +970,6 @@ class LacoMaker:
         self,
         slug: str,
         aberta: CotacaoAberta,
-        tokens: tuple[str, str],
         livros: list[OrderBook | None],
     ) -> bool:
         """Alguma perna desta cotação ficou exposta? Basta UMA, porque as
