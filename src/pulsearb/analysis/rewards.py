@@ -225,7 +225,9 @@ def combinar_lados(
     return min(q_bid, q_ask)
 
 
-def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
+def score_do_livro(
+    book: OrderBook, params: ParametrosDeReward, *, meio: float | None = None
+) -> float:
     """Score de TODOS os makers já presentes no livro, os dois lados.
 
     Limitação estrutural, e ela é grande: o WS entrega níveis AGREGADOS, não
@@ -233,8 +235,14 @@ def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
     quantos participantes ele se divide — o que basta para o denominador
     pro-rata (a soma é a mesma), mas impede qualquer afirmação sobre posição
     na fila. Ver B.4 em `docs/VEREDITO_M2.md`.
+
+    `meio` sobrepõe o ponto médio usado para pontuar os níveis. Sem ele, é o
+    `book.mid` de sempre. Com ele, o chamador pode pontuar um livro derivado
+    contra o ponto médio da fotografia que decidiu a cotação: remover a nossa
+    ordem para simular o pós-cancelamento pode mover o `mid` do livro derivado,
+    enquanto o numerador já foi calculado contra a fotografia original.
     """
-    meio = book.mid
+    meio = book.mid if meio is None else meio
     total = 0.0
     for niveis in (book.bids, book.asks):
         for preco, tamanho in niveis:
@@ -242,7 +250,9 @@ def score_do_livro(book: OrderBook, params: ParametrosDeReward) -> float:
     return total
 
 
-def denominador_pessimista(book: OrderBook, params: ParametrosDeReward) -> float:
+def denominador_pessimista(
+    book: OrderBook, params: ParametrosDeReward, *, meio: float | None = None
+) -> float:
     """O MAIOR valor que a soma dos `Q_min` dos makers do livro pode ter.
 
     O livro agregado não diz quem é quem, então o `Q_min` de cada maker não
@@ -264,8 +274,11 @@ def denominador_pessimista(book: OrderBook, params: ParametrosDeReward) -> float
     por isso os +148,02 USDC/h dele **não mudam** com esta correção: eram, e
     continuam sendo, limite inferior. O que muda é a cotação de UM lado, que
     o código antigo pagava inteira e a doc paga em um terço, ou em nada.
+
+    `meio` (opcional) é repassado a `score_do_livro`; serve apenas para manter
+    numerador e denominador na mesma fotografia ao avaliar um reposicionamento.
     """
-    return score_do_livro(book, params) / 2.0
+    return score_do_livro(book, params, meio=meio) / 2.0
 
 
 def score_da_ordem(
@@ -578,5 +591,4 @@ def _p50(valores: list[float]) -> float | None:
         return None
     ordenados = sorted(valores)
     return round(ordenados[len(ordenados) // 2], 9)
-
 

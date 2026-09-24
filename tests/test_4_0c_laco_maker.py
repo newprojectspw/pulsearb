@@ -1784,6 +1784,39 @@ class TestTetoDeFracaoDoPool:
         sem_teto = _laco(tmp_path, nossa_ordem_esta_no_livro=True)
         assert sem_teto._denominador_para_teto(livro, aberta, params) is None
 
+    def test_em_LIVE_o_denominador_pos_cancelamento_mantem_o_meio_original(self, tmp_path):
+        """Retirar nossa ordem pode mover o midpoint, mas não pode mudar só o
+        denominador: a candidata já teve o numerador calculado no livro real."""
+        from pulsearb.analysis.rewards import ParametrosDeReward, denominador_pessimista
+        from pulsearb.live.repouso import CotacaoAberta
+
+        params = ParametrosDeReward(
+            daily_rate=100.0, min_size=5.0, max_spread=0.03, tick_size=0.01
+        )
+        livro = OrderBook(
+            asset_id="tok-up",
+            bids=[(0.49, 50.0), (0.47, 100.0)],
+            asks=[(0.51, 100.0)],
+        )
+        aberta = CotacaoAberta(
+            cotacao=Cotacao(1, 50.0), desde_epoch=0.0, preco_up=0.49, preco_down=0.49
+        )
+        live = _laco(
+            tmp_path, fracao_maxima_do_pool=0.10, nossa_ordem_esta_no_livro=True
+        )
+        sem_nossa = OrderBook(
+            asset_id="tok-up", bids=[(0.47, 100.0)], asks=[(0.51, 100.0)]
+        )
+
+        assert livro.mid == pytest.approx(0.50)
+        assert sem_nossa.mid == pytest.approx(0.49)
+        assert live._denominador_para_teto(livro, aberta, params) == pytest.approx(
+            denominador_pessimista(sem_nossa, params, meio=livro.mid)
+        )
+        assert live._denominador_para_teto(livro, aberta, params) != pytest.approx(
+            denominador_pessimista(sem_nossa, params)
+        )
+
     async def test_MANTER_repetido_nao_infla_ordens_efetivas(self, tmp_path):
         """A fração ADMITIDA por avaliação sobe a cada passada (inclui MANTER);
         a de ORDENS EFETIVAS não — ela só conta COLOCADA/REPOSICIONADA. É o

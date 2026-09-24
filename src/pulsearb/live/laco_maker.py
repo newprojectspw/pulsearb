@@ -622,7 +622,11 @@ class LacoMaker:
         sem_a_nossa = OrderBook(
             asset_id=livro.asset_id, bids=bids, asks=livro.asks, ts_ns=livro.ts_ns
         )
-        return denominador_pessimista(sem_a_nossa, params)
+        # A retirada pode deslocar o `mid` do livro derivado. O numerador da
+        # candidata já foi avaliado contra `livro`, então o denominador precisa
+        # usar o MESMO meio — mudar só um dos dois mistura fotografias e pode
+        # aprovar ou recusar o teto pela conta errada.
+        return denominador_pessimista(sem_a_nossa, params, meio=livro.mid)
 
     def _escolher_da_grade(
         self,
