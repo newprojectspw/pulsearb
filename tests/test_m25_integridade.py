@@ -717,3 +717,24 @@ class TestPoliticaDeResync:
                 (evento_ts + 1) * 1_000_000,
             )
         assert m.consumir_resync() == {ASSET: "divergencia_persistente"}
+
+    def test_dois_blips_separados_por_silencio_NAO_sao_persistentes(self):
+        """Revisão #195 item 4: duas divergências de um tick separadas por um
+        silêncio longo (o token ficou mudo) não descrevem um livro
+        CONTINUAMENTE fora — são blips isolados. A contagem recomeça depois do
+        gap máximo, e não vira resync."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        m.observar(
+            _delta(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.51"),
+            2_000_000_000,
+        )
+        # 99 s depois (>> 5 s de gap maximo): o segundo blip recomeca a contagem.
+        m.observar(
+            _delta(101000, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.51"),
+            101_000_000_000,
+        )
+        assert m.consumir_resync() == {}
+        assert m.resyncs_por_persistencia == 0

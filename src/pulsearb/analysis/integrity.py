@@ -92,6 +92,15 @@ PERSISTENCIA_MIN_MS = 250.0
 # `MonitorDeIntegridade._politica_de_resync`.
 CONFIRMACOES_MIN_RESYNC = 2
 
+# Intervalo máximo entre duas observações divergentes para elas contarem como
+# a MESMA persistência. Duas divergências de um tick separadas por, digamos,
+# 99 s (o token ficou mudo no meio) não descrevem um livro CONTINUAMENTE fora
+# — descrevem dois blips isolados, e cada um recomeça a contagem. 5 s são bem
+# acima da cadência de deltas do CLOB (~5 ms a 1 s) e bem abaixo do silêncio
+# que já viraria lacuna. Sem este teto, a persistência seria falsa (revisão do
+# PR #195).
+INTERVALO_MAX_ENTRE_CONFIRMACOES_MS = 5_000.0
+
 # Fração do tempo observado com livro divergente que ainda deixa o token
 # utilizável. 1% de uma janela de 5 min são 3 s.
 FRACAO_MEDIA = 0.01
@@ -295,12 +304,14 @@ class _EstadoDoToken:
     )
     #: lado → (ts_ms de início, maior magnitude) da divergência relevante aberta
     abertas: dict[str, tuple[float, float]] = field(default_factory=dict)
-    #: lado → (ts_ms de início, nº de observações) de uma divergência
-    #: SUB-material aberta, SÓ para a política de resync por persistência. É
-    #: separada de `abertas` de propósito: `abertas` (material) alimenta a
-    #: MARCA de qualidade e não pode incluir corrida de um tick, senão a
-    #: calibração do M2.5 muda; esta alimenta só a decisão de resync.
-    resync_streak: dict[str, tuple[float, int]] = field(default_factory=dict)
+    #: lado → (ts_ms de início, ts_ms da última observação, nº de observações)
+    #: de uma divergência SUB-material aberta, SÓ para a política de resync por
+    #: persistência. É separada de `abertas` de propósito: `abertas` (material)
+    #: alimenta a MARCA de qualidade e não pode incluir corrida de um tick,
+    #: senão a calibração do M2.5 muda; esta alimenta só a decisão de resync. O
+    #: `ultimo` existe para descartar a "persistência" falsa de dois blips
+    #: separados por um silêncio longo (revisão do PR #195).
+    resync_streak: dict[str, tuple[float, float, int]] = field(default_factory=dict)
     #: `None` = ainda não observado. Zero NÃO serve de sentinela aqui: um
     #: carimbo legítimo de 0 seria indistinguível de "nunca vi este token", e
     #: a comparação com 0.0 em ponto flutuante é frágil por natureza.
@@ -911,9 +922,15 @@ class MonitorDeIntegridade:
             self.resyncs_por_material += 1
             self._solicitar_resync(asset_id, "divergencia_material")
             return
-        inicio, contagem = estado.resync_streak.get(lado, (carimbo, 0))
+        inicio, ultimo, contagem = estado.resync_streak.get(
+            lado, (carimbo, carimbo, 0)
+        )
+        # Gap longo desde a última observação divergente: não foi divergência
+        # CONTÍNUA, foram blips isolados. Recomeça a contagem (revisão #195).
+        if carimbo - ultimo > INTERVALO_MAX_ENTRE_CONFIRMACOES_MS:
+            inicio, contagem = carimbo, 0
         contagem += 1
-        estado.resync_streak[lado] = (inicio, contagem)
+        estado.resync_streak[lado] = (inicio, carimbo, contagem)
         if (
             contagem >= self.confirmacoes_min_resync
             and carimbo - inicio > self.persistencia_min_ms
