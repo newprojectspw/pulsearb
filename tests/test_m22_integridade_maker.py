@@ -526,6 +526,28 @@ def test_score_do_livro_soma_os_dois_lados():
     assert score_do_livro(livro, PARAMS) == pytest.approx(2 * (2 / 3) ** 2 * 100)
 
 
+def test_denominador_pessimista_pode_fixar_o_meio_da_fotografia():
+    """Livro derivado pode perder o melhor bid ao retirar nossa ordem.
+
+    A pontuação do denominador continua sendo feita no meio da fotografia que
+    calculou o numerador; usar o `book.mid` do derivado misturaria os dois.
+    """
+    livro_original = OrderBook(
+        asset_id="tok",
+        bids=[(0.49, 50.0), (0.47, 100.0)],
+        asks=[(0.51, 100.0)],
+    )
+    sem_nossa = OrderBook(
+        asset_id="tok", bids=[(0.47, 100.0)], asks=[(0.51, 100.0)]
+    )
+
+    assert livro_original.mid == pytest.approx(0.50)
+    assert sem_nossa.mid == pytest.approx(0.49)
+    assert denominador_pessimista(sem_nossa, PARAMS, meio=livro_original.mid) != pytest.approx(
+        denominador_pessimista(sem_nossa, PARAMS)
+    )
+
+
 def _janela_com_livro(slug: str = "j1") -> WindowState:
     timeline = BookTimeline()
     for segundo in range(10):
