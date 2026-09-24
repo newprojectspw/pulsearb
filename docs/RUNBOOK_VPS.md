@@ -209,17 +209,119 @@ journalctl -u pulsearb-recorder --since "60 seconds ago" \
 | Campo | Valor saudável | O que significa se estourar |
 |---|---|---|
 | `descartadas_book` | **0**, sempre | a fila SEM PERDA transbordou: delta de livro se perdeu. Disco ou CPU insuficientes. |
-| `divergencias` | 0, ou poucas e estáveis | o topo que reconstruímos discorda do que o servidor manda. Crescendo sem parar = parser errado (ver API_NOTES 6.1b), não perda. |
-| `resyncs` | poucos | cada um é um buraco que foi consertado. Muitos = a fonte do problema não foi resolvida. |
+| `divergencias` | pode ser ALTO e estável | é a contagem de TODAS as divergências alinhadas, e a maioria é a corrida de um tick entre `best_bid_ask` e `price_change` — NORMAL (M2.5). Sozinho não condena a gravação; o que condena é `divergencias_persistentes` e `tokens_corrompidos`. |
+| `resyncs` | **poucos e explicáveis** | desde 2026-09-24 o resync NÃO dispara mais a cada divergência: só divergência MATERIAL (> 2 ticks, delta perdido) ou de um tick que PERSISTE (> 250 ms, ≥ 2 obs). Milhares de resyncs = a fonte real do problema, não corrida. Veja `integridade.divergencia_topo_book.politica_de_resync` no relatório: `por_divergencia_material`, `por_persistencia`, `transientes_ignoradas`. |
 | `offset_relogio_p50_ms` | estável, dezenas de ms | crescendo ao longo da gravação = NTP quebrado (§4.1). |
 
-**`divergencias` alto logo no primeiro minuto é o sinal mais importante desta
-lista**, e vale parar por ele: significa que o livro reconstruído não
-corresponde ao real, e uma gravação de 72h nessas condições não sustenta
-veredito nenhum. Confira `integridade.divergencia_topo_book.formas_de_price_change`
-no relatório final para saber qual formato o servidor está usando.
+**O sinal que condena a gravação NÃO é `divergencias` alto** — foi esse o
+engano que invalidou a gravação de 2026-09-24, com 542 mil resyncs disparados
+por corridas de um tick. O que condena é
+`integridade.divergencia_topo_book.divergencias_persistentes` > 0 e
+`tokens_corrompidos` não vazio no relatório final. Confira também
+`formas_de_price_change` (tem de ser `price_changes`) e o bloco
+`politica_de_resync` (as corridas têm de aparecer em `transientes_ignoradas`,
+não em resyncs).
 
 Só depois desses quatro checks a gravação está de fato iniciada.
+
+### 5.2. A tempestade de resyncs de um tick — causa raiz e conserto (2026-09-24)
+
+**Sintoma medido na VPS (2 vCPU / 4 GB, ~1 h, 76 janelas):** 6,39 M msgs
+poly, 392 mil divergências, **542 mil disparos de resync**, 9.488 resyncs
+efetivos, ~1,4 M ms de token `apos_perda`, 24 `slow consumer`, ~2 GB/h. A
+gravação foi invalidada.
+
+**Causa raiz.** O `MonitorDeIntegridade` (M2.5) já classificava a QUALIDADE do
+livro por conjunção (magnitude > 2 ticks **e** persistência > 250 ms **e**
+fração de tempo), mas o RECORDER resincronizava a cada divergência devolvida
+por `observar()` — **sem nenhum desses limiares**. A corrida de um tick entre
+`best_bid_ask` e `price_change` (que o M2.5 documenta como NORMAL) virava
+resync destrutivo: cada resync `marca_perda` (livro descartado → tempo
+`apos_perda`) e reassina (unsub+sub → enxurrada de snapshots de book →
+mais tráfego → `slow consumer` → mais quedas → mais divergências). Um laço que
+se realimentava.
+
+**Comportamento anterior:** `for divergencia in observar(...): a_resincronizar.add(...)`.
+
+**Comportamento corrigido:** o monitor decide o resync por uma política
+explícita (`_politica_de_resync`), e o recorder drena com `consumir_resync()`:
+
+- só a comparação **alinhada por carimbo** pede resync (a por chegada mede a
+  nossa fila, não corrupção);
+- divergência **material** (> 2 ticks, na mesma mensagem = delta perdido) →
+  resync imediato (motivo `divergencia_material`);
+- divergência de **um tick** → telemetria (`transientes_ignoradas`), sem
+  resync — a menos que **persista** (≥ 2 observações E > 250 ms), aí resync
+  com motivo `divergencia_persistente`;
+- perda de fila (`fila_cheia`), snapshot ausente após perda e corrupção
+  persistente continuam forçando resync — a falha fechada não afrouxou.
+
+Nenhuma tolerância foi aumentada e nenhuma divergência é escondida: o número
+de divergências pode continuar alto (são as corridas), mas agora elas não
+viram resync.
+
+### 5.3. Hora de teste — critérios de aceite (rode ANTES das 72 h)
+
+```bash
+# uma hora de gravação (o preflight de disco não barra rodada curta)
+python -m pulsearb.recorder --duration 1h
+# leia o relatório final:
+journalctl -u pulsearb-recorder --since "70 min ago" \
+  | grep '"msg":"recorder encerrado"' | tail -1 | python3 -m json.tool
+```
+
+A hora PASSA quando, no relatório final:
+
+| Critério | Onde | Aceite |
+|---|---|---|
+| descarte de livro | `descartadas_por_canal.book` | **0** |
+| resyncs | `integridade.resyncs` | poucos e explicáveis (dezenas, não milhares) |
+| corridas viram telemetria | `integridade...politica_de_resync.transientes_ignoradas` | **> 0** (as corridas foram vistas e NÃO resincronizaram) |
+| divergências persistentes | `integridade...criterio_de_invalidacao.divergencias_persistentes` | **0** |
+| tokens corrompidos | `integridade...tokens_corrompidos` | **[]** |
+| forma do price_change | `integridade...formas_de_price_change` | `{"price_changes": N}` |
+| slow consumer recorrente | `quedas_por_feed.poly_ws` | sem `1013` repetido |
+| offset do relógio | `integridade.offset_relogio_ms.p50_ms` | estável, dezenas de ms |
+| projeção de disco | `armazenamento.bytes_por_hora_medido` | projeção 72 h cabe no disco |
+| relatório | linha `recorder encerrado` | presente e completo |
+
+### 5.4. Escopo do recorder (opcional) e preflight de armazenamento
+
+**Escopo.** Se a descoberta trouxer janelas demais para a banda/CPU da
+máquina, limite o número de tokens assinados no `config.yaml`:
+
+```yaml
+recorder:
+  max_tokens_assinados: 40   # par >= 2; 20 janelas inteiras; null = tudo
+```
+
+O corte é determinístico (por slug), mantém janelas inteiras (Up+Down) e
+**aparece no snapshot de descoberta** (bloco `escopo`:
+`janelas_descobertas`, `janelas_no_escopo`, `janelas_cortadas`). Cobertura
+nunca cai em silêncio.
+
+**Preflight de disco (req 12).** Antes de gravar, o recorder projeta o espaço
+e **recusa iniciar** se o disco não comporta:
+
+```yaml
+recorder:
+  bytes_por_hora_estimados: 2000000000   # 2 GB/h — calibre pela taxa MEDIDA
+  margem_de_disco: 1.2
+```
+
+Uma rodada de 72 h com disco insuficiente sai com código 1 e a linha de log
+`preflight de armazenamento RECUSOU a gravação`. Rodada curta (< 6 h) não é
+barrada. Depois de uma hora de teste, use
+`armazenamento.bytes_por_hora_medido` do relatório para calibrar
+`bytes_por_hora_estimados`.
+
+### 5.5. Critérios objetivos para aceitar uma gravação de 72 h
+
+Tudo da §5.3 (medido sobre as 72 h), MAIS: as duas metades do 0.8 (saúde do
+feed **e** dano às medidas — ver `docs/ESTADO_PARA_LIVE.md` item 0.8), maior
+silêncio ≤ 60 s, e `armazenamento` projetado que de fato coube (a rodada não
+morreu por disco). `divergencias_persistentes` = 0 e `tokens_corrompidos` = []
+sobre as 72 h inteiras — não numa hora boa.
 
 Alternativa com Docker:
 

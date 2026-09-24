@@ -126,6 +126,10 @@ class JsonlGzipWriter:
         self.dropped = 0
         self.dropped_por_canal: Counter[str] = Counter()
         self.written = 0
+        #: Arquivos que ESTE writer abriu, para medir bytes em disco (gzip) e
+        #: projetar armazenamento (req 13). Só os desta rodada — somar tudo no
+        #: diretório contaria gravações antigas.
+        self.arquivos_escritos: list[Path] = []
         self.log = get_logger("pulsearb.recorder")
         self._task: asyncio.Task[None] | None = None
         self._file: IO[bytes] | None = None
@@ -155,6 +159,20 @@ class JsonlGzipWriter:
     def queue(self) -> asyncio.Queue[RecordEnvelope]:
         """Compat: o canal padrão. Havia uma fila só até o M2.2."""
         return self.queues[CANAL_PADRAO]
+
+    @property
+    def bytes_em_disco(self) -> int:
+        """Soma dos tamanhos (gzip, em disco) dos arquivos desta rodada.
+
+        É o número que a projeção de armazenamento usa: bytes COMPRIMIDOS, que
+        é o que ocupa o disco — e não a soma das linhas cruas."""
+        total = 0
+        for caminho in self.arquivos_escritos:
+            try:
+                total += caminho.stat().st_size
+            except OSError:
+                continue
+        return total
 
     # ------------------------------------------------------------------- ciclo
     async def start(self) -> None:
@@ -243,6 +261,7 @@ class JsonlGzipWriter:
             self._file = gzip.open(path, "wb", compresslevel=1)
             self._file_slot = slot
             self._desde_flush = 0
+            self.arquivos_escritos.append(path)
             self.log.info("novo arquivo de gravação", arquivo=str(path))
         self._file.write(envelope.to_line() + b"\n")
         self.written += 1

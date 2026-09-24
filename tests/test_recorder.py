@@ -183,3 +183,40 @@ async def test_arquivo_truncado_nao_e_reaberto_em_append(tmp_path):
     assert _gzip_valido(novo), "o arquivo novo não pode herdar o dano do velho"
     with gzip.open(novo, "rb") as handle:
         assert json.loads(handle.readline())["payload"] == {"depois": 1}
+
+
+async def test_backpressure_no_canal_book_grava_a_rajada_inteira(tmp_path):
+    """Req 10: uma rajada de livro DENTRO da capacidade é gravada inteira, sem
+    descarte. O canal sem perda existe para isso — perder um delta corrompe o
+    livro reconstruído em silêncio."""
+    from pulsearb.recorder.writer import CANAL_BOOK
+
+    writer = JsonlGzipWriter(output_dir=tmp_path, queue_max=4, queue_max_book=2000)
+    await writer.start()
+    for i in range(800):
+        writer.submit(
+            RecordEnvelope(i, i, "poly_ws", b'{"n":%d}' % i), canal=CANAL_BOOK
+        )
+    await asyncio.sleep(0.3)
+    await writer.stop()
+
+    assert writer.dropped_por_canal.get(CANAL_BOOK, 0) == 0
+    assert len(_read_all(tmp_path)) == 800
+
+
+def test_overflow_de_book_e_incidente_contado_nao_silencio(tmp_path):
+    """Req 5/10: se o canal SEM PERDA transborda, cada evento perdido vira um
+    incidente com callback (o recorder marca perda e resincroniza) e é
+    CONTADO — nunca um descarte silencioso."""
+    from pulsearb.recorder.writer import CANAL_BOOK
+
+    incidentes: list = []
+    writer = JsonlGzipWriter(
+        output_dir=tmp_path, queue_max_book=4, ao_perder_book=incidentes.append
+    )
+    # Sem start(): ninguém drena; a 5ª submissão de book transborda.
+    for i in range(10):
+        writer.submit(RecordEnvelope(i, i, "poly_ws", b"{}"), canal=CANAL_BOOK)
+
+    assert writer.dropped_por_canal[CANAL_BOOK] == 6
+    assert len(incidentes) == 6

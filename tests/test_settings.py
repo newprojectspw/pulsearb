@@ -148,6 +148,27 @@ def test_teto_de_fracao_do_pool_fora_da_faixa_e_recusado(tmp_path, monkeypatch):
     assert Settings.load(tmp_path / "x.yaml").maker_fracao_maxima_do_pool == 1.0
 
 
+@pytest.mark.parametrize(
+    ("nome", "valor"),
+    [
+        ("PULSEARB_RECORDER__MAX_TOKENS_ASSINADOS", "0"),
+        ("PULSEARB_RECORDER__MAX_TOKENS_ASSINADOS", "3"),
+        ("PULSEARB_RECORDER__BYTES_POR_HORA_ESTIMADOS", "0"),
+        ("PULSEARB_RECORDER__BYTES_POR_HORA_ESTIMADOS", "-1"),
+        ("PULSEARB_RECORDER__MARGEM_DE_DISCO", "0.99"),
+        ("PULSEARB_RECORDER__MARGEM_DE_DISCO", "-1"),
+        ("PULSEARB_RECORDER__DURACAO_MINIMA_PARA_PREFLIGHT_S", "0"),
+    ],
+)
+def test_recorder_rejeita_parametros_de_escopo_e_preflight_invalidos(
+    tmp_path, monkeypatch, nome, valor
+):
+    """Configuração inválida não pode desativar o fail-closed do recorder."""
+    monkeypatch.setenv(nome, valor)
+    with pytest.raises(ValueError):
+        Settings.load(tmp_path / "inexistente.yaml")
+
+
 # ── todo teto de risco tem de estar ESCRITO no config.yaml versionado ─────────
 #
 # Auditoria de 2026-09-17, §2.8: nenhum dos treze campos de `RiskSettings`

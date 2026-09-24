@@ -141,6 +141,39 @@ async def test_snapshot_e_gravado_a_cada_ciclo(recorder, tmp_path):
     assert snapshots[0]["janelas"][0]["_seconds_left"] is not None
 
 
+async def test_log_de_descoberta_conta_operaveis_dentro_do_escopo(
+    recorder, monkeypatch
+):
+    """A telemetria deve refletir as janelas realmente assinadas."""
+    from pulsearb.recorder import __main__ as recorder_main
+
+    recorder.settings.recorder.max_tokens_assinados = 2
+    eventos: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        recorder_main.log,
+        "info",
+        lambda mensagem, **campos: eventos.append((mensagem, campos)),
+    )
+    fake = FakeDiscovery([[_janela(1), _janela(2)]])
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    descoberta = next(
+        campos for mensagem, campos in eventos if mensagem == "descoberta"
+    )
+    assert descoberta["janelas"] == 2
+    assert descoberta["no_escopo"] == 1
+    assert descoberta["cortadas"] == 1
+    assert descoberta["operaveis"] == 1
+
+
 async def test_eventos_de_feed_chegam_ao_arquivo(recorder, server, tmp_path):  # noqa: F811
     server.to_send = [
         json.dumps(
@@ -335,30 +368,82 @@ def test_lote_com_um_delta_ja_vai_pelo_canal_sem_perda(recorder):
     assert recorder._canal_do_evento(evento) == CANAL_BOOK
 
 
-def test_divergencia_de_topo_agenda_resync(recorder):
-    """A.2 → A.3: divergiu, o token entra na fila de resync."""
-    recorder._contar_evento_poly(
-        _evento_poly(
-            {
-                "event_type": "book",
-                "asset_id": "tok",
-                "bids": [{"price": "0.49", "size": "100"}],
-                "asks": [{"price": "0.51", "size": "100"}],
-            }
-        )
+def _book_evt(ts_ms, bid="0.49", ask="0.51"):
+    return _evento_poly(
+        {
+            "event_type": "book",
+            "asset_id": "tok",
+            "timestamp": str(ts_ms),
+            "bids": [{"price": bid, "size": "100"}],
+            "asks": [{"price": ask, "size": "100"}],
+        }
     )
+
+
+def _delta_evt(ts_ms, *, price, size, side, best_bid, best_ask):
+    return _evento_poly(
+        {
+            "event_type": "price_change",
+            "market": "0xabc",
+            "timestamp": str(ts_ms),
+            "price_changes": [
+                {
+                    "asset_id": "tok",
+                    "price": price,
+                    "size": size,
+                    "side": side,
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                }
+            ],
+        }
+    )
+
+
+def test_divergencia_MATERIAL_alinhada_agenda_resync(recorder):
+    """Req 8: topo autoritativo do `price_change` diverge do reconstruído por
+    MUITO mais que um tick, na MESMA mensagem — perdemos um delta. Resync
+    imediato, com motivo próprio."""
+    recorder._contar_evento_poly(_book_evt(1000))
+    # O delta sobe o bid para 0,50, mas o servidor afirma 0,70: 20 ticks fora.
     recorder._contar_evento_poly(
-        _evento_poly(
-            {
-                "event_type": "best_bid_ask",
-                "asset_id": "tok",
-                "best_bid": "0.70",
-                "best_ask": "0.71",
-            }
-        )
+        _delta_evt(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.70", best_ask="0.51")
     )
     assert "tok" in recorder.a_resincronizar
-    assert recorder.motivos_de_resync["divergencia_de_topo"] > 0
+    assert recorder.motivos_de_resync["divergencia_material"] > 0
+
+
+def test_corrida_de_um_tick_NAO_agenda_resync(recorder):
+    """Req 7: uma divergência de um tick numa única observação é a corrida
+    `best_bid_ask` × `price_change` que o M2.5 mediu como normal — telemetria,
+    nunca resync destrutivo imediato."""
+    recorder._contar_evento_poly(_book_evt(1000))
+    # Reconstruído fica 0,50; o servidor afirma 0,51 — um tick, uma vez.
+    recorder._contar_evento_poly(
+        _delta_evt(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.52")
+    )
+    assert "tok" not in recorder.a_resincronizar
+    assert recorder.integridade.divergencias_transientes_ignoradas >= 1
+
+
+def test_divergencia_de_um_tick_PERSISTENTE_agenda_resync(recorder):
+    """Req 7/8: a mesma divergência de um tick, confirmada em duas observações
+    separadas por mais que a persistência mínima, deixa de ser corrida — o
+    livro ficou de fato um tick fora, e um snapshot novo o conserta."""
+    recorder._contar_evento_poly(_book_evt(1000))
+    # Duas observações sub-materiais na mesma direção, > 250 ms de intervalo.
+    recorder._contar_evento_poly(
+        _delta_evt(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.52")
+    )
+    recorder._contar_evento_poly(
+        _delta_evt(2300, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.52")
+    )
+    assert "tok" in recorder.a_resincronizar
+    assert recorder.motivos_de_resync["divergencia_persistente"] > 0
 
 
 def test_fila_de_livro_cheia_marca_o_token_como_furado(recorder):

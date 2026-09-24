@@ -311,6 +311,37 @@ Rodada 4 (20 min): 24 quedas na `clob[updown]`, **1** na `clob[pools]`. 🟡
 falta: medir em rodada longa (horas) quantas quedas a `clob[pools]` tem
 sozinha.
 
+### A tempestade de resyncs de um tick invalidou a gravação (2026-09-24)
+
+A VPS de 2 vCPU / 4 GB gravou ~1 h com 76 janelas e o relatório mostrou o
+defeito: 392 mil divergências, **542 mil disparos de resync**, 9.488 resyncs
+efetivos, ~1,4 M ms de token `apos_perda`, 24 `slow consumer`, ~2 GB/h. A
+gravação não vale.
+
+**Causa raiz, e ela não é CPU.** O `MonitorDeIntegridade` (M2.5) classifica a
+QUALIDADE do livro por conjunção (magnitude > 2 ticks **e** persistência > 250
+ms **e** fração de tempo), mas o recorder resincronizava a CADA divergência
+devolvida por `observar()`, sem nenhum desses limiares — inclusive a corrida
+de um tick entre `best_bid_ask` e `price_change` que o próprio M2.5 documenta
+como NORMAL. Cada resync descartava o livro (`marca_perda` → tempo
+`apos_perda`) e reassinava (enxurrada de snapshots → mais tráfego → `slow
+consumer` → mais quedas → mais divergências): um laço que se realimentava.
+
+**Conserto (`analysis/integrity.py`, `recorder/__main__.py`):** o resync
+passou a obedecer uma política explícita e testável. Só a comparação ALINHADA
+por carimbo pede resync; MATERIAL (> 2 ticks = delta perdido) resincroniza na
+hora, um tick só se PERSISTIR (≥ 2 obs E > 250 ms), e a corrida vira
+telemetria (`politica_de_resync.transientes_ignoradas`). Perda de fila,
+snapshot ausente e corrupção persistente continuam forçando resync — a falha
+fechada não afrouxou, e nenhuma tolerância subiu. No mesmo PR: escopo do
+recorder configurável e visível no relato de descoberta
+(`recorder.max_tokens_assinados`), preflight de disco que RECUSA 72 h sem
+espaço (`recorder.bytes_por_hora_estimados`), e taxa de bytes/hora medida no
+relatório. Critérios de aceite da hora de teste e da gravação de 72 h em
+`docs/RUNBOOK_VPS.md` §5.3–§5.5. 🟡 falta: rodar a hora de teste na VPS e
+confirmar os critérios (`divergencias_persistentes = 0`, `descartadas_book =
+0`, resyncs poucos, sem `slow consumer` recorrente).
+
 ---
 
 ## Bloco 1 — Veredito M2: existe edge líquido?

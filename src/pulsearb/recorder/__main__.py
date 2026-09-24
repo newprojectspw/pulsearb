@@ -33,8 +33,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import shutil
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -103,6 +105,71 @@ RESOLUTION_POLL_SECONDS = 120.0
 # grafia nova.
 
 
+
+
+class PreflightRecusado(RuntimeError):
+    """O disco não comporta a projeção da rodada. Recusar é a falha fechada:
+    começar 72 h para morrer sem espaço no meio invalida a gravação inteira."""
+
+
+def projetar_armazenamento(
+    *, bytes_por_hora: float, duracao_s: float, margem: float, livre_bytes: int
+) -> dict[str, Any]:
+    """Projeta o espaço de uma rodada e diz se cabe. Função PURA — o teste a
+    exercita sem disco, e o preflight injeta o `livre_bytes` real.
+
+    `exigido` é a projeção VEZES a margem: a folga cobre picos e o que não é
+    gravação (log, sistema). `cabe` é o veredito; quem chama recusa se falso.
+    """
+    if bytes_por_hora <= 0:
+        raise ValueError("bytes_por_hora deve ser maior que zero")
+    if duracao_s < 0:
+        raise ValueError("duracao_s não pode ser negativa")
+    if margem < 1:
+        raise ValueError("margem deve ser maior ou igual a 1")
+    if livre_bytes < 0:
+        raise ValueError("livre_bytes não pode ser negativo")
+    horas = duracao_s / 3600.0
+    projetado = bytes_por_hora * horas
+    exigido = projetado * margem
+    return {
+        "bytes_por_hora_estimados": round(bytes_por_hora),
+        "horas": round(horas, 3),
+        "projecao_bytes": round(projetado),
+        "projecao_72h_bytes": round(bytes_por_hora * 72.0),
+        "margem": margem,
+        "exigido_bytes": round(exigido),
+        "livre_bytes": livre_bytes,
+        "cabe": livre_bytes >= exigido,
+    }
+
+
+def preflight_de_armazenamento(settings: Settings, duracao_s: float) -> dict[str, Any]:
+    """Confere o disco ANTES de gravar. Levanta `PreflightRecusado` se não
+    cabe e a rodada é longa o bastante para o preflight valer.
+
+    Rodada curta (< `duracao_minima_para_preflight_s`) não é barrada: uma hora
+    de teste não precisa de espaço para 72 h. O diretório é criado antes da
+    medida — `disk_usage` de um caminho inexistente levantaria."""
+    rec = settings.recorder
+    Path(rec.output_dir).mkdir(parents=True, exist_ok=True)
+    livre = shutil.disk_usage(rec.output_dir).free
+    proj = projetar_armazenamento(
+        bytes_por_hora=rec.bytes_por_hora_estimados,
+        duracao_s=duracao_s,
+        margem=rec.margem_de_disco,
+        livre_bytes=livre,
+    )
+    proj["aplicavel"] = duracao_s >= rec.duracao_minima_para_preflight_s
+    if proj["aplicavel"] and not proj["cabe"]:
+        raise PreflightRecusado(
+            "disco insuficiente para a gravação: projeção "
+            f"{proj['exigido_bytes'] / 1e9:.1f} GB (com margem {rec.margem_de_disco}), "
+            f"livre {livre / 1e9:.1f} GB. Libere disco, reduza `--duration`, ou "
+            "limite o escopo (`recorder.max_tokens_assinados`) e recalibre "
+            "`recorder.bytes_por_hora_estimados` pela taxa medida no relatório."
+        )
+    return proj
 
 
 def market_snapshot(
@@ -350,9 +417,17 @@ class Recorder:
             carimbo = numero(item.get("timestamp"))
             if carimbo:
                 self.relogio.observar(carimbo, event.ts_wall_ns)
-            for divergencia in self.integridade.observar(item, event.ts_wall_ns):
-                self.a_resincronizar.add(divergencia.asset_id)
-                self.motivos_de_resync["divergencia_de_topo"] += 1
+            # A divergência é observada SEMPRE (a telemetria não some), mas o
+            # resync passou a obedecer a política do monitor: só a comparação
+            # ALINHADA por carimbo, e só divergência MATERIAL na hora ou
+            # SUB-material que PERSISTE — nunca a corrida de um tick entre
+            # `best_bid_ask` e `price_change` (M2.5). O gatilho antigo
+            # ("resync a cada divergência") era a causa da tempestade de
+            # resyncs que invalidou a gravação.
+            self.integridade.observar(item, event.ts_wall_ns)
+        for asset_id, motivo in self.integridade.consumir_resync().items():
+            self.a_resincronizar.add(asset_id)
+            self.motivos_de_resync[motivo] += 1
 
     def _on_event(self, event: FeedEvent) -> None:
         if event.source == "poly_ws":
@@ -387,19 +462,61 @@ class Recorder:
                 log.warning("falha na descoberta", erro=f"{type(exc).__name__}: {exc}")
             await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
 
+    def _aplicar_escopo(
+        self, markets: list[DiscoveredMarket]
+    ) -> tuple[list[DiscoveredMarket], dict[str, Any]]:
+        """Corta a descoberta ao escopo configurado, SEM esconder o corte.
+
+        `max_tokens_assinados=None` grava tudo (padrão). Com limite, mantém
+        janelas INTEIRAS (Up+Down são um par; meia janela não serve) até o
+        teto de tokens, em ordem determinística por slug — o replay tem de
+        reproduzir a mesma seleção. O que ficou de fora vai no relato de
+        descoberta (`cortadas`), nunca some em silêncio."""
+        limite = self.settings.recorder.max_tokens_assinados
+        if limite is None:
+            return markets, {
+                "limite_de_tokens": None,
+                "janelas_descobertas": len(markets),
+                "janelas_no_escopo": len(markets),
+                "janelas_cortadas": 0,
+                "tokens_no_escopo": sum(
+                    len(m.token_id_by_outcome) for m in markets
+                ),
+            }
+        no_escopo: list[DiscoveredMarket] = []
+        tokens = 0
+        for market in sorted(markets, key=lambda m: m.slug):
+            n = len(market.token_id_by_outcome)
+            if tokens + n > limite:
+                continue
+            no_escopo.append(market)
+            tokens += n
+        return no_escopo, {
+            "limite_de_tokens": limite,
+            "janelas_descobertas": len(markets),
+            "janelas_no_escopo": len(no_escopo),
+            "janelas_cortadas": len(markets) - len(no_escopo),
+            "tokens_no_escopo": tokens,
+        }
+
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
         markets = await discovery.discover()
         self.discovery_cycles += 1
+        no_escopo, escopo = self._aplicar_escopo(markets)
 
         agora = time.time()
 
         # Tokens que DEVEM estar assinados agora. Janela não-operável continua
         # sendo gravada: o motivo da recusa é dado, e o M2 quer medir isso.
+        # Só as janelas DENTRO do escopo entram na assinatura; as cortadas
+        # ficam registradas no snapshot (bloco `escopo`), não sumem.
         desejados = {
-            token for market in markets for token in market.token_id_by_outcome.values()
+            token
+            for market in no_escopo
+            for token in market.token_id_by_outcome.values()
         }
         # Registra a carência de cada token visto nesta descoberta.
-        for market in markets:
+        for market in no_escopo:
             fim = parse_end_date_epoch({"endDate": market.end_date_iso})
             limite = (fim + RESOLUTION_GRACE_SECONDS) if fim is not None else (
                 agora + RESOLUTION_GRACE_SECONDS
@@ -443,7 +560,10 @@ class Recorder:
             FONTE_DISCOVERY,
             {
                 "ciclo": self.discovery_cycles,
+                # TODAS as janelas descobertas — inclusive as cortadas pelo
+                # escopo. Documentar o corte é o que o impede de ser silencioso.
                 "janelas": [market_snapshot(m) for m in markets],
+                "escopo": escopo,
                 "assinaturas": {
                     "novas": len(novos),
                     "encerradas": len(encerrados),
@@ -458,7 +578,13 @@ class Recorder:
             "descoberta",
             ciclo=self.discovery_cycles,
             janelas=len(markets),
-            operaveis=sum(1 for m in markets if m.operable),
+            no_escopo=escopo["janelas_no_escopo"],
+            cortadas=escopo["janelas_cortadas"],
+            # `markets` inclui janelas cortadas pelo escopo. Contar essas
+            # janelas como operáveis faria o log prometer mais cobertura do
+            # que foi efetivamente assinada; o snapshot continua registrando
+            # a descoberta completa e o corte separadamente.
+            operaveis=sum(1 for m in no_escopo if m.operable),
             novas=len(novos),
             encerradas=len(encerrados),
             assinadas=len(self.poly.token_ids),
@@ -736,6 +862,33 @@ class Recorder:
             ),
         }
 
+    def _armazenamento_resumo(self, duracao_s: float) -> dict[str, Any]:
+        """A taxa de bytes/hora MEDIDA e a projeção para 72 h (req 13).
+
+        É o número que calibra o preflight: a estimativa configurada é um
+        chute conservador; esta é a taxa real desta rodada, em bytes de DISCO
+        (gzip). Os bytes do arquivo aberto ainda não fechado entram
+        subcontados — é estimativa, não contabilidade."""
+        horas = max(duracao_s / 3600.0, 1e-9)
+        bytes_disco = self.writer.bytes_em_disco
+        por_hora = bytes_disco / horas
+        return {
+            "bytes_em_disco": bytes_disco,
+            "arquivos": len(self.writer.arquivos_escritos),
+            "bytes_por_hora_medido": round(por_hora),
+            "projecao_72h_bytes": round(por_hora * 72.0),
+            "estimativa_configurada_por_hora": (
+                self.settings.recorder.bytes_por_hora_estimados
+            ),
+            "nota": (
+                "req 13. `bytes_por_hora_medido` e a taxa REAL em disco (gzip) "
+                "desta rodada; use-a para calibrar "
+                "`recorder.bytes_por_hora_estimados`, que o preflight usa para "
+                "RECUSAR uma rodada de 72 h que nao cabe. O arquivo aberto no "
+                "fim entra subcontado."
+            ),
+        }
+
     def redundancia_resumo(self) -> dict[str, Any]:
         """Quanto cada conexão do RTDS de fato acrescentou (M2.2 A.5).
 
@@ -844,6 +997,7 @@ class Recorder:
             "gaps": resumo_gaps(self.trackers, duracao),
             "redundancia_rtds": self.redundancia_resumo(),
             "saude_do_rtds": self.saude_do_rtds(duracao),
+            "armazenamento": self._armazenamento_resumo(duracao),
         }
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()
@@ -873,6 +1027,17 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging()
     settings = Settings.load(args.config)
     seconds = args.hours * 3600 if args.hours is not None else parse_duration(args.duration)
+
+    # PREFLIGHT DE ARMAZENAMENTO (req 12): recusa ANTES de gravar se o disco
+    # não comporta a projeção. Falha fechada — começar 72 h para morrer sem
+    # espaço no meio invalida a gravação inteira.
+    try:
+        projecao = preflight_de_armazenamento(settings, seconds)
+    except PreflightRecusado as erro:
+        log.error("preflight de armazenamento RECUSOU a gravação", motivo=str(erro))
+        return 1
+    log.info("preflight de armazenamento", **projecao)
+
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run(settings, seconds))
     return 0
