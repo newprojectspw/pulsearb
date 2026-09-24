@@ -84,6 +84,14 @@ TICKS_MIN_DIVERGENCIA = 2
 # são ~2 ordens de grandeza acima do intervalo entre deltas do CLOB.
 PERSISTENCIA_MIN_MS = 250.0
 
+# Confirmações mínimas antes de um resync por PERSISTÊNCIA de divergência
+# sub-material. Uma observação divergente só pode ser corrida (a afirmação e o
+# delta que a corrige ainda não se cruzaram); duas observações alinhadas
+# seguidas, separadas por mais que `PERSISTENCIA_MIN_MS`, não são mais corrida
+# — o livro ficou de fato um tick fora e um snapshot novo o conserta. Ver
+# `MonitorDeIntegridade._politica_de_resync`.
+CONFIRMACOES_MIN_RESYNC = 2
+
 # Fração do tempo observado com livro divergente que ainda deixa o token
 # utilizável. 1% de uma janela de 5 min são 3 s.
 FRACAO_MEDIA = 0.01
@@ -287,6 +295,12 @@ class _EstadoDoToken:
     )
     #: lado → (ts_ms de início, maior magnitude) da divergência relevante aberta
     abertas: dict[str, tuple[float, float]] = field(default_factory=dict)
+    #: lado → (ts_ms de início, nº de observações) de uma divergência
+    #: SUB-material aberta, SÓ para a política de resync por persistência. É
+    #: separada de `abertas` de propósito: `abertas` (material) alimenta a
+    #: MARCA de qualidade e não pode incluir corrida de um tick, senão a
+    #: calibração do M2.5 muda; esta alimenta só a decisão de resync.
+    resync_streak: dict[str, tuple[float, int]] = field(default_factory=dict)
     #: `None` = ainda não observado. Zero NÃO serve de sentinela aqui: um
     #: carimbo legítimo de 0 seria indistinguível de "nunca vi este token", e
     #: a comparação com 0.0 em ponto flutuante é frágil por natureza.
@@ -374,10 +388,26 @@ class MonitorDeIntegridade:
     fracao_alta: float = FRACAO_ALTA
     max_amostras: int = MAX_AMOSTRAS
 
+    confirmacoes_min_resync: int = CONFIRMACOES_MIN_RESYNC
+
     estados: dict[str, _EstadoDoToken] = field(default_factory=dict)
     amostras: list[Divergencia] = field(default_factory=list)
     por_chegada: _Populacao = field(default_factory=_Populacao)
     por_carimbo: _Populacao = field(default_factory=_Populacao)
+    #: asset_id → motivo do resync PEDIDO mas ainda não consumido. É a saída
+    #: explícita da política de resync (ver `_politica_de_resync`): o recorder
+    #: drena com `consumir_resync()`. Fica separado de `observar()` porque uma
+    #: afirmação `best_bid_ask` só é julgada ALINHADA num evento posterior, e
+    #: não no retorno da chamada que a recebeu — devolver o pedido no retorno
+    #: perderia justamente o caso alinhado, que é o que decide.
+    _resync_solicitado: dict[str, str] = field(default_factory=dict)
+    #: Contadores da política de resync, para o relato distinguir POR QUE se
+    #: resincronizou (ou não). `transientes_ignoradas` é a chave do M2.5: são
+    #: as corridas de um tick que ANTES viravam resync destrutivo e agora só
+    #: viram telemetria.
+    resyncs_por_material: int = 0
+    resyncs_por_persistencia: int = 0
+    divergencias_transientes_ignoradas: int = 0
     #: token → quantas vezes divergiu (população alinhada)
     divergencias_por_token: Counter[str] = field(default_factory=Counter)
     #: qual forma de `price_change` o servidor está usando de fato
@@ -552,6 +582,7 @@ class MonitorDeIntegridade:
                     estado.livro.best_ask,
                     origem="price_change",
                     alinhado=True,
+                    pode_pedir_resync=True,
                 )
             )
         return achados
@@ -613,6 +644,7 @@ class MonitorDeIntegridade:
         estado.historico.clear()
         estado.pendentes.clear()
         estado.abertas.clear()
+        estado.resync_streak.clear()
         estado.abrir_sem_livro(estado.ts_ultimo_ms)
 
     def finalizar(self) -> None:
@@ -691,6 +723,11 @@ class MonitorDeIntegridade:
             nosso_ask,
             origem="best_bid_ask" + ("_forcada" if forcada else ""),
             alinhado=True,
+            # Só pede resync quando o alinhamento de fato ACHOU o estado no
+            # carimbo. Sem estado alinhado (`achou=False`) a comparação
+            # degenera para a conta por chegada — que mede a nossa fila, não
+            # corrupção —, e resync ali reintroduziria a tempestade.
+            pode_pedir_resync=achou,
         )
 
     @staticmethod
@@ -724,6 +761,7 @@ class MonitorDeIntegridade:
         *,
         origem: str,
         alinhado: bool,
+        pode_pedir_resync: bool = False,
     ) -> list[Divergencia]:
         populacao = self.por_carimbo if alinhado else self.por_chegada
         achados: list[Divergencia] = []
@@ -742,6 +780,7 @@ class MonitorDeIntegridade:
                 origem=origem,
                 alinhado=alinhado,
                 populacao=populacao,
+                pode_pedir_resync=pode_pedir_resync,
             )
             if divergencia is not None:
                 achados.append(divergencia)
@@ -760,6 +799,7 @@ class MonitorDeIntegridade:
         origem: str,
         alinhado: bool,
         populacao: _Populacao,
+        pode_pedir_resync: bool = False,
     ) -> Divergencia | None:
         """Confere UM lado do livro. `None` = nada a registrar neste lado."""
         if afirmado is None:
@@ -781,6 +821,9 @@ class MonitorDeIntegridade:
             if alinhado:
                 self._fechar_aberta(estado, lado, carimbo)
                 estado.fechar_sem_livro(carimbo)
+                # Bateu: a divergência (se havia) era corrida, e o livro voltou
+                # a descrever o topo. A confirmação de resync recomeça do zero.
+                estado.resync_streak.pop(lado, None)
             return None
         magnitude = abs(afirmado - nosso) if nosso is not None else float("inf")
         motivo = estado.livro.motivo_vazio[lado] if nosso is None else None
@@ -797,6 +840,10 @@ class MonitorDeIntegridade:
         populacao.registrar(magnitude, motivo)
         if alinhado:
             self._contabilizar(asset_id, estado, lado, carimbo, magnitude, motivo)
+            if pode_pedir_resync:
+                self._politica_de_resync(
+                    asset_id, estado, lado, carimbo, magnitude, motivo
+                )
         if len(self.amostras) < self.max_amostras:
             self.amostras.append(divergencia)
         return divergencia
@@ -829,6 +876,70 @@ class MonitorDeIntegridade:
         # Lado vazio não conta tempo divergente: é outra doença, e misturar as
         # duas populações foi o erro do M2.2.
         self._fechar_aberta(estado, lado, carimbo)
+
+    def _politica_de_resync(
+        self,
+        asset_id: str,
+        estado: _EstadoDoToken,
+        lado: str,
+        carimbo: float,
+        magnitude: float,
+        motivo: str | None,
+    ) -> None:
+        """Decide se ESTA divergência alinhada pede resync — a política
+        explícita que substitui o "resync a cada divergência" (req 7/8).
+
+        - **lado vazio** (magnitude infinita): truncagem de profundidade (o
+          servidor mostra um nível que nunca nos foi contado) — não é livro
+          furado e reaplicar snapshot não conserta. A ausência REAL de livro
+          (`sem_snapshot`/`apos_perda`) nem chega aqui: `_conferir_lado` sai
+          antes, sem snapshot. Não pede resync.
+        - **material** (> `magnitude_minima`, > ~2 ticks): o topo autoritativo
+          diverge do reconstruído por mais que ruído de corrida — perdemos um
+          delta. Resync imediato (req 8).
+        - **sub-material** (tipicamente 1 tick): por padrão é a corrida
+          `best_bid_ask` × `price_change` que o M2.5 mediu como NORMAL (req 7)
+          — telemetria, sem resync destrutivo. Só vira resync se PERSISTIR:
+          `confirmacoes_min_resync` observações E duração > `persistencia_min_ms`.
+          Um livro parado um tick fora por 250 ms não é mais corrida.
+        """
+        if math.isinf(magnitude):
+            estado.resync_streak.pop(lado, None)
+            return
+        if magnitude > self.magnitude_minima:
+            estado.resync_streak.pop(lado, None)
+            self.resyncs_por_material += 1
+            self._solicitar_resync(asset_id, "divergencia_material")
+            return
+        inicio, contagem = estado.resync_streak.get(lado, (carimbo, 0))
+        contagem += 1
+        estado.resync_streak[lado] = (inicio, contagem)
+        if (
+            contagem >= self.confirmacoes_min_resync
+            and carimbo - inicio > self.persistencia_min_ms
+        ):
+            estado.resync_streak.pop(lado, None)
+            self.resyncs_por_persistencia += 1
+            self._solicitar_resync(asset_id, "divergencia_persistente")
+        else:
+            self.divergencias_transientes_ignoradas += 1
+
+    def _solicitar_resync(self, asset_id: str, motivo: str) -> None:
+        """Registra um pedido de resync, para o recorder drenar. `material`
+        vence `persistente` se os dois caírem antes do dreno — é o mais grave."""
+        if motivo == "divergencia_material" or asset_id not in self._resync_solicitado:
+            self._resync_solicitado[asset_id] = motivo
+
+    def consumir_resync(self) -> dict[str, str]:
+        """Os pedidos de resync desde o último dreno, e limpa. asset_id → motivo.
+
+        O recorder chama isto DEPOIS de `observar()` a cada evento: um pedido
+        pode nascer tanto no `price_change` (alinhado por construção) quanto na
+        resolução de uma afirmação `best_bid_ask` pendente que um evento
+        posterior destravou — e só aqui os dois caminhos se encontram."""
+        pedidos = dict(self._resync_solicitado)
+        self._resync_solicitado.clear()
+        return pedidos
 
     @staticmethod
     def _abrir_ou_estender(
@@ -1065,6 +1176,24 @@ class MonitorDeIntegridade:
                     "divergente acima do teto. O limiar antigo (0,01) era "
                     "exatamente UM tick de mercado e reprovou 200 de 200 "
                     "janelas medindo corrida, nao corrupcao."
+                ),
+            },
+            "politica_de_resync": {
+                "por_divergencia_material": self.resyncs_por_material,
+                "por_persistencia": self.resyncs_por_persistencia,
+                "transientes_ignoradas": self.divergencias_transientes_ignoradas,
+                "confirmacoes_min": self.confirmacoes_min_resync,
+                "persistencia_min_ms": self.persistencia_min_ms,
+                "pendentes_de_dreno": len(self._resync_solicitado),
+                "nota": (
+                    "A politica que substituiu 'resync a cada divergencia' "
+                    "(req 7/8). So a comparacao ALINHADA por carimbo pede "
+                    "resync — a por chegada mede a fila, nao corrupcao. "
+                    "MATERIAL (> magnitude_minima) resincroniza na hora; "
+                    "SUB-material (1 tick) so se persistir "
+                    "(>= confirmacoes_min observacoes E > persistencia_min_ms). "
+                    "`transientes_ignoradas` sao as corridas de um tick que "
+                    "ANTES viravam resync destrutivo e agora sao so telemetria."
                 ),
             },
             "snapshots_de_livro": self._resumo_dos_books(),

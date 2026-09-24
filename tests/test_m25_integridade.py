@@ -540,3 +540,121 @@ def test_uma_mensagem_pode_tocar_dois_tokens_e_cada_um_e_conferido():
     assert monitor.divergencias == 0
     assert monitor.qualidade_do_token("up") == "alta"
     assert monitor.qualidade_do_token("down") == "alta"
+
+
+# ───────────────────────── política de resync por confirmação (req 7/8, #resync)
+#
+# O detector do M2.5 classifica QUALIDADE por conjunção; a política de resync
+# é o que o RECORDER usa para reagir. Antes ele resincronizava a cada
+# divergência — inclusive a corrida de um tick — e isso foi a tempestade que
+# invalidou a gravação da VPS. Aqui se trava a política nova.
+
+
+class TestPoliticaDeResync:
+    def test_divergencia_material_pede_resync_na_hora(self):
+        """Req 8: topo autoritativo do `price_change` diverge por muito mais
+        que um tick, na mesma mensagem — delta perdido. Resync imediato."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        m.observar(
+            _delta(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.70", best_ask="0.51"),
+            2_000_000_000,
+        )
+        assert m.consumir_resync() == {ASSET: "divergencia_material"}
+        assert m.resyncs_por_material == 1
+
+    def test_corrida_de_um_tick_NAO_pede_resync(self):
+        """Req 7: uma divergência de um tick, uma vez, é corrida — telemetria,
+        sem resync."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        m.observar(
+            _delta(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.51", best_ask="0.52"),
+            2_000_000_000,
+        )
+        assert m.consumir_resync() == {}
+        assert m.divergencias_transientes_ignoradas >= 1
+
+    def test_um_tick_persistente_pede_resync(self):
+        """Req 7/8: o mesmo tick fora, confirmado em 2 observações a > 250 ms,
+        deixa de ser corrida."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        for ts in (2000, 2300):
+            # só o bid diverge um tick (ask afirmado bate o reconstruído).
+            m.observar(
+                _delta(ts, price="0.50", size="10", side="BUY",
+                       best_bid="0.51", best_ask="0.51"),
+                ts * 1_000_000,
+            )
+        assert m.consumir_resync() == {ASSET: "divergencia_persistente"}
+        assert m.resyncs_por_persistencia == 1
+
+    def test_um_tick_que_se_corrige_rapido_nao_pede_resync(self):
+        """Duas observações de um tick separadas por menos que a persistência
+        mínima continuam sendo corrida — não resincroniza."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        for ts in (2000, 2100):  # 100 ms < 250 ms
+            m.observar(
+                _delta(ts, price="0.50", size="10", side="BUY",
+                       best_bid="0.51", best_ask="0.52"),
+                ts * 1_000_000,
+            )
+        assert m.consumir_resync() == {}
+
+    def test_best_bid_ask_por_chegada_sozinho_nao_pede_resync(self):
+        """A afirmação `best_bid_ask` avulsa é comparada por CHEGADA (mede a
+        fila, não corrupção). Sozinha, não pede resync — só telemetria."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        m.observar(_bba(2000, "0.70", "0.71"), 2_000_000_000)
+        assert m.consumir_resync() == {}
+
+    def test_sem_snapshot_nao_pede_resync(self):
+        """Delta antes de qualquer `book`: não há reconstrução para divergir —
+        é ausência de livro, não corrupção. Nenhum resync por divergência."""
+        m = MonitorDeIntegridade()
+        m.observar(
+            _delta(2000, price="0.50", size="10", side="BUY",
+                   best_bid="0.70", best_ask="0.51"),
+            2_000_000_000,
+        )
+        assert m.consumir_resync() == {}
+
+    def test_forma_oficial_price_changes_continua_funcionando(self):
+        """A forma B do SDK (`price_changes`, com `asset_id` por entrada) é a
+        que o servidor usa. Ela tem de aplicar os deltas e bater o topo."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000), 1_000_000_000)
+        # engrossa um nível ABAIXO do topo: o topo não muda, e o afirmado bate.
+        m.observar(
+            _delta(2000, price="0.48", size="50", side="BUY",
+                   best_bid="0.49", best_ask="0.51"),
+            2_000_000_000,
+        )
+        assert m.formas_de_price_change["price_changes"] == 1
+        # topo inalterado (bid 0,49 / ask 0,51) e o afirmado bate: sem resync.
+        assert m.consumir_resync() == {}
+        assert m.resumo()["alinhamento"]["por_carimbo_do_servidor"]["divergencias"] == 0
+
+    def test_regressao_sequencia_real_de_corridas_nao_vira_tempestade(self):
+        """A sequência que a VPS viu: dezenas de deltas de um tick com o topo
+        oscilando um tick. NENHUM pede resync; todos viram telemetria."""
+        m = MonitorDeIntegridade()
+        m.observar(_book(1000, bid="0.49", ask="0.51"), 1_000_000_000)
+        ts = 1000
+        for i in range(40):
+            ts += 5  # 5 ms entre deltas — a cadência do CLOB
+            # o topo do bid oscila entre 0,49 e 0,50, um tick, como numa corrida
+            novo = "0.50" if i % 2 == 0 else "0.49"
+            m.observar(
+                _delta(ts, price=novo, size="10", side="BUY",
+                       best_bid=novo, best_ask="0.51"),
+                ts * 1_000_000,
+            )
+        assert m.consumir_resync() == {}
+        assert m.resyncs_por_material == 0
+        assert m.resyncs_por_persistencia == 0

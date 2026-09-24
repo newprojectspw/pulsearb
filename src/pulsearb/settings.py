@@ -111,6 +111,25 @@ class RecorderSettings(BaseModel):
     # Intervalo do laço que refaz a assinatura dos tokens marcados como
     # corrompidos, para forçar um snapshot novo do livro.
     resync_intervalo_s: float = 5.0
+    # ESCOPO do recorder. `None` = grava toda janela descoberta (o padrão
+    # histórico). Um inteiro LIMITA quantos tokens do CLOB ficam assinados por
+    # vez — a alavanca contra a pressão de banda/CPU quando a descoberta traz
+    # dezenas de janelas. Nunca reduz cobertura em SILÊNCIO: o escopo efetivo
+    # (limite, assinados, cortados) sai no snapshot de descoberta. A ordenação
+    # do corte é determinística (por token) para o replay reproduzir.
+    max_tokens_assinados: int | None = None
+    # PREFLIGHT DE ARMAZENAMENTO (req 12/13). Estimativa de bytes/hora em DISCO
+    # (gzip) usada ANTES de gravar para projetar o espaço de uma rodada e
+    # RECUSAR iniciar se o disco não comporta. 2 GB/h é a taxa observada na VPS
+    # ANTES do conserto da tempestade de resyncs — conservador de propósito; o
+    # relatório publica a taxa MEDIDA, que o operador usa para calibrar isto.
+    bytes_por_hora_estimados: float = 2_000_000_000.0
+    # Margem sobre a projeção: o disco tem de comportar a estimativa VEZES
+    # isto. 1,2 = 20% de folga para picos e para o que não é gravação.
+    margem_de_disco: float = 1.2
+    # Preflight só recusa a partir desta duração. Uma rodada curta de teste
+    # (uma hora) não deve ser barrada por um disco que não comporta 72h.
+    duracao_minima_para_preflight_s: float = 6 * 3600.0
 
 
 class UiSettings(BaseModel):
