@@ -180,6 +180,23 @@ def _ligada(regras: dict[str, Any], nome: str) -> bool:
     return valor is not None
 
 
+def _normalizar_regras(regras: dict[str, Any]) -> dict[str, Any]:
+    """O `maker.regras` projetado no conjunto conhecido, com o que falta em
+    `None`.
+
+    Um relato de uma versão anterior a um knob novo não traz a chave dele. Sem
+    normalizar, um restart pós-deploy tem o trecho velho (sem a chave) e o novo
+    (com a chave em `None`) e a comparação crua acusa `regras_mudaram_no_meio`,
+    matando a rodada por uma chave ACRESCENTADA — não mudada. Projetar nos
+    nomes conhecidos, com `.get(nome)` (ausente → `None`), faz os dois
+    baterem enquanto a regra ficou desligada. Chaves extras (de uma versão mais
+    NOVA que este leitor) caem fora, o que é o certo: o leitor não julga o que
+    não conhece. Só vale enquanto o valor desligado de todo knob for `None` — e
+    o `recolhe...`, que desliga em `False`, está sempre presente nos relatos,
+    então nunca é preenchido por ausência."""
+    return {nome: regras.get(nome) for nome in REGRAS_EXPERIMENTAIS}
+
+
 def regras_da_rodada(relatos: list[dict]) -> tuple[dict[str, Any] | None, str | None]:
     """As regras em vigor, e a recusa se elas não valem para uma medida.
 
@@ -198,7 +215,13 @@ def regras_da_rodada(relatos: list[dict]) -> tuple[dict[str, Any] | None, str | 
         # informação. Medida de regra desconhecida entrava num PASSA.
         return None, "campo_ausente"
     primeira = vistas[0]
-    if any(atual != primeira for atual in vistas):
+    # Compara NORMALIZADO, não cru: um trecho gravado por uma versão anterior a
+    # um knob novo não traz a chave dele, e comparar os dicts crus daria
+    # `regras_mudaram_no_meio` num restart pós-deploy — invalidando 14 dias por
+    # uma chave que só foi ACRESCENTADA, não mudada, com a regra ainda
+    # desligada (revisão do Codex, #193). Ver `_normalizar_regras`.
+    base = _normalizar_regras(primeira)
+    if any(_normalizar_regras(atual) != base for atual in vistas):
         return primeira, "regras_mudaram_no_meio"
     ligadas = [nome for nome in REGRAS_EXPERIMENTAIS if _ligada(primeira, nome)]
     if len(ligadas) > 1:

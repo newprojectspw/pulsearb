@@ -973,6 +973,36 @@ class TestTrechoSemRegras:
         assert resumo.regras_da_rodada([_relato(), _relato()])[1] is None
 
 
+class TestKnobNovoNaoInvalidaRodadaAntiga:
+    """Um knob acrescentado ao `maker.regras` não pode matar uma rodada em
+    curso por um restart pós-deploy.
+
+    O trecho gravado pela versão antiga não traz a chave nova; o novo traz com
+    `None` (regra desligada). Comparar os dicts crus daria
+    `regras_mudaram_no_meio` — 14 dias invalidados por uma chave ACRESCENTADA,
+    não mudada (revisão do Codex, #193).
+    """
+
+    def test_chave_nova_desligada_nao_e_mudanca_de_regra(self):
+        # `_relato()` tem a forma ANTIGA (sem `fracao_maxima_do_pool`); o novo
+        # trecho traz a chave em None (desligada).
+        antigo = _relato()
+        assert "fracao_maxima_do_pool" not in antigo["maker"]["regras"]
+        novo = _relato(regras={"fracao_maxima_do_pool": None})
+
+        assert resumo.regras_da_rodada([antigo, novo])[1] is None
+
+    def test_chave_nova_LIGADA_no_meio_ainda_e_mudanca_de_regra(self):
+        """A normalização não pode cegar o caso real: se o teto foi de fato
+        LIGADO no meio, a regra mudou e a rodada tem de recusar."""
+        antigo = _relato()
+        ligou_teto = _relato(regras={"fracao_maxima_do_pool": 0.10})
+
+        assert resumo.regras_da_rodada([antigo, ligou_teto])[1] == (
+            "regras_mudaram_no_meio"
+        )
+
+
 class TestODiarioPedidoENaoLido:
     """Pedir o diário e não conseguir lê-lo NÃO é o mesmo que não pedir.
 
