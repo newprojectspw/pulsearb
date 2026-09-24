@@ -367,7 +367,7 @@ class LacoMaker:
         livro, livro_down = dados.livro, dados.livro_down
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
-        melhor, encerrar = self._escolher_da_grade(dados, params, aberta)
+        melhor, fracao_no_teto, encerrar = self._escolher_da_grade(dados, params, aberta)
         if encerrar:
             # Nada a decidir: sem cotação no livro e sem candidata cotável
             # (ausente por microprice, ou barrada pelo teto). Seguir daria
@@ -438,7 +438,7 @@ class LacoMaker:
             livro_down=livro_down,
             ancora=ancora,
         )
-        self._registrar_ordem_efetiva(melhor, efeito)
+        self._registrar_ordem_efetiva(fracao_no_teto, efeito)
         return efeito
 
     def _conferir_prints(
@@ -629,7 +629,7 @@ class LacoMaker:
         dados: _DadosDaPassada,
         params: ParametrosDeReward,
         aberta: CotacaoAberta | None,
-    ) -> tuple[RetornoEstimado | None, bool]:
+    ) -> tuple[RetornoEstimado | None, float | None, bool]:
         """A cotação escolhida da grade e se a passada pode ENCERRAR aqui.
 
         Encerra cedo só quando NÃO há cotação no livro e também não há
@@ -646,18 +646,20 @@ class LacoMaker:
         escolha = self._melhor_candidata(dados, params, aberta)
         if escolha is None:
             # sem_microprice, já contado em `_melhor_candidata`.
-            return None, not ha_aberta
+            return None, None, not ha_aberta
         if escolha.escolhida is not None:
-            self._registrar_fracao_admitida(escolha.escolhida.fracao_do_pool)
-            return escolha.escolhida, False
+            # A fração COMO O TETO A VIU (pós-cancelamento em LIVE), não a do
+            # `RetornoEstimado`, que em LIVE inclui a ordem velha e subestima.
+            self._registrar_fracao_admitida(escolha.fracao_no_teto)
+            return escolha.escolhida, escolha.fracao_no_teto, False
         if escolha.bloqueada_por_teto:
             # Havia candidata que pontua, mas TODAS excederiam a nossa
             # participação máxima. Nome próprio, para não virar
             # `sem_candidata_que_pontue`, que diz o oposto — 'não achei onde
             # cotar'.
             self._contar("fracao_do_pool_acima_do_teto")
-            return None, not ha_aberta
-        return None, False
+            return None, None, not ha_aberta
+        return None, None, False
 
     def _dados_da_passada(
         self,
@@ -1184,38 +1186,43 @@ class LacoMaker:
     def _contar(self, motivo: str) -> None:
         self.motivos[motivo] = self.motivos.get(motivo, 0) + 1
 
-    def _registrar_fracao_admitida(self, fracao: float) -> None:
+    def _registrar_fracao_admitida(self, fracao: float | None) -> None:
         """A fração de uma candidata que o teto ADMITIU numa AVALIAÇÃO da grade
-        — não uma ordem. Conta toda passada com candidata escolhível, inclusive
-        as que viram MANTER e as que o portão ainda barra: prova que o teto
-        nunca admite fração acima dele. Para ordens de fato colocadas, ver
-        `_registrar_ordem_efetiva`."""
+        — não uma ordem. É a fração COMO O TETO A VIU (pós-cancelamento em
+        LIVE), não a do `RetornoEstimado`, que em LIVE subestima. Conta toda
+        passada com candidata escolhível, inclusive as que viram MANTER e as
+        que o portão ainda barra: prova que o teto nunca admite fração acima
+        dele. Para ordens de fato colocadas, ver `_registrar_ordem_efetiva`."""
+        if fracao is None:
+            return
         self._fracao_admitida_soma += fracao
         self._fracao_admitida_n += 1
         self._fracao_admitida_max = max(self._fracao_admitida_max, fracao)
 
     def _registrar_ordem_efetiva(
-        self, melhor: RetornoEstimado | None, efeito: Efeito
+        self, fracao: float | None, efeito: Efeito
     ) -> None:
         """A fração da cotação EFETIVAMENTE colocada/reposicionada — só depois
-        da ação, e só quando houve ação no livro.
+        da ação, e só quando houve ação no livro. `fracao` é a que o teto viu
+        (pós-cancelamento em LIVE), não a do livro que ainda incluía a ordem
+        velha.
 
         Uma passada de MANTER não chega aqui (o laço retorna antes do I/O), e
         uma recusa do portão vira `_recusar`, não `_executar` — então nem o
         MANTER repetido nem a candidata barrada inflam este contador, que é o
-        defeito que ele existe para não ter. `melhor is None` cobre a saída sem
+        defeito que ele existe para não ter. `fracao is None` cobre a saída sem
         candidata (`atual_nao_pontua_mais` sem melhor): ali não há fração de
         ordem nova a registrar."""
-        if melhor is None:
+        if fracao is None:
             return
         if efeito.resultado not in (
             ResultadoDaAcao.COLOCADA,
             ResultadoDaAcao.REPOSICIONADA,
         ):
             return
-        self._fracao_ordem_soma += melhor.fracao_do_pool
+        self._fracao_ordem_soma += fracao
         self._fracao_ordem_n += 1
-        self._fracao_ordem_max = max(self._fracao_ordem_max, melhor.fracao_do_pool)
+        self._fracao_ordem_max = max(self._fracao_ordem_max, fracao)
 
     def _diagnosticar_up_ausente(self) -> None:
         """O livro do Up faltou — o caso OPERACIONAL (`livro_indisponivel`, não

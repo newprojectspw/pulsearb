@@ -1726,6 +1726,31 @@ class TestTetoDeFracaoDoPool:
         assert ordens["n"] == 1
         assert ordens["maxima"] <= 0.10 + 1e-9
 
+    async def test_em_LIVE_o_relato_publica_a_fracao_pos_cancelamento(self, tmp_path):
+        """A telemetria publica a fatia COMO O TETO A VIU (pós-cancelamento em
+        LIVE), não a do livro que ainda incluía a ordem velha — senão o relato
+        subestimaria a fatia admitida e a colocada (revisão do Codex, #193).
+
+        Mesmo livro e mesma cotação repousando nas duas rodadas: em LIVE, a
+        reavaliação desconta a nossa ordem do denominador e a fatia registrada
+        fica MAIOR que a de SHADOW, onde não há o que descontar."""
+        livro_de = _livro_de(_livro())
+        shadow = _laco(tmp_path, fracao_maxima_do_pool=0.99)
+        live = _laco(
+            tmp_path, fracao_maxima_do_pool=0.99, nossa_ordem_esta_no_livro=True
+        )
+        for laco in (shadow, live):
+            # 1ª passada coloca; a 2ª reavalia com a cotação repousando.
+            await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+            await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1001.0, agora_ns=2)
+
+        def maxima(laco):
+            return laco.resumo()["teto_de_fracao_do_pool"][
+                "avaliacoes_aceitas_pelo_teto"
+            ]["maxima"]
+
+        assert maxima(live) > maxima(shadow)
+
     def test_em_LIVE_o_teto_desconta_a_ordem_repousando(self, tmp_path):
         """Em LIVE a nossa ordem já está no livro; um reposicionamento a
         substitui, então o teto avalia a fatia do substituto sobre o livro SEM

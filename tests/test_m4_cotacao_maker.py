@@ -528,6 +528,27 @@ class TestOTetoDeFracaoDoPool:
         assert com.escolhida is None
         assert com.bloqueada_por_teto
 
+    def test_fracao_no_teto_carrega_a_fatia_que_o_teto_viu(self):
+        """`EscolhaDaGrade.fracao_no_teto` é a fatia COMO O TETO A VIU. Sem
+        desconto, igual à estimada; com desconto (LIVE), a pós-cancelamento —
+        maior que a `fracao_do_pool` crua, e é ELA que o relato publica, senão
+        subestimaria a fatia real (revisão do Codex, #193)."""
+        livro = self._livro_de_fracao_limpa()
+        r = estimar_retorno(Cotacao(1, 50.0), livro, PARAMS, horas=4.0)
+        do_livro = r.score_total_do_livro - r.score_proprio
+
+        sem = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0, fracao_maxima=0.99
+        )
+        assert sem.fracao_no_teto == pytest.approx(sem.escolhida.fracao_do_pool)
+
+        com = avaliar_grade(
+            [Cotacao(1, 50.0)], livro, PARAMS, horas=4.0,
+            fracao_maxima=0.99, denominador_para_teto=do_livro / 2,
+        )
+        assert com.escolhida is not None
+        assert com.fracao_no_teto > com.escolhida.fracao_do_pool
+
     def test_escolher_cotacao_repassa_o_teto(self):
         """O atalho `escolher_cotacao` também respeita o teto — é a mesma
         avaliação, só devolvendo a escolhida."""

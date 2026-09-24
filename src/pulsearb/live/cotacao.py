@@ -364,6 +364,13 @@ class EscolhaDaGrade:
     recusadas_por_teto: int
     #: O teto em vigor nesta avaliação (`None` = sem teto).
     teto: float | None
+    #: A fração da escolhida COMO O TETO A VIU — pós-cancelamento em LIVE (com
+    #: o `denominador_para_teto` limpo da nossa ordem repousando), a estimada
+    #: de sempre fora disso. É esta, e não `escolhida.fracao_do_pool`, que o
+    #: relato deve publicar: em LIVE a do `RetornoEstimado` está calculada
+    #: sobre o livro que ainda inclui a ordem velha e subestima a fatia real
+    #: (revisão do Codex, #193). `None` quando não há escolhida.
+    fracao_no_teto: float | None = None
 
     @property
     def bloqueada_por_teto(self) -> bool:
@@ -466,6 +473,11 @@ def avaliar_grade(
         pontuaram=len(pontuam),
         recusadas_por_teto=recusadas_por_teto,
         teto=fracao_maxima,
+        fracao_no_teto=(
+            _fracao_para_o_teto(escolhida, denominador_para_teto)
+            if escolhida is not None
+            else None
+        ),
     )
 
 
