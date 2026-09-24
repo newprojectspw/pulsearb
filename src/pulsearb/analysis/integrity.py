@@ -624,10 +624,19 @@ class MonitorDeIntegridade:
             return
         estado = self._estado(asset_id)
         self._resolver_pendentes(asset_id, estado, carimbo)
-        if carimbo < estado.ts_max_servidor_ms:
-            # Snapshot mais VELHO que o estado que já temos. Ele é
-            # autoritativo para o instante dele, não para agora: aplicá-lo
-            # rebobinaria o livro e a corrupção seria nossa. Conta e ignora.
+        if estado.com_snapshot and carimbo < estado.ts_max_servidor_ms:
+            # Snapshot mais VELHO que o estado que já temos, E temos um livro
+            # VÁLIDO para proteger: aplicá-lo rebobinaria o livro e a corrupção
+            # seria nossa. Conta e ignora.
+            #
+            # O `com_snapshot` no guarda é o conserto de um fail-closed
+            # violado: SEM livro válido (primeiro snapshot ainda não veio, ou
+            # `marcar_perda` o descartou e este é o snapshot de RECUPERAÇÃO do
+            # resync), não há nada para rebobinar — e rejeitar deixaria o token
+            # CEGO para sempre (`com_snapshot=False`, `aguardando_resync=True`),
+            # que é o oposto do que o resync existe para fazer. Um snapshot de
+            # recuperação com carimbo atrasado (o `timestamp` do book reflete a
+            # última mutação, não o envio) NUNCA pode ser descartado.
             estado.snapshots_fora_de_ordem += 1
             self._anotar_atraso(estado, carimbo)
             return

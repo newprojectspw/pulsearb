@@ -738,3 +738,32 @@ class TestPoliticaDeResync:
         )
         assert m.consumir_resync() == {}
         assert m.resyncs_por_persistencia == 0
+
+
+# ─────────────── recuperação de snapshot após perda (revisão de reconciliação)
+
+
+def test_snapshot_de_recuperacao_com_carimbo_atrasado_e_aplicado():
+    """Fail-closed violado: sem livro válido (após `marcar_perda`), um book de
+    RECUPERAÇÃO com carimbo atrasado — o `timestamp` do book reflete a última
+    mutação, não o envio — era REJEITADO como fora de ordem, deixando o token
+    cego para sempre (`aguardando_resync` eterno). Ele tem de ser aplicado."""
+    m = MonitorDeIntegridade()
+    m.observar(_book(2000), 2_000_000_000)   # com_snapshot, ts_max = 2000
+    m.marcar_perda(ASSET)
+    assert ASSET in m.aguardando_resync
+
+    m.observar(_book(1500), 3_000_000_000)   # recuperação, carimbo < ts_max
+    assert ASSET not in m.aguardando_resync, "o token tem de recuperar"
+    assert m.estados[ASSET].com_snapshot is True
+
+
+def test_snapshot_antigo_com_book_VALIDO_ainda_e_rejeitado():
+    """A proteção contra rebobinar um livro BOM continua: com book válido, um
+    snapshot mais velho é rejeitado e o topo não anda para trás."""
+    m = MonitorDeIntegridade()
+    m.observar(_book(2000, "0.49", "0.51"), 2_000_000_000)
+    m.observar(_book(1500, "0.10", "0.90"), 3_000_000_000)  # mais velho
+
+    assert m.estados[ASSET].snapshots_fora_de_ordem == 1
+    assert m.estados[ASSET].livro.best_bid == 0.49  # não rebobinou
