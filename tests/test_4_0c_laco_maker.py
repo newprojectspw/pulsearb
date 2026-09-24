@@ -1717,20 +1717,46 @@ class TestTetoDeFracaoDoPool:
         assert teto["recusas_por_teto"] == laco.motivos.get(
             "fracao_do_pool_acima_do_teto"
         )
-        # A fração ACEITA existe e fica sob o teto — é o que prova a trava agindo.
-        assert teto["fracao_aceita"]["cotacoes"] >= 1
-        assert teto["fracao_aceita"]["maxima"] <= 0.10 + 1e-9
+        # A fração ADMITIDA pelo teto existe e fica sob o teto — prova a trava.
+        admitida = teto["avaliacoes_aceitas_pelo_teto"]
+        assert admitida["n"] >= 1
+        assert admitida["maxima"] <= 0.10 + 1e-9
+        # E a ORDEM efetiva (a que foi colocada) também está sob o teto.
+        ordens = teto["ordens_efetivas"]
+        assert ordens["n"] == 1
+        assert ordens["maxima"] <= 0.10 + 1e-9
 
-    async def test_sem_aceite_a_fracao_aceita_e_None_e_nao_zero(self, tmp_path):
-        """Nada aceito ainda: `None`, não zero — zero afirmaria fatia nula."""
+    async def test_MANTER_repetido_nao_infla_ordens_efetivas(self, tmp_path):
+        """A fração ADMITIDA por avaliação sobe a cada passada (inclui MANTER);
+        a de ORDENS EFETIVAS não — ela só conta COLOCADA/REPOSICIONADA. É o
+        defeito P2 que esta separação existe para não ter."""
+        laco = _laco(tmp_path, fracao_maxima_do_pool=0.99)
+        livro_de = _livro_de(_livro())
+        # Uma colocação e várias passadas seguintes que só MANTÊM.
+        await laco.passo([_janela()], livro_de=livro_de, agora_epoch=1000.0, agora_ns=1)
+        for i in range(3):
+            await laco.passo(
+                [_janela()], livro_de=livro_de, agora_epoch=1001.0 + i, agora_ns=2 + i
+            )
+        assert laco.motivos.get("estavel", 0) >= 3  # as passadas MANTIVERAM
+
+        teto = laco.resumo()["teto_de_fracao_do_pool"]
+        # Uma ordem efetiva só, apesar das quatro avaliações admitidas.
+        assert teto["ordens_efetivas"]["n"] == 1
+        assert teto["avaliacoes_aceitas_pelo_teto"]["n"] == 4
+
+    async def test_sem_aceite_as_fracoes_sao_None_e_nao_zero(self, tmp_path):
+        """Nada aceito ou colocado ainda: `None`, não zero — zero afirmaria
+        fatia nula, e o que houve foi ausência de medida."""
         laco = _laco(tmp_path, fracao_maxima_do_pool=0.001)
         await laco.passo(
             [_janela()], livro_de=_livro_de(_livro_fino()), agora_epoch=1000.0, agora_ns=1
         )
-        aceita = laco.resumo()["teto_de_fracao_do_pool"]["fracao_aceita"]
-        assert aceita["cotacoes"] == 0
-        assert aceita["media"] is None
-        assert aceita["maxima"] is None
+        teto = laco.resumo()["teto_de_fracao_do_pool"]
+        for bloco in ("avaliacoes_aceitas_pelo_teto", "ordens_efetivas"):
+            assert teto[bloco]["n"] == 0
+            assert teto[bloco]["media"] is None
+            assert teto[bloco]["maxima"] is None
 
 
 class TestDiagnosticoDeCoberturaDosPools:
@@ -1738,14 +1764,33 @@ class TestDiagnosticoDeCoberturaDosPools:
     cancela); o diagnóstico separa, à parte e sem mudar a regra, a conexão dos
     pools caída do token que emudeceu com a conexão viva."""
 
-    async def test_livro_disponivel_conta_cobertura(self, tmp_path):
+    async def test_ambos_disponiveis_conta_cobertura(self, tmp_path):
         laco = _laco(tmp_path)
         await laco.passo(
             [_janela()], livro_de=_livro_de(_livro()), agora_epoch=1000.0, agora_ns=1
         )
         cobertura = laco.resumo()["cobertura_dos_pools"]
-        assert cobertura["livro_disponivel"] == 1
+        assert cobertura["ambos_disponiveis"] == 1
+        assert cobertura["livro_up_ausente"] == 0
+        assert cobertura["livro_down_ausente"] == 0
         assert cobertura["sem_livro_total"] == 0
+
+    async def test_up_presente_down_ausente_e_distinguido(self, tmp_path):
+        """O Up presente não prova o Down presente. Um maker de dois lados com
+        a perna Down sem livro NÃO pode ser relatado como cobertura cheia — e
+        a regra não muda: com o Up e sem âncora, ele ainda cota."""
+        def so_o_up(token_id, *, agora_ns):
+            return _livro() if token_id == "tok-up" else None
+
+        laco = _laco(tmp_path)
+        efeitos = await laco.passo(
+            [_janela()], livro_de=so_o_up, agora_epoch=1000.0, agora_ns=1
+        )
+        cobertura = laco.resumo()["cobertura_dos_pools"]
+        assert cobertura["livro_down_ausente"] == 1
+        assert cobertura["ambos_disponiveis"] == 0
+        # A regra operacional NÃO muda: com o Up disponível e sem âncora, cota.
+        assert any(e.resultado is ResultadoDaAcao.COLOCADA for e in efeitos)
 
     async def test_conexao_caida_e_atribuida_a_conexao(self, tmp_path):
         """Sem livro E a conexão dos pools reportada como caída: a causa é a

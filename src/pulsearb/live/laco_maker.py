@@ -186,12 +186,22 @@ class LacoMaker:
     #: contando o total e a passada segue sem cotar e sem cancelar. Ver
     #: `_diagnosticar_cobertura`.
     cobertura_dos_pools: dict[str, int] = field(default_factory=dict)
-    #: A fração do pool das cotações que o teto ACEITOU (as que foram
-    #: escolhidas). Soma×n para a média e o máximo, para o relato mostrar que as
-    #: aceitas ficam sob o teto — o complemento das `recusas_por_teto`.
-    _fracao_aceita_soma: float = field(default=0.0, repr=False)
-    _fracao_aceita_n: int = field(default=0, repr=False)
-    _fracao_aceita_max: float = field(default=0.0, repr=False)
+    #: A fração do pool das candidatas que o teto ADMITIU, por AVALIAÇÃO da
+    #: grade — não por ordem. Conta toda passada em que o teto deixou uma
+    #: candidata passar, inclusive as que viram MANTER e as que o portão ainda
+    #: barraria: é o complemento por avaliação das `recusas_por_teto`, e serve
+    #: para provar que o teto nunca admite fração acima dele. NÃO é "ordens
+    #: colocadas" — para isso ver `_fracao_ordem_*`.
+    _fracao_admitida_soma: float = field(default=0.0, repr=False)
+    _fracao_admitida_n: int = field(default=0, repr=False)
+    _fracao_admitida_max: float = field(default=0.0, repr=False)
+    #: A fração do pool das cotações EFETIVAMENTE colocadas/reposicionadas —
+    #: atualizada só DEPOIS da ação bem-sucedida (`COLOCADA`/`REPOSICIONADA`),
+    #: nunca numa avaliação de MANTER nem numa candidata barrada pelo portão. É
+    #: a "fração das cotações efetivamente aceitas" que o item 3 pede.
+    _fracao_ordem_soma: float = field(default=0.0, repr=False)
+    _fracao_ordem_n: int = field(default=0, repr=False)
+    _fracao_ordem_max: float = field(default=0.0, repr=False)
     #: O relógio do 4.2: o que as cotações repousando teriam rendido e quantas
     #: vezes teriam executado. Ver `caixa_maker`.
     caixa: CaixaDoMaker = field(default_factory=CaixaDoMaker)
@@ -421,7 +431,7 @@ class LacoMaker:
         if self._perna_down_sem_bids(decisao, livro_down):
             return await self._recusar(janela.slug, "perna_down_sem_bids")
 
-        return await self._executar(
+        efeito = await self._executar(
             decisao,
             janela,
             meio=meio,
@@ -430,6 +440,8 @@ class LacoMaker:
             livro_down=livro_down,
             ancora=ancora,
         )
+        self._registrar_ordem_efetiva(melhor, efeito)
+        return efeito
 
     def _conferir_prints(
         self,
@@ -600,7 +612,7 @@ class LacoMaker:
             # sem_microprice, já contado em `_melhor_candidata`.
             return None, not ha_aberta
         if escolha.escolhida is not None:
-            self._contar_fracao_aceita(escolha.escolhida.fracao_do_pool)
+            self._registrar_fracao_admitida(escolha.escolhida.fracao_do_pool)
             return escolha.escolhida, False
         if escolha.bloqueada_por_teto:
             # Havia candidata que pontua, mas TODAS excederiam a nossa
@@ -629,9 +641,8 @@ class LacoMaker:
         """
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
         if livro is None:
-            self._diagnosticar_cobertura(disponivel=False)
+            self._diagnosticar_up_ausente()
             return None, "livro_indisponivel"
-        self._diagnosticar_cobertura(disponivel=True)
         horas = max(janela.seconds_left(agora_epoch), 0.0) / 3600.0
         if horas <= 0.0:
             return None, "janela_sem_tempo"
@@ -644,6 +655,12 @@ class LacoMaker:
         # o espelho do Up (a revisão do #126 mostrou que os dois não são
         # complementares).
         livro_down = livro_de(janela.token_down, agora_ns=agora_ns)
+        # Cobertura com o Up já disponível: a perna Down é a OUTRA perna de um
+        # maker de dois lados, e o Up presente não prova o Down presente. Só
+        # diagnóstico — não muda a regra: Down ausente não impede cotar (o
+        # score sai do livro do Up), a âncora do microprice é que trata a falta
+        # via `sem_microprice`.
+        self._diagnosticar_cobertura(down_disponivel=livro_down is not None)
         ancora, sem_microprice = self._ancora_do_microprice(livro, livro_down)
         return (
             _DadosDaPassada(
@@ -1131,36 +1148,57 @@ class LacoMaker:
     def _contar(self, motivo: str) -> None:
         self.motivos[motivo] = self.motivos.get(motivo, 0) + 1
 
-    def _contar_fracao_aceita(self, fracao: float) -> None:
-        """Anota a fração do pool de uma cotação que o teto ACEITOU (a
-        escolhida da passada). Média e máximo saem daqui para o relato provar
-        que as aceitas ficam sob o teto — é o complemento das recusas."""
-        self._fracao_aceita_soma += fracao
-        self._fracao_aceita_n += 1
-        self._fracao_aceita_max = max(self._fracao_aceita_max, fracao)
+    def _registrar_fracao_admitida(self, fracao: float) -> None:
+        """A fração de uma candidata que o teto ADMITIU numa AVALIAÇÃO da grade
+        — não uma ordem. Conta toda passada com candidata escolhível, inclusive
+        as que viram MANTER e as que o portão ainda barra: prova que o teto
+        nunca admite fração acima dele. Para ordens de fato colocadas, ver
+        `_registrar_ordem_efetiva`."""
+        self._fracao_admitida_soma += fracao
+        self._fracao_admitida_n += 1
+        self._fracao_admitida_max = max(self._fracao_admitida_max, fracao)
 
-    def _diagnosticar_cobertura(self, *, disponivel: bool) -> None:
-        """Torna a causa de `livro_indisponivel` OBSERVÁVEL, sem mudar a regra.
+    def _registrar_ordem_efetiva(
+        self, melhor: RetornoEstimado | None, efeito: Efeito
+    ) -> None:
+        """A fração da cotação EFETIVAMENTE colocada/reposicionada — só depois
+        da ação, e só quando houve ação no livro.
 
-        Livro disponível conta `livro_disponivel`. Indisponível, a causa se
-        separa em duas quando dá — e `livro_indisponivel` segue sendo o motivo
-        operacional, contado à parte, que não cota e não cancela:
+        Uma passada de MANTER não chega aqui (o laço retorna antes do I/O), e
+        uma recusa do portão vira `_recusar`, não `_executar` — então nem o
+        MANTER repetido nem a candidata barrada inflam este contador, que é o
+        defeito que ele existe para não ter. `melhor is None` cobre a saída sem
+        candidata (`atual_nao_pontua_mais` sem melhor): ali não há fração de
+        ordem nova a registrar."""
+        if melhor is None:
+            return
+        if efeito.resultado not in (
+            ResultadoDaAcao.COLOCADA,
+            ResultadoDaAcao.REPOSICIONADA,
+        ):
+            return
+        self._fracao_ordem_soma += melhor.fracao_do_pool
+        self._fracao_ordem_n += 1
+        self._fracao_ordem_max = max(self._fracao_ordem_max, melhor.fracao_do_pool)
 
-        - conexão dos pools caída (`conexao_de_pools_ok()` devolve `False`) →
+    def _diagnosticar_up_ausente(self) -> None:
+        """O livro do Up faltou — o caso OPERACIONAL (`livro_indisponivel`, não
+        cota, não cancela). Aqui só se torna a causa observável, separando o
+        que dá:
+
+        - conexão dos pools caída (`conexao_de_pools_ok()` = `False`) →
           `sem_livro_por_conexao_de_pools`: nenhum token de pool tem livro
           porque o cano fechou;
         - conexão viva → `sem_livro_por_token`: o cano está aberto e ESTE token
           emudeceu — mercado parado, não feed morto;
-        - sem sinal da conexão (rota de pools desligada, ou o callback
-          levantou) → `sem_diagnostico`, porque afirmar a causa sem base seria
-          o defeito de `cobertura_da_gravacao` que o M2 já pagou.
+        - sem sinal da conexão (rota de pools desligada, ou o callback devolveu
+          `None`/levantou) → `sem_diagnostico`, porque afirmar a causa sem base
+          seria o defeito de `cobertura_da_gravacao` que o M2 já pagou.
 
         NÃO afrouxa silêncio, portão nem heartbeat: a decisão de não cotar é a
         mesma; só a leitura de 60 s passa a dizer POR QUE não havia livro.
         """
-        if disponivel:
-            self._contar_cobertura("livro_disponivel")
-            return
+        self._contar_cobertura("livro_up_ausente")
         estado = self._conexao_de_pools_esta_ok()
         if estado is None:
             self._contar_cobertura("sem_diagnostico")
@@ -1168,6 +1206,19 @@ class LacoMaker:
             self._contar_cobertura("sem_livro_por_token")
         else:
             self._contar_cobertura("sem_livro_por_conexao_de_pools")
+
+    def _diagnosticar_cobertura(self, *, down_disponivel: bool) -> None:
+        """Com o livro do Up já em mãos: as DUAS pernas chegaram, ou só o Up?
+
+        Um maker de dois lados precisa dos dois livros; o Up presente não prova
+        o Down presente, e marcar 'disponível' logo após o Up esconderia uma
+        perna Down sem livro. Só diagnóstico — a regra não muda: Down ausente
+        não impede cotar (o score sai do Up) nem cancela; a âncora do
+        microprice trata a falta por `sem_microprice`, à parte."""
+        if down_disponivel:
+            self._contar_cobertura("ambos_disponiveis")
+        else:
+            self._contar_cobertura("livro_down_ausente")
 
     def _conexao_de_pools_esta_ok(self) -> bool | None:
         """A conexão dos pools está de pé? `None` quando não há como saber —
@@ -1240,49 +1291,77 @@ class LacoMaker:
         registrar("reconciliacao do maker no arranque", **self.ultima_reconciliacao)
         return rec
 
+    @staticmethod
+    def _stats_de_fracao(soma: float, n: int, maxima: float) -> dict[str, Any]:
+        """Média/máxima/contagem de uma fração acumulada. `None` sem amostra —
+        zero afirmaria fatia nula, e o que houve foi ausência de medida."""
+        return {
+            "media": round(soma / n, 4) if n > 0 else None,
+            "maxima": round(maxima, 4) if n > 0 else None,
+            "n": n,
+        }
+
     def _resumo_do_teto(self) -> dict[str, Any]:
         """A história do teto de fração no relato de 60 s: o teto em vigor, as
-        recusas que ele produziu, e a fração das cotações que ele ACEITOU — que
-        precisa ficar sob o teto para provar que a trava está agindo.
+        recusas que ele produziu, e DUAS frações que não são a mesma coisa —
 
-        `fracao_aceita` é `None` quando nada foi aceito ainda: zero ali seria
-        afirmar fatia zero, e o que houve foi ausência de aceite."""
-        n = self._fracao_aceita_n
+        - `avaliacoes_aceitas_pelo_teto`: por AVALIAÇÃO da grade, inclui MANTER
+          e candidatas que o portão ainda barra. Prova que o teto nunca admite
+          fração acima dele (a máxima fica <= teto).
+        - `ordens_efetivas`: só as cotações COLOCADAS/REPOSICIONADAS. É a
+          "fração das cotações efetivamente aceitas" — MANTER repetido não a
+          infla.
+        """
         return {
             "teto": self.fracao_maxima_do_pool,
             "recusas_por_teto": self.motivos.get("fracao_do_pool_acima_do_teto", 0),
-            "fracao_aceita": {
-                "media": round(self._fracao_aceita_soma / n, 4) if n > 0 else None,
-                "maxima": round(self._fracao_aceita_max, 4) if n > 0 else None,
-                "cotacoes": n,
-            },
+            "avaliacoes_aceitas_pelo_teto": self._stats_de_fracao(
+                self._fracao_admitida_soma,
+                self._fracao_admitida_n,
+                self._fracao_admitida_max,
+            ),
+            "ordens_efetivas": self._stats_de_fracao(
+                self._fracao_ordem_soma, self._fracao_ordem_n, self._fracao_ordem_max
+            ),
             "nota": (
                 "`teto` None e a rota sem trava (linha de base). "
                 "`recusas_por_teto` conta as passadas em que TODA candidata que "
-                "pontua excedia o teto (motivo `fracao_do_pool_acima_do_teto`); "
-                "`fracao_aceita` e a fatia das cotacoes escolhidas, e com teto "
-                "ativo a maxima tem de ficar <= teto."
+                "pontua excedia o teto (motivo `fracao_do_pool_acima_do_teto`). "
+                "`avaliacoes_aceitas_pelo_teto` e por AVALIACAO (inclui MANTER e "
+                "candidata que o portao ainda barra) — a maxima prova que o teto "
+                "nao admite fracao acima dele. `ordens_efetivas` e so o que foi "
+                "COLOCADO/REPOSICIONADO — MANTER repetido nao a infla."
             ),
         }
 
     def _resumo_da_cobertura(self) -> dict[str, Any]:
         """A cobertura dos livros de pool no relato de 60 s — diagnóstico, não
-        regra. `sem_livro_total` bate com `motivos['livro_indisponivel']`; as
-        duas causas o repartem quando há sinal da conexão, e `sem_diagnostico`
-        conta o que não deu para atribuir."""
+        regra.
+
+        Três estados de disponibilidade por passada avaliada:
+        `ambos_disponiveis`, `livro_up_ausente` (o caso operacional que não
+        cota — bate com `motivos['livro_indisponivel']`), e `livro_down_ausente`
+        (o Up chegou, a perna Down não). E, quando o Up falta, a causa se
+        reparte em conexão de pools caída × token mudo, com `sem_diagnostico`
+        para o que não deu para atribuir. NADA aqui muda a regra: Up ausente já
+        não cotava; Down ausente segue cotando (o score sai do Up)."""
         c = self.cobertura_dos_pools
         return {
-            "livro_disponivel": c.get("livro_disponivel", 0),
+            "ambos_disponiveis": c.get("ambos_disponiveis", 0),
+            "livro_up_ausente": c.get("livro_up_ausente", 0),
+            "livro_down_ausente": c.get("livro_down_ausente", 0),
             "sem_livro_total": self.motivos.get("livro_indisponivel", 0),
             "sem_livro_por_conexao_de_pools": c.get("sem_livro_por_conexao_de_pools", 0),
             "sem_livro_por_token": c.get("sem_livro_por_token", 0),
             "sem_diagnostico": c.get("sem_diagnostico", 0),
             "nota": (
-                "Separa, na medida do possivel e SEM mudar a regra, a conexao "
-                "de pools caida (nenhum token tem livro) do token que emudeceu "
-                "com a conexao viva (mercado parado). `livro_indisponivel` "
-                "segue sem cotar e sem cancelar nas duas; isto so torna a causa "
-                "visivel. `sem_diagnostico` = sem sinal da conexao."
+                "Disponibilidade por passada: `ambos_disponiveis`, "
+                "`livro_up_ausente` (o Up faltou — NAO cota, e bate com "
+                "`motivos['livro_indisponivel']`) e `livro_down_ausente` (o Up "
+                "veio, a perna Down nao — ainda cota, o score sai do Up). Quando "
+                "o Up falta, a causa se separa em conexao de pools caida x token "
+                "mudo (`sem_diagnostico` = sem sinal da conexao). So torna a "
+                "causa visivel; nao afrouxa silencio, portao nem heartbeat."
             ),
         }
 
