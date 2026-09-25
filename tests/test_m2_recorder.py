@@ -652,3 +652,152 @@ def test_relatorio_traz_o_bloco_de_integridade(recorder):
     redundancia = recorder.redundancia_resumo()
     assert redundancia["conexoes"] == 2
     assert len(redundancia["por_conexao"]) == 2
+
+
+# ───────────────────────────────────────────────────── revisão do PR #197
+
+
+async def test_rotacao_nunca_fura_o_teto_de_assinaturas(recorder):
+    """Revisão P2 #197: desassinar ANTES de assinar. Com teto 2, a janela A
+    (encerrada) sai e a B entra — em NENHUM instante há 4 tokens assinados."""
+    recorder.settings.recorder.max_tokens_assinados = 2
+    fake = FakeDiscovery([[_janela(1)], [_janela(2)]])  # endDate no passado
+    pico = {"max": 0}
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        original = recorder.poly.subscribe
+
+        async def espia(tokens):
+            pico["max"] = max(pico["max"], len(set(recorder.poly.token_ids) | set(tokens)))
+            return await original(tokens)
+
+        recorder.poly.subscribe = espia
+        await recorder._discovery_cycle(fake)
+        await recorder._discovery_cycle(fake)
+        assert set(recorder.poly.token_ids) == {"up2", "dn2"}
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    assert pico["max"] <= 2
+
+
+async def test_marcador_de_resync_vai_antes_do_subscribe_no_canal_sem_perda(
+    recorder, server  # noqa: F811
+):
+    """Revisão P1 #197: o `resync_book` é enfileirado ANTES do subscribe que
+    dispara o book de recuperação, no CANAL_BOOK (FIFO, sem descarte), e
+    carrega `ts_perda_ns` — a fronteira que o replay respeita."""
+    import time as _time
+
+    from pulsearb.recorder.writer import CANAL_BOOK
+
+    eventos: list[tuple[str, str]] = []
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder.poly.subscribe(["tokA"])
+        recorder.a_resincronizar.add("tokA")
+        recorder.settings.recorder.resync_intervalo_s = 0.01
+
+        submit_original = recorder.writer.submit
+        subscribe_original = recorder.poly.subscribe
+
+        def espia_submit(envelope, *, canal="padrao"):
+            eventos.append(("submit", f"{envelope.fonte}@{canal}"))
+            return submit_original(envelope, canal=canal)
+
+        async def espia_subscribe(tokens):
+            eventos.append(("subscribe", ",".join(tokens)))
+            return await subscribe_original(tokens)
+
+        recorder.writer.submit = espia_submit
+        recorder.poly.subscribe = espia_subscribe
+        antes_ns = _time.time_ns()
+        await recorder._resync_loop(_time.monotonic() + 0.05)
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    marcador = ("submit", f"resync_book@{CANAL_BOOK}")
+    assert marcador in eventos
+    assert eventos.index(marcador) < eventos.index(("subscribe", "tokA"))
+    assert recorder.resyncs == 1
+
+    linhas = []
+    for path in sorted(recorder.writer.arquivos_escritos):
+        with gzip.open(path, "rb") as handle:
+            linhas.extend(json.loads(linha) for linha in handle if linha.strip())
+    (registro,) = [linha for linha in linhas if linha["fonte"] == "resync_book"]
+    assert isinstance(registro["payload"]["ts_perda_ns"], int)
+    assert registro["payload"]["ts_perda_ns"] >= antes_ns
+
+
+def test_relatorio_final_conta_divergencia_aberta_no_ultimo_evento(tmp_path):
+    """Revisão P1 #197: `finalizar()` antes do relatório. A divergência
+    material abre às 2000 e segue aberta até o último evento (2600): só o
+    `finalizar()` a fecha e a conta como persistente."""
+    settings = Settings(mode="SIM")
+    settings.recorder.output_dir = str(tmp_path)
+    rec = Recorder(settings)
+    book = {
+        "event_type": "book",
+        "asset_id": "tok",
+        "timestamp": "1000",
+        "bids": [{"price": "0.49", "size": "100"}],
+        "asks": [{"price": "0.51", "size": "100"}],
+    }
+    rec.integridade.observar(book, 1000 * 1_000_000)
+    for ts in (2000, 2600):
+        rec.integridade.observar(
+            {
+                "event_type": "price_change",
+                "market": "0xabc",
+                "timestamp": str(ts),
+                "price_changes": [
+                    {
+                        "asset_id": "tok",
+                        "price": "0.50",
+                        "size": "10",
+                        "side": "BUY",
+                        "best_bid": "0.70",
+                        "best_ask": "0.71",
+                    }
+                ],
+            },
+            ts * 1_000_000,
+        )
+    # sem finalizar, a divergência aberta NÃO conta:
+    assert rec.integridade.estados["tok"].persistentes == 0
+
+    relatorio = rec._relatorio_final(1.0)
+    criterio = relatorio["integridade"]["divergencia_topo_book"]["criterio_de_invalidacao"]
+    assert criterio["divergencias_persistentes"] >= 1
+
+
+async def test_snapshot_de_descoberta_lista_o_escopo_explicitamente(recorder, tmp_path):
+    """Revisão P1 #197: a lista de slugs no escopo e os tokens assinados vão
+    no snapshot — contagem sozinha não deixa o backtest filtrar."""
+    recorder.settings.recorder.max_tokens_assinados = 2
+    fake = FakeDiscovery([[_janela(1), _janela(2)]])
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    linhas = []
+    for path in sorted(tmp_path.glob("*.jsonl.gz")):
+        with gzip.open(path, "rb") as handle:
+            linhas.extend(json.loads(linha) for linha in handle if linha.strip())
+    (snap,) = [linha["payload"] for linha in linhas if linha["fonte"] == "discovery_snapshot"]
+    assert len(snap["janelas"]) == 2  # o corte continua visível
+    assert snap["escopo"]["slugs_no_escopo"] == ["btc-updown-5m-1"]
+    assert snap["tokens_assinados"] == ["dn1", "up1"]

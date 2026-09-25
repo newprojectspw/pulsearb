@@ -283,6 +283,23 @@ class _Populacao:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _BookObservado:
+    """O último `book` do token, guardado só até o próximo evento dele.
+
+    Serve a `aplicar_marcador_de_resync`: se o marcador de resync aparece no
+    arquivo DEPOIS do book de recuperação (ordem trocada), o book é
+    re-aplicado na ordem certa — perda, depois snapshot — em vez de a perda
+    apagá-lo. Qualquer evento posterior do token invalida a rebobinagem.
+    """
+
+    evento: dict[str, Any]
+    ts_ns: int
+    carimbo: float
+    ts_ultimo_antes_ms: float | None
+    rejeitado: bool
+
+
 @dataclass(slots=True)
 class _EstadoDoToken:
     """Tudo que se sabe sobre a saúde do livro de UM token."""
@@ -325,6 +342,12 @@ class _EstadoDoToken:
     #: `None` = há livro. Mesmo motivo da sentinela acima.
     sem_livro_desde: float | None = None
     teve_snapshot: bool = False
+    #: chegada (wall ns) do último `book` APLICADO. Eixo de chegada, não de
+    #: carimbo: é o que situa um snapshot antes/depois do instante em que o
+    #: recorder marcou a perda (`aplicar_marcador_de_resync`).
+    ts_ultimo_book_ns: int | None = None
+    #: ver `_BookObservado`. `None` assim que outro evento do token chega.
+    book_para_rebobinar: _BookObservado | None = None
 
     def marcar_tempo(self, ts_ms: float) -> None:
         if self.ts_primeiro_ms is None:
@@ -410,6 +433,11 @@ class MonitorDeIntegridade:
     resyncs_por_material: int = 0
     resyncs_por_persistencia: int = 0
     divergencias_transientes_ignoradas: int = 0
+    #: Replay de `resync_book` (ver `aplicar_marcador_de_resync`): marcadores
+    #: sem o instante da perda (ordem ambígua), e tokens cujo book de
+    #: recuperação já tinha sido aplicado quando o marcador foi lido.
+    marcadores_de_resync_legados: int = 0
+    resyncs_ja_recuperados_no_replay: int = 0
     #: token → quantas vezes divergiu (população alinhada)
     divergencias_por_token: Counter[str] = field(default_factory=Counter)
     #: qual forma de `price_change` o servidor está usando de fato
@@ -496,6 +524,7 @@ class MonitorDeIntegridade:
             if not isinstance(asset_id, str):
                 return []
             estado = self._estado(asset_id)
+            estado.book_para_rebobinar = None
             estado.marcar_tempo(carimbo)
             afirmado_bid = numero(evento.get("best_bid"))
             afirmado_ask = numero(evento.get("best_ask"))
@@ -547,6 +576,7 @@ class MonitorDeIntegridade:
         fora_de_ordem: set[str] = set()
         for mudanca in iter_mudancas(evento):
             estado = self._estado(mudanca.asset_id)
+            estado.book_para_rebobinar = None
             if mudanca.asset_id not in tocados:
                 self._resolver_pendentes(mudanca.asset_id, estado, carimbo)
                 # Delta com carimbo anterior ao maior já visto está sendo
@@ -631,14 +661,39 @@ class MonitorDeIntegridade:
             # última mutação, não o envio) NUNCA pode ser descartado.
             estado.snapshots_fora_de_ordem += 1
             self._anotar_atraso(estado, carimbo)
+            estado.book_para_rebobinar = _BookObservado(
+                evento, ts_ns, carimbo, estado.ts_ultimo_ms, rejeitado=True
+            )
             return
+        ts_ultimo_antes = estado.ts_ultimo_ms
+        self._aplicar_book(estado, evento, ts_ns, carimbo)
+        estado.book_para_rebobinar = _BookObservado(
+            evento, ts_ns, carimbo, ts_ultimo_antes, rejeitado=False
+        )
+
+    def _aplicar_book(
+        self, estado: _EstadoDoToken, evento: dict[str, Any], ts_ns: int, carimbo: float
+    ) -> None:
+        tinha_livro_valido = estado.com_snapshot
         estado.livro.aplicar_snapshot(evento)
         estado.livro.ts_ns = ts_ns
+        estado.ts_ultimo_book_ns = ts_ns
         estado.com_snapshot = True
         estado.teve_snapshot = True
         estado.aguardando_resync = False
+        # O carimbo de um `book` é a última MUTAÇÃO do livro, não o envio: o
+        # snapshot de recuperação costuma vir com carimbo ANTERIOR ao último
+        # evento visto antes da perda. Fechar o buraco nesse carimbo daria
+        # duração ZERO (`max(0, …)`) e `fracao_ruim` sairia artificialmente
+        # saudável (revisão do PR #197, P2). Só um carimbo que AVANÇA o relógio
+        # do servidor deste token fecha o buraco aqui; senão ele fica aberto até
+        # o próximo carimbo fresco (delta/confirmação) ou o `finalizar()` —
+        # superestima o buraco em no máximo um intervalo entre eventos, que é a
+        # direção fail-closed.
+        carimbo_fresco = estado.ts_ultimo_ms is None or carimbo > estado.ts_ultimo_ms
         estado.marcar_tempo(carimbo)
-        estado.fechar_sem_livro(carimbo)
+        if carimbo_fresco:
+            estado.fechar_sem_livro(carimbo)
         # Um primeiro snapshot ou snapshot de recuperação inicia uma nova
         # época. O high-water mark da época anterior não pode fazer deltas
         # válidos da recuperação parecerem fora de ordem.
@@ -667,7 +722,70 @@ class MonitorDeIntegridade:
         estado.pendentes.clear()
         estado.abertas.clear()
         estado.resync_streak.clear()
+        estado.book_para_rebobinar = None
         estado.abrir_sem_livro(estado.ts_ultimo_ms)
+
+    def aplicar_marcador_de_resync(self, payload: Any) -> None:
+        """Reproduz, num REPLAY, o registro `resync_book` que o recorder gravou.
+
+        Função única para qualquer consumidor da gravação (mesmo caminho): a
+        ordem em que o marcador e o `book` de recuperação aparecem no arquivo
+        NÃO pode mudar o estado final (revisão do PR #197, P1).
+
+        O recorder marca a perda ANTES de reassinar e grava `ts_perda_ns` (o
+        instante da marcação, relógio de chegada). Um `book` do token que
+        CHEGOU em `ts_perda_ns` ou depois só pode ser o snapshot pós-perda.
+        Marcar a perda agora o APAGARIA — token cego, `aguardando_resync` e
+        `observacoes_sem_snapshot` fabricados. Por isso:
+
+        - book pós-perda sendo o ÚLTIMO evento do token → rebobina: perda,
+          depois o mesmo book, exatamente a sequência da ordem certa (inclusive
+          o snapshot de carimbo atrasado que, com o livro antigo ainda válido,
+          tinha sido rejeitado como fora de ordem);
+        - book pós-perda JÁ APLICADO e seguido de deltas → a recuperação valeu
+          e os deltas estão sobre ela: não se apaga nada;
+        - nenhum book pós-perda → a perda é marcada.
+
+        Marcador LEGADO (sem `ts_perda_ns`, gravado depois do subscribe): o
+        instante da perda é desconhecido, então a perda é marcada sempre — a
+        direção conservadora — e contada em `marcadores_de_resync_legados`
+        para o relatório dizer que o replay daquela gravação é ambíguo.
+        """
+        if not isinstance(payload, dict):
+            return
+        ts_perda = payload.get("ts_perda_ns")
+        if not isinstance(ts_perda, int) or isinstance(ts_perda, bool):
+            self.marcadores_de_resync_legados += 1
+            ts_perda = None
+        for token in payload.get("tokens", []):
+            if not isinstance(token, str):
+                continue
+            estado = self.estados.get(token)
+            if ts_perda is None or estado is None:
+                self.marcar_perda(token)
+            elif not self._recuperacao_ja_lida(estado, token, ts_perda):
+                self.marcar_perda(token)
+
+    def _recuperacao_ja_lida(
+        self, estado: _EstadoDoToken, token: str, ts_perda_ns: int
+    ) -> bool:
+        """O book de recuperação já passou pelo replay? Se sim, põe na ordem."""
+        visto = estado.book_para_rebobinar
+        if visto is not None and visto.ts_ns >= ts_perda_ns:
+            if visto.rejeitado:
+                # Não estava fora de ordem: o marcador é que veio atrasado.
+                estado.snapshots_fora_de_ordem -= 1
+            if visto.ts_ultimo_antes_ms is None:
+                estado.ts_primeiro_ms = None
+            estado.ts_ultimo_ms = visto.ts_ultimo_antes_ms
+            self.marcar_perda(token)
+            self._aplicar_book(estado, visto.evento, visto.ts_ns, visto.carimbo)
+            self.resyncs_ja_recuperados_no_replay += 1
+            return True
+        if estado.ts_ultimo_book_ns is not None and estado.ts_ultimo_book_ns >= ts_perda_ns:
+            self.resyncs_ja_recuperados_no_replay += 1
+            return True
+        return False
 
     def finalizar(self) -> None:
         """Fecha pendências e divergências abertas. Chame antes de `resumo()`.

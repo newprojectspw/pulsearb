@@ -17,6 +17,7 @@ from pulsearb.feeds.rtds import TOPIC_TWAP_60, e18_do_evento, parse_rtds_event
 from pulsearb.live.ciclo import FONTE_RTDS, CicloAoVivo
 from pulsearb.markets.discovery import DiscoveredMarket
 from pulsearb.recorder.writer import FONTE_DISCOVERY
+from pulsearb.replay.escopo import slugs_no_escopo
 from pulsearb.replay.player import ReplayPlayer
 from pulsearb.replay.reader import RecordingReader
 
@@ -52,6 +53,9 @@ class ResumoDoReplay:
     n_eventos: int = 0
     n_meta: int = 0
     n_discovery: int = 0
+    #: snapshots sem `escopo.slugs_no_escopo` (gravação anterior à lista):
+    #: o escopo real daqueles ciclos não é verificável.
+    n_discovery_sem_escopo: int = 0
     n_passo: int = 0
     n_passo_erros: int = 0
     span_s: float = 0.0
@@ -102,10 +106,18 @@ class ReplayCiclo:
             if record.is_meta:
                 resumo.n_meta += 1
                 if record.fonte == FONTE_DISCOVERY:
+                    # Só as janelas que o recorder ASSINOU neste ciclo: as
+                    # cortadas pelo escopo estão no snapshot mas não têm livro
+                    # gravado (revisão do PR #197, P1). Snapshot sem a lista
+                    # (gravação antiga) segue inteiro e é contado.
+                    no_escopo = slugs_no_escopo(record.payload)
+                    if no_escopo is None:
+                        resumo.n_discovery_sem_escopo += 1
                     mercados = [
                         m
                         for j in record.payload.get("janelas", [])
                         if (m := _mercado_do_dict(j)) is not None
+                        and (no_escopo is None or m.slug in no_escopo)
                     ]
                     self.ciclo.on_descoberta(mercados, agora_epoch=agora_epoch)
                     resumo.n_discovery += 1

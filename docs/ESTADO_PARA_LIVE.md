@@ -342,6 +342,32 @@ relatório. Critérios de aceite da hora de teste e da gravação de 72 h em
 confirmar os critérios (`divergencias_persistentes = 0`, `descartadas_book =
 0`, resyncs poucos, sem `slow consumer` recorrente).
 
+**Revisão do PR #197 (2026-09-25), cinco defeitos que faziam o relatório
+parecer mais saudável do que a gravação foi.** (1) O marcador `resync_book`
+era gravado DEPOIS do subscribe e no canal com descarte. Por isso o `book` de
+recuperação podia aparecer antes dele, e o replay apagava uma recuperação já
+aplicada, criando `aguardando_resync` que não existia. Agora o marcador vai
+ANTES do subscribe, no `CANAL_BOOK`, e carrega `ts_perda_ns`. O replay usa uma
+função única, `MonitorDeIntegridade.aplicar_marcador_de_resync`, que dá o
+mesmo estado final nas duas ordens. Marcador legado (sem `ts_perda_ns`) marca
+a perda e é contado como ambíguo. (2) O snapshot de descoberta passou a gravar
+a LISTA `escopo.slugs_no_escopo` e `tokens_assinados`. O backtest exclui
+janela cortada pelo escopo em qualquer ciclo, e o replay filtra ciclo a ciclo,
+os dois via `replay/escopo.py`. (3) `finalizar()` agora roda antes do
+relatório final do recorder, então a divergência aberta no último evento
+passa a contar. (4) Um snapshot de recuperação com carimbo atrasado não zera
+mais o `ms_sem_livro`: o buraco fica aberto até um carimbo fresco. (5) A
+rotação desassina antes de assinar, então `max_tokens_assinados` nunca é
+furado. O diagnóstico offline ganhou uma `leitura` por indicador (não diz mais
+"reduz" quando comprometidos sobem: na VPS, 12→6 persistentes, mas 2→6
+comprometidos e 0→40 aguardando), além de `detalhe_com_replay` e
+`forense_pendentes` por token; o fim da gravação não conta como recuperação.
+19 testes (15 em `tests/test_revisao_pr197.py`, 4 em
+`tests/test_m2_recorder.py`). Com `recorder/__main__.py` e
+`analysis/integrity.py` de `main`, 14 deles falham. 🟡 falta: gravar de novo com o recorder corrigido
+e rodar o diagnóstico sobre ESSA gravação. As gravações anteriores têm
+marcador legado, e o replay delas continua ambíguo por construção.
+
 ---
 
 ## Bloco 1 — Veredito M2: existe edge líquido?

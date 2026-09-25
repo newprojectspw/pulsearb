@@ -74,6 +74,7 @@ from pulsearb.recorder.writer import (
     JsonlGzipWriter,
     RecordEnvelope,
 )
+from pulsearb.replay.escopo import CHAVE_SLUGS_NO_ESCOPO
 from pulsearb.settings import Settings
 from pulsearb.tempo import RESOLUTION_GRACE_SECONDS, parse_duration
 
@@ -442,7 +443,9 @@ class Recorder:
             canal=self._canal_do_evento(event),
         )
 
-    def _write_meta(self, fonte: str, payload: dict[str, Any]) -> None:
+    def _write_meta(
+        self, fonte: str, payload: dict[str, Any], *, canal: str = CANAL_PADRAO
+    ) -> None:
         """Grava um registro sintetizado pelo recorder (não veio do fio)."""
         self.writer.submit(
             RecordEnvelope(
@@ -450,7 +453,8 @@ class Recorder:
                 ts_wall_ns=time.time_ns(),
                 fonte=fonte,
                 raw=orjson.dumps(payload),
-            )
+            ),
+            canal=canal,
         )
 
     # ------------------------------------------------------------ descoberta
@@ -478,6 +482,10 @@ class Recorder:
         if retidos_em_carencia < 0:
             raise ValueError("retidos_em_carencia não pode ser negativo")
         limite = self.settings.recorder.max_tokens_assinados
+        # A LISTA explícita dos slugs no escopo vai no snapshot, não só a
+        # contagem: backtest e replay filtram por ela (`replay/escopo.py`) e
+        # nunca tratam como gravada uma janela que o corte deixou de fora
+        # (revisão do PR #197, P1).
         if limite is None:
             return markets, {
                 "limite_de_tokens": None,
@@ -488,6 +496,7 @@ class Recorder:
                     len(m.token_id_by_outcome) for m in markets
                 ),
                 "tokens_retidos_em_carencia": retidos_em_carencia,
+                CHAVE_SLUGS_NO_ESCOPO: sorted(m.slug for m in markets),
             }
 
         disponivel = max(0, limite - retidos_em_carencia)
@@ -507,6 +516,7 @@ class Recorder:
             "tokens_no_escopo": tokens,
             "tokens_retidos_em_carencia": retidos_em_carencia,
             "tokens_ativos_estimados": retidos_em_carencia + tokens,
+            CHAVE_SLUGS_NO_ESCOPO: sorted(m.slug for m in no_escopo),
         }
 
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
@@ -580,11 +590,14 @@ class Recorder:
         for token in encerrados:
             self.desassinar_apos.pop(token, None)
 
+        # SAI antes de ENTRAR (revisão do PR #197, P2): assinar os novos antes
+        # de desassinar os encerrados furava `max_tokens_assinados` durante a
+        # rotação — o teto valia no fim do ciclo, não em todo instante.
+        if encerrados:
+            await self.poly.unsubscribe(encerrados)
         if novos:
             await self.poly.subscribe(novos)
             self.subscribed_ever.update(novos)
-        if encerrados:
-            await self.poly.unsubscribe(encerrados)
 
         self._write_meta(
             FONTE_DISCOVERY,
@@ -594,6 +607,9 @@ class Recorder:
                 # escopo. Documentar o corte é o que o impede de ser silencioso.
                 "janelas": [market_snapshot(m) for m in markets],
                 "escopo": escopo,
+                # Os tokens EFETIVAMENTE assinados ao fim do ciclo — inclui os
+                # retidos em carência, que não estão em `slugs_no_escopo`.
+                "tokens_assinados": sorted(self.poly.token_ids),
                 "assinaturas": {
                     "novas": len(novos),
                     "encerradas": len(encerrados),
@@ -744,10 +760,34 @@ class Recorder:
             # marcar_perda — o token perderia a recuperação e ficaria cego
             # (corrida ws×resync, revisão do PR #195). Entre o unsubscribe e o
             # subscribe não chega book nenhum, então marcar aqui é seguro.
+            #
+            # O MARCADOR também vai ANTES do subscribe, e pelo canal SEM perda
+            # (revisão do PR #197, P1): gravado depois, como era, o `book` de
+            # recuperação podia aparecer no arquivo ANTES do `resync_book`, e o
+            # replay apagava uma recuperação já aplicada — fabricando
+            # `aguardando_resync`. No CANAL_BOOK (FIFO, o mesmo do `book`) e
+            # enfileirado antes do subscribe, ele precede o snapshot que o
+            # subscribe dispara; no canal padrão podia ser descartado ou
+            # drenado num ciclo posterior. `ts_perda_ns` é a fronteira que o
+            # replay respeita (`aplicar_marcador_de_resync`) mesmo em ordem
+            # trocada. O marcador diz "perda marcada", o que é verdade mesmo
+            # se o subscribe falhar: o token fica aguardando, como deve.
             try:
                 await self.poly.unsubscribe(pendentes)
+                ts_perda_ns = time.time_ns()
                 for token in pendentes:
                     self.integridade.marcar_perda(token)
+                self._write_meta(
+                    FONTE_RESYNC,
+                    {
+                        "_sintetico": True,
+                        "tokens": pendentes,
+                        "ts_perda_ns": ts_perda_ns,
+                        "motivos": dict(self.motivos_de_resync),
+                        "observado_em_epoch": time.time(),
+                    },
+                    canal=CANAL_BOOK,
+                )
                 await self.poly.subscribe(pendentes)
             except Exception as exc:
                 log.warning(
@@ -758,15 +798,6 @@ class Recorder:
                 self.a_resincronizar.update(pendentes)
                 continue
             self.resyncs += len(pendentes)
-            self._write_meta(
-                FONTE_RESYNC,
-                {
-                    "_sintetico": True,
-                    "tokens": pendentes,
-                    "motivos": dict(self.motivos_de_resync),
-                    "observado_em_epoch": time.time(),
-                },
-            )
             log.warning(
                 "resync do livro",
                 tokens=len(pendentes),
@@ -951,6 +982,43 @@ class Recorder:
         }
 
     # ---------------------------------------------------------------- ciclo
+    def _relatorio_final(self, duracao: float) -> dict[str, Any]:
+        """O relatório de encerramento, gravado como `recorder_relatorio`."""
+        # Fecha pendências e divergências ABERTAS antes de resumir (revisão do
+        # PR #197, P1): sem isto, uma divergência ainda aberta no último evento
+        # nunca contava tempo nem entrava em `divergencias_persistentes` — o
+        # relatório final saía mais saudável do que a gravação foi.
+        self.integridade.finalizar()
+        relatorio = {
+            "duracao_s": round(duracao, 1),
+            "ciclos_descoberta": self.discovery_cycles,
+            "tokens_assinados_no_total": len(self.subscribed_ever),
+            "mensagens": {
+                "rtds": sum(feed.message_count for feed in self.rtds_feeds),
+                "binance_ws": self.binance.message_count,
+                "poly_ws": self.poly.message_count,
+            },
+            "gravadas": self.writer.written,
+            "descartadas": self.writer.dropped,
+            "descartadas_por_canal": dict(self.writer.dropped_por_canal),
+            "integridade": self.integridade_resumo(),
+            "eventos_poly_por_tipo": dict(self.eventos_poly),
+            "resolucoes_capturadas": len(self.resolvidos),
+            "janelas_vistas": len(self.janela_por_token),
+            "quedas_por_feed": {
+                nome: {
+                    "total": feed.close_count,
+                    "ultimas": feed.close_reasons[-10:],
+                }
+                for nome, feed in self._feed_by_name.items()
+            },
+            "gaps": resumo_gaps(self.trackers, duracao),
+            "redundancia_rtds": self.redundancia_resumo(),
+            "saude_do_rtds": self.saude_do_rtds(duracao),
+            "armazenamento": self._armazenamento_resumo(duracao),
+        }
+        return relatorio
+
     async def run(self, duration_seconds: float) -> dict[str, Any]:
         await self.writer.start()
         inicio_mono = time.monotonic()
@@ -1008,34 +1076,7 @@ class Recorder:
                 await self.poly.stop()
 
         duracao = time.monotonic() - inicio_mono
-        relatorio = {
-            "duracao_s": round(duracao, 1),
-            "ciclos_descoberta": self.discovery_cycles,
-            "tokens_assinados_no_total": len(self.subscribed_ever),
-            "mensagens": {
-                "rtds": sum(feed.message_count for feed in self.rtds_feeds),
-                "binance_ws": self.binance.message_count,
-                "poly_ws": self.poly.message_count,
-            },
-            "gravadas": self.writer.written,
-            "descartadas": self.writer.dropped,
-            "descartadas_por_canal": dict(self.writer.dropped_por_canal),
-            "integridade": self.integridade_resumo(),
-            "eventos_poly_por_tipo": dict(self.eventos_poly),
-            "resolucoes_capturadas": len(self.resolvidos),
-            "janelas_vistas": len(self.janela_por_token),
-            "quedas_por_feed": {
-                nome: {
-                    "total": feed.close_count,
-                    "ultimas": feed.close_reasons[-10:],
-                }
-                for nome, feed in self._feed_by_name.items()
-            },
-            "gaps": resumo_gaps(self.trackers, duracao),
-            "redundancia_rtds": self.redundancia_resumo(),
-            "saude_do_rtds": self.saude_do_rtds(duracao),
-            "armazenamento": self._armazenamento_resumo(duracao),
-        }
+        relatorio = self._relatorio_final(duracao)
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()
         # Só DEPOIS de o writer drenar as filas e FECHAR os arquivos os bytes
