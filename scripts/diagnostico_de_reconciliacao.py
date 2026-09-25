@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
         destino = caminho_de_escrita(args.json)
-        destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
+        destino.write_text(saida, encoding="utf-8")
     if not leitura_da_gravacao["integra"]:
         return SAIDA_GRAVACAO_NAO_INTEGRA
     return 0
