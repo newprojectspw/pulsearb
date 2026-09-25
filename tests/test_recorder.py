@@ -220,3 +220,21 @@ def test_overflow_de_book_e_incidente_contado_nao_silencio(tmp_path):
 
     assert writer.dropped_por_canal[CANAL_BOOK] == 6
     assert len(incidentes) == 6
+
+
+async def test_bytes_em_disco_so_completa_apos_stop(tmp_path):
+    """Revisão P2 #195: medir a taxa de armazenamento ANTES do `stop()`
+    subestima — o buffer gzip e as filas ainda não drenaram. Só depois de
+    fechar o arquivo os bytes em disco estão completos."""
+    # flush alto: nada vai a disco até o close.
+    writer = JsonlGzipWriter(output_dir=tmp_path, flush_a_cada=10**9)
+    await writer.start()
+    for i in range(200):
+        writer.submit(RecordEnvelope(i, i, "poly_ws", b'{"n":%d}' % i))
+    await asyncio.sleep(0.2)
+    antes = writer.bytes_em_disco
+    await writer.stop()
+    depois = writer.bytes_em_disco
+
+    assert depois > antes, "os bytes só ficam completos depois do stop()"
+    assert depois > 0

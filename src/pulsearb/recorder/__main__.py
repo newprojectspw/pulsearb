@@ -463,7 +463,10 @@ class Recorder:
             await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
 
     def _aplicar_escopo(
-        self, markets: list[DiscoveredMarket]
+        self,
+        markets: list[DiscoveredMarket],
+        *,
+        retidos_em_carencia: int = 0,
     ) -> tuple[list[DiscoveredMarket], dict[str, Any]]:
         """Corta a descoberta ao escopo configurado, SEM esconder o corte.
 
@@ -471,7 +474,13 @@ class Recorder:
         janelas INTEIRAS (Up+Down são um par; meia janela não serve) até o
         teto de tokens, em ordem determinística por slug — o replay tem de
         reproduzir a mesma seleção. O que ficou de fora vai no relato de
-        descoberta (`cortadas`), nunca some em silêncio."""
+        descoberta (`cortadas`), nunca some em silêncio.
+
+        `retidos_em_carencia` são os tokens que já estão assinados de janelas
+        FECHADAS mas ainda dentro da carência de resolução — eles continuam no
+        ar e por isso CONSOMEM o teto (revisão P1 do PR #195). Sem descontá-los
+        do orçamento, `limite=2` com 2 retidos + 2 novos daria 4 ativos, e o
+        teto não seria teto. O orçamento para janelas NOVAS é o que sobra."""
         limite = self.settings.recorder.max_tokens_assinados
         if limite is None:
             return markets, {
@@ -482,29 +491,50 @@ class Recorder:
                 "tokens_no_escopo": sum(
                     len(m.token_id_by_outcome) for m in markets
                 ),
+                "tokens_retidos_em_carencia": retidos_em_carencia,
             }
+        orcamento = max(0, limite - retidos_em_carencia)
         no_escopo: list[DiscoveredMarket] = []
         tokens = 0
         for market in sorted(markets, key=lambda m: m.slug):
             n = len(market.token_id_by_outcome)
-            if tokens + n > limite:
+            if tokens + n > orcamento:
                 continue
             no_escopo.append(market)
             tokens += n
         return no_escopo, {
             "limite_de_tokens": limite,
+            "orcamento_para_novos": orcamento,
+            "tokens_retidos_em_carencia": retidos_em_carencia,
             "janelas_descobertas": len(markets),
             "janelas_no_escopo": len(no_escopo),
             "janelas_cortadas": len(markets) - len(no_escopo),
             "tokens_no_escopo": tokens,
+            # O teto de verdade: o que fica no ar depois deste ciclo.
+            "tokens_ativos_estimados": tokens + retidos_em_carencia,
         }
 
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
         markets = await discovery.discover()
         self.discovery_cycles += 1
-        no_escopo, escopo = self._aplicar_escopo(markets)
 
         agora = time.time()
+        atuais = set(self.poly.token_ids)
+        descobertos = {
+            token for market in markets for token in market.token_id_by_outcome.values()
+        }
+        # Tokens de janelas FECHADAS ainda dentro da carência: continuam no ar
+        # e consomem o teto do escopo (revisão P1 do PR #195).
+        retidos_em_carencia = {
+            token
+            for token in atuais
+            if token not in descobertos
+            and agora < self.desassinar_apos.get(token, 0.0)
+            and token not in self.resolvidos
+        }
+        no_escopo, escopo = self._aplicar_escopo(
+            markets, retidos_em_carencia=len(retidos_em_carencia)
+        )
 
         # Tokens que DEVEM estar assinados agora. Janela não-operável continua
         # sendo gravada: o motivo da recusa é dado, e o M2 quer medir isso.
@@ -533,18 +563,23 @@ class Recorder:
                     ),
                 }
 
-        atuais = set(self.poly.token_ids)
         novos = sorted(desejados - atuais)
 
         # Rotação COM CARÊNCIA: o token só sai depois que a janela encerrou
         # E a carência de resolução passou. Desassinar no endDate — como era
         # antes — desligava a escuta antes de o resultado ser publicado, e foi
         # por isso que o primeiro backtest real viu 104 janelas e 0 resoluções.
+        #
+        # EXCEÇÃO do escopo: um token cuja janela SEGUE aberta (`descobertos`)
+        # mas que o escopo CORTOU sai agora — senão o teto seria furado por
+        # tokens abertos fora do escopo. A carência só protege janela FECHADA
+        # (revisão P1 do PR #195).
         candidatos = atuais - desejados
         encerrados = sorted(
             token
             for token in candidatos
-            if agora >= self.desassinar_apos.get(token, 0.0)
+            if token in descobertos
+            or agora >= self.desassinar_apos.get(token, 0.0)
             or token in self.resolvidos
         )
         for token in encerrados:
@@ -707,8 +742,17 @@ class Recorder:
             if not pendentes:
                 continue
             self.a_resincronizar.difference_update(pendentes)
+            # marca_perda ANTES de reassinar, e não depois: o `subscribe`
+            # dispara o book de RECUPERAÇÃO, que chega pela tarefa do WS. Se a
+            # perda fosse marcada DEPOIS do subscribe, um book de recuperação
+            # que chegasse no meio seria aplicado e então APAGADO pela
+            # marcar_perda — o token perderia a recuperação e ficaria cego
+            # (corrida ws×resync, revisão do PR #195). Entre o unsubscribe e o
+            # subscribe não chega book nenhum, então marcar aqui é seguro.
             try:
                 await self.poly.unsubscribe(pendentes)
+                for token in pendentes:
+                    self.integridade.marcar_perda(token)
                 await self.poly.subscribe(pendentes)
             except Exception as exc:
                 log.warning(
@@ -719,8 +763,6 @@ class Recorder:
                 self.a_resincronizar.update(pendentes)
                 continue
             self.resyncs += len(pendentes)
-            for token in pendentes:
-                self.integridade.marcar_perda(token)
             self._write_meta(
                 FONTE_RESYNC,
                 {
@@ -997,10 +1039,17 @@ class Recorder:
             "gaps": resumo_gaps(self.trackers, duracao),
             "redundancia_rtds": self.redundancia_resumo(),
             "saude_do_rtds": self.saude_do_rtds(duracao),
-            "armazenamento": self._armazenamento_resumo(duracao),
         }
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()
+        # Só DEPOIS de o writer drenar as filas e FECHAR os arquivos os bytes
+        # em disco (gzip) estão completos. Medir antes subestimava a taxa —
+        # filas e buffer gzip não drenados ficavam de fora — e calibraria o
+        # preflight para MENOS, podendo aprovar uma rodada que não cabe
+        # (revisão P2 do PR #195). Vai no relatório RETORNADO (o que a linha
+        # `recorder encerrado` loga), não no meta embutido, que já foi escrito
+        # e não pode mais ser, com o writer fechado.
+        relatorio["armazenamento"] = self._armazenamento_resumo(duracao)
         return relatorio
 
 

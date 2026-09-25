@@ -143,3 +143,28 @@ def test_relatorio_traz_projecao_de_armazenamento(tmp_path):
     assert "bytes_por_hora_medido" in resumo
     assert "projecao_72h_bytes" in resumo
     assert resumo["estimativa_configurada_por_hora"] == 2_000_000_000.0
+
+
+# ───────────── escopo desconta tokens retidos em carência (revisão P1 #195)
+
+
+def test_escopo_desconta_retidos_em_carencia(tmp_path):
+    """Tokens de janelas fechadas ainda em carência consomem o teto — senão
+    `limite=4` com 2 retidos + 2 novos daria 4 ativos e o teto não seria teto.
+    """
+    rec = _recorder(tmp_path, max_tokens_assinados=4)
+    no_escopo, escopo = rec._aplicar_escopo(_markets(10), retidos_em_carencia=2)
+
+    assert escopo["orcamento_para_novos"] == 2   # 4 − 2 retidos
+    assert len(no_escopo) == 1                    # só 1 janela nova cabe
+    assert escopo["tokens_ativos_estimados"] == 4  # 2 novos + 2 retidos = teto
+
+
+def test_escopo_com_carencia_cheia_nao_assina_nada_novo(tmp_path):
+    """Se os retidos já enchem o teto, nenhuma janela nova entra."""
+    rec = _recorder(tmp_path, max_tokens_assinados=2)
+    no_escopo, escopo = rec._aplicar_escopo(_markets(10), retidos_em_carencia=2)
+
+    assert escopo["orcamento_para_novos"] == 0
+    assert no_escopo == []
+    assert escopo["tokens_ativos_estimados"] == 2
