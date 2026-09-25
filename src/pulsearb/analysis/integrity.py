@@ -92,6 +92,11 @@ PERSISTENCIA_MIN_MS = 250.0
 # `MonitorDeIntegridade._politica_de_resync`.
 CONFIRMACOES_MIN_RESYNC = 2
 
+# Intervalo máximo entre duas observações divergentes para elas contarem como
+# a MESMA persistência. Dois blips separados por um silêncio longo não
+# descrevem um livro continuamente fora; cada um recomeça a contagem.
+INTERVALO_MAX_ENTRE_CONFIRMACOES_MS = 5_000.0
+
 # Fração do tempo observado com livro divergente que ainda deixa o token
 # utilizável. 1% de uma janela de 5 min são 3 s.
 FRACAO_MEDIA = 0.01
@@ -295,6 +300,9 @@ class _EstadoDoToken:
     )
     #: lado → (ts_ms de início, maior magnitude) da divergência relevante aberta
     abertas: dict[str, tuple[float, float]] = field(default_factory=dict)
+    #: lado → (ts_ms de início, ts_ms da última observação, nº de observações)
+    #: de uma divergência sub-material aberta, apenas para a política de resync.
+    resync_streak: dict[str, tuple[float, float, int]] = field(default_factory=dict)
     #: `None` = ainda não observado. Zero NÃO serve de sentinela aqui: um
     #: carimbo legítimo de 0 seria indistinguível de "nunca vi este token", e
     #: a comparação com 0.0 em ponto flutuante é frágil por natureza.
@@ -607,7 +615,8 @@ class MonitorDeIntegridade:
             return
         estado = self._estado(asset_id)
         self._resolver_pendentes(asset_id, estado, carimbo)
-        if estado.com_snapshot and carimbo < estado.ts_max_servidor_ms:
+        tinha_livro_valido = estado.com_snapshot
+        if tinha_livro_valido and carimbo < estado.ts_max_servidor_ms:
             # Snapshot mais VELHO que o estado que já temos, E temos um livro
             # VÁLIDO para proteger: aplicá-lo rebobinaria o livro e a corrupção
             # seria nossa. Conta e ignora.
@@ -630,7 +639,14 @@ class MonitorDeIntegridade:
         estado.aguardando_resync = False
         estado.marcar_tempo(carimbo)
         estado.fechar_sem_livro(carimbo)
-        estado.ts_max_servidor_ms = max(estado.ts_max_servidor_ms, carimbo)
+        # Um primeiro snapshot ou snapshot de recuperação inicia uma nova
+        # época. O high-water mark da época anterior não pode fazer deltas
+        # válidos da recuperação parecerem fora de ordem.
+        estado.ts_max_servidor_ms = (
+            max(estado.ts_max_servidor_ms, carimbo)
+            if tinha_livro_valido
+            else carimbo
+        )
         self._anotar_historico(estado, carimbo)
 
     def marcar_perda(self, asset_id: str) -> None:
@@ -644,6 +660,9 @@ class MonitorDeIntegridade:
         estado.livro = LivroLeve()
         estado.com_snapshot = False
         estado.aguardando_resync = True
+        # A próxima book começa uma nova época; não compare os seus carimbos
+        # com o high-water mark do livro que acaba de ser invalidado.
+        estado.ts_max_servidor_ms = 0.0
         estado.historico.clear()
         estado.pendentes.clear()
         estado.abertas.clear()
@@ -914,6 +933,13 @@ class MonitorDeIntegridade:
             self.resyncs_por_material += 1
             self._solicitar_resync(asset_id, "divergencia_material")
             return
+        inicio, ultimo, contagem = estado.resync_streak.get(
+            lado, (carimbo, carimbo, 0)
+        )
+        if carimbo - ultimo > INTERVALO_MAX_ENTRE_CONFIRMACOES_MS:
+            inicio, contagem = carimbo, 0
+        contagem += 1
+        estado.resync_streak[lado] = (inicio, carimbo, contagem)
         if (
             contagem >= self.confirmacoes_min_resync
             and carimbo - inicio > self.persistencia_min_ms

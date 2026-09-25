@@ -463,13 +463,20 @@ class Recorder:
             await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
 
     def _aplicar_escopo(
+        self,
+        markets: list[DiscoveredMarket],
+        *,
+        retidos_em_carencia: int = 0,
     ) -> tuple[list[DiscoveredMarket], dict[str, Any]]:
-        """Corta a descoberta ao escopo configurado, SEM esconder o corte.
+        """Corta a descoberta ao escopo configurado, sem esconder o corte.
 
-        `max_tokens_assinados=None` grava tudo (padrão). Com limite, mantém
-        janelas INTEIRAS (Up+Down são um par; meia janela não serve) até o
-        teto de tokens, em ordem determinística por slug — o replay tem de
-        reproduzir a mesma seleção. O que ficou de fora vai no relato de
+        Tokens de janelas fechadas ainda em carência permanecem assinados,
+        mas ocupam o teto antes de novas janelas serem escolhidas. Assim,
+        `max_tokens_assinados` limita o total ativo durante a rotação, e não
+        apenas o conjunto recém-descoberto.
+        """
+        if retidos_em_carencia < 0:
+            raise ValueError("retidos_em_carencia não pode ser negativo")
         limite = self.settings.recorder.max_tokens_assinados
         if limite is None:
             return markets, {
@@ -480,10 +487,15 @@ class Recorder:
                 "tokens_no_escopo": sum(
                     len(m.token_id_by_outcome) for m in markets
                 ),
+                "tokens_retidos_em_carencia": retidos_em_carencia,
+            }
+
+        disponivel = max(0, limite - retidos_em_carencia)
         no_escopo: list[DiscoveredMarket] = []
         tokens = 0
         for market in sorted(markets, key=lambda m: m.slug):
             n = len(market.token_id_by_outcome)
+            if tokens + n > disponivel:
                 continue
             no_escopo.append(market)
             tokens += n
@@ -493,12 +505,13 @@ class Recorder:
             "janelas_no_escopo": len(no_escopo),
             "janelas_cortadas": len(markets) - len(no_escopo),
             "tokens_no_escopo": tokens,
+            "tokens_retidos_em_carencia": retidos_em_carencia,
+            "tokens_ativos_estimados": retidos_em_carencia + tokens,
         }
 
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
         markets = await discovery.discover()
         self.discovery_cycles += 1
-        no_escopo, escopo = self._aplicar_escopo(markets)
 
         agora = time.time()
         atuais = set(self.poly.token_ids)
