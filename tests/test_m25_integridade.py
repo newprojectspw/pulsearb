@@ -717,3 +717,32 @@ class TestPoliticaDeResync:
                 (evento_ts + 1) * 1_000_000,
             )
         assert m.consumir_resync() == {ASSET: "divergencia_persistente"}
+
+
+def test_snapshot_de_recuperacao_reinicia_high_water_da_epoca():
+    """Um snapshot após perda inaugura uma nova época de timestamps.
+
+    O high-water mark da época anterior não pode rejeitar deltas válidos da
+    recuperação só porque chegam com carimbo menor que o último evento antes
+    da perda. Sem este reset, a reconciliação parecia fora de ordem depois de
+    cada reconexão e a integridade permanecia degradada indefinidamente.
+    """
+    monitor = MonitorDeIntegridade()
+    monitor.observar(_book(1000), 1_000_000_000)
+    monitor.observar(
+        _delta(10000, price="0.50", size="10", side="BUY",
+               best_bid="0.50", best_ask="0.51"),
+        2_000_000_000,
+    )
+    monitor.marcar_perda(ASSET)
+
+    monitor.observar(_book(9000, bid="0.70", ask="0.71"), 3_000_000_000)
+    monitor.observar(
+        _delta(9500, price="0.70", size="10", side="BUY",
+               best_bid="0.70", best_ask="0.71"),
+        4_000_000_000,
+    )
+
+    estado = monitor.estados[ASSET]
+    assert estado.deltas_fora_de_ordem == 0
+    assert estado.ts_max_servidor_ms == 9500

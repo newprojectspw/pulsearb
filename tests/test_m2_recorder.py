@@ -505,6 +505,67 @@ async def test_resync_reassina_e_registra(recorder, server, tmp_path):  # noqa: 
     assert resyncs[0]["payload"]["_sintetico"] is True
 
 
+async def test_resync_marca_perda_ANTES_de_reassinar(recorder, server):  # noqa: F811
+    """Revisão P1 #195: `marcar_perda` tem de rodar ANTES do `subscribe`. Se o
+    book de recuperação chegar durante o subscribe e a perda fosse marcada
+    depois, ele seria apagado e o token ficaria cego (corrida ws×resync)."""
+    import time as _time
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    estado = {}
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder.poly.subscribe(["tokA"])
+        recorder.a_resincronizar.add("tokA")
+        recorder.settings.recorder.resync_intervalo_s = 0.01
+
+        original = recorder.poly.subscribe
+
+        async def espia(tokens):
+            # no instante do subscribe, a perda JÁ tem de estar marcada.
+            estado["aguardando_no_subscribe"] = (
+                "tokA" in recorder.integridade.aguardando_resync
+            )
+            return await original(tokens)
+
+        recorder.poly.subscribe = espia
+        await recorder._resync_loop(_time.monotonic() + 0.05)
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+    assert estado.get("aguardando_no_subscribe") is True
+
+
+async def test_escopo_respeita_o_teto_contando_carencia(recorder):
+    """Revisão P1 #195: uma janela FECHADA em carência consome o teto. Com
+    limite 2 e uma janela retida, a janela nova é cortada — o total nunca
+    ultrapassa o teto."""
+    from dataclasses import replace
+
+    recorder.settings.recorder.max_tokens_assinados = 2
+    futuro = "2027-01-01T00:00:00Z"  # end no futuro → carência ativa
+    a = replace(_janela(1), end_date_iso=futuro)
+    b = replace(_janela(2), end_date_iso=futuro)
+    fake = FakeDiscovery([[a], [b]])  # ciclo 1: A; ciclo 2: só B (A em carência)
+
+    await recorder.writer.start()
+    await recorder.poly.start()
+    try:
+        await _wait_for(lambda: recorder.poly.connected)
+        await recorder._discovery_cycle(fake)
+        assert set(recorder.poly.token_ids) == {"up1", "dn1"}
+
+        await recorder._discovery_cycle(fake)
+        # A (2 tokens) está em carência e consome o teto de 2 → B é cortada.
+        assert len(recorder.poly.token_ids) <= 2
+        assert set(recorder.poly.token_ids) == {"up1", "dn1"}
+    finally:
+        await recorder.poly.stop()
+        await recorder.writer.stop()
+
+
 def test_rtds_redundante_deduplica_por_identidade_do_tick(recorder):
     """A.5: duas conexões, uma gravação. Quem chega primeiro vale."""
     from pulsearb.feeds.base import FeedEvent
