@@ -247,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
         destino = caminho_de_escrita(args.json)
-        destino.write_text(saida, encoding="utf-8")
+        destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
     return 0
 
 
