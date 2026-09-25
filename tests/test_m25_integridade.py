@@ -767,3 +767,22 @@ def test_snapshot_antigo_com_book_VALIDO_ainda_e_rejeitado():
 
     assert m.estados[ASSET].snapshots_fora_de_ordem == 1
     assert m.estados[ASSET].livro.best_bid == 0.49  # não rebobinou
+
+
+def test_apos_perda_o_carimbo_de_alta_agua_zera_e_deltas_validos_conferem():
+    """Revisão P1 #196: sem zerar `ts_max_servidor_ms` na perda, o snapshot de
+    recuperação (carimbo atrasado) e os deltas válidos DEPOIS dele cairiam em
+    'fora de ordem' contra o carimbo antigo, e deixariam de ser conferidos."""
+    m = MonitorDeIntegridade()
+    m.observar(_book(5000), 5_000_000_000)   # ts_max = 5000
+    m.marcar_perda(ASSET)                     # nova época: ts_max volta a 0
+    m.observar(_book(3000), 6_000_000_000)   # recuperação, carimbo < 5000
+    # delta em 3500: > recuperação (3000) e < ts_max antigo (5000). Com o
+    # carimbo zerado, ele é conferido; sem, seria descartado como fora de ordem.
+    m.observar(
+        _delta(3500, price="0.49", size="10", side="BUY",
+               best_bid="0.49", best_ask="0.51"),
+        7_000_000_000,
+    )
+    assert m.estados[ASSET].deltas_fora_de_ordem == 0
+    assert m.por_carimbo.comparacoes >= 1

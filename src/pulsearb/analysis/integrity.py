@@ -665,6 +665,14 @@ class MonitorDeIntegridade:
         estado.pendentes.clear()
         estado.abertas.clear()
         estado.resync_streak.clear()
+        # NOVA ÉPOCA: zera a marca de alta-água do carimbo do servidor. O
+        # snapshot de recuperação traz o `timestamp` da última mutação do
+        # book, que pode ser ANTERIOR ao maior carimbo da sessão perdida — e
+        # sem zerar aqui, ele e os deltas válidos DEPOIS dele cairiam todos em
+        # "fora de ordem" e deixariam de ser conferidos (revisão P1 do PR #196).
+        # A perda já invalidou o passado; o carimbo antigo não descreve mais
+        # nada que se queira proteger.
+        estado.ts_max_servidor_ms = 0.0
         estado.abrir_sem_livro(estado.ts_ultimo_ms)
 
     def finalizar(self) -> None:

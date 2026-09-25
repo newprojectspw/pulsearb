@@ -111,3 +111,35 @@ def test_metricas_trazem_formas_e_niveis_para_achar_truncagem():
     assert "formas_de_book" in d["metricas"]
     assert "niveis_por_lado" in d["metricas"]
     assert "formas_de_price_change" in d["metricas"]
+
+
+def test_json_com_caminho_absoluto_e_recusado(tmp_path):
+    """Revisão Sonar (S2083): o `--json` passa por `caminho_de_escrita`, então
+    um caminho absoluto/não sanitizado é RECUSADO."""
+    import gzip
+
+    import orjson
+    import pytest
+    from scripts.diagnostico_de_reconciliacao import main
+
+    rec = tmp_path / "pulsearb-x.jsonl.gz"
+    with gzip.open(rec, "wb") as f:
+        f.write(
+            orjson.dumps(
+                {
+                    "ts_mono_ns": 1,
+                    "ts_wall_ns": 1_000_000,
+                    "fonte": "poly_ws",
+                    "payload": {
+                        "event_type": "book",
+                        "asset_id": "tok",
+                        "timestamp": "1000",
+                        "bids": [{"price": "0.49", "size": "100"}],
+                        "asks": [{"price": "0.51", "size": "100"}],
+                    },
+                }
+            )
+            + b"\n"
+        )
+    with pytest.raises(ValueError):
+        main([str(rec), "--json", "/tmp/evil.json"])

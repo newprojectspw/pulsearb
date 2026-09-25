@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsearb.analysis.integrity import MAGNITUDE_CRITICA, MonitorDeIntegridade
+from pulsearb.caminhos import caminho_de_escrita
 from pulsearb.feeds.poly_ws import eventos_do_payload
 from pulsearb.recorder.writer import FONTE_RESYNC
 
@@ -157,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     saida = json.dumps(comparativo, indent=2, ensure_ascii=False)
     print(saida)
     if args.json:
-        Path(args.json).write_text(saida, encoding="utf-8")
+        # `caminho_de_escrita` contém o destino à raiz permitida (S2083): um
+        # `--json` não sanitizado é caminho de saída não confiável. Ver
+        # `caminhos.py`.
+        caminho_de_escrita(args.json).write_text(saida, encoding="utf-8")
     return 0
 
 
