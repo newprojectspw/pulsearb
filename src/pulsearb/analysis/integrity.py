@@ -826,26 +826,11 @@ class MonitorDeIntegridade:
         """Confere UM lado do livro. `None` = nada a registrar neste lado."""
         if afirmado is None:
             return None
-        if not estado.com_snapshot:
-            # Sem snapshot inicial não há reconstrução: comparar seria comparar
-            # contra chute. Não entra em `comparacoes` nem em `divergencias` —
-            # não é a reconstrução errando, é a ausência dela. Vira TEMPO sem
-            # livro, que é o que a marca de qualidade cobra.
-            if alinhado:
-                self.observacoes_sem_snapshot += 1
-                self.sem_livro_por_causa[
-                    "apos_perda" if estado.aguardando_resync else "sem_snapshot"
-                ] += 1
-                estado.abrir_sem_livro(carimbo)
+        if self._registrar_ausencia_de_snapshot(estado, carimbo, alinhado):
             return None
         populacao.comparacoes += 1
-        if nosso is not None and abs(afirmado - nosso) <= self.tolerancia:
-            if alinhado:
-                self._fechar_aberta(estado, lado, carimbo)
-                estado.fechar_sem_livro(carimbo)
-                # Bateu: a divergência (se havia) era corrida, e o livro voltou
-                # a descrever o topo. A confirmação de resync recomeça do zero.
-                estado.resync_streak.pop(lado, None)
+        if self._lado_confere(afirmado, nosso):
+            self._registrar_lado_confere(estado, lado, carimbo, alinhado)
             return None
         magnitude = abs(afirmado - nosso) if nosso is not None else float("inf")
         motivo = estado.livro.motivo_vazio[lado] if nosso is None else None
@@ -864,11 +849,38 @@ class MonitorDeIntegridade:
             self._contabilizar(asset_id, estado, lado, carimbo, magnitude, motivo)
             if pode_pedir_resync:
                 self._politica_de_resync(
-                    asset_id, estado, lado, carimbo, magnitude, motivo
+                    asset_id, estado, lado, carimbo, magnitude
                 )
         if len(self.amostras) < self.max_amostras:
             self.amostras.append(divergencia)
         return divergencia
+
+    def _registrar_ausencia_de_snapshot(
+        self, estado: _EstadoDoToken, carimbo: float, alinhado: bool
+    ) -> bool:
+        """Registra ausência de livro e informa se não há reconstrução."""
+        if estado.com_snapshot:
+            return False
+        if alinhado:
+            self.observacoes_sem_snapshot += 1
+            causa = "apos_perda" if estado.aguardando_resync else "sem_snapshot"
+            self.sem_livro_por_causa[causa] += 1
+            estado.abrir_sem_livro(carimbo)
+        return True
+
+    def _registrar_lado_confere(
+        self, estado: _EstadoDoToken, lado: str, carimbo: float, alinhado: bool
+    ) -> None:
+        if not alinhado:
+            return
+        self._fechar_aberta(estado, lado, carimbo)
+        estado.fechar_sem_livro(carimbo)
+        # Bateu: a divergência (se havia) era corrida, e o livro voltou
+        # a descrever o topo. A confirmação de resync recomeça do zero.
+        estado.resync_streak.pop(lado, None)
+
+    def _lado_confere(self, afirmado: float, nosso: float | None) -> bool:
+        return nosso is not None and abs(afirmado - nosso) <= self.tolerancia
 
     def _contabilizar(
         self,
@@ -906,7 +918,6 @@ class MonitorDeIntegridade:
         lado: str,
         carimbo: float,
         magnitude: float,
-        motivo: str | None,
     ) -> None:
         """Decide se ESTA divergência alinhada pede resync — a política
         explícita que substitui o "resync a cada divergência" (req 7/8).

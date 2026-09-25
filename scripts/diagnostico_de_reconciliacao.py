@@ -115,18 +115,30 @@ def diagnosticar(registros: Iterable[Any], *, replay_resync: bool) -> dict[str, 
     medir se o descompasso de reprodução (item 4) explica os persistentes."""
     monitor = MonitorDeIntegridade()
     for rec in registros:
-        if rec.fonte == FONTE_RESYNC:
-            if replay_resync and isinstance(rec.payload, dict):
-                for token in rec.payload.get("tokens", []):
-                    if isinstance(token, str):
-                        monitor.marcar_perda(token)
+        if _tratar_resync(monitor, rec, replay_resync):
             continue
         if rec.fonte != "poly_ws":
             continue
-        for evento in eventos_do_payload(rec.payload):
-            monitor.observar(evento, rec.ts_wall_ns)
+        _observar_eventos(monitor, rec)
     monitor.finalizar()
     return relatorio_de_diagnostico(monitor)
+
+
+def _tratar_resync(monitor: MonitorDeIntegridade, rec: Any, replay: bool) -> bool:
+    """Reproduz uma perda do recorder e informa se o registro foi consumido."""
+    if rec.fonte != FONTE_RESYNC:
+        return False
+    if not replay or not isinstance(rec.payload, dict):
+        return True
+    for token in rec.payload.get("tokens", []):
+        if isinstance(token, str):
+            monitor.marcar_perda(token)
+    return True
+
+
+def _observar_eventos(monitor: MonitorDeIntegridade, rec: Any) -> None:
+    for evento in eventos_do_payload(rec.payload):
+        monitor.observar(evento, rec.ts_wall_ns)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,7 +173,13 @@ def main(argv: list[str] | None = None) -> int:
         # `caminho_de_escrita` contém o destino à raiz permitida (S2083): um
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
-        caminho_de_escrita(args.json).write_text(saida, encoding="utf-8")
+        # O helper valida o nome contra uma allowlist e contém o destino na
+        # raiz permitida antes de devolver o Path. O Sonar não propaga essa
+        # sanitização entre módulos (S2083), por isso a supressão fica presa
+        # exatamente ao sink já protegido, não ao argumento inteiro.
+        caminho_de_escrita(args.json).write_text(  # NOSONAR S2083
+            saida, encoding="utf-8"
+        )
     return 0
 
 
