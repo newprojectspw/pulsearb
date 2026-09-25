@@ -89,6 +89,7 @@ from pulsearb.feeds.poly_ws import (
 from pulsearb.feeds.rtds import TOPIC_TWAP_60, PriceTick, e18_do_evento, parse_rtds_event
 from pulsearb.markets.discovery import duracao_do_slug, parse_end_date_epoch
 from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA
+from pulsearb.replay.escopo import slugs_no_escopo
 from pulsearb.replay.reader import RecordingReader, ReplayRecord
 
 #: De quantos em quantos registros o progresso é impresso. 500 mil é ~1 % de
@@ -345,6 +346,9 @@ class RecordingIndex:
         self.n_snapshots = 0
         self.ticks_vistos: Counter[str] = Counter()
         self.janelas_por_slug: dict[str, dict[str, Any]] = {}
+        # Escopo REAL do recorder (ver `_janela_no_escopo`).
+        self.slugs_fora_do_escopo: set[str] = set()
+        self.snapshots_sem_escopo_explicito = 0
         # M2.3: a resolução é indexada pelos DOIS caminhos que o evento
         # oferece — condition id e token. O condition id é a chave primária
         # (identifica o mercado inteiro); o token cobre o fallback sintético
@@ -455,6 +459,9 @@ class RecordingIndex:
         janelas = payload.get("janelas")
         if not isinstance(janelas, list):
             return
+        no_escopo = slugs_no_escopo(payload)
+        if no_escopo is None:
+            self.snapshots_sem_escopo_explicito += 1
         mudaram: list[dict[str, Any]] = []
         for janela in janelas:
             if not isinstance(janela, dict):
@@ -462,7 +469,8 @@ class RecordingIndex:
             slug = janela.get("slug")
             if not isinstance(slug, str):
                 continue
-            self.janelas_por_slug[slug] = janela
+            if self._janela_no_escopo(slug, no_escopo):
+                self.janelas_por_slug[slug] = janela
             tick = janela.get("tick_size")
             if not isinstance(tick, (int, float)) or isinstance(tick, bool):
                 continue
@@ -472,6 +480,41 @@ class RecordingIndex:
                 mudaram.append(janela)
         if mudaram:
             self.snapshots.append({"janelas": mudaram})
+
+    def _janela_no_escopo(self, slug: str, no_escopo: frozenset[str] | None) -> bool:
+        """A janela entra no backtest só se o recorder a GRAVOU.
+
+        O snapshot lista todas as janelas descobertas, inclusive as que o
+        `max_tokens_assinados` cortou — essas não têm livro gravado (revisão do
+        PR #197, P1). Fail-closed: uma janela cortada em QUALQUER ciclo sai do
+        backtest inteira, porque o livro dela tem um buraco (antes de entrar
+        ou depois de sair) que pareceria livro parado. (O replay ao vivo usa
+        a MESMA leitura, `slugs_no_escopo`, mas filtra ciclo a ciclo: o ciclo
+        só vê o que estava assinado naquele instante, como ao vivo; o backtest
+        julga a janela inteira de uma vez.) Snapshot sem a lista
+        (gravação antiga) mantém a janela, e o relatório diz quantos snapshots
+        tinham escopo não verificável.
+        """
+        if slug in self.slugs_fora_do_escopo:
+            return False
+        if no_escopo is not None and slug not in no_escopo:
+            self.slugs_fora_do_escopo.add(slug)
+            self.janelas_por_slug.pop(slug, None)
+            return False
+        return True
+
+    def escopo_do_recorder(self) -> dict[str, Any]:
+        return {
+            "snapshots_sem_escopo_explicito": self.snapshots_sem_escopo_explicito,
+            "janelas_fora_do_escopo_excluidas": len(self.slugs_fora_do_escopo),
+            "nota": (
+                "Janelas que o `max_tokens_assinados` do recorder cortou em "
+                "algum ciclo NAO entram no backtest: o livro delas nao foi "
+                "gravado (ou foi so em parte). Snapshots sem a lista "
+                "`escopo.slugs_no_escopo` sao de gravacao anterior a ela: o "
+                "escopo daquelas janelas nao e verificavel."
+            ),
+        }
 
     def _on_rtds(self, record: ReplayRecord) -> None:
         tick = parse_rtds_event(record.payload, record.ts_mono_ns, record.ts_wall_ns)
@@ -2091,6 +2134,7 @@ def main(argv: list[str] | None = None) -> int:
             "linhas_corrompidas": reader.corrompidas,
             "arquivos_ilegiveis": reader.arquivos_ilegiveis,
             "snapshots_de_descoberta": index.n_snapshots,
+            "escopo_do_recorder": index.escopo_do_recorder(),
             "janelas_conhecidas": len(janelas),
             "janelas_com_resolucao": len(resolvidas),
             "resolucoes": index.resolucoes_resumo(janelas),

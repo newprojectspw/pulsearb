@@ -21,9 +21,11 @@ distinguir quatro coisas que o número total confunde:
 
 A ferramenta roda o MESMO `MonitorDeIntegridade` do backtest sobre a gravação,
 em dois modos — sem e com a reprodução dos resyncs (`--replay-resync`) — e põe
-as métricas lado a lado. Se os persistentes/comprometidos CAEM ao reproduzir
-os resyncs, a causa era o item 4; se NÃO caem, é truncagem/perda (itens 2/3),
-e o relatório por token diz em qual nível o servidor apontava.
+as métricas lado a lado. A `leitura` compara CADA indicador em separado —
+persistentes caírem enquanto comprometidos/aguardando SOBEM não é "redução",
+é replay offline infiel — e imprime os quatro deltas. Para cada token que
+termina `aguardando_resync`, `forense_pendentes` diz o último resync, se veio
+book depois e o motivo; o fim da gravação NÃO conta como recuperação.
 
 Não altera nada da política de integridade. Só MEDE.
 """
@@ -33,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,8 +67,66 @@ def _motivo_comprometido(monitor: MonitorDeIntegridade, token: str) -> dict[str,
     }
 
 
-def relatorio_de_diagnostico(monitor: MonitorDeIntegridade) -> dict[str, Any]:
+@dataclass
+class _ForenseDeResync:
+    """Por token: quando foi o último `resync_book` e se um `book` veio depois.
+
+    Existe para responder POR QUE um token termina `aguardando_resync`. O fim
+    da gravação NÃO é recuperação: um token cujo último resync não teve book
+    posterior fica pendente, e o motivo diz isso em vez de sumir da conta.
+    """
+
+    ultimo_resync_ns: dict[str, int] = field(default_factory=dict)
+    book_apos_resync_ns: dict[str, int] = field(default_factory=dict)
+
+    def resync(self, payload: Any, ts_registro_ns: int) -> None:
+        if not isinstance(payload, dict):
+            return
+        ts_perda = payload.get("ts_perda_ns")
+        if not isinstance(ts_perda, int) or isinstance(ts_perda, bool):
+            ts_perda = ts_registro_ns  # marcador legado: só há o do registro
+        for token in payload.get("tokens", []):
+            if isinstance(token, str):
+                self.ultimo_resync_ns[token] = ts_perda
+                self.book_apos_resync_ns.pop(token, None)
+
+    def evento(self, evento: dict[str, Any], ts_ns: int) -> None:
+        if evento.get("event_type") != "book":
+            return
+        token = evento.get("asset_id")
+        if not isinstance(token, str) or token in self.book_apos_resync_ns:
+            return
+        if token in self.ultimo_resync_ns and ts_ns >= self.ultimo_resync_ns[token]:
+            self.book_apos_resync_ns[token] = ts_ns
+
+    def pendentes(self, monitor: MonitorDeIntegridade) -> list[dict[str, Any]]:
+        saida = []
+        for token in sorted(monitor.aguardando_resync):
+            ultimo = self.ultimo_resync_ns.get(token)
+            posterior = self.book_apos_resync_ns.get(token)
+            if ultimo is None:
+                motivo = "sem_registro_de_resync_book"
+            elif posterior is None:
+                motivo = "sem_book_apos_o_ultimo_resync"
+            else:
+                motivo = "book_posterior_NAO_reancorou"
+            saida.append(
+                {
+                    "token": token,
+                    "ts_ultimo_resync_ns": ultimo,
+                    "houve_book_posterior": posterior is not None,
+                    "ts_book_posterior_ns": posterior,
+                    "motivo": motivo,
+                }
+            )
+        return saida
+
+
+def relatorio_de_diagnostico(
+    monitor: MonitorDeIntegridade, forense: _ForenseDeResync | None = None
+) -> dict[str, Any]:
     """As métricas que decidem, mais o porquê de cada token comprometido."""
+    forense = forense or _ForenseDeResync()
     resumo = monitor.resumo()
     comprometidos = [
         _motivo_comprometido(monitor, token)
@@ -88,6 +149,10 @@ def relatorio_de_diagnostico(monitor: MonitorDeIntegridade) -> dict[str, Any]:
             "snapshots_fora_de_ordem": resumo["alinhamento"][
                 "snapshots_com_carimbo_fora_de_ordem"
             ],
+            "marcadores_de_resync_legados": monitor.marcadores_de_resync_legados,
+            "resyncs_ja_recuperados_no_replay": (
+                monitor.resyncs_ja_recuperados_no_replay
+            ),
             "observacoes_sem_snapshot": monitor.observacoes_sem_snapshot,
             "formas_de_price_change": resumo["formas_de_price_change"],
             "formas_de_book": resumo["snapshots_de_livro"]["formas"],
@@ -96,6 +161,7 @@ def relatorio_de_diagnostico(monitor: MonitorDeIntegridade) -> dict[str, Any]:
         "motivos_dos_comprometidos": _contagem_de_motivos(comprometidos),
         "tokens_comprometidos": comprometidos[:50],
         "amostras_de_divergencia": resumo["amostras"][:20],
+        "forense_pendentes": forense.pendentes(monitor),
     }
 
 
@@ -114,31 +180,39 @@ def diagnosticar(registros: Iterable[Any], *, replay_resync: bool) -> dict[str, 
     tokens dele — reproduzindo o que o recorder fez AO VIVO, para o diagnóstico
     medir se o descompasso de reprodução (item 4) explica os persistentes."""
     monitor = MonitorDeIntegridade()
+    forense = _ForenseDeResync()
     for rec in registros:
-        if _tratar_resync(monitor, rec, replay_resync):
+        if _tratar_resync(monitor, rec, replay_resync, forense):
             continue
         if rec.fonte != "poly_ws":
             continue
-        _observar_eventos(monitor, rec)
+        _observar_eventos(monitor, rec, forense)
     monitor.finalizar()
-    return relatorio_de_diagnostico(monitor)
+    return relatorio_de_diagnostico(monitor, forense)
 
 
-def _tratar_resync(monitor: MonitorDeIntegridade, rec: Any, replay: bool) -> bool:
-    """Reproduz uma perda do recorder e informa se o registro foi consumido."""
+def _tratar_resync(
+    monitor: MonitorDeIntegridade, rec: Any, replay: bool, forense: _ForenseDeResync
+) -> bool:
+    """Reproduz uma perda do recorder e informa se o registro foi consumido.
+
+    A reprodução é a função do monitor (`aplicar_marcador_de_resync`), a
+    mesma para qualquer consumidor: ela respeita `ts_perda_ns` e não apaga um
+    book de recuperação que o arquivo trouxe ANTES do marcador."""
     if rec.fonte != FONTE_RESYNC:
         return False
-    if not replay or not isinstance(rec.payload, dict):
-        return True
-    for token in rec.payload.get("tokens", []):
-        if isinstance(token, str):
-            monitor.marcar_perda(token)
+    if replay:
+        monitor.aplicar_marcador_de_resync(rec.payload)
+        forense.resync(rec.payload, rec.ts_wall_ns)
     return True
 
 
-def _observar_eventos(monitor: MonitorDeIntegridade, rec: Any) -> None:
+def _observar_eventos(
+    monitor: MonitorDeIntegridade, rec: Any, forense: _ForenseDeResync
+) -> None:
     for evento in eventos_do_payload(rec.payload):
         monitor.observar(evento, rec.ts_wall_ns)
+        forense.evento(evento, rec.ts_wall_ns)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,11 +235,10 @@ def main(argv: list[str] | None = None) -> int:
         "sem_replay_de_resync": sem["metricas"],
         "com_replay_de_resync": com["metricas"],
         "leitura": _leitura(sem["metricas"], com["metricas"]),
-        "detalhe_sem_replay": {
-            "motivos_dos_comprometidos": sem["motivos_dos_comprometidos"],
-            "tokens_comprometidos": sem["tokens_comprometidos"],
-            "amostras_de_divergencia": sem["amostras_de_divergencia"],
-        },
+        "detalhe_sem_replay": _detalhe(sem),
+        # O modo COM replay também é detalhado: sem isto, comprometidos que
+        # SUBIRAM ao reproduzir os resyncs não tinham como ser examinados.
+        "detalhe_com_replay": _detalhe(com),
     }
     saida = json.dumps(comparativo, indent=2, ensure_ascii=False)
     print(saida)
@@ -183,23 +256,65 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _leitura(sem: dict[str, Any], com: dict[str, Any]) -> str:
-    """O veredito que o comparativo permite, em uma frase."""
-    caiu_persistente = com["divergencias_persistentes"] < sem["divergencias_persistentes"]
-    caiu_comprometido = com["tokens_comprometidos"] < sem["tokens_comprometidos"]
-    if caiu_persistente or caiu_comprometido:
-        return (
-            "Reproduzir os resyncs REDUZ persistentes/comprometidos: a causa é "
-            "o backtest NÃO reproduzir os resyncs do recorder (item 4) — a "
-            "reconstrução do backtest não é re-ancorada como a do recorder ao "
-            "vivo. Ver `motivos_dos_comprometidos` para o resíduo."
-        )
+def _detalhe(diagnostico: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "motivos_dos_comprometidos": diagnostico["motivos_dos_comprometidos"],
+        "tokens_comprometidos": diagnostico["tokens_comprometidos"],
+        "amostras_de_divergencia": diagnostico["amostras_de_divergencia"],
+        "forense_pendentes": diagnostico["forense_pendentes"],
+    }
+
+
+def _fatos(sem: dict[str, Any], com: dict[str, Any]) -> str:
+    """Os quatro indicadores, `sem→com`, sempre impressos junto do veredito."""
     return (
-        "Reproduzir os resyncs NÃO reduz: os persistentes são truncagem de "
-        "profundidade ou delta perdido (itens 2/3). Cheque "
-        "`tokens_comprometidos` (fracao_ruim, magnitude) e `niveis_por_lado` — "
-        "topo afirmado abaixo do nível mais raso do snapshot = truncagem."
+        "persistentes {ps}→{pc}, comprometidos {cs}→{cc}, aguardando_resync "
+        "{as_}→{ac}, snapshots_fora_de_ordem {ss}→{sc}".format(
+            ps=sem["divergencias_persistentes"], pc=com["divergencias_persistentes"],
+            cs=sem["tokens_comprometidos"], cc=com["tokens_comprometidos"],
+            as_=sem["tokens_aguardando_resync"], ac=com["tokens_aguardando_resync"],
+            ss=sem["snapshots_fora_de_ordem"], sc=com["snapshots_fora_de_ordem"],
+        )
     )
+
+
+def _leitura(sem: dict[str, Any], com: dict[str, Any]) -> str:
+    """Veredito FACTUAL, indicador a indicador — nunca diz que um número caiu
+    quando subiu (a versão anterior usava um OR e afirmava redução de
+    comprometidos quando eles AUMENTAVAM). Os quatro deltas vão impressos."""
+    dp = com["divergencias_persistentes"] - sem["divergencias_persistentes"]
+    dc = com["tokens_comprometidos"] - sem["tokens_comprometidos"]
+    da = com["tokens_aguardando_resync"] - sem["tokens_aguardando_resync"]
+    if dp > 0:
+        veredito = (
+            "Reproduzir os resyncs AUMENTA as divergências persistentes: o "
+            "replay offline PIORA a reconstrução. Os números do modo SEM "
+            "replay são os confiáveis."
+        )
+    elif dp < 0 and dc <= 0 and da <= 0:
+        veredito = (
+            "Reproduzir os resyncs REDUZ os persistentes SEM aumentar "
+            "comprometidos nem aguardando_resync: o backtest não reproduzir os "
+            "resyncs do recorder (mesmo caminho) explica os persistentes, e "
+            "vale reproduzi-los."
+        )
+    elif dp < 0:
+        veredito = (
+            "Reproduzir os resyncs REDUZ os persistentes MAS AUMENTA "
+            "comprometidos e/ou aguardando_resync: o replay offline NÃO é fiel "
+            "— cria janelas sem-snapshot e tokens presos em recuperação que o "
+            "recorder ao vivo não teve (a gravação termina no meio da "
+            "recuperação). Confie no modo SEM replay; os persistentes de lá são "
+            "o alvo. Ver `detalhe_com_replay.forense_pendentes`."
+        )
+    else:  # dp == 0
+        veredito = (
+            "Reproduzir os resyncs NÃO muda os persistentes. Investigue os do "
+            "modo SEM replay (truncagem/perda): `tokens_comprometidos` e "
+            "`niveis_por_lado` — topo afirmado abaixo do nível mais raso do "
+            "snapshot = truncagem."
+        )
+    return f"{veredito} [{_fatos(sem, com)}]"
 
 
 if __name__ == "__main__":
