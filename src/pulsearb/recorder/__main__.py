@@ -463,10 +463,6 @@ class Recorder:
             await asyncio.sleep(DISCOVERY_INTERVAL_SECONDS)
 
     def _aplicar_escopo(
-        self,
-        markets: list[DiscoveredMarket],
-        *,
-        retidos_em_carencia: int = 0,
     ) -> tuple[list[DiscoveredMarket], dict[str, Any]]:
         """Corta a descoberta ao escopo configurado, SEM esconder o corte.
 
@@ -474,13 +470,6 @@ class Recorder:
         janelas INTEIRAS (Up+Down são um par; meia janela não serve) até o
         teto de tokens, em ordem determinística por slug — o replay tem de
         reproduzir a mesma seleção. O que ficou de fora vai no relato de
-        descoberta (`cortadas`), nunca some em silêncio.
-
-        `retidos_em_carencia` são os tokens que já estão assinados de janelas
-        FECHADAS mas ainda dentro da carência de resolução — eles continuam no
-        ar e por isso CONSOMEM o teto (revisão P1 do PR #195). Sem descontá-los
-        do orçamento, `limite=2` com 2 retidos + 2 novos daria 4 ativos, e o
-        teto não seria teto. O orçamento para janelas NOVAS é o que sobra."""
         limite = self.settings.recorder.max_tokens_assinados
         if limite is None:
             return markets, {
@@ -491,32 +480,25 @@ class Recorder:
                 "tokens_no_escopo": sum(
                     len(m.token_id_by_outcome) for m in markets
                 ),
-                "tokens_retidos_em_carencia": retidos_em_carencia,
-            }
-        orcamento = max(0, limite - retidos_em_carencia)
         no_escopo: list[DiscoveredMarket] = []
         tokens = 0
         for market in sorted(markets, key=lambda m: m.slug):
             n = len(market.token_id_by_outcome)
-            if tokens + n > orcamento:
                 continue
             no_escopo.append(market)
             tokens += n
         return no_escopo, {
             "limite_de_tokens": limite,
-            "orcamento_para_novos": orcamento,
-            "tokens_retidos_em_carencia": retidos_em_carencia,
             "janelas_descobertas": len(markets),
             "janelas_no_escopo": len(no_escopo),
             "janelas_cortadas": len(markets) - len(no_escopo),
             "tokens_no_escopo": tokens,
-            # O teto de verdade: o que fica no ar depois deste ciclo.
-            "tokens_ativos_estimados": tokens + retidos_em_carencia,
         }
 
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
         markets = await discovery.discover()
         self.discovery_cycles += 1
+        no_escopo, escopo = self._aplicar_escopo(markets)
 
         agora = time.time()
         atuais = set(self.poly.token_ids)
@@ -1039,6 +1021,7 @@ class Recorder:
             "gaps": resumo_gaps(self.trackers, duracao),
             "redundancia_rtds": self.redundancia_resumo(),
             "saude_do_rtds": self.saude_do_rtds(duracao),
+            "armazenamento": self._armazenamento_resumo(duracao),
         }
         self._write_meta("recorder_relatorio", relatorio)
         await self.writer.stop()
