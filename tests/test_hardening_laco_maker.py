@@ -767,12 +767,16 @@ class TestEscritorUnico:
     antes de as tarefas subirem. Isto prende a fiação."""
 
     ESCRITORES = frozenset({"passo", "recolher_se_o_livro_andou", "ver_prints_entre_passadas"})
+    AJUDANTES_DO_ESCRITOR = frozenset(
+        {"_recolher_entre_passadas", "_ver_prints_entre_passadas"}
+    )
 
     def test_so_o_laco_de_cotacao_escreve_no_laco_maker(self):
         arvore = ast.parse(FONTE_DO_SHADOW.read_text(encoding="utf-8"))
         classe = _corpo_da_classe(arvore, "ProcessoShadow")
         onde: dict[str, set[str]] = {}
         chama_o_sono: set[str] = set()
+        chamadas_dos_ajudantes: dict[str, set[str]] = {}
         for metodo in classe.body:
             if not isinstance(metodo, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
@@ -787,11 +791,18 @@ class TestEscritorUnico:
                     onde.setdefault(no.func.attr, set()).add(metodo.name)
                 if alvo == "self" and no.func.attr == "_dormir_medindo_markout":
                     chama_o_sono.add(metodo.name)
+                if alvo == "self" and no.func.attr in self.AJUDANTES_DO_ESCRITOR:
+                    chamadas_dos_ajudantes.setdefault(no.func.attr, set()).add(metodo.name)
 
         for escritor in self.ESCRITORES:
             assert onde.get(escritor, set()) <= {
                 "laco_de_cotacao", "_dormir_medindo_markout",
+                *self.AJUDANTES_DO_ESCRITOR,
             }, (escritor, onde.get(escritor))
+        for ajudante in self.AJUDANTES_DO_ESCRITOR:
+            assert chamadas_dos_ajudantes.get(ajudante, set()) == {
+                "_dormir_medindo_markout"
+            }
         assert onde["passo"] == {"laco_de_cotacao"}
         assert chama_o_sono == {"laco_de_cotacao"}
         assert onde["reconciliar_no_arranque"] == {"_reconciliar_maker_no_arranque"}

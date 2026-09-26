@@ -580,53 +580,49 @@ class ProcessoShadow:
         segue na cadência de 15 s, pela razão escrita em `laco_de_cotacao`.
         """
         fim = min(time.monotonic() + cadencia, deadline)
-        while True:
-            restante = fim - time.monotonic()
-            if restante <= 0:
-                return
+        while (restante := fim - time.monotonic()) > 0:
             await asyncio.sleep(min(1.0, restante))
             if self.laco_maker is None:
                 continue
-            if self.laco_maker.caixa._pendentes:
-                self.laco_maker.caixa.medir_markout(
-                    self._livro_para_o_maker, agora_ns=time.time_ns()
-                )
-            # A regra dos makers dos leaderboards, a cada segundo: o melhor
-            # bid caiu abaixo da nossa cotação → recolher. Ver `LacoMaker`.
-            if getattr(self.laco_maker, "recolhe_quando_o_livro_anda", False):
-                try:
-                    await self.laco_maker.recolher_se_o_livro_andou(
-                        self._livro_para_o_maker, agora_ns=time.time_ns()
-                    )
-                except OSError as erro:
-                    # O MESMO caminho fatal da passada do maker: diário que não
-                    # grava é rodada que não vale, e o cliente sombra já tirou a
-                    # ordem da memória antes de gravar o cancelamento — seguir
-                    # deixaria a medição inconsistente com `falhou == None`.
-                    self.falhou = f"io_do_diario_maker: {erro}"
-                    raise
-                except Exception:
-                    log.exception("recolher entre passadas falhou")
-            # OS PRINTS, A CADA SEGUNDO, EM TODA RODADA — e o `if` do knob
-            # saiu daqui de propósito. Enquanto esta chamada dependia da
-            # pausa, os prints eram vistos a cada segundo na rodada da pausa
-            # e só a cada 15 s nas outras três; a `CaixaDoMaker` carimba
-            # `meio_no_fill` com o livro do instante em que VÊ o print, então
-            # o instrumento de markout ficava diferente entre controle e
-            # tratamento, e a comparação de 14 dias mediria a diferença entre
-            # os instrumentos junto com a da regra (revisão do Codex, #131).
-            #
-            # Ver print não muda o que o bot faz — muda quando a conta fecha.
-            # Quem olha o knob é o cancelamento, dentro do método.
-            try:
-                await self.laco_maker.ver_prints_entre_passadas(
-                    self._livro_para_o_maker, agora_ns=time.time_ns()
-                )
-            except OSError as erro:
-                self.falhou = f"io_do_diario_maker: {erro}"
-                raise
-            except Exception:
-                log.exception("ver prints entre passadas falhou")
+            self._medir_markout_entre_passadas()
+            await self._recolher_entre_passadas()
+            await self._ver_prints_entre_passadas()
+
+    def _medir_markout_entre_passadas(self) -> None:
+        """Fecha markouts vencidos sem alterar a cadência da decisão."""
+        if self.laco_maker is None or not self.laco_maker.caixa._pendentes:
+            return
+        self.laco_maker.caixa.medir_markout(
+            self._livro_para_o_maker, agora_ns=time.time_ns()
+        )
+
+    async def _recolher_entre_passadas(self) -> None:
+        """Aplica o recolhimento de livro, quando a regra estiver ligada."""
+        if not getattr(self.laco_maker, "recolhe_quando_o_livro_anda", False):
+            return
+        try:
+            await self.laco_maker.recolher_se_o_livro_andou(
+                self._livro_para_o_maker, agora_ns=time.time_ns()
+            )
+        except OSError as erro:
+            # O MESMO caminho fatal da passada do maker: diário que não grava
+            # é rodada que não vale.
+            self.falhou = f"io_do_diario_maker: {erro}"
+            raise
+        except Exception:
+            log.exception("recolher entre passadas falhou")
+
+    async def _ver_prints_entre_passadas(self) -> None:
+        """Confere prints a cada segundo, independentemente do knob de pausa."""
+        try:
+            await self.laco_maker.ver_prints_entre_passadas(
+                self._livro_para_o_maker, agora_ns=time.time_ns()
+            )
+        except OSError as erro:
+            self.falhou = f"io_do_diario_maker: {erro}"
+            raise
+        except Exception:
+            log.exception("ver prints entre passadas falhou")
 
     async def laco_de_cotacao(
         self, deadline: float, deadline_de_parede: float | None = None
