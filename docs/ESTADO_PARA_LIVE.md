@@ -410,8 +410,8 @@ recalcula `armazenamento` depois de `writer.stop()`, e é esse o número que
 calibra o preflight.
 
 Os cenários da VPS (v3 recusada com 14,4 GB > 13,6 GB, v4 com env de 200 MB/h,
-16 tokens) viraram testes de segundos: 38 em
-`tests/test_auditoria_recorder_replay.py`, dos quais 23 falham com o código de
+16 tokens) viraram testes de segundos: 40 em
+`tests/test_auditoria_recorder_replay.py`, dos quais 25 falham com o código de
 `main`.
 
 **Cobertura: o Quality Gate NÃO a mede.** O Sonar roda como Automatic Analysis

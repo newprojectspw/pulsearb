@@ -845,3 +845,51 @@ def test_diagnostico_de_zero_e_de_um_token_nao_quebra():
     um = diagnosticar(_registros_basicos(), replay_resync=True)["metricas"]
     assert um["tokens_comprometidos"] == 0
     assert um["tokens_aguardando_resync"] == 0
+
+
+# ──────── Sonar do #199: o encerramento não engole o cancelamento do chamador
+
+
+async def test_cancelar_e_aguardar_propaga_o_cancelamento_de_quem_espera():
+    """O `CancelledError` do CHAMADOR sobe (o encerramento não o engole),
+    mesmo com a tarefa filha ainda no meio do cleanup dela."""
+    libera = asyncio.Event()
+
+    async def filha_lenta():
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await libera.wait()  # cleanup demorado
+
+    filha = asyncio.create_task(filha_lenta())
+    await asyncio.sleep(0)
+    espera = asyncio.create_task(recorder_mod._cancelar_e_aguardar(filha))
+    await asyncio.sleep(0)
+    espera.cancel()
+    try:
+        # Com prazo: a versão que engolia o cancelamento ficava presa no
+        # cleanup da filha — sem prazo, a regressão TRAVARIA a suíte.
+        feitas, _ = await asyncio.wait([espera], timeout=5)
+        assert espera in feitas, "o cancelamento do chamador não subiu"
+        assert espera.cancelled()
+    finally:
+        libera.set()
+        await asyncio.wait([filha, espera])
+    assert filha.cancelled()
+
+
+async def test_cancelar_e_aguardar_nao_relanca_falha_nem_cancelamento_da_filha():
+    """O fluxo normal do encerramento não quebra: a filha cancelada, ou que
+    falhou, é esperada sem relançar nada para o chamador."""
+
+    async def falha():
+        raise RuntimeError("laço quebrou")
+
+    quebrada = asyncio.create_task(falha())
+    await asyncio.wait([quebrada])
+    await recorder_mod._cancelar_e_aguardar(quebrada)  # não levanta
+
+    dormindo = asyncio.create_task(asyncio.sleep(60))
+    await asyncio.sleep(0)
+    await recorder_mod._cancelar_e_aguardar(dormindo)  # não levanta
+    assert dormindo.cancelled()

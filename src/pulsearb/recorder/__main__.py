@@ -1103,7 +1103,8 @@ class Recorder:
             anterior = signal.getsignal(sinal)
             try:
                 loop.add_signal_handler(sinal, self._pedir_parada, parada, desfecho)
-            except (NotImplementedError, RuntimeError, ValueError):
+            # `NotImplementedError` (Windows) é subclasse de `RuntimeError`.
+            except (RuntimeError, ValueError):
                 continue
             anteriores[sinal] = anterior
 
