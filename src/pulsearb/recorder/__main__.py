@@ -129,6 +129,9 @@ SAIDA_POR_DESFECHO: dict[str | None, int] = {
     DESFECHO_SIGTERM: SAIDA_SIGTERM,
 }
 SINAIS_DE_PARADA = {signal.SIGTERM: DESFECHO_SIGTERM, signal.SIGINT: DESFECHO_SIGINT}
+#: Quanto o relatório final espera por vaga na fila do writer antes de o
+#: encerramento desistir dele — e DIZER que desistiu (`relatorio_gravado`).
+PRAZO_DO_RELATORIO_FINAL_S = 30.0
 
 
 class PreflightRecusado(RuntimeError):
@@ -1058,20 +1061,34 @@ class Recorder:
         deadline = inicio_mono + duration_seconds
         parada = asyncio.Event()
         restaurar_sinais = self._instalar_sinais(parada)
+        try:
+            relatorio, erro = await self._gravar_e_encerrar(deadline, parada, inicio_mono)
+        finally:
+            # Os handlers ficam instalados até o gzip FECHAR. Restaurá-los logo
+            # depois da coleta (como era) devolvia o SIGTERM ao handler do SO
+            # durante o relatório e o flush: um `systemctl stop` nessa janela —
+            # ou um segundo SIGTERM — matava o processo e deixava o último
+            # arquivo sem trailer.
+            restaurar_sinais()
+        if erro is not None:
+            raise erro
+        return relatorio
+
+    async def _gravar_e_encerrar(
+        self, deadline: float, parada: asyncio.Event, inicio_mono: float
+    ) -> tuple[dict[str, Any], Exception | None]:
         erro: Exception | None = None
         try:
             await self._coletar(deadline, parada)
         except Exception as exc:
             erro = exc
-        finally:
-            restaurar_sinais()
 
         duracao = time.monotonic() - inicio_mono
         relatorio = self._relatorio_final(duracao)
         relatorio["desfecho"] = self._desfecho(erro)
         if erro is not None:
             relatorio["erro"] = f"{type(erro).__name__}: {erro}"
-        self._write_meta("recorder_relatorio", relatorio)
+        gravado = await self._gravar_relatorio_final(relatorio)
         await self.writer.stop()
         # Só DEPOIS de o writer drenar as filas e FECHAR os arquivos os bytes
         # em disco (gzip) estão completos. Medir antes subestimava a taxa —
@@ -1082,9 +1099,37 @@ class Recorder:
         # ANTES do `writer.stop()` — senão não entraria no arquivo — e o
         # `armazenamento` dele é a medida de antes do flush.
         relatorio["armazenamento"] = self._armazenamento_resumo(duracao)
-        if erro is not None:
-            raise erro
-        return relatorio
+        relatorio["relatorio_gravado"] = gravado
+        return relatorio, erro
+
+    async def _gravar_relatorio_final(self, relatorio: dict[str, Any]) -> bool:
+        """O relatório final ENTRA na gravação — esperando espaço, não descartado.
+
+        `_write_meta` usa `submit`, que descarta em silêncio com a fila cheia.
+        No fim de uma rodada interrompida com a fila padrão cheia (um backlog
+        grande de livro sendo drenado), o gzip fechava íntegro SEM o
+        `recorder_relatorio` — e a rodada parecia completa só que sem desfecho.
+        Aqui a gravação ESPERA vaga na fila, com prazo: se o writer não andar
+        em `PRAZO_DO_RELATORIO_FINAL_S`, o log diz que o relatório ficou de
+        fora, e o relatório retornado diz `relatorio_gravado: false`."""
+        envelope = RecordEnvelope(
+            ts_mono_ns=time.monotonic_ns(),
+            ts_wall_ns=time.time_ns(),
+            fonte="recorder_relatorio",
+            raw=orjson.dumps(relatorio),
+        )
+        try:
+            await asyncio.wait_for(
+                self.writer.enfileirar_sem_perda(envelope),
+                timeout=PRAZO_DO_RELATORIO_FINAL_S,
+            )
+        except TimeoutError:
+            log.error(
+                "relatorio final NAO entrou na gravacao: a fila do writer nao andou",
+                prazo_s=PRAZO_DO_RELATORIO_FINAL_S,
+            )
+            return False
+        return True
 
     def _desfecho(self, erro: Exception | None) -> str:
         if erro is not None:

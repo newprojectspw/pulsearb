@@ -386,10 +386,22 @@ rede e em menos de 1 s: num PROCESSO FILHO rodando o `main()` (o pai espera o
 aviso de "no ar" e manda SIGTERM ao PID; sai 143, gzip com trailer, nenhum
 `recorder encerrado`; com o código anterior o filho morria com -15), e também
 pelo `main()` e pelo `Recorder.run()` no próprio processo do teste.
+**Revisão do #199 (2026-09-26), duas brechas desse encerramento:** os
+handlers eram restaurados ANTES do relatório e do flush, então um SIGTERM
+nessa janela (ou um segundo SIGTERM) voltava ao handler do SO e matava sem
+trailer; agora só são restaurados depois de o gzip fechar. E o relatório final
+ia pelo canal que descarta com a fila cheia; agora ESPERA vaga
+(`enfileirar_sem_perda`), com prazo de 30 s, e se o prazo vencer o log diz e o
+retorno traz `relatorio_gravado: false`. ✅ testado: SIGTERM enviado DURANTE o
+flush é do recorder; com o canal padrão descartando tudo, o relatório ainda é
+o último registro.
 
 (2) **Precedência do env.** Qualquer `PULSEARB_RECORDER__*` apagava a seção
 `recorder:` INTEIRA do YAML. Hoje é latente (o YAML só tem valores iguais aos
-defaults). Agora sai só a chave coberta.
+defaults). Agora sai só a chave coberta — e o `.env` conta igual ao
+ambiente: antes só `os.environ` era olhado, e uma chave do `.env` ficava
+escondida pela mesma chave do YAML (revisão do #199; ✅ testado com uma
+variável no ambiente e outra no `.env`, na mesma seção).
 
 (3) **Leitura íntegra no diagnóstico.** O diagnóstico lia o arquivo ainda em
 gravação e escondia gzip truncado. Agora exclui o mais novo por mtime só se
@@ -410,9 +422,10 @@ recalcula `armazenamento` depois de `writer.stop()`, e é esse o número que
 calibra o preflight.
 
 Os cenários da VPS (v3 recusada com 14,4 GB > 13,6 GB, v4 com env de 200 MB/h,
-16 tokens) viraram testes de segundos: 40 em
-`tests/test_auditoria_recorder_replay.py`, dos quais 25 falham com o código de
-`main`.
+16 tokens) viraram testes de segundos: 44 em
+`tests/test_auditoria_recorder_replay.py`. 25 deles falhavam com o código de
+`main` antes do #199; os 4 da revisão do #199 falham com o `main` de
+2026-09-26 (`b190e40`).
 
 **Cobertura: o Quality Gate NÃO a mede.** O Sonar roda como Automatic Analysis
 (ver `.sonarcloud.properties`), que não importa relatório de cobertura, e o CI

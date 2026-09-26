@@ -408,12 +408,30 @@ class Settings(BaseSettings):
         # `recorder` inteiro por causa de PULSEARB_RECORDER__BYTES_POR_HORA_...
         # descartava em silêncio todo outro `recorder.*` do YAML (o
         # pydantic-settings funde as fontes aninhadas campo a campo).
-        import os
-
-        for nome in os.environ:
-            if nome.startswith("PULSEARB_"):
+        #
+        # O `.env` conta igual ao ambiente: o pydantic-settings o lê, mas o
+        # YAML entra como kwarg de init e GANHA dele. Olhar só `os.environ`
+        # deixava uma chave do `.env` escondida pela mesma chave do YAML — e,
+        # com uma variável no ambiente e outra no `.env` na mesma seção, a do
+        # `.env` perdia em silêncio (revisão do #199).
+        for nome in _nomes_de_ambiente(cls.model_config.get("env_file")):
+            if nome.upper().startswith("PULSEARB_"):
                 _remover_chave_coberta(yaml_data, nome[len("PULSEARB_"):].lower())
         return cls(**{**yaml_data, **overrides})
+
+
+def _nomes_de_ambiente(env_file: Any) -> set[str]:
+    """Nomes de variável que o pydantic-settings vai ler: ambiente + `.env`."""
+    import os
+
+    from dotenv import dotenv_values
+
+    nomes = set(os.environ)
+    arquivos = env_file if isinstance(env_file, (list, tuple)) else [env_file]
+    for arquivo in arquivos:
+        if arquivo and Path(arquivo).is_file():
+            nomes.update(dotenv_values(arquivo))
+    return nomes
 
 
 def _remover_chave_coberta(dados: dict[str, Any], caminho: str) -> None:
