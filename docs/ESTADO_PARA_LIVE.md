@@ -368,25 +368,57 @@ comprometidos e 0→40 aguardando), além de `detalhe_com_replay` e
 e rodar o diagnóstico sobre ESSA gravação. As gravações anteriores têm
 marcador legado, e o replay delas continua ambíguo por construção.
 
-**Auditoria dos testes do recorder/replay (2026-09-26).** Três defeitos que
-nenhum teste pegava. (1) O `main()` do recorder saía 0 quando interrompido,
-igual a uma rodada completa. Com a unidade `systemd-run --collect` já
-coletada, o código no journal é o que distingue. Agora os desfechos são:
-completa sai 0, preflight recusado sai 1, interrompida sai 130, e exceção
-propaga. (2) Qualquer `PULSEARB_RECORDER__*` apagava a seção `recorder:`
-INTEIRA do YAML. Hoje é latente (o YAML só tem valores iguais aos defaults).
-Agora sai só a chave coberta. (3) O diagnóstico lia o arquivo ainda em
+**Auditoria dos testes do recorder/replay (2026-09-26).** Defeitos que
+nenhum teste pegava.
+
+(1) **Desfecho do processo.** O `main()` do recorder saía 0 quando
+interrompido, igual a uma rodada completa. `systemctl stop` (SIGTERM) matava o
+processo pelo handler do SO: sem relatório final e com o último arquivo sem
+trailer. Com a unidade `systemd-run --collect` já coletada, o journal é o que
+resta. Agora SIGTERM e SIGINT viram PEDIDO de parada, e o encerramento é o
+mesmo da rodada completa: feeds parados, `finalizar()`, relatório final com
+`desfecho`, writer drenado e gzip fechado. Uma exceção num laço também grava o
+relatório (`desfecho = excecao`) e depois SOBE. Códigos: `completa` 0,
+`preflight_recusado` 1, `interrompida_sigint` 130, `interrompida_sigterm` 143,
+e desfecho desconhecido 1. `recorder encerrado` só é logado para `completa`;
+interrupção loga `recorder INTERROMPIDO`. ✅ testado com SIGTERM real, sem
+rede e em menos de 1 s: num PROCESSO FILHO rodando o `main()` (o pai espera o
+aviso de "no ar" e manda SIGTERM ao PID; sai 143, gzip com trailer, nenhum
+`recorder encerrado`; com o código anterior o filho morria com -15), e também
+pelo `main()` e pelo `Recorder.run()` no próprio processo do teste.
+
+(2) **Precedência do env.** Qualquer `PULSEARB_RECORDER__*` apagava a seção
+`recorder:` INTEIRA do YAML. Hoje é latente (o YAML só tem valores iguais aos
+defaults). Agora sai só a chave coberta.
+
+(3) **Leitura íntegra no diagnóstico.** O diagnóstico lia o arquivo ainda em
 gravação e escondia gzip truncado. Agora exclui o mais novo por mtime só se
-foi tocado há menos de 120 s E não termina num trailer gzip válido (uma
-gravação recém-encerrada tem o último arquivo recente e fechado, e ele é
-lido). Também relata `leitura_da_gravacao` (truncados, linhas
-corrompidas, `integra`) e sai 2 se a gravação não está íntegra. Cada pendente
-ganha `ms_do_resync_ao_fim_da_gravacao`. Os cenários da VPS (v3 recusada com
-14,4 GB > 13,6 GB, v4 com env de 200 MB/h, 16 tokens) viraram testes de
-segundos: 26 em `tests/test_auditoria_recorder_replay.py`, dos quais 10
-falham com o código de `main`. 🟡 falta: tratar SIGTERM
-(`systemctl stop` ainda mata sem relatório final e deixa o último arquivo sem
-trailer).
+foi tocado há menos de 120 s E não termina num trailer gzip válido. O
+relatório diz que isso é uma HEURÍSTICA (`criterio_de_exclusao`), e
+`--incluir NOME` força a leitura. **Gravação íntegra** exige, ao mesmo tempo:
+algum arquivo lido, nenhum truncado ou ilegível, nenhuma linha corrompida e
+**nenhum registro fora de ordem**. Uma inversão maior que o buffer do leitor
+sai na ordem errada, e o monitor aplica deltas na ordem em que os recebe, então
+o replay deixa de ser o que o recorder viu. Fora disso sai código 2, com as
+contagens em `leitura_da_gravacao`. Cada pendente ganha
+`ms_do_resync_ao_fim_da_gravacao`.
+
+**Ordem do encerramento, como é:** o `recorder_relatorio` é escrito com o
+writer AINDA aberto (senão não entraria no arquivo), é o último registro, e o
+`armazenamento` DELE é a medida de antes do flush. O relatório RETORNADO/logado
+recalcula `armazenamento` depois de `writer.stop()`, e é esse o número que
+calibra o preflight.
+
+Os cenários da VPS (v3 recusada com 14,4 GB > 13,6 GB, v4 com env de 200 MB/h,
+16 tokens) viraram testes de segundos: 38 em
+`tests/test_auditoria_recorder_replay.py`, dos quais 23 falham com o código de
+`main`.
+
+**Cobertura: o Quality Gate NÃO a mede.** O Sonar roda como Automatic Analysis
+(ver `.sonarcloud.properties`), que não importa relatório de cobertura, e o CI
+não gera nenhum (não há `pytest-cov` no `requirements-dev.txt`). O `0.0%
+Coverage on New Code` dos PRs é ausência de dado, não medida. A evidência de
+teste é a suíte do CI, não esse número.
 
 ---
 

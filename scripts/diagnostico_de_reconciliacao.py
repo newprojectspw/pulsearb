@@ -253,8 +253,23 @@ def _gzip_fechado(caminho: Path) -> bool:
     return True
 
 
+#: Por que um arquivo sai da leitura — escrito no relatório, para ninguém
+#: confundir a exclusão com uma validação: é uma HEURÍSTICA (mtime) confirmada
+#: pela falta de trailer. Arquivo truncado e recente (cópia/restauração de um
+#: que morreu no meio) cai aqui também; `--incluir` o força para dentro.
+CRITERIO_DE_EXCLUSAO = (
+    "heurística: o arquivo mais novo por mtime, tocado há menos de "
+    "--quieto-s E sem trailer gzip válido, é presumido EM GRAVAÇÃO e não é "
+    "lido. Use --incluir NOME para lê-lo mesmo assim."
+)
+
+
 def arquivos_da_gravacao(
-    caminho: Path, *, agora: float, quieto_s: float = QUIETO_PADRAO_S
+    caminho: Path,
+    *,
+    agora: float,
+    quieto_s: float = QUIETO_PADRAO_S,
+    incluir: frozenset[str] = frozenset(),
 ) -> tuple[list[Path], list[str]]:
     """Os arquivos a ler, e os excluídos por ainda estarem EM GRAVAÇÃO.
 
@@ -266,8 +281,8 @@ def arquivos_da_gravacao(
     encerrar tem o último arquivo recente e FECHADO, com o relatório final
     dentro, e excluí-lo daria `integra: true` sem a última rotação (revisão do
     #199). Pelo mtime, e não pelo nome: `-1400-002` ordena ANTES de `-1400`
-    por nome, mas é mais novo. Um arquivo passado explicitamente é lido — quem
-    o escolheu sabe o que escolheu.
+    por nome, mas é mais novo. Um arquivo passado explicitamente, ou nomeado
+    em `incluir`, é lido — quem o escolheu sabe o que escolheu.
     """
     if caminho.is_file():
         return [caminho], []
@@ -275,6 +290,8 @@ def arquivos_da_gravacao(
     if not arquivos:
         return [], []
     mais_novo = max(arquivos, key=lambda a: a.stat().st_mtime)
+    if mais_novo.name in incluir:
+        return arquivos, []
     recente = agora - mais_novo.stat().st_mtime < quieto_s
     if recente and not _gzip_fechado(mais_novo):
         return [a for a in arquivos if a != mais_novo], [mais_novo.name]
@@ -287,15 +304,26 @@ def _leitura_da_gravacao(
     """Integridade do que foi LIDO, separada do que o replay concluiu.
 
     Um gzip truncado é defeito da GRAVAÇÃO, não do replay: sai aqui, com o
-    arquivo e o erro, e não como token preso no relatório do monitor."""
+    arquivo e o erro, e não como token preso no relatório do monitor.
+
+    Registro FORA DE ORDEM também invalida: o leitor só reordena dentro do
+    buffer, e uma inversão maior sai na ordem errada. O monitor aplica deltas
+    na ordem em que os recebe, então o livro do replay deixa de ser o que o
+    recorder viu — o diagnóstico sobre ele não é confiável."""
     ilegiveis = list(reader.arquivos_ilegiveis)
     return {
         "arquivos_lidos": [a.name for a in lidos],
         "arquivos_em_gravacao_excluidos": excluidos,
+        "criterio_de_exclusao": CRITERIO_DE_EXCLUSAO if excluidos else None,
         "arquivos_truncados_ou_ilegiveis": ilegiveis,
         "linhas_corrompidas": reader.corrompidas,
         "registros_fora_de_ordem": reader.fora_de_ordem,
-        "integra": bool(lidos) and not ilegiveis and reader.corrompidas == 0,
+        "integra": (
+            bool(lidos)
+            and not ilegiveis
+            and reader.corrompidas == 0
+            and reader.fora_de_ordem == 0
+        ),
     }
 
 
@@ -306,11 +334,13 @@ def _aviso_de_integridade(leitura: dict[str, Any]) -> str:
         return ""
     return (
         "GRAVAÇÃO NÃO ÍNTEGRA ({n} arquivo(s) truncado(s)/ilegível(is), {c} "
-        "linha(s) corrompida(s)): as métricas cobrem só o que foi lido, e um "
-        "token pendente perto do ponto de quebra pode ser artefato da "
-        "truncagem, não do replay. ".format(
+        "linha(s) corrompida(s), {o} registro(s) fora de ordem): as métricas "
+        "cobrem só o que foi lido, na ordem em que foi lido; um token pendente "
+        "perto do ponto de quebra, ou uma divergência perto de uma inversão, "
+        "pode ser artefato da gravação, não do replay. ".format(
             n=len(leitura["arquivos_truncados_ou_ilegiveis"]),
             c=leitura["linhas_corrompidas"],
+            o=leitura["registros_fora_de_ordem"],
         )
     )
 
@@ -326,7 +356,15 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=QUIETO_PADRAO_S,
         help="num diretório, o arquivo mais novo modificado há menos que isto "
-        "é tratado como em gravação e excluído",
+        "E sem trailer gzip é tratado como em gravação e excluído",
+    )
+    parser.add_argument(
+        "--incluir",
+        action="append",
+        default=[],
+        metavar="NOME",
+        help="nome de arquivo a ler mesmo que a heurística o presuma em "
+        "gravação (repetível)",
     )
     args = parser.parse_args(argv)
 
@@ -336,7 +374,10 @@ def main(argv: list[str] | None = None) -> int:
 
     caminho = Path(args.gravacao)
     lidos, excluidos = arquivos_da_gravacao(
-        caminho, agora=time.time(), quieto_s=args.quieto_s
+        caminho,
+        agora=time.time(),
+        quieto_s=args.quieto_s,
+        incluir=frozenset(args.incluir),
     )
     leitor = RecordingReader(lidos)
     sem = diagnosticar(leitor, replay_resync=False)
