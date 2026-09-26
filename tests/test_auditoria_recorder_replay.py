@@ -38,7 +38,7 @@ from pulsearb.recorder.__main__ import (
     preflight_de_armazenamento,
     projetar_armazenamento,
 )
-from pulsearb.recorder.writer import FONTE_RESYNC
+from pulsearb.recorder.writer import CANAL_PADRAO, FONTE_RESYNC, RecordEnvelope
 from pulsearb.replay.escopo import slugs_no_escopo
 from pulsearb.settings import Settings
 
@@ -221,6 +221,26 @@ def test_env_aninhado_nao_apaga_as_outras_chaves_da_secao(tmp_path, monkeypatch)
     assert rec.output_dir == str(tmp_path / "gravacoes")
 
 
+def test_dotenv_tambem_vence_o_yaml_so_na_chave_coberta(tmp_path, monkeypatch):
+    """Revisão do #199 (P2): o `.env` é lido pelo pydantic-settings, mas a
+    remoção da chave coberta só olhava `os.environ` — e o YAML (kwarg de
+    init) escondia o valor do `.env`. O caso da revisão: uma variável no
+    ambiente, outra no `.env`, mesma seção. As duas valem; o resto do YAML
+    fica."""
+    monkeypatch.chdir(tmp_path)  # longe do `.env` do repositório
+    monkeypatch.delenv("PULSEARB_RECORDER__BYTES_POR_HORA_ESTIMADOS", raising=False)
+    (tmp_path / ".env").write_text(
+        "PULSEARB_RECORDER__BYTES_POR_HORA_ESTIMADOS=200000000\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PULSEARB_RECORDER__OUTPUT_DIR", str(tmp_path / "do_ambiente"))
+    cfg = _config(tmp_path, "  bytes_por_hora_estimados: 2000000000\n  margem_de_disco: 1.5\n")
+
+    rec = Settings.load(cfg).recorder
+    assert rec.bytes_por_hora_estimados == 200_000_000  # do `.env`
+    assert rec.output_dir == str(tmp_path / "do_ambiente")  # do ambiente
+    assert rec.margem_de_disco == 1.5  # do YAML, preservado
+
+
 @pytest.mark.parametrize("valor", ["1", "0"])
 def test_zero_ou_um_token_de_limite_e_recusado(tmp_path, monkeypatch, valor):
     """Uma janela exige Up+Down: limite 0 ou 1 não assina nada — recusa."""
@@ -320,6 +340,14 @@ class _RecorderSemRede(Recorder):
         self.diario.append(f"meta:{fonte}")
         return super()._write_meta(fonte, payload, **kw)
 
+    async def _gravar_relatorio_final(self, relatorio):
+        # O relatório final tem caminho próprio (espera vaga, não descarta).
+        fechado = self.writer._task is None
+        self.diario.append(
+            f"meta:recorder_relatorio:{'writer_fechado' if fechado else 'writer_aberto'}"
+        )
+        return await super()._gravar_relatorio_final(relatorio)
+
     def _armazenamento_resumo(self, duracao_s):
         fechado = self.writer._task is None and self.writer._file is None
         self.diario.append(f"armazenamento:{'writer_fechado' if fechado else 'writer_aberto'}")
@@ -377,7 +405,9 @@ async def test_encerramento_relatorio_meta_antes_do_stop_e_bytes_medidos_depois(
     assert len(paradas) == len(rec._feed_by_name)
     assert d.index("finalizar") > max(paradas)
     ultimo_resumo = len(d) - 1 - d[::-1].index("resumo_integridade")
-    assert d.index("finalizar") < ultimo_resumo < d.index("meta:recorder_relatorio")
+    # o relatório final vai pelo caminho que ESPERA vaga, com o writer aberto
+    relatorio_na_fila = d.index("meta:recorder_relatorio:writer_aberto")
+    assert d.index("finalizar") < ultimo_resumo < relatorio_na_fila
     # a medida do relatório RETORNADO é a última, com o writer já fechado
     assert d[-1] == "armazenamento:writer_fechado"
 
@@ -542,6 +572,77 @@ def test_sigterm_num_processo_controlado_sai_143_com_gzip_integro(tmp_path):
     linhas = _registros_do_arquivo(tmp_path / "gravacoes")  # levanta sem trailer
     assert linhas[-1]["fonte"] == "recorder_relatorio"
     assert linhas[-1]["payload"]["desfecho"] == "interrompida_sigterm"
+
+
+async def test_relatorio_final_entra_mesmo_com_a_fila_padrao_descartando(
+    tmp_path, sem_rede
+):
+    """Revisão do #199 (P1): com o canal padrão cheio, `submit` descarta em
+    silêncio — e o relatório final ia por ele. O gzip fechava íntegro SEM o
+    `recorder_relatorio`. Aqui o canal padrão descarta TUDO (fila cheia
+    simulada) e o relatório ainda assim é o último registro."""
+    rec = sem_rede(_settings_sem_rede(tmp_path))
+    submit_real = rec.writer.submit
+
+    def fila_padrao_cheia(envelope, *, canal=CANAL_PADRAO):
+        if canal == CANAL_PADRAO:
+            rec.writer.dropped += 1
+            return None
+        return submit_real(envelope, canal=canal)
+
+    rec.writer.submit = fila_padrao_cheia
+    relatorio = await rec.run(0.2)
+
+    assert rec.writer.dropped > 0  # a fila de fato descartou os outros metas
+    linhas = _registros_do_arquivo(tmp_path)
+    assert linhas[-1]["fonte"] == "recorder_relatorio"
+    assert linhas[-1]["payload"]["desfecho"] == "completa"
+    assert relatorio["relatorio_gravado"] is True
+
+
+async def test_relatorio_final_que_nao_cabe_no_prazo_e_DITO_e_nao_escondido(
+    tmp_path, monkeypatch
+):
+    """Se o writer não anda (fila cheia e nada drenando), esperar para sempre
+    travaria o encerramento. O prazo vence, o log diz, e o retorno é False."""
+    monkeypatch.setattr(recorder_mod, "PRAZO_DO_RELATORIO_FINAL_S", 0.05)
+    settings = _settings_sem_rede(tmp_path)
+    settings.recorder.queue_max = 1
+    rec = Recorder(settings)
+    rec.writer.queues[CANAL_PADRAO].put_nowait(RecordEnvelope(1, 1, "rtds", b"{}"))
+
+    assert await rec._gravar_relatorio_final({"desfecho": "completa"}) is False
+
+
+async def test_sigterm_durante_o_flush_e_do_recorder_nao_do_SO(
+    tmp_path, sem_rede, sigterm_protegido
+):
+    """Revisão do #199 (P1): os handlers eram restaurados ANTES do relatório e
+    do `writer.stop()`. Um SIGTERM nessa janela ia para o handler anterior (o
+    do SO, na VPS: morte sem trailer). Aqui ele chega DURANTE o flush e tem de
+    ser do recorder; depois do gzip fechado, o handler anterior volta."""
+    rec = sem_rede(_settings_sem_rede(tmp_path))
+    stop_real = rec.writer.stop
+
+    async def stop_com_sigterm():
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.sleep(0.05)  # o loop entrega o sinal ao handler dele
+        await stop_real()
+
+    rec.writer.stop = stop_com_sigterm
+    await rec.run(0.2)
+
+    assert sigterm_protegido == []  # durante o flush, o sinal foi do recorder
+    linhas = _registros_do_arquivo(tmp_path)  # levanta se sem trailer
+    assert linhas[-1]["fonte"] == "recorder_relatorio"
+
+    # gzip fechado → o handler anterior voltou
+    os.kill(os.getpid(), signal.SIGTERM)
+    for _ in range(100):
+        if sigterm_protegido:
+            break
+        await asyncio.sleep(0.01)
+    assert sigterm_protegido == [signal.SIGTERM]
 
 
 async def test_excecao_num_laco_grava_relatorio_e_sobe(tmp_path, sem_rede):

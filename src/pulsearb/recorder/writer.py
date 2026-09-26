@@ -155,6 +155,17 @@ class JsonlGzipWriter:
             if canal == CANAL_BOOK and self.ao_perder_book is not None:
                 self.ao_perder_book(envelope)
 
+    async def enfileirar_sem_perda(
+        self, envelope: RecordEnvelope, *, canal: str = CANAL_PADRAO
+    ) -> None:
+        """ESPERA vaga em vez de descartar.
+
+        Só para registro que não pode faltar e não está no hot path — o
+        relatório final. No callback do feed esperar travaria a recepção, e
+        por isso lá continua `submit`, que nunca bloqueia."""
+        fila = self.queues.get(canal) or self.queues[CANAL_PADRAO]
+        await fila.put(envelope)
+
     @property
     def queue(self) -> asyncio.Queue[RecordEnvelope]:
         """Compat: o canal padrão. Havia uma fila só até o M2.2."""
