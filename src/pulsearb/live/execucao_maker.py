@@ -26,10 +26,13 @@ Down — que no livro do Up é o ask. As duas são uma cotação: entram juntas,
 saem juntas, e o `CotacaoAberta` guarda os dois ids.
 
 A regra do cancelamento incerto vale perna a perna: qualquer INCERTA para a
-sequência e devolve RECONCILIAR. E a colocação é **tudo ou nada**: se a
-segunda perna é RECUSADA, a primeira é cancelada — ficar de um lado só seria
-repousar uma cotação que a estimativa não avaliou (ela avaliou dois lados),
-e fora da faixa isso é risco de execução por zero reward.
+sequência e devolve RECONCILIAR. E "o servidor respondeu" não basta: só sai do
+livro a perna com PROVA (`ResultadoDoCancelamento.fora_do_livro`); um
+`NAO_CANCELADA` sem prova — 401, 4xx, 200 que não fala do id — para igual.
+E a colocação é **tudo ou nada**: se a segunda perna é RECUSADA, a primeira
+é cancelada — ficar de um lado só seria repousar uma cotação que a estimativa
+não avaliou (ela avaliou dois lados), e fora da faixa isso é risco de execução
+por zero reward.
 
 O QUE ESTE MÓDULO NÃO FAZ
 ──────────────────────────
@@ -65,6 +68,50 @@ log = get_logger(__name__)
 #: de mercado. Recebe a cotação, devolve a ordem pronta para `enviar`. Há um
 #: por perna: o do Up (obrigatório) e o do Down (só na cotação de dois lados).
 OrdemDaCotacao = Callable[[Cotacao], OrdemPretendida]
+
+
+class MOTIVOS_DO_EFEITO:
+    """Todo motivo que ESTE módulo põe num `Efeito`. Mesma regra do `MOTIVOS`
+    do `risk/gates.py`: desfecho sem nome não vira métrica nem alarme.
+
+    Não estão aqui os motivos que o `Efeito` apenas REPASSA da `Decisao` (os
+    do `repouso.MOTIVOS`, e os que o `laco_maker` passa ao sair): esses têm
+    dono lá. Aqui mora o que a EXECUÇÃO descobriu — que o livro não fez o que
+    a decisão pediu.
+    """
+
+    #: `REPOSICIONAR` sem `nova`: invariante do `repouso` quebrada; nada saiu.
+    REPOSICIONAR_SEM_COTACAO_NOVA = "reposicionar_sem_cotacao_nova"
+    #: Cotação de dois lados sem como montar o Down. Ver `aplicar_decisao`.
+    DOIS_LADOS_SEM_ORDEM_DO_LADO_DOWN = "dois_lados_sem_ordem_do_lado_down"
+    #: Perna com id do cliente e sem id do servidor: não há por onde cancelar.
+    ABERTA_SEM_ORDER_ID = "aberta_sem_order_id"
+    #: O DELETE não teve resposta (timeout/5xx): a ordem PODE repousar.
+    CANCELAMENTO_INCERTO = "cancelamento_incerto"
+    #: O servidor respondeu mas NÃO provou que a ordem saiu do livro (401/403,
+    #: 4xx, 200 sem o id, `not_canceled` com motivo não verificado). Ver
+    #: `ResultadoDoCancelamento.fora_do_livro`.
+    CANCELAMENTO_NAO_CONFIRMADO = "cancelamento_nao_confirmado"
+    #: O POST não teve resposta: a nova PODE ter entrado.
+    ENVIO_INCERTO = "envio_incerto"
+    #: O servidor recusou a nova (ou o Down, e o Up foi desfeito).
+    ENVIO_RECUSADO = "envio_recusado"
+    #: Algo LEVANTOU depois de o Up ser aceito: o Up repousa e o Down é
+    #: desconhecido. Ver `_colocar`.
+    EXCECAO_NA_SEGUNDA_PERNA = "excecao_na_segunda_perna"
+
+    TODOS = frozenset(
+        {
+            REPOSICIONAR_SEM_COTACAO_NOVA,
+            DOIS_LADOS_SEM_ORDEM_DO_LADO_DOWN,
+            ABERTA_SEM_ORDER_ID,
+            CANCELAMENTO_INCERTO,
+            CANCELAMENTO_NAO_CONFIRMADO,
+            ENVIO_INCERTO,
+            ENVIO_RECUSADO,
+            EXCECAO_NA_SEGUNDA_PERNA,
+        }
+    )
 
 
 class ResultadoDaAcao(StrEnum):
@@ -138,7 +185,7 @@ async def aplicar_decisao(
     if decisao.nova is None:
         return Efeito(
             ResultadoDaAcao.MANTIDA,
-            "reposicionar_sem_cotacao_nova",
+            MOTIVOS_DO_EFEITO.REPOSICIONAR_SEM_COTACAO_NOVA,
             aberta=aberta,
             detalhe={"aviso": "decisao REPOSICIONAR sem `nova`; nada enviado"},
         )
@@ -148,14 +195,14 @@ async def aplicar_decisao(
         # dois — o defeito achado na rodada r4 de 2026-09-14.
         return Efeito(
             ResultadoDaAcao.MANTIDA,
-            "dois_lados_sem_ordem_do_lado_down",
+            MOTIVOS_DO_EFEITO.DOIS_LADOS_SEM_ORDEM_DO_LADO_DOWN,
             aberta=aberta,
             detalhe={"aviso": "Cotacao.dois_lados sem `ordem_do_lado_down`"},
         )
 
     # 1) Tira a antiga do livro ANTES de pôr a nova. Um cancelamento incerto
-    #    para tudo: a antiga pode repousar, e a nova em cima seria posição
-    #    dupla. Ver o cabeçalho.
+    #    OU não confirmado para tudo: a antiga pode repousar, e a nova em cima
+    #    seria posição dupla. Ver o cabeçalho.
     if aberta is not None:
         efeito_cancel = await _cancelar(
             aberta, cliente=cliente, motivo=decisao.motivo
@@ -209,7 +256,7 @@ async def _cancelar(
             )
             return Efeito(
                 ResultadoDaAcao.RECONCILIAR,
-                "aberta_sem_order_id",
+                MOTIVOS_DO_EFEITO.ABERTA_SEM_ORDER_ID,
                 aberta=aberta,
                 detalhe={"perna": perna, "id_do_cliente": id_do_cliente},
             )
@@ -219,14 +266,42 @@ async def _cancelar(
             # reconciliação ter o que procurar; NÃO a damos por fechada.
             return Efeito(
                 ResultadoDaAcao.RECONCILIAR,
-                "cancelamento_incerto",
+                MOTIVOS_DO_EFEITO.CANCELAMENTO_INCERTO,
                 aberta=aberta,
                 detalhe={"perna": perna, "order_id": order_id},
             )
+        if not resultado.fora_do_livro:
+            # O servidor respondeu, mas NÃO provou que a ordem saiu: 401/403,
+            # 4xx, 200 que não fala do id, `not_canceled` com motivo que a
+            # §4.4 não tem VERIFICADO. Até 2026-09-26 isto era lido como "já
+            # sumiu" e o REPOSICIONAR seguia para o POST — a nova por cima de
+            # uma antiga que podia estar no livro. Mesma saída do INCERTA:
+            # mantém `aberta` e para.
+            log.warning(
+                "cancelamento nao confirmado: a ordem pode ainda repousar, reconciliar",
+                perna=perna,
+                order_id=order_id,
+                estado=str(resultado.estado),
+                motivo_do_cliente=resultado.motivo,
+                status=resultado.detalhe.get("status"),
+                motivo_do_servidor=resultado.detalhe.get("motivo_do_servidor"),
+            )
+            return Efeito(
+                ResultadoDaAcao.RECONCILIAR,
+                MOTIVOS_DO_EFEITO.CANCELAMENTO_NAO_CONFIRMADO,
+                aberta=aberta,
+                detalhe={
+                    "perna": perna,
+                    "order_id": order_id,
+                    "estado_do_cancelamento": str(resultado.estado),
+                    "motivo_do_cliente": resultado.motivo,
+                    "status": resultado.detalhe.get("status"),
+                    "motivo_do_servidor": resultado.detalhe.get("motivo_do_servidor"),
+                },
+            )
         estados[perna] = str(resultado.estado)
-    # CANCELADA ou NAO_CANCELADA: nos dois, a ordem não repousa mais do nosso
-    # ponto de vista. NAO_CANCELADA inclui "já tinha sumido" (§4.4), que para o
-    # objetivo — não ter esta ordem no livro — é tão bom quanto cancelada.
+    # Toda perna com PROVA de que saiu (`fora_do_livro`): CANCELADA, ou o id
+    # que o livro de ensaio nem tinha. Só aqui a cotação é dada por fechada.
     detalhe: dict[str, Any] = {"estado_do_cancelamento": estados.get("up", "")}
     if "down" in estados:
         detalhe["estado_do_cancelamento_down"] = estados["down"]
@@ -257,16 +332,41 @@ async def _colocar(
             preco_up=ordem.preco_limite,
         )
         if ordem_do_lado_down is not None:
-            return await _colocar_lado_down(
-                nova,
-                aberta_nova,
-                cliente=cliente,
-                ordem_do_lado_down=ordem_do_lado_down,
-                janela=janela,
-                motivo=motivo,
-                tinha_anterior=tinha_anterior,
-                ganho=ganho,
-            )
+            # O Up JÁ está no livro. Qualquer exceção daqui para frente —
+            # montar o Down, um transporte que levanta algo fora de
+            # `ErroDeTransporte`, o desfazer do Up — subiria levando embora a
+            # única referência ao Up: posição repousando que ninguém gerencia.
+            # Por isso a exceção vira RECONCILIAR com o Up na mão, e o erro
+            # vai para o log (não é engolida: o estado sai como desconhecido).
+            try:
+                return await _colocar_lado_down(
+                    nova,
+                    aberta_nova,
+                    cliente=cliente,
+                    ordem_do_lado_down=ordem_do_lado_down,
+                    janela=janela,
+                    motivo=motivo,
+                    tinha_anterior=tinha_anterior,
+                    ganho=ganho,
+                )
+            except Exception as erro:
+                log.error(
+                    "excecao depois do Up aceito: Up repousa, Down desconhecido, reconciliar",
+                    order_id=aberta_nova.order_id,
+                    id_do_cliente=aberta_nova.id_do_cliente,
+                    erro=f"{type(erro).__name__}: {erro}",
+                    exc_info=True,
+                )
+                return Efeito(
+                    ResultadoDaAcao.RECONCILIAR,
+                    MOTIVOS_DO_EFEITO.EXCECAO_NA_SEGUNDA_PERNA,
+                    aberta=aberta_nova,
+                    detalhe={
+                        "perna": "down",
+                        "order_id": aberta_nova.order_id,
+                        "erro": f"{type(erro).__name__}: {erro}",
+                    },
+                )
         return Efeito(
             ResultadoDaAcao.REPOSICIONADA if tinha_anterior else ResultadoDaAcao.COLOCADA,
             motivo,
@@ -280,7 +380,7 @@ async def _colocar(
         # passo 1 deste reposicionamento.
         return Efeito(
             ResultadoDaAcao.RECONCILIAR,
-            "envio_incerto",
+            MOTIVOS_DO_EFEITO.ENVIO_INCERTO,
             aberta=CotacaoAberta(
                 cotacao=nova,
                 desde_epoch=agora_epoch,
@@ -294,7 +394,7 @@ async def _colocar(
     # nossa cotação — correto, e o motivo da recusa vai no detalhe.
     return Efeito(
         ResultadoDaAcao.CANCELADA if tinha_anterior else ResultadoDaAcao.MANTIDA,
-        "envio_recusado",
+        MOTIVOS_DO_EFEITO.ENVIO_RECUSADO,
         aberta=None,
         detalhe={"motivo_da_recusa": resultado.motivo},
     )
@@ -343,7 +443,7 @@ async def _colocar_lado_down(
         # Down para procurar.
         return Efeito(
             ResultadoDaAcao.RECONCILIAR,
-            "envio_incerto",
+            MOTIVOS_DO_EFEITO.ENVIO_INCERTO,
             aberta=CotacaoAberta(
                 cotacao=nova,
                 desde_epoch=com_up.desde_epoch,
@@ -357,12 +457,18 @@ async def _colocar_lado_down(
         )
 
     # RECUSADA: o Up entrou sozinho, e sozinho não é a cotação avaliada. Sai.
-    desfeito = await _cancelar(com_up, cliente=cliente, motivo="lado_down_recusado")
+    # O motivo passado ao `_cancelar` só apareceria no `Efeito` de sucesso, que
+    # é descartado logo abaixo (o desfecho é ENVIO_RECUSADO com perna=down). O
+    # antigo literal "lado_down_recusado" nunca chegava a quem lê — era motivo
+    # decorativo, e por isso saiu.
+    desfeito = await _cancelar(
+        com_up, cliente=cliente, motivo=MOTIVOS_DO_EFEITO.ENVIO_RECUSADO
+    )
     if desfeito.precisa_reconciliar:
         return desfeito
     return Efeito(
         ResultadoDaAcao.CANCELADA if tinha_anterior else ResultadoDaAcao.MANTIDA,
-        "envio_recusado",
+        MOTIVOS_DO_EFEITO.ENVIO_RECUSADO,
         aberta=None,
         detalhe={"perna": "down", "motivo_da_recusa": resultado.motivo},
     )
@@ -392,6 +498,13 @@ class Reconciliacao:
         """Sem órfã nem fantasma: o nosso estado batia com o servidor."""
         return not self.orfas and not self.fantasmas
 
+    @property
+    def orfas_sem_id(self) -> int:
+        """Órfãs que o servidor listou SEM id legível. Não há como cancelá-las
+        por id (§4.4) — são posição que só uma pessoa resolve. Contadas para
+        não sumirem: `cancelar_orfas` as pulava em silêncio."""
+        return sum(1 for o in self.orfas if not o.id)
+
 
 async def reconciliar(
     cliente: ClienteDeOrdens,
@@ -416,7 +529,13 @@ async def reconciliar(
     casadas = tuple(sorted(ids_no_servidor & ids_esperados))
     orfas = tuple(o for o in no_servidor if o.id not in ids_esperados)
     fantasmas = tuple(sorted(ids_esperados - ids_no_servidor))
-    return Reconciliacao(casadas=casadas, orfas=orfas, fantasmas=fantasmas)
+    rec = Reconciliacao(casadas=casadas, orfas=orfas, fantasmas=fantasmas)
+    if rec.orfas_sem_id:
+        log.error(
+            "reconciliacao achou orfa sem id: nao da para cancelar por id",
+            orfas_sem_id=rec.orfas_sem_id,
+        )
+    return rec
 
 
 async def cancelar_orfas(
@@ -430,21 +549,47 @@ async def cancelar_orfas(
     é exposição que nenhum portão desta sessão autorizou. Devolve o estado do
     cancelamento por id, para o diário — inclusive `INCERTA`, que pede outra
     passada (recancelar é seguro, §4.4).
+
+    Órfã SEM id não é pulada em silêncio: não há por onde cancelá-la (§4.4),
+    então ela fica fora de `desfechos` (que é por id), mas sai no log como
+    erro — e o aviso de preenchimento vale para ela também. A contagem está
+    em `Reconciliacao.orfas_sem_id`.
     """
     desfechos: dict[str, str] = {}
     for orfa in reconciliacao.orfas:
+        _avisar_preenchimento(orfa)
         if not orfa.id:
+            log.error(
+                "orfa sem id nao pode ser cancelada: posicao a resolver a mao",
+                token_id=orfa.token_id,
+                side=orfa.side,
+                price=orfa.price,
+                original_size=orfa.original_size,
+                size_matched=orfa.size_matched,
+                status=orfa.status,
+            )
             continue
         resultado = await cliente.cancelar(orfa.id)
         desfechos[orfa.id] = str(resultado.estado)
-        if orfa.size_matched > 0:
-            # Meio preenchida: cancelar tira o resto do livro, mas a metade que
-            # casou é posição REAL. O log nomeia isso para a reconciliação de
-            # PnL não perder que existiu exposição.
-            log.warning(
-                "orfa meio preenchida cancelada: ha posicao real a reconciliar",
-                order_id=orfa.id,
-                size_matched=orfa.size_matched,
-                original_size=orfa.original_size,
-            )
     return desfechos
+
+
+def _avisar_preenchimento(orfa: OrdemAberta) -> None:
+    """Meio preenchida — ou sem saber — é posição REAL possível: cancelar tira
+    o resto do livro, mas a metade que casou fica. O log nomeia isso para a
+    reconciliação de PnL não perder que existiu exposição."""
+    if orfa.size_matched is None:
+        # Desconhecido não é zero: o servidor não disse quanto casou.
+        log.warning(
+            "orfa com preenchimento DESCONHECIDO: pode haver posicao real a reconciliar",
+            order_id=orfa.id,
+            size_matched=None,
+            original_size=orfa.original_size,
+        )
+    elif orfa.size_matched > 0:
+        log.warning(
+            "orfa meio preenchida: ha posicao real a reconciliar",
+            order_id=orfa.id,
+            size_matched=orfa.size_matched,
+            original_size=orfa.original_size,
+        )

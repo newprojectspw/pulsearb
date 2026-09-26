@@ -85,6 +85,7 @@ CAMINHO_LISTAR_ORDENS = "/data/orders"
 #: Teto de páginas ao listar ordens abertas. A conta não tem milhares de ordens
 #: repousando ao mesmo tempo aqui; o teto existe só para um `next_cursor` que
 #: nunca terminasse não virar laço infinito na reconciliação de arranque.
+#: Estourá-lo LEVANTA `ErroDeLeitura` — lista parcial não é lista.
 MAX_PAGINAS_DE_ORDENS = 50
 
 #: Teto de espera de um envio. Acima disto a resposta não chega a tempo de
@@ -153,12 +154,28 @@ class EstadoDoCancelamento(StrEnum):
 
     #: O servidor confirmou: o id saiu do livro. Não há mais o que repousar.
     CANCELADA = "cancelada"
-    #: O servidor respondeu e disse que NÃO cancelou este id, com motivo. Um id
-    #: que já não existia cai aqui também — e para a rota maker isso é tão bom
-    #: quanto cancelada: o objetivo era não ter a ordem repousando, e não tem.
+    #: O servidor respondeu e NÃO confirmou o cancelamento deste id. Cabe aqui
+    #: coisa demais para ler como "saiu do livro": 401/403, 4xx genérico, corpo
+    #: ilegível, 200 que não menciona o id, e o id em `not_canceled` — este
+    #: último inclui "já não existia" (§4.4), mas a §4.4 NÃO tem a string
+    #: VERIFICADA desse motivo, então ele não se distingue de "existe e o
+    #: servidor recusou". Quem precisa saber se a ordem saiu do livro pergunta
+    #: `ResultadoDoCancelamento.fora_do_livro`, que só diz sim com PROVA.
     NAO_CANCELADA = "nao_cancelada"
     #: A resposta não chegou. A ordem PODE ainda estar repousando. Reconciliar.
     INCERTA = "incerta"
+
+
+#: O único motivo de `NAO_CANCELADA` que PROVA que o id não repousa: o do
+#: `ClienteSombraDeOrdens` (`execution/cliente_sombra.py`), cujo dicionário É o
+#: livro de ensaio — id ausente dali é id fora do livro, sem margem.
+#:
+#: Do servidor real não há equivalente: a §4.4 do `API_NOTES.md` diz que um id
+#: que já sumiu volta em `not_canceled` "com um motivo (string)", mas não
+#: registra QUAL string. Ler "já não existe" de um texto não verificado é o
+#: defeito de "fato de API assumido" que o `CLAUDE.md` proíbe. Até a string
+#: ser VERIFICADA na fonte, nenhuma resposta `not_canceled` prova ausência.
+MOTIVO_ID_NAO_REPOUSAVA = "id_nao_repousava"
 
 
 @dataclass(frozen=True)
@@ -178,6 +195,24 @@ class ResultadoDoCancelamento:
         """`True` obriga a ler o lado deles: não sabemos se a ordem repousa."""
         return self.estado is EstadoDoCancelamento.INCERTA
 
+    @property
+    def fora_do_livro(self) -> bool:
+        """`True` só com PROVA de que o id não repousa mais.
+
+        Prova é: `CANCELADA` (o id veio em `canceled`), ou `NAO_CANCELADA` com
+        `MOTIVO_ID_NAO_REPOUSAVA` (o livro de ensaio, que é autoritativo).
+        Todo o resto de `NAO_CANCELADA` — 401/403, 4xx, corpo ilegível, 200
+        que não fala do id, id em `not_canceled` com motivo não verificado — é
+        "o servidor não confirmou", e tratar isso como "saiu" deixa a ordem
+        antiga no livro debaixo da nova: a posição dupla entre dois makers.
+        """
+        if self.estado is EstadoDoCancelamento.CANCELADA:
+            return True
+        return (
+            self.estado is EstadoDoCancelamento.NAO_CANCELADA
+            and self.motivo == MOTIVO_ID_NAO_REPOUSAVA
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class OrdemAberta:
@@ -194,21 +229,29 @@ class OrdemAberta:
     side: str
     price: float
     original_size: float
-    size_matched: float
+    #: Quanto já casou. `None` = o servidor não disse, ou disse algo ilegível:
+    #: é DESCONHECIDO, e não zero. Zero afirmaria "intacta", e é justamente a
+    #: afirmação que esconderia uma órfã meio preenchida (posição real).
+    size_matched: float | None
     status: str
 
     @classmethod
     def do_payload(cls, item: dict[str, Any]) -> OrdemAberta:
-        """De um item do `data[]` (§4.5). Campos ausentes viram vazio/zero em
-        vez de estourar: a reconciliação prefere uma ordem com dado faltando a
-        uma exceção que a impede de ler as outras — e o `id` é o que importa."""
+        """De um item do `data[]` (§4.5). Campos ausentes não estouram: a
+        reconciliação prefere uma ordem com dado faltando a uma exceção que a
+        impede de ler as outras.
+
+        Mas faltar não vira valor inventado onde o valor DECIDE algo:
+        `size_matched` ilegível vira `None` (desconhecido), não `0.0`. E o `id`
+        vazio continua vazio — quem usa (`execucao_maker.cancelar_orfas`) conta
+        e loga a órfã sem id em vez de pulá-la."""
         return cls(
             id=str(item.get("id") or item.get("orderID") or ""),
             token_id=str(item.get("asset_id") or item.get("token_id") or ""),
             side=str(item.get("side") or ""),
             price=_float_ou_zero(item.get("price")),
             original_size=_float_ou_zero(item.get("original_size")),
-            size_matched=_float_ou_zero(item.get("size_matched")),
+            size_matched=_float_ou_none(item.get("size_matched")),
             status=str(item.get("status") or ""),
         )
 
@@ -218,6 +261,16 @@ def _float_ou_zero(valor: Any) -> float:
         return float(valor)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _float_ou_none(valor: Any) -> float | None:
+    """Número finito, ou `None` quando ausente/ilegível/não finito. `NaN > 0` é
+    `False`, então um NaN passaria por "nada casou" tão bem quanto um zero."""
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return numero if math.isfinite(numero) else None
 
 
 class ErroDeLeitura(Exception):
@@ -677,6 +730,16 @@ class ClienteDeOrdens:
             # `LTE=` é a sentinela de fim da paginação keyset (§2.2/§4.5).
             if cursor is None or cursor == "LTE=":
                 break
+        else:
+            # O teto estourou sem a sentinela: há páginas que NÃO lemos.
+            # Devolver o que se leu seria uma lista PARCIAL com cara de
+            # completa — a reconciliação acharia fantasma onde há ordem e não
+            # veria a órfã da página seguinte. Falha fechada, como o timeout.
+            raise ErroDeLeitura(
+                f"listagem de ordens abertas nao terminou em "
+                f"{MAX_PAGINAS_DE_ORDENS} paginas (ultimo next_cursor={cursor!r}): "
+                "lista parcial recusada"
+            )
         return abertas
 
 

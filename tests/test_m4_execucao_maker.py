@@ -410,7 +410,9 @@ class TestDuasPernas:
         cliente = _cliente(
             _aceita("o-up"),
             (400, {"success": False, "errorMsg": "invalid"}),
-            (200, {"success": True}),  # cancel do Up
+            # cancel do Up na forma REAL do §4.4. Era `{"success": True}`, que
+            # não menciona o id — e 200 sem o id NÃO prova cancelamento.
+            (200, {"canceled": ["o-up"], "not_canceled": {}}),
         )
 
         efeito = await _aplicar_dois_lados(self._nova(), None, cliente)
@@ -432,7 +434,12 @@ class TestDuasPernas:
         assert efeito.aberta.id_do_cliente_down != ""
 
     async def test_cancelar_tira_as_DUAS_pernas(self):
-        cliente = _cliente((200, {"success": True}), (200, {"success": True}))
+        # Forma real do §4.4: o id em `canceled`. `{"success": True}` não
+        # menciona o id e, desde 2026-09-26, não prova que saiu do livro.
+        cliente = _cliente(
+            (200, {"canceled": ["o-up"], "not_canceled": {}}),
+            (200, {"canceled": ["o-down"], "not_canceled": {}}),
+        )
         aberta = CotacaoAberta(
             cotacao=Cotacao(2, 5.0),
             desde_epoch=1000.0,
@@ -451,7 +458,10 @@ class TestDuasPernas:
         assert [c[0] for c in cliente.transporte.chamadas] == ["DELETE", "DELETE"]
 
     async def test_cancelamento_INCERTO_da_segunda_perna_NAO_da_a_cotacao_por_fechada(self):
-        cliente = _cliente((200, {"success": True}), TimeoutError())
+        # O Up sai com PROVA (id em `canceled`), para o teste chegar ao Down.
+        cliente = _cliente(
+            (200, {"canceled": ["o-up"], "not_canceled": {}}), TimeoutError()
+        )
         aberta = CotacaoAberta(
             cotacao=Cotacao(2, 5.0),
             desde_epoch=1000.0,
@@ -470,7 +480,8 @@ class TestDuasPernas:
         assert efeito.aberta is aberta
 
     async def test_perna_down_com_id_do_cliente_e_SEM_order_id_reconcilia(self):
-        cliente = _cliente((200, {"success": True}))
+        # O Up sai com PROVA, para o teste chegar à perna Down sem order_id.
+        cliente = _cliente((200, {"canceled": ["o-up"], "not_canceled": {}}))
         aberta = CotacaoAberta(
             cotacao=Cotacao(2, 5.0),
             desde_epoch=1000.0,
