@@ -33,6 +33,7 @@ Não altera nada da política de integridade. Só MEDE.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import time
 from collections.abc import Iterable
@@ -44,6 +45,7 @@ from pulsearb.analysis.integrity import MAGNITUDE_CRITICA, MonitorDeIntegridade
 from pulsearb.caminhos import caminho_de_escrita
 from pulsearb.feeds.poly_ws import eventos_do_payload
 from pulsearb.recorder.writer import FONTE_RESYNC
+from pulsearb.replay.reader import ERROS_DE_FLUXO
 
 
 def _motivo_comprometido(monitor: MonitorDeIntegridade, token: str) -> dict[str, Any]:
@@ -233,6 +235,23 @@ QUIETO_PADRAO_S = 120.0
 SAIDA_GRAVACAO_NAO_INTEGRA = 2
 
 
+def _gzip_fechado(caminho: Path) -> bool:
+    """O arquivo termina num trailer gzip válido (o writer o FECHOU)?
+
+    Lê até o fim: é a única prova de que o fluxo terminou — o arquivo aberto
+    e o que morreu no meio falham igual aqui. `.jsonl` sem compressão não tem
+    trailer que prove nada: conta como não fechado (lado conservador)."""
+    if caminho.suffix != ".gz":
+        return False
+    try:
+        with gzip.open(caminho, "rb") as fluxo:
+            while fluxo.read(1 << 20):
+                pass
+    except ERROS_DE_FLUXO:
+        return False
+    return True
+
+
 def arquivos_da_gravacao(
     caminho: Path, *, agora: float, quieto_s: float = QUIETO_PADRAO_S
 ) -> tuple[list[Path], list[str]]:
@@ -240,10 +259,14 @@ def arquivos_da_gravacao(
 
     O arquivo que o recorder está escrevendo não tem trailer gzip: lido, ele
     parece truncado, e o token com resync no fim dele pareceria preso. Num
-    diretório, o arquivo modificado mais recentemente é excluído se foi tocado
-    há menos de `quieto_s`. Pelo mtime, e não pelo nome: `-1400-002` ordena
-    ANTES de `-1400` por nome, mas é mais novo. Um arquivo passado
-    explicitamente é lido — quem o escolheu sabe o que escolheu.
+    diretório, o arquivo modificado mais recentemente é excluído só se as DUAS
+    coisas valem: foi tocado há menos de `quieto_s` E não termina num trailer
+    gzip válido. Recência sozinha não prova nada — uma gravação que acabou de
+    encerrar tem o último arquivo recente e FECHADO, com o relatório final
+    dentro, e excluí-lo daria `integra: true` sem a última rotação (revisão do
+    #199). Pelo mtime, e não pelo nome: `-1400-002` ordena ANTES de `-1400`
+    por nome, mas é mais novo. Um arquivo passado explicitamente é lido — quem
+    o escolheu sabe o que escolheu.
     """
     if caminho.is_file():
         return [caminho], []
@@ -251,7 +274,8 @@ def arquivos_da_gravacao(
     if not arquivos:
         return [], []
     mais_novo = max(arquivos, key=lambda a: a.stat().st_mtime)
-    if agora - mais_novo.stat().st_mtime < quieto_s:
+    recente = agora - mais_novo.stat().st_mtime < quieto_s
+    if recente and not _gzip_fechado(mais_novo):
         return [a for a in arquivos if a != mais_novo], [mais_novo.name]
     return arquivos, []
 

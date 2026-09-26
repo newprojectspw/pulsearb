@@ -350,11 +350,42 @@ def test_em_gravacao_e_o_mais_novo_por_mtime_nao_por_nome(tmp_path):
     """`-1400-002` ordena ANTES de `-1400` pelo nome, mas é o mais novo."""
     velho = _gravar(tmp_path / "pulsearb-20260925-1400.jsonl.gz", _registros_basicos())
     _envelhecer(velho)
-    novo = _gravar(tmp_path / "pulsearb-20260925-1400-002.jsonl.gz", _registros_basicos())
+    novo = _gravar(
+        tmp_path / "pulsearb-20260925-1400-002.jsonl.gz",
+        _registros_basicos(),
+        cortar_trailer=True,
+    )
 
     lidos, excluidos = arquivos_da_gravacao(tmp_path, agora=time.time(), quieto_s=120)
     assert excluidos == [novo.name]
     assert lidos == [velho]
+
+
+def test_gravacao_recem_encerrada_le_o_ultimo_arquivo_fechado(tmp_path, capsys):
+    """Revisão do #199: recência NÃO prova arquivo aberto. Diagnosticar logo
+    depois do fim da gravação: o último arquivo é recente mas FECHADO (trailer
+    gzip, relatório final dentro) — tem de ser lido, com o resync pendente
+    dele contado, e não excluído com `integra: true`."""
+    velho = _gravar(tmp_path / "pulsearb-20260925-1300.jsonl.gz", _registros_basicos())
+    _envelhecer(velho)
+    ultimo = _gravar(
+        tmp_path / "pulsearb-20260925-1400.jsonl.gz",
+        [
+            _marcador(3000),
+            _Reg("recorder_relatorio", {"duracao_s": 7200.0}, 3100 * MS),
+        ],
+    )  # mtime agora, mas fechado
+
+    lidos, excluidos = arquivos_da_gravacao(tmp_path, agora=time.time(), quieto_s=120)
+    assert excluidos == []
+    assert lidos == [velho, ultimo]
+
+    assert diagnostico_main([str(tmp_path)]) == 0
+    saida = json.loads(capsys.readouterr().out)
+    assert saida["leitura_da_gravacao"]["arquivos_lidos"] == [velho.name, ultimo.name]
+    assert saida["leitura_da_gravacao"]["integra"] is True
+    # a última rotação entrou nas métricas: o resync dela está pendente.
+    assert saida["com_replay_de_resync"]["tokens_aguardando_resync"] == 1
 
 
 def test_gzip_truncado_antigo_e_rejeitado_como_gravacao_nao_como_replay(tmp_path, capsys):
@@ -381,7 +412,12 @@ def test_gzip_truncado_antigo_e_rejeitado_como_gravacao_nao_como_replay(tmp_path
 
 
 def test_diretorio_sem_arquivo_fechado_nao_e_diagnostico(tmp_path, capsys):
-    _gravar(tmp_path / "pulsearb-20260925-1400.jsonl.gz", _registros_basicos())
+    """O único arquivo está em gravação (recente, sem trailer): nada a ler."""
+    _gravar(
+        tmp_path / "pulsearb-20260925-1400.jsonl.gz",
+        _registros_basicos(),
+        cortar_trailer=True,
+    )
     assert diagnostico_main([str(tmp_path)]) == SAIDA_GRAVACAO_NAO_INTEGRA
     assert json.loads(capsys.readouterr().out)["leitura"].startswith("NENHUM arquivo")
 
