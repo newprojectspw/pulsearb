@@ -295,6 +295,14 @@ class TestOAssinador:
 
         return AssinadorLocal(self.CHAVE)
 
+    @staticmethod
+    def _assinar(assinador, ordem):
+        """O caminho que o `ConstrutorDeOrdemLocal` usa de verdade:
+        `assinar_typed_data(typed_data_da_ordem(...))`. O atalho
+        `AssinadorLocal.assinar_ordem` não tinha chamador e saiu como código
+        morto (2026-09-26); estes testes continuam provando a assinatura."""
+        return assinador.assinar_typed_data(typed_data_da_ordem(ordem))
+
     def _assinavel(self, **ajustes):
         """Ordem com endereços REAIS.
 
@@ -312,13 +320,13 @@ class TestOAssinador:
     def test_a_assinatura_bate_com_a_do_SDK(self):
         """O teste que fecha o 3.2: mesma chave, mesma ordem, mesmos bytes."""
         assinador = self._assinador()
-        assert assinador.assinar_ordem(self._assinavel()) == self.ASSINATURA
+        assert self._assinar(assinador, self._assinavel()) == self.ASSINATURA
 
     def test_a_assinatura_vem_com_prefixo_0x(self):
         """Em `eth-account` recente `.hex()` já não inclui o prefixo, e o SDK
         o repõe. Assinatura sem `0x` é recusada, e a recusa não diz que o
         problema é o prefixo."""
-        assinatura = self._assinador().assinar_ordem(self._assinavel())
+        assinatura = self._assinar(self._assinador(), self._assinavel())
 
         assert assinatura.startswith("0x")
         assert len(assinatura) == 132  # 0x + 65 bytes
@@ -327,7 +335,7 @@ class TestOAssinador:
         """Cada campo entra no hash. Se algum não entrasse, a struct estaria
         errada e a ordem assinada não seria a ordem pretendida."""
         assinador = self._assinador()
-        base = assinador.assinar_ordem(self._assinavel())
+        base = self._assinar(assinador, self._assinavel())
 
         for mudanca in (
             {"salt": 987654321},
@@ -338,16 +346,16 @@ class TestOAssinador:
             {"timestamp_ms": 1756000000001},
             {"neg_risk": True},
         ):
-            assert assinador.assinar_ordem(self._assinavel(**mudanca)) != base, mudanca
+            assert self._assinar(assinador, self._assinavel(**mudanca)) != base, mudanca
 
     def test_a_expiracao_NAO_muda_a_assinatura(self):
         """Ela não está em `_ORDER_FIELDS`: vai no corpo do fio e não é
         assinada. O teste trava a assimetria para que ninguém a "conserte"."""
         assinador = self._assinador()
 
-        assert assinador.assinar_ordem(
-            self._assinavel(expiracao=0)
-        ) == assinador.assinar_ordem(self._assinavel(expiracao=999999))
+        assert self._assinar(
+            assinador, self._assinavel(expiracao=0)
+        ) == self._assinar(assinador, self._assinavel(expiracao=999999))
 
     def test_o_repr_nao_publica_a_chave(self):
         """Chave privada em arquivo de log é a perda total do capital da

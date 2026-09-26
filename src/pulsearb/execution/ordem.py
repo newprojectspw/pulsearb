@@ -367,10 +367,6 @@ class AssinadorLocal:
         bruto = assinada.signature.hex()
         return bruto if bruto.startswith("0x") else "0x" + bruto
 
-    def assinar_ordem(self, ordem: OrdemNaoAssinada) -> str:
-        """A assinatura da struct da ordem, pronta para o corpo do envio."""
-        return self.assinar_typed_data(typed_data_da_ordem(ordem))
-
     def __repr__(self) -> str:
         """Só o endereço. O endereço é público; a chave não.
 

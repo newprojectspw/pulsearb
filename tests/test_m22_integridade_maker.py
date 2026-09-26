@@ -20,7 +20,6 @@ from pulsearb.analysis.measurements import conta_do_maker, medir_markout
 from pulsearb.analysis.rewards import (
     OrdemHipotetica,
     ParametrosDeReward,
-    capital_da_ordem,
     combinar_lados,
     denominador_pessimista,
     fatia_do_pool,
@@ -459,40 +458,6 @@ def test_q_min_nunca_passa_da_metade_da_soma(meio, fracao):
     assert q <= soma / 2 + 1e-9
     if fracao == 0.5:
         assert q == pytest.approx(soma / 2)
-
-
-def test_capital_da_ordem_e_lido_do_livro_e_nunca_passa_do_tamanho():
-    """Dois lados = duas compras, uma em cada token: `tamanho × (1 − spread)`."""
-    livro = OrderBook(asset_id="tok", bids=[(0.49, 500.0)], asks=[(0.51, 500.0)])
-    dois = OrdemHipotetica(tamanho=1000, distancia_ticks=1, dois_lados=True)
-    um = OrdemHipotetica(tamanho=1000, distancia_ticks=1, dois_lados=False)
-    # bid a 0,48 e ask a 0,52 → 1000 × (0,48 + 0,48) = 960
-    assert capital_da_ordem(dois, livro, PARAMS) == pytest.approx(960.0)
-    assert capital_da_ordem(um, livro, PARAMS) == pytest.approx(480.0)
-    assert capital_da_ordem(dois, livro, PARAMS) <= dois.tamanho
-
-
-def test_capital_da_ordem_em_mercado_extremo_e_barato_e_assimetrico():
-    """Fora da faixa o capital dos dois lados continua tamanho × (1 − spread),
-    mas o lado caro e o barato são muito diferentes — e é o lado barato (NO
-    a 0,03) que, se executar sozinho, vira o inventário que o markout de 5 s
-    não vê."""
-    livro = OrderBook(asset_id="tok", bids=[(0.94, 500.0)], asks=[(0.96, 500.0)])
-    dois = OrdemHipotetica(tamanho=1000, distancia_ticks=1, dois_lados=True)
-    # bid YES a 0,93 (930) + bid NO a 1 − 0,97 = 0,03 (30) = 960
-    assert capital_da_ordem(dois, livro, PARAMS) == pytest.approx(960.0)
-
-
-def test_capital_da_ordem_sem_preco_e_none_nao_zero():
-    livro = OrderBook(asset_id="tok", bids=[(0.49, 500.0)], asks=[])
-    assert capital_da_ordem(
-        OrdemHipotetica(tamanho=100, distancia_ticks=1), livro, PARAMS
-    ) is None
-    # preço que sairia do intervalo (0, 1) também recusa
-    borda = OrderBook(asset_id="tok", bids=[(0.005, 500.0)], asks=[(0.995, 500.0)])
-    assert capital_da_ordem(
-        OrdemHipotetica(tamanho=100, distancia_ticks=1), borda, PARAMS
-    ) is None
 
 
 def test_denominador_pessimista_e_metade_do_livro():

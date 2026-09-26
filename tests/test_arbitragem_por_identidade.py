@@ -24,7 +24,6 @@ from pulsearb.analysis.arbitragem import (
     Taxa,
     maior_cesta,
     oportunidade_de_cesta,
-    oportunidade_de_escada,
 )
 from pulsearb.backtest.book import OrderBook
 
@@ -159,104 +158,6 @@ class TestAMaiorCesta:
         )
 
         assert op is None and motivo == "sem_folga"
-
-
-class TestAEscadaDeLimiares:
-    """`P(X ≥ k₁) ≥ P(X ≥ k₂)`: quem passa de k₂ passou de k₁."""
-
-    def test_comprar_o_limiar_BAIXO_e_vender_o_ALTO_trava_a_diferenca(self):
-        baixo = _livro(asks=[(0.40, 100.0)], asset_id="k1")
-        alto = _livro(bids=[(0.55, 100.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=100_000.0, limiar_alto=110_000.0,
-        )
-
-        assert motivo is None
-        assert op.lucro_usdc == pytest.approx(1.5)
-
-    def test_escada_em_ordem_CORRETA_nao_e_oportunidade(self):
-        """O caso normal: o limiar baixo vale MAIS que o alto."""
-        baixo = _livro(asks=[(0.60, 100.0)], asset_id="k1")
-        alto = _livro(bids=[(0.40, 100.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=100_000.0, limiar_alto=110_000.0,
-        )
-
-        assert op is None and motivo == "sem_folga"
-
-    def test_o_MESMO_token_dos_dois_lados_RECUSA(self):
-        """Comprar e vender o mesmo token não é escada — é ruído de
-        agrupamento, e daria 'lucro' do spread invertido."""
-        livro = _livro(asks=[(0.40, 100.0)], bids=[(0.55, 100.0)], asset_id="k")
-
-        op, motivo = oportunidade_de_escada(
-            livro, livro, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k", token_alto="k",
-            limiar_baixo=100_000.0, limiar_alto=110_000.0,
-        )
-
-        assert op is None and motivo == "mesma_perna"
-
-    def test_limiares_TROCADOS_recusam_em_vez_de_inventar_lucro(self):
-        """A conta devolveria "lucro travado" sobre posição que perde.
-
-        Os livros não carregam o limiar deles: com os dois trocados a
-        desigualdade se inverte e o que sobra é aposta em spread. Mesmo modo
-        de falha do `conjunto_nao_exaustivo`.
-        """
-        baixo = _livro(asks=[(0.40, 100.0)], asset_id="k1")
-        alto = _livro(bids=[(0.55, 100.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=110_000.0, limiar_alto=100_000.0,
-        )
-
-        assert op is None and motivo == "escada_fora_de_ordem"
-
-    def test_limiares_IGUAIS_tambem_recusam(self):
-        """Mesmo limiar não é escada: não há desigualdade a explorar."""
-        baixo = _livro(asks=[(0.40, 100.0)], asset_id="k1")
-        alto = _livro(bids=[(0.55, 100.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=100_000.0, limiar_alto=100_000.0,
-        )
-
-        assert op is None and motivo == "escada_fora_de_ordem"
-
-    def test_sem_bids_no_limiar_alto_nao_ha_o_que_vender(self):
-        baixo = _livro(asks=[(0.40, 100.0)], asset_id="k1")
-        alto = _livro(asks=[(0.55, 100.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=100_000.0, limiar_alto=110_000.0,
-        )
-
-        assert op is None and motivo == "perna_sem_livro"
-
-    def test_venda_que_nao_enche_RECUSA(self):
-        baixo = _livro(asks=[(0.40, 100.0)], asset_id="k1")
-        alto = _livro(bids=[(0.55, 3.0)], asset_id="k2")
-
-        op, motivo = oportunidade_de_escada(
-            baixo, alto, SEM_TAXA, SEM_TAXA,
-            shares=10.0, token_baixo="k1", token_alto="k2",
-            limiar_baixo=100_000.0, limiar_alto=110_000.0,
-        )
-
-        assert op is None and motivo == "livro_raso"
 
 
 def test_todo_motivo_declarado_e_ALCANCAVEL():

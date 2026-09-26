@@ -31,7 +31,7 @@ do §6.1b e do §12.13:
 |---|---|---|---|---|
 | 2.1 | o **sentido** do campo `side` do `last_trade_price` ("lado do taker") está afirmado, não verificado | `live/livros.py:60`, `live/caixa_maker.py:334` | lido; API_NOTES só verifica `side` na struct da ORDEM (§ linha 1074) | o **sinal** de todo markout da rota maker |
 | 2.2 | janela do TWAP fixa em **60 s** para 5m/15m/4h; a nota que justifica não tem data e contradiz a mudança pública de 2026-08-07 (5m → 30 s) | `engine/twap.py:74`, `API_NOTES.md:633` vs `:875-882` | lido | `P(Up)` de toda janela de 5m |
-| 2.3 | reconciliação é obrigatória em três lugares e **chamada em nenhum** | `execucao_maker.py:396,422` (0 chamadas) | medido (grep + vulture) | pré-requisito de LIVE |
+| 2.3 | reconciliação é obrigatória em três lugares e **chamada em nenhum** | `execucao_maker.py:396,422` (0 chamadas na data) — **2026-09-26: chamada no arranque** por `LacoMaker.reconciliar_no_arranque` ← `ProcessoShadow.run` | medido (grep + vulture); atualização conferida no código | pré-requisito de LIVE; o 3.5 segue aberto |
 | 2.4 | `value: true` no RTDS vira preço **1,0** | `feeds/rtds.py:149` | **provado** | falha aberta no preço que decide a janela |
 | 2.5 | dois `_percentil` com definições diferentes: p50 de 1..10 dá **5** num e **6** no outro | `analysis/measurements.py:37` vs `analysis/anchor_sweep.py:563` | **provado** | comparabilidade entre relatórios |
 | 2.6 | `mypy` não roda no CI: **44 erros**, 9 no laço maker; um tipo de retorno mente | `engine/decisao.py:111`, `live/laco_maker.py` | medido | dívida que vira defeito sem aviso |
@@ -124,13 +124,25 @@ dois números. E datar a nota do API_NOTES, seja qual for o resultado.
 - `live/laco_maker.py:947`: log `"cotacao maker em estado desconhecido: reconciliar"`;
 - quadro 3.5: *"`INCERTA` é terminal e obriga reconciliação"*.
 
-`live/execucao_maker.py:396 reconciliar` e `:422 cancelar_orfas` existem,
-estão testados (2 arquivos), e têm **zero** chamadas em `src/` e `scripts/`
-(medido). O mesmo vale para `risk/gates.py:691 retomar` e `:702
-desarmar_disjuntor`: o disjuntor arma e não há caminho de código que o
-desarme. Em SHADOW nada disso importa; em LIVE, um processo que morre entre
-o envio e a resposta deixa ordem no livro que ninguém vai limpar. É
-pré-requisito do 3.5/4.x e não está no quadro como tal.
+Na data desta auditoria, `live/execucao_maker.py` `reconciliar` e
+`cancelar_orfas` existiam, testados, com **zero** chamadas em `src/` e
+`scripts/`.
+
+**Atualização 2026-09-26 (conferida no código):** a reconciliação passou a
+ser chamada. `LacoMaker.reconciliar_no_arranque` (`live/laco_maker.py`)
+chama `reconciliar` e, com órfãs achadas, `cancelar_orfas`; quem a chama é o
+`ProcessoShadow.run` (`live/shadow.py`), no ARRANQUE, antes de qualquer
+cotação — e um `ErroDeLeitura` ali impede a subida em vez de ser engolido.
+Isto fecha o "executada por ninguém"; NÃO fecha o 3.5, que continua sem uma
+ordem assinada recebendo resposta.
+
+`risk/gates.py` `retomar` e `desarmar_disjuntor` **não são código morto**:
+são controles manuais de segurança (a docstring de cada um diz *"Só uma
+pessoa chama isto"*), e o disjuntor que não se desarma sozinho é a
+propósito. Continuam sem chamador em `src/` e `scripts/`, e isso é o
+desenho, não esquecimento. O que segue **em aberto**: não existe comando de
+operador (script ou CLI) que os invoque — desarmar hoje exige chamar o
+método à mão.
 
 ### 2.4 `true` vira preço 1,0 no RTDS — provado
 
@@ -226,13 +238,13 @@ provando que aceitamos o formato que **imaginamos**. É a frase do
 próprios testes do feed. Um recorte de 100 eventos reais de cada tipo,
 commitado como fixture, fecha isto.
 
-Código morto real (vulture ≥ 60 %, conferido a mão): além de 2.3,
-`execution/ordem.py:370 assinar_ordem` (o construtor assina por
-`assinar_typed_data` direto na linha 462 — duas formas de assinar, uma sem
-uso), `execution/executor.py:253 carregar_diario`,
-`analysis/rewards.py:299 capital_da_ordem`,
-`analysis/arbitragem.py:211 oportunidade_de_escada` (escrita, testada, não
-ligada — o quadro 1.13 já diz que a escada falta).
+Código morto real (vulture ≥ 60 %, conferido a mão): os quatro símbolos
+listados aqui — um atalho de assinatura sem uso, um leitor do diário do
+shadow, a conta de capital do maker e a conta da escada de limiares — foram
+**removidos em 2026-09-26**, depois de conferido que nenhum era chamado por
+`src/` nem `scripts/`. Os testes da assinatura da ordem continuam, agora
+pelo caminho que o construtor usa (`assinar_typed_data`); os que existiam só
+para os símbolos removidos saíram.
 
 ### 2.10 Docstrings da trava desatualizadas
 
