@@ -368,6 +368,24 @@ comprometidos e 0→40 aguardando), além de `detalhe_com_replay` e
 e rodar o diagnóstico sobre ESSA gravação. As gravações anteriores têm
 marcador legado, e o replay delas continua ambíguo por construção.
 
+**Auditoria dos testes do recorder/replay (2026-09-26).** Três defeitos que
+nenhum teste pegava. (1) O `main()` do recorder saía 0 quando interrompido,
+igual a uma rodada completa. Com a unidade `systemd-run --collect` já
+coletada, o código no journal é o que distingue. Agora os desfechos são:
+completa sai 0, preflight recusado sai 1, interrompida sai 130, e exceção
+propaga. (2) Qualquer `PULSEARB_RECORDER__*` apagava a seção `recorder:`
+INTEIRA do YAML. Hoje é latente (o YAML só tem valores iguais aos defaults).
+Agora sai só a chave coberta. (3) O diagnóstico lia o arquivo ainda em
+gravação e escondia gzip truncado. Agora exclui o mais novo por mtime se foi
+tocado há menos de 120 s, relata `leitura_da_gravacao` (truncados, linhas
+corrompidas, `integra`) e sai 2 se a gravação não está íntegra. Cada pendente
+ganha `ms_do_resync_ao_fim_da_gravacao`. Os cenários da VPS (v3 recusada com
+14,4 GB > 13,6 GB, v4 com env de 200 MB/h, 16 tokens) viraram testes de
+segundos: 25 em `tests/test_auditoria_recorder_replay.py`, dos quais 9
+falham com o código de `main`. 🟡 falta: tratar SIGTERM
+(`systemctl stop` ainda mata sem relatório final e deixa o último arquivo sem
+trailer).
+
 ---
 
 ## Bloco 1 — Veredito M2: existe edge líquido?

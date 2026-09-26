@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,6 +79,10 @@ class _ForenseDeResync:
 
     ultimo_resync_ns: dict[str, int] = field(default_factory=dict)
     book_apos_resync_ns: dict[str, int] = field(default_factory=dict)
+    #: maior `ts_wall_ns` lido — o FIM da gravação. Diz, por pendente, quanto
+    #: tempo a gravação ainda correu depois do resync: 50 ms é a gravação
+    #: acabando no meio da recuperação; horas é token que não se recuperou.
+    fim_ns: int = 0
 
     def resync(self, payload: Any, ts_registro_ns: int) -> None:
         if not isinstance(payload, dict):
@@ -116,6 +121,9 @@ class _ForenseDeResync:
                     "ts_ultimo_resync_ns": ultimo,
                     "houve_book_posterior": posterior is not None,
                     "ts_book_posterior_ns": posterior,
+                    "ms_do_resync_ao_fim_da_gravacao": (
+                        None if ultimo is None else round((self.fim_ns - ultimo) / 1e6, 1)
+                    ),
                     "motivo": motivo,
                 }
             )
@@ -182,6 +190,7 @@ def diagnosticar(registros: Iterable[Any], *, replay_resync: bool) -> dict[str, 
     monitor = MonitorDeIntegridade()
     forense = _ForenseDeResync()
     for rec in registros:
+        forense.fim_ns = max(forense.fim_ns, rec.ts_wall_ns)
         if _tratar_resync(monitor, rec, replay_resync, forense):
             continue
         if rec.fonte != "poly_ws":
@@ -215,11 +224,84 @@ def _observar_eventos(
         forense.evento(evento, rec.ts_wall_ns)
 
 
+#: Arquivo modificado há menos que isto é tratado como AINDA EM GRAVAÇÃO.
+QUIETO_PADRAO_S = 120.0
+
+#: Código de saída quando a gravação lida não está íntegra (arquivo truncado,
+#: linha corrompida) ou não há arquivo fechado para ler. O relatório sai
+#: mesmo assim — mas ninguém o confunde com um diagnóstico limpo.
+SAIDA_GRAVACAO_NAO_INTEGRA = 2
+
+
+def arquivos_da_gravacao(
+    caminho: Path, *, agora: float, quieto_s: float = QUIETO_PADRAO_S
+) -> tuple[list[Path], list[str]]:
+    """Os arquivos a ler, e os excluídos por ainda estarem EM GRAVAÇÃO.
+
+    O arquivo que o recorder está escrevendo não tem trailer gzip: lido, ele
+    parece truncado, e o token com resync no fim dele pareceria preso. Num
+    diretório, o arquivo modificado mais recentemente é excluído se foi tocado
+    há menos de `quieto_s`. Pelo mtime, e não pelo nome: `-1400-002` ordena
+    ANTES de `-1400` por nome, mas é mais novo. Um arquivo passado
+    explicitamente é lido — quem o escolheu sabe o que escolheu.
+    """
+    if caminho.is_file():
+        return [caminho], []
+    arquivos = sorted([*caminho.glob("*.jsonl.gz"), *caminho.glob("*.jsonl")])
+    if not arquivos:
+        return [], []
+    mais_novo = max(arquivos, key=lambda a: a.stat().st_mtime)
+    if agora - mais_novo.stat().st_mtime < quieto_s:
+        return [a for a in arquivos if a != mais_novo], [mais_novo.name]
+    return arquivos, []
+
+
+def _leitura_da_gravacao(
+    reader: Any, lidos: list[Path], excluidos: list[str]
+) -> dict[str, Any]:
+    """Integridade do que foi LIDO, separada do que o replay concluiu.
+
+    Um gzip truncado é defeito da GRAVAÇÃO, não do replay: sai aqui, com o
+    arquivo e o erro, e não como token preso no relatório do monitor."""
+    ilegiveis = list(reader.arquivos_ilegiveis)
+    return {
+        "arquivos_lidos": [a.name for a in lidos],
+        "arquivos_em_gravacao_excluidos": excluidos,
+        "arquivos_truncados_ou_ilegiveis": ilegiveis,
+        "linhas_corrompidas": reader.corrompidas,
+        "registros_fora_de_ordem": reader.fora_de_ordem,
+        "integra": bool(lidos) and not ilegiveis and reader.corrompidas == 0,
+    }
+
+
+def _aviso_de_integridade(leitura: dict[str, Any]) -> str:
+    if not leitura["arquivos_lidos"]:
+        return "NENHUM arquivo fechado para ler: não há diagnóstico. "
+    if leitura["integra"]:
+        return ""
+    return (
+        "GRAVAÇÃO NÃO ÍNTEGRA ({n} arquivo(s) truncado(s)/ilegível(is), {c} "
+        "linha(s) corrompida(s)): as métricas cobrem só o que foi lido, e um "
+        "token pendente perto do ponto de quebra pode ser artefato da "
+        "truncagem, não do replay. ".format(
+            n=len(leitura["arquivos_truncados_ou_ilegiveis"]),
+            c=leitura["linhas_corrompidas"],
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gravacao", help="arquivo .jsonl.gz ou diretório")
     parser.add_argument(
         "--json", default=None, help="grava o relatório comparativo neste caminho"
+    )
+    parser.add_argument(
+        "--quieto-s",
+        type=float,
+        default=QUIETO_PADRAO_S,
+        help="num diretório, o arquivo mais novo modificado há menos que isto "
+        "é tratado como em gravação e excluído",
     )
     args = parser.parse_args(argv)
 
@@ -228,13 +310,20 @@ def main(argv: list[str] | None = None) -> int:
     from pulsearb.replay.reader import RecordingReader
 
     caminho = Path(args.gravacao)
-    sem = diagnosticar(RecordingReader(caminho), replay_resync=False)
-    com = diagnosticar(RecordingReader(caminho), replay_resync=True)
+    lidos, excluidos = arquivos_da_gravacao(
+        caminho, agora=time.time(), quieto_s=args.quieto_s
+    )
+    leitor = RecordingReader(lidos)
+    sem = diagnosticar(leitor, replay_resync=False)
+    leitura_da_gravacao = _leitura_da_gravacao(leitor, lidos, excluidos)
+    com = diagnosticar(RecordingReader(lidos), replay_resync=True)
     comparativo = {
         "arquivo": str(caminho),
+        "leitura_da_gravacao": leitura_da_gravacao,
         "sem_replay_de_resync": sem["metricas"],
         "com_replay_de_resync": com["metricas"],
-        "leitura": _leitura(sem["metricas"], com["metricas"]),
+        "leitura": _aviso_de_integridade(leitura_da_gravacao)
+        + _leitura(sem["metricas"], com["metricas"]),
         "detalhe_sem_replay": _detalhe(sem),
         # O modo COM replay também é detalhado: sem isto, comprometidos que
         # SUBIRAM ao reproduzir os resyncs não tinham como ser examinados.
@@ -248,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         # `caminhos.py`.
         destino = caminho_de_escrita(args.json)
         destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
+    if not leitura_da_gravacao["integra"]:
+        return SAIDA_GRAVACAO_NAO_INTEGRA
     return 0
 
 

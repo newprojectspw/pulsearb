@@ -108,6 +108,10 @@ RESOLUTION_POLL_SECONDS = 120.0
 
 
 
+#: Código de saída de uma rodada interrompida (convenção 128 + SIGINT).
+SAIDA_INTERROMPIDO = 130
+
+
 class PreflightRecusado(RuntimeError):
     """O disco não comporta a projeção da rodada. Recusar é a falha fechada:
     começar 72 h para morrer sem espaço no meio invalida a gravação inteira."""
@@ -1124,8 +1128,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     log.info("preflight de armazenamento", **projecao)
 
-    with contextlib.suppress(KeyboardInterrupt):
+    # Três desfechos, três códigos de saída — é o que o journal guarda quando
+    # a unidade `systemd-run --collect` já sumiu do `systemctl`:
+    #   0   → rodou a duração inteira e emitiu `recorder encerrado`;
+    #   1   → preflight recusou (nada foi gravado);
+    #   130 → INTERROMPIDO: sem relatório final, último arquivo sem trailer.
+    # Uma exceção sobe com traceback (código 1 do interpretador). Antes, a
+    # interrupção saía 0 — indistinguível de uma rodada completa.
+    try:
         asyncio.run(run(settings, seconds))
+    except KeyboardInterrupt:
+        log.error(
+            "recorder INTERROMPIDO: sem relatório final; o último arquivo "
+            "pode estar sem trailer gzip"
+        )
+        return SAIDA_INTERROMPIDO
     return 0
 
 
