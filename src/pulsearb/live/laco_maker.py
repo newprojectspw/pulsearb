@@ -80,11 +80,12 @@ uma cotação deixa de pontuar. A diferença é que aqui dá para nem começar.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from pulsearb.analysis.rewards import ParametrosDeReward, denominador_pessimista
 from pulsearb.backtest.book import OrderBook
+from pulsearb.execution.cliente import ErroDeLeitura, EstadoDoCancelamento
 from pulsearb.live.caixa_maker import CaixaDoMaker, espelho_do_livro
 from pulsearb.live.cotacao import (
     AncoraDoMicroprice,
@@ -95,6 +96,7 @@ from pulsearb.live.cotacao import (
     estimar_retorno_repousando,
 )
 from pulsearb.live.execucao_maker import (
+    MOTIVOS_DO_EFEITO,
     Efeito,
     OrdemDaCotacao,
     Reconciliacao,
@@ -112,6 +114,7 @@ from pulsearb.live.repouso import (
     decidir,
 )
 from pulsearb.obs.logging import get_logger
+from pulsearb.risk import MOTIVOS as MOTIVOS_DO_PORTAO
 from pulsearb.risk import OrdemPretendida
 
 log = get_logger(__name__)
@@ -124,6 +127,134 @@ CADENCIA_DO_MAKER_S = 15.0
 #: candidata** de propósito — quem chama passa a grade —, então ela é explícita
 #: aqui, e quem lê o resultado sabe o que foi de fato considerado.
 GRADE_DE_TICKS = (1, 2, 3, 4, 5)
+
+
+class MOTIVOS_DO_LACO:
+    """Todo motivo que ESTE módulo conta em `LacoMaker.motivos` por conta
+    própria. Mesma regra do `MOTIVOS` do `risk/gates.py` e do
+    `MOTIVOS_DO_EFEITO`: desfecho sem nome não vira métrica nem alarme, e não
+    distingue "o bot está travado" de "o bot não achou trade".
+
+    Os VALORES são contrato: o relato de 60 s, o leitor da rodada
+    (`scripts/resumo_da_rodada_maker.py`) e o quadro citam estas strings.
+    Renomear uma é quebrar a série histórica — acrescente, não troque.
+
+    As outras chaves que `motivos` pode ter têm dono fora daqui:
+    `repouso.MOTIVOS` (a decisão da histerese) e as recusas do portão, que
+    entram com `PREFIXO_DO_PORTAO` — tanto as do `gates.MOTIVOS` quanto as
+    três de `DO_PORTAO`, que são do próprio laço ao perguntar ao portão.
+    """
+
+    #: A janela não tem `reward_daily_rate`: não se cota (sem numerador).
+    SEM_POOL_DE_REWARD = "sem_pool_de_reward"
+    #: Havia cotação e o pool sumiu da janela: ela SAI.
+    POOL_SUMIU = "pool_sumiu"
+    #: A janela saiu da lista de abertas: a cotação sai com ela.
+    JANELA_FECHOU = "janela_fechou"
+    #: O livro do Up não está à mão (`livro_de` devolveu `None`).
+    LIVRO_INDISPONIVEL = "livro_indisponivel"
+    #: A janela não tem mais tempo (`seconds_left <= 0`).
+    JANELA_SEM_TEMPO = "janela_sem_tempo"
+    #: Livro de um lado só: sem meio, não há onde cotar.
+    LIVRO_SEM_MEIO = "livro_sem_meio"
+    #: A âncora do microprice está ligada e o microprice não está à mão.
+    SEM_MICROPRICE = "sem_microprice"
+    #: Toda candidata que pontua excederia o teto de fração do pool.
+    FRACAO_DO_POOL_ACIMA_DO_TETO = "fracao_do_pool_acima_do_teto"
+    #: A perna Down iria para um livro sem bid (só com o recolher ligado).
+    PERNA_DOWN_SEM_BIDS = "perna_down_sem_bids"
+    #: Entre passadas: o melhor bid externo caiu abaixo da referência.
+    LIVRO_ANDOU_CONTRA = "livro_andou_contra"
+    #: A janela levou fill ATRAVESSADO há pouco: sai e não recota.
+    PAUSA_POR_FILL_TOXICO = "pausa_por_fill_toxico"
+    #: A janela está em `_em_reconciliacao`: o estado do livro é
+    #: DESCONHECIDO (um efeito `RECONCILIAR`) e nada se decide nela até a
+    #: leitura do servidor provar o que repousa. Conta uma vez por passada
+    #: em que ela CONTINUOU desconhecida.
+    ESTADO_DESCONHECIDO = "estado_desconhecido"
+
+    #: Recusas que o LAÇO produz ao perguntar ao portão — contadas com
+    #: `PREFIXO_DO_PORTAO`, como as do `gates.MOTIVOS`.
+    #: Sem portão configurado: falha fechada, não se cota.
+    SEM_PORTAO = "sem_portao"
+    #: Uma perna saiu de (0, 1): forma do mercado, não defeito nosso.
+    SEM_ESPACO_PARA_RECUAR = "sem_espaco_para_recuar"
+    #: O portão disse não sem nome (só um dublê faz isso; `gates.Decisao`
+    #: recusa construir recusa anônima).
+    RECUSADO_SEM_MOTIVO = "recusado_sem_motivo"
+
+    DO_PORTAO = frozenset({SEM_PORTAO, SEM_ESPACO_PARA_RECUAR, RECUSADO_SEM_MOTIVO})
+
+    TODOS = frozenset(
+        {
+            SEM_POOL_DE_REWARD,
+            POOL_SUMIU,
+            JANELA_FECHOU,
+            LIVRO_INDISPONIVEL,
+            JANELA_SEM_TEMPO,
+            LIVRO_SEM_MEIO,
+            SEM_MICROPRICE,
+            FRACAO_DO_POOL_ACIMA_DO_TETO,
+            PERNA_DOWN_SEM_BIDS,
+            LIVRO_ANDOU_CONTRA,
+            PAUSA_POR_FILL_TOXICO,
+            ESTADO_DESCONHECIDO,
+            SEM_PORTAO,
+            SEM_ESPACO_PARA_RECUAR,
+            RECUSADO_SEM_MOTIVO,
+        }
+    )
+
+
+#: Como uma recusa do portão entra em `LacoMaker.motivos`:
+#: `portao:<motivo>` — o `<motivo>` é do `gates.MOTIVOS` ou de
+#: `MOTIVOS_DO_LACO.DO_PORTAO`. O prefixo é contrato (o quadro cita
+#: `portao:disjuntor_armado`, `portao:spread_anomalo`...).
+PREFIXO_DO_PORTAO = "portao:"
+
+#: Os portões de SISTEMA — os que impedem operar de todo, independente da
+#: ordem (`PortaoDeRisco._portoes_do_sistema`, antes do portão de livro).
+#: Com o livro indisponível, só ELES tiram do livro a cotação que já repousa
+#: (ver `_reavaliar_sem_livro`). `LIVRO_DESCONHECIDO` fica de fora de
+#: propósito: livro que falta é falta de dado NOSSO, e sair por ela perderia a
+#: fila de graça (a decisão de desenho de `_dados_da_passada`).
+MOTIVOS_DE_SISTEMA_DO_PORTAO = frozenset(
+    {
+        MOTIVOS_DO_PORTAO.KILL_ACIONADO,
+        MOTIVOS_DO_PORTAO.DISJUNTOR_ARMADO,
+        MOTIVOS_DO_PORTAO.PAUSA_POR_SEQUENCIA,
+        MOTIVOS_DO_PORTAO.FEED_PARADO,
+        MOTIVOS_DO_PORTAO.RELOGIO_DERIVADO,
+        MOTIVOS_DO_PORTAO.RELOGIO_NAO_MONITORADO,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _EstadoDesconhecido:
+    """Uma janela cujo estado no livro NÃO se sabe — um efeito `RECONCILIAR`.
+
+    Guarda o que for preciso para perguntar ao servidor depois: a cotação que
+    ACHÁVAMOS repousar (com os ids que se conhecem — `order_id` e/ou
+    `id_do_cliente` de cada perna) e os tokens da janela, porque a janela pode
+    fechar antes de o estado ser provado e o cache `_tokens` a esquece.
+    """
+
+    aberta: CotacaoAberta | None
+    tokens: tuple[str, str] | None
+    motivo: str
+
+
+#: As chaves de `LacoMaker.reconciliacao_na_rodada`, na ordem do relato.
+_CHAVES_DA_RECONCILIACAO_NA_RODADA = (
+    "tentativas",
+    "resolvidas",
+    "falhas_de_leitura",
+    "orfas_achadas",
+    "orfas_canceladas",
+    "orfas_sem_id",
+    "cotacoes_conhecidas_canceladas",
+)
 
 
 def _cabe_no_livro(ordem: OrdemPretendida) -> bool:
@@ -269,6 +400,31 @@ class LacoMaker:
     #: acertar o último intervalo ANTES de recolher (o recolher não recebe a
     #: janela — só o livro).
     _params: dict[str, ParametrosDeReward] = field(default_factory=dict, repr=False)
+    #: As janelas em estado DESCONHECIDO — um efeito `RECONCILIAR` as pôs
+    #: aqui (`_guardar`). Ficam FORA de `abertas`: não são cotação repousando
+    #: que se saiba, e tudo que lê `abertas` (a caixa, o recolher, os prints,
+    #: a decisão) trataria o registro como normal — foi esse o defeito (F2
+    #: da auditoria de 2026-09-26): o relógio creditava reward e o `decidir`
+    #: podia MANTER uma cotação que talvez nem existisse. Enquanto a janela
+    #: estiver aqui, nada se decide, acerta ou coloca nela; cada passada
+    #: pergunta ao servidor (`_reconciliar_pendentes`), e só a leitura que
+    #: PROVA o estado a tira daqui.
+    _em_reconciliacao: dict[str, _EstadoDesconhecido] = field(
+        default_factory=dict, repr=False
+    )
+    #: A reconciliação DURANTE a rodada, para o relato de 60 s. Ver
+    #: `_resumo_da_reconciliacao_na_rodada` para o significado de cada chave.
+    reconciliacao_na_rodada: dict[str, int] = field(
+        default_factory=lambda: dict.fromkeys(_CHAVES_DA_RECONCILIACAO_NA_RODADA, 0)
+    )
+    #: Todo `Efeito` de ação no livro, por `ResultadoDaAcao` (N2 da
+    #: auditoria de 2026-09-26). À parte de `motivos`, que é o que a DECISÃO
+    #: disse: aqui é o que o LIVRO fez.
+    efeitos_por_resultado: dict[str, int] = field(default_factory=dict)
+    #: O motivo dos efeitos em que a execução NÃO fez o que a decisão pediu —
+    #: sempre um `MOTIVOS_DO_EFEITO` (`envio_incerto`, `cancelamento_incerto`,
+    #: `envio_recusado`...).
+    motivos_do_efeito: dict[str, int] = field(default_factory=dict)
 
     async def passo(
         self,
@@ -293,12 +449,18 @@ class LacoMaker:
         # ANTES de olhar prints novos — o livro é o deste instante.
         self.caixa.medir_markout(livro_de, agora_ns=agora_ns)
 
+        # 0) O que está em estado DESCONHECIDO pergunta ao servidor ANTES de
+        #    qualquer outra coisa — janela aberta ou já fechada (a fechada não
+        #    passa pelo `_passo_da_janela`, e a ordem dela pode repousar do
+        #    mesmo jeito). Quem continuar desconhecido é pulado abaixo.
+        efeitos.extend(await self._reconciliar_pendentes())
+
         # 1) Janela que fechou leva a cotação junto. ANTES de avaliar as
         #    abertas: se uma fechou e outra abriu no mesmo passo, sair da
         #    fechada primeiro evita cotar duas ao mesmo tempo por um passo.
         abertas_agora = {j.slug for j in janelas}
         for slug in [s for s in self.abertas if s not in abertas_agora]:
-            efeito = await self._sair(slug, motivo="janela_fechou")
+            efeito = await self._sair(slug, motivo=MOTIVOS_DO_LACO.JANELA_FECHOU)
             efeitos.append(efeito)
         # Tokens e parâmetros são de toda janela AVALIADA, cotada ou não —
         # a saída da cotação não os alcança quando nunca houve cotação, e
@@ -310,6 +472,11 @@ class LacoMaker:
 
         # 2) As abertas.
         for janela in janelas:
+            if janela.slug in self._em_reconciliacao:
+                # Estado DESCONHECIDO, e a leitura do passo 0 não o provou:
+                # nada de caixa, decisão ou cotação nova nesta janela. Já
+                # contado (`estado_desconhecido`) em `_reconciliar_pendentes`.
+                continue
             efeito = await self._passo_da_janela(
                 janela,
                 livro_de=livro_de,
@@ -333,12 +500,12 @@ class LacoMaker:
         self._tokens[janela.slug] = (janela.token_up, janela.token_down)
         params = self._parametros(janela)
         if params is None:
-            self._contar("sem_pool_de_reward")
+            self._contar(MOTIVOS_DO_LACO.SEM_POOL_DE_REWARD)
             # Se havia cotação e o pool sumiu, sai: ficar seria risco por zero.
             # O motivo da SAÍDA tem outro nome de propósito — `sem_pool` conta
             # janela que nunca teve pool, `pool_sumiu` conta cotação perdida.
             if janela.slug in self.abertas:
-                return await self._sair(janela.slug, motivo="pool_sumiu")
+                return await self._sair(janela.slug, motivo=MOTIVOS_DO_LACO.POOL_SUMIU)
             return None
         self._params[janela.slug] = params
 
@@ -362,8 +529,12 @@ class LacoMaker:
         if dados is None:
             # Cada motivo daqui é falta de dado NOSSO, e nenhum cancela: o
             # livro volta no passo seguinte, e sair perderia a fila de graça.
+            # O que ainda vale sem livro é o portão de SISTEMA sobre a
+            # exposição que JÁ existe — ver `_reavaliar_sem_livro`.
             self._contar(recusa)
-            return None
+            return await self._reavaliar_sem_livro(
+                janela, aberta, feeds_saudaveis=feeds_saudaveis
+            )
         livro, livro_down = dados.livro, dados.livro_down
         meio, horas, ancora = dados.meio, dados.horas, dados.ancora
 
@@ -419,7 +590,7 @@ class LacoMaker:
             if recusa is not None:
                 # Havia cotação e o risco mudou? Sai. Manter uma cotação que o
                 # portão não autorizaria HOJE é exposição que ninguém aprovou.
-                return await self._recusar(janela.slug, f"portao:{recusa}")
+                return await self._recusar(janela.slug, PREFIXO_DO_PORTAO + recusa)
 
         if decisao.acao is AcaoNaCotacao.MANTER:
             # Nada a fazer no livro. Não chama o I/O: uma passada que não muda
@@ -427,7 +598,9 @@ class LacoMaker:
             return None
 
         if self._perna_down_sem_bids(decisao, livro_down):
-            return await self._recusar(janela.slug, "perna_down_sem_bids")
+            return await self._recusar(
+                janela.slug, MOTIVOS_DO_LACO.PERNA_DOWN_SEM_BIDS
+            )
 
         efeito = await self._executar(
             decisao,
@@ -524,12 +697,12 @@ class LacoMaker:
         aberta = self.abertas.get(slug)
         tokens = self._tokens.get(slug)
         if aberta is None or tokens is None:
-            self._contar("pausa_por_fill_toxico")
+            self._contar(MOTIVOS_DO_LACO.PAUSA_POR_FILL_TOXICO)
             return None
         livros = [livro_de(token_id, agora_ns=agora_ns) for token_id in tokens]
         return await self._recolher(
             slug, aberta, tokens, livros,
-            livro_de=livro_de, agora_ns=agora_ns, motivo="pausa_por_fill_toxico",
+            livro_de=livro_de, agora_ns=agora_ns, motivo=MOTIVOS_DO_LACO.PAUSA_POR_FILL_TOXICO,
         )
 
     def _em_pausa_por_fill_toxico(self, slug: str, agora_ns: int) -> bool:
@@ -575,7 +748,7 @@ class LacoMaker:
         Dois lados, porque são DUAS pernas que se colocam. Ver o cabeçalho.
         """
         if dados.sem_microprice:
-            self._contar("sem_microprice")
+            self._contar(MOTIVOS_DO_LACO.SEM_MICROPRICE)
             return None
         candidatas = [
             Cotacao(distancia_ticks=t, tamanho=self.tamanho_da_cotacao)
@@ -662,7 +835,7 @@ class LacoMaker:
             # participação máxima. Nome próprio, para não virar
             # `sem_candidata_que_pontue`, que diz o oposto — 'não achei onde
             # cotar'.
-            self._contar("fracao_do_pool_acima_do_teto")
+            self._contar(MOTIVOS_DO_LACO.FRACAO_DO_POOL_ACIMA_DO_TETO)
             return None, None, not ha_aberta
         return None, None, False
 
@@ -685,14 +858,14 @@ class LacoMaker:
         livro = livro_de(janela.token_up, agora_ns=agora_ns)
         if livro is None:
             self._diagnosticar_up_ausente()
-            return None, "livro_indisponivel"
+            return None, MOTIVOS_DO_LACO.LIVRO_INDISPONIVEL
         horas = max(janela.seconds_left(agora_epoch), 0.0) / 3600.0
         if horas <= 0.0:
-            return None, "janela_sem_tempo"
+            return None, MOTIVOS_DO_LACO.JANELA_SEM_TEMPO
         meio = livro.mid
         if meio is None:
             # Livro de um lado só não tem meio, e sem meio não há onde cotar.
-            return None, "livro_sem_meio"
+            return None, MOTIVOS_DO_LACO.LIVRO_SEM_MEIO
         # O livro do Down é lido AQUI, antes da escolha: a âncora do
         # microprice precisa dele, e a perna Down é um bid no livro dela — não
         # o espelho do Up (a revisão do #126 mostrou que os dois não são
@@ -828,7 +1001,7 @@ class LacoMaker:
         if self.portao is None:
             # Falha fechada: sem portão não se cota. Um laço que cotasse
             # "porque ninguém passou trava" seria o oposto do que a trava serve.
-            return "sem_portao"
+            return MOTIVOS_DO_LACO.SEM_PORTAO
         # As duas pernas, cada uma como a ordem que vai para o fio. O portão
         # vê o livro do Up; o do Down é o espelho (bid = 1 − ask), com o mesmo
         # spread — que é a única coisa que o portão lê dele.
@@ -857,7 +1030,7 @@ class LacoMaker:
         # `shares <= 0` continua indo para ele, porque AQUELE seria defeito
         # nosso de verdade.
         if not all(_cabe_no_livro(ordem) for ordem in pernas):
-            return "sem_espaco_para_recuar"
+            return MOTIVOS_DO_LACO.SEM_ESPACO_PARA_RECUAR
         for ordem in pernas:
             decisao = self.portao.avaliar_risco(
                 ordem,
@@ -866,7 +1039,67 @@ class LacoMaker:
                 melhor_ask=livro.best_ask,
             )
             if not decisao.pode:
-                return decisao.motivo or "recusado_sem_motivo"
+                return decisao.motivo or MOTIVOS_DO_LACO.RECUSADO_SEM_MOTIVO
+        return None
+
+    async def _reavaliar_sem_livro(
+        self,
+        janela: JanelaAoVivo,
+        aberta: CotacaoAberta | None,
+        *,
+        feeds_saudaveis: bool,
+    ) -> Efeito | None:
+        """Sem livro, o portão de SISTEMA ainda vale para o que já repousa.
+
+        O 4.0 registra que o portão vale para a exposição que EXISTE, não só
+        para a que se vai criar. Mas a passada sem livro retornava antes de
+        consultá-lo: com a chave puxada ou o disjuntor armado enquanto o livro
+        estava indisponível (ou sem meio), a cotação ficava no livro — o
+        mesmo buraco que o fill tóxico já tinha fechado, cancelando sem livro
+        (F4 da auditoria de 2026-09-26).
+
+        Pergunta ao portão com a ordem de cada perna NO PREÇO GUARDADO (não
+        há meio para recalcular) e SEM topo de livro. Os portões de sistema
+        vêm antes do de livro (`gates._portoes_do_sistema`), então a resposta
+        é um deles ou `livro_desconhecido`. Só os de sistema
+        (`MOTIVOS_DE_SISTEMA_DO_PORTAO`) tiram a cotação — `livro_desconhecido`
+        continua NÃO cancelando, pela decisão de desenho de
+        `_dados_da_passada`. Sem portão configurado sai (`sem_portao`), pela
+        mesma falha fechada da passada normal. Perna sem preço guardado não
+        vira ordem: não se inventa preço para perguntar. Sem cotação aberta
+        não há exposição a reavaliar.
+        """
+        if aberta is None:
+            return None
+        if self.portao is None:
+            return await self._recusar(
+                janela.slug, PREFIXO_DO_PORTAO + MOTIVOS_DO_LACO.SEM_PORTAO
+            )
+        pernas = [
+            OrdemPretendida(
+                slug=janela.slug,
+                token_id=token_id,
+                lado_up=lado_up,
+                shares=aberta.cotacao.tamanho,
+                preco_limite=preco,
+            )
+            for token_id, lado_up, preco in (
+                (janela.token_up, True, aberta.preco_up),
+                (janela.token_down, False, aberta.preco_down),
+            )
+            if 0.0 < preco < 1.0
+        ]
+        for ordem in pernas:
+            decisao = self.portao.avaliar_risco(
+                ordem,
+                feeds_saudaveis=feeds_saudaveis,
+                melhor_bid=None,
+                melhor_ask=None,
+            )
+            if not decisao.pode and decisao.motivo in MOTIVOS_DE_SISTEMA_DO_PORTAO:
+                return await self._recusar(
+                    janela.slug, PREFIXO_DO_PORTAO + decisao.motivo
+                )
         return None
 
     async def _executar(
@@ -961,7 +1194,7 @@ class LacoMaker:
                     await self._recolher(
                         slug, aberta, tokens, livros,
                         livro_de=livro_de, agora_ns=agora_ns,
-                        motivo="livro_andou_contra",
+                        motivo=MOTIVOS_DO_LACO.LIVRO_ANDOU_CONTRA,
                     )
                 )
         return efeitos
@@ -1095,37 +1328,222 @@ class LacoMaker:
     def _guardar(self, slug: str, efeito: Efeito) -> None:
         """O novo estado do nosso lado, depois da ação.
 
-        `RECONCILIAR` MANTÉM o registro: o estado é desconhecido, e esquecer a
-        cotação transformaria "não sei" em "não tenho" — que é a suposição que
-        cria órfã. É a mesma regra do INCERTA do cliente.
+        `RECONCILIAR` NÃO esquece o registro — esquecer transformaria "não
+        sei" em "não tenho", que é a suposição que cria órfã (a mesma regra do
+        INCERTA do cliente). Mas também não o deixa em `abertas`, onde ele
+        seria tratado como cotação repousando normal: vai para
+        `_em_reconciliacao`, com os ids e os tokens, e a passada seguinte
+        pergunta ao servidor antes de qualquer outra coisa. Ver o campo.
         """
+        self._contar_efeito(efeito)
         anterior = self.abertas.get(slug)
-        if efeito.aberta is None:
+        desconhecido = efeito.resultado is ResultadoDaAcao.RECONCILIAR
+        fica = None if desconhecido else efeito.aberta
+        if fica is None:
             self.abertas.pop(slug, None)
+            # A caixa esquece também no desconhecido: o tempo em que não se
+            # sabe se a ordem está no livro não é repouso, e não rende reward.
             self.caixa.esquecer(slug)
         else:
-            self.abertas[slug] = efeito.aberta
+            self.abertas[slug] = fica
         # A referência do recolher é da cotação, não da janela: cotação que
         # saiu ou foi trocada (novo `desde_epoch`) leva a sua embora. Só o
         # caminho do recolher a apagava, e cada `janela_fechou`, `pool_sumiu`
         # ou recotação deixava uma chave morta para sempre (revisão do
         # Codex, #126).
         if anterior is not None and (
-            efeito.aberta is None or efeito.aberta.desde_epoch != anterior.desde_epoch
+            fica is None or fica.desde_epoch != anterior.desde_epoch
         ):
             self._referencia_do_recolher.pop(
                 (slug, int(anterior.desde_epoch * 1e6)), None
             )
-        if efeito.aberta is None:
-            self._tokens.pop(slug, None)
-            self._params.pop(slug, None)
-        if efeito.resultado is ResultadoDaAcao.RECONCILIAR:
+        if desconhecido:
+            self._em_reconciliacao[slug] = _EstadoDesconhecido(
+                aberta=efeito.aberta if efeito.aberta is not None else anterior,
+                tokens=self._tokens.get(slug),
+                motivo=efeito.motivo,
+            )
             log.warning(
                 "cotacao maker em estado desconhecido: reconciliar",
                 slug=slug,
                 motivo=efeito.motivo,
                 **efeito.detalhe,
             )
+        if fica is None:
+            self._tokens.pop(slug, None)
+            self._params.pop(slug, None)
+
+    def _contar_efeito(self, efeito: Efeito) -> None:
+        """N2: o desfecho de cada ação no livro, e o motivo quando a execução
+        não fez o que a decisão pediu. "Não fez" é `RECONCILIAR` ou um motivo
+        de `MOTIVOS_DO_EFEITO` — os efeitos de sucesso carregam o motivo da
+        DECISÃO, que já está em `motivos`, e contá-lo de novo aqui o dobraria."""
+        resultado = str(efeito.resultado)
+        self.efeitos_por_resultado[resultado] = (
+            self.efeitos_por_resultado.get(resultado, 0) + 1
+        )
+        if (
+            efeito.resultado is ResultadoDaAcao.RECONCILIAR
+            or efeito.motivo in MOTIVOS_DO_EFEITO.TODOS
+        ):
+            self.motivos_do_efeito[efeito.motivo] = (
+                self.motivos_do_efeito.get(efeito.motivo, 0) + 1
+            )
+
+    # ────────────────────────────────────────── reconciliação durante a rodada
+    async def _reconciliar_pendentes(self) -> list[Efeito]:
+        """Pergunta ao servidor por cada janela em estado desconhecido.
+
+        Uma leitura por janela e por passada. Quem continua desconhecido
+        depois dela é contado (`estado_desconhecido`) — uma vez por passada,
+        para o relato mostrar quanto tempo a janela ficou no escuro.
+        """
+        efeitos: list[Efeito] = []
+        for slug in list(self._em_reconciliacao):
+            efeito = await self._reconciliar_uma(slug)
+            if efeito is not None:
+                efeitos.append(efeito)
+            if slug in self._em_reconciliacao:
+                self._contar(MOTIVOS_DO_LACO.ESTADO_DESCONHECIDO)
+        return efeitos
+
+    async def _reconciliar_uma(self, slug: str) -> Efeito | None:
+        """Uma tentativa de PROVAR o estado de uma janela. Pela ordem:
+
+        - **leitura que falha** (`ErroDeLeitura`): continua desconhecida e
+          conta — não saber ler não autoriza afirmar livro limpo;
+        - **órfã** (o servidor lista, nos tokens desta janela, ordem que não
+          esperávamos — o envio INCERTA que afinal entrou): cancelada pelo
+          `cancelar_orfas` de sempre, e a janela CONTINUA desconhecida até
+          uma leitura seguinte não achar nada. Órfã sem id não se cancela
+          (§4.4) e prende a janela — é posição que só uma pessoa resolve;
+        - **pernas conhecidas que repousam** (casadas): canceladas pelo
+          mesmo `aplicar_decisao` do laço; só a PROVA de que saíram
+          (`CANCELADA`) resolve a janela;
+        - **nada repousa** (o que esperávamos sumiu, e não há órfã): provado
+          vazio — o registro é largado e a janela volta ao normal.
+        """
+        registro = self._em_reconciliacao[slug]
+        rodada = self.reconciliacao_na_rodada
+        rodada["tentativas"] += 1
+        try:
+            leituras = await self._ler_o_servidor(registro)
+        except ErroDeLeitura as erro:
+            rodada["falhas_de_leitura"] += 1
+            log.warning(
+                "reconciliacao na rodada: leitura falhou, janela segue desconhecida",
+                slug=slug,
+                erro=f"{type(erro).__name__}: {erro}",
+            )
+            return None
+        if any(rec.orfas for rec in leituras):
+            await self._cancelar_orfas_da_janela(slug, leituras)
+            return None
+        # Só os ids DESTA janela: na leitura da conta inteira (sem tokens) as
+        # casadas incluem as cotações das outras janelas.
+        nossos = set(registro.aberta.order_ids) if registro.aberta is not None else set()
+        casadas = {oid for rec in leituras for oid in rec.casadas} & nossos
+        if casadas:
+            return await self._cancelar_conhecidas(slug, registro, casadas)
+        self._resolver(slug)
+        return None
+
+    async def _ler_o_servidor(
+        self, registro: _EstadoDesconhecido
+    ) -> list[Reconciliacao]:
+        """As leituras que decidem uma janela, pela `reconciliar` de sempre.
+
+        Com os tokens conhecidos, uma leitura POR TOKEN, esperando só os ids
+        da perna daquele token — toda ordem ali que não esperávamos é órfã
+        desta janela. Sem os tokens (registro montado à mão), a leitura é da
+        conta inteira, e aí se esperam TODOS os ids que o laço conhece, para
+        a cotação de outra janela não passar por órfã e ser cancelada.
+        """
+        aberta = registro.aberta
+        if registro.tokens is None:
+            return [await reconciliar(self.cliente, self._ids_conhecidos())]
+        pernas = (
+            (registro.tokens[0], aberta.order_id if aberta is not None else ""),
+            (registro.tokens[1], aberta.order_id_down if aberta is not None else ""),
+        )
+        leituras = []
+        for token_id, order_id in pernas:
+            esperadas = {order_id: aberta} if order_id and aberta is not None else {}
+            leituras.append(
+                await reconciliar(self.cliente, esperadas, token_id=token_id)
+            )
+        return leituras
+
+    def _ids_conhecidos(self) -> dict[str, CotacaoAberta]:
+        """Todo `order_id` que o laço conhece — repousando ou desconhecido."""
+        conhecidas = list(self.abertas.values()) + [
+            r.aberta for r in self._em_reconciliacao.values() if r.aberta is not None
+        ]
+        return {oid: aberta for aberta in conhecidas for oid in aberta.order_ids}
+
+    async def _cancelar_orfas_da_janela(
+        self, slug: str, leituras: list[Reconciliacao]
+    ) -> None:
+        rodada = self.reconciliacao_na_rodada
+        for rec in leituras:
+            if not rec.orfas:
+                continue
+            rodada["orfas_achadas"] += len(rec.orfas)
+            rodada["orfas_sem_id"] += rec.orfas_sem_id
+            desfechos = await cancelar_orfas(self.cliente, rec)
+            rodada["orfas_canceladas"] += sum(
+                1 for estado in desfechos.values()
+                if estado == EstadoDoCancelamento.CANCELADA.value
+            )
+            log.warning(
+                "reconciliacao na rodada: orfa na janela, cancelada; segue desconhecida",
+                slug=slug,
+                orfas=len(rec.orfas),
+                orfas_sem_id=rec.orfas_sem_id,
+                cancelamentos=desfechos,
+            )
+
+    async def _cancelar_conhecidas(
+        self, slug: str, registro: _EstadoDesconhecido, casadas: set[str]
+    ) -> Efeito:
+        """As pernas que o servidor CONFIRMA repousar saem pelo caminho de
+        sempre (`aplicar_decisao` → CANCELAR). Só elas: a perna que não está
+        lá já foi provada fora, e mandá-la ao `_cancelar` sem `order_id`
+        voltaria `aberta_sem_order_id` para sempre."""
+        assert registro.aberta is not None
+        aberta = registro.aberta
+        so_as_casadas = replace(
+            aberta,
+            id_do_cliente=aberta.id_do_cliente if aberta.order_id in casadas else "",
+            order_id=aberta.order_id if aberta.order_id in casadas else "",
+            id_do_cliente_down=(
+                aberta.id_do_cliente_down if aberta.order_id_down in casadas else ""
+            ),
+            order_id_down=aberta.order_id_down if aberta.order_id_down in casadas else "",
+        )
+        efeito = await aplicar_decisao(
+            Decisao(AcaoNaCotacao.CANCELAR, MOTIVOS_DO_LACO.ESTADO_DESCONHECIDO),
+            so_as_casadas,
+            cliente=self.cliente,
+            ordem_da_cotacao=_nunca_chamado,
+            janela=slug,
+            agora_epoch=0.0,
+        )
+        self._contar_efeito(efeito)
+        if efeito.resultado is ResultadoDaAcao.CANCELADA:
+            self.reconciliacao_na_rodada["cotacoes_conhecidas_canceladas"] += 1
+            self._resolver(slug)
+        return efeito
+
+    def _resolver(self, slug: str) -> None:
+        """O estado foi PROVADO: nada nosso repousa nesta janela."""
+        registro = self._em_reconciliacao.pop(slug)
+        self.reconciliacao_na_rodada["resolvidas"] += 1
+        log.info(
+            "reconciliacao na rodada: estado provado, janela volta ao normal",
+            slug=slug,
+            motivo_original=registro.motivo,
+        )
 
     def _parametros(self, janela: JanelaAoVivo) -> ParametrosDeReward | None:
         """Os parâmetros do pool desta janela, ou `None` se ela não tem pool.
@@ -1331,6 +1749,10 @@ class LacoMaker:
         self.ultima_reconciliacao = {
             "casadas": len(rec.casadas),
             "orfas": len(rec.orfas),
+            # Órfã que o servidor listou SEM id: não há por onde cancelá-la
+            # (§4.4), então ela NÃO está em `cancelamentos` — sem este número
+            # ela sumiria do relato. Posição que só uma pessoa resolve.
+            "orfas_sem_id": rec.orfas_sem_id,
             "fantasmas": len(rec.fantasmas),
             "registros_largados": largadas,
             "cancelamentos": desfechos,
@@ -1362,7 +1784,9 @@ class LacoMaker:
         """
         return {
             "teto": self.fracao_maxima_do_pool,
-            "recusas_por_teto": self.motivos.get("fracao_do_pool_acima_do_teto", 0),
+            "recusas_por_teto": self.motivos.get(
+                MOTIVOS_DO_LACO.FRACAO_DO_POOL_ACIMA_DO_TETO, 0
+            ),
             "avaliacoes_aceitas_pelo_teto": self._stats_de_fracao(
                 self._fracao_admitida_soma,
                 self._fracao_admitida_n,
@@ -1398,7 +1822,7 @@ class LacoMaker:
             "ambos_disponiveis": c.get("ambos_disponiveis", 0),
             "livro_up_ausente": c.get("livro_up_ausente", 0),
             "livro_down_ausente": c.get("livro_down_ausente", 0),
-            "sem_livro_total": self.motivos.get("livro_indisponivel", 0),
+            "sem_livro_total": self.motivos.get(MOTIVOS_DO_LACO.LIVRO_INDISPONIVEL, 0),
             "sem_livro_por_conexao_de_pools": c.get("sem_livro_por_conexao_de_pools", 0),
             "sem_livro_por_token": c.get("sem_livro_por_token", 0),
             "sem_diagnostico": c.get("sem_diagnostico", 0),
@@ -1413,10 +1837,59 @@ class LacoMaker:
             ),
         }
 
+    def _resumo_da_reconciliacao_na_rodada(self) -> dict[str, Any]:
+        """A reconciliação DURANTE a rodada (F2/N3), no relato de 60 s.
+
+        Contadores acumulados desde o arranque:
+
+        - `tentativas`: leituras do servidor feitas para janelas em estado
+          desconhecido (uma por janela e por passada);
+        - `resolvidas`: janelas cujo estado a leitura PROVOU e que voltaram
+          ao normal;
+        - `falhas_de_leitura`: leituras que levantaram `ErroDeLeitura` — a
+          janela seguiu desconhecida;
+        - `orfas_achadas`: ordens que o servidor listou nos tokens de uma
+          janela desconhecida e que não esperávamos (o envio INCERTA que
+          afinal entrou);
+        - `orfas_canceladas`: dessas, as que o cancelamento CONFIRMOU
+          (`cancelada`);
+        - `orfas_sem_id`: órfãs listadas sem id — não se cancelam por id e
+          prendem a janela no desconhecido;
+        - `cotacoes_conhecidas_canceladas`: cotações cujas pernas o servidor
+          confirmou repousar e que saíram com prova, resolvendo a janela.
+        """
+        return {
+            **{
+                chave: self.reconciliacao_na_rodada.get(chave, 0)
+                for chave in _CHAVES_DA_RECONCILIACAO_NA_RODADA
+            },
+            "nota": (
+                "Janela com efeito RECONCILIAR fica em estado desconhecido: "
+                "fora de `cotacoes_repousando`, sem caixa, sem decisao e sem "
+                "cotacao nova, contada em `motivos['estado_desconhecido']` a "
+                "cada passada. Cada passada le o servidor; so a leitura que "
+                "PROVA o estado a devolve ao normal (`resolvidas`)."
+            ),
+        }
+
     def resumo(self) -> dict[str, Any]:
-        """O que sai no relato de 60 s do SHADOW."""
+        """O que sai no relato de 60 s do SHADOW.
+
+        Além do que sempre saiu, três blocos da auditoria de 2026-09-26:
+
+        - `cotacoes_em_estado_desconhecido`: quantas janelas estão em
+          `_em_reconciliacao` AGORA — separado de `cotacoes_repousando`, que
+          conta só o que se sabe repousar;
+        - `reconciliacao_na_rodada`: ver `_resumo_da_reconciliacao_na_rodada`;
+        - `efeitos` (por `ResultadoDaAcao`: `colocada`, `reposicionada`,
+          `cancelada`, `mantida`, `reconciliar`) e `motivos_do_efeito` (o
+          motivo, sempre de `MOTIVOS_DO_EFEITO`, dos efeitos em que a execução
+          não fez o que a decisão pediu). Acumulados; à parte de `motivos`,
+          que é o que a DECISÃO disse.
+        """
         return {
             "cotacoes_repousando": len(self.abertas),
+            "cotacoes_em_estado_desconhecido": len(self._em_reconciliacao),
             "por_janela": sorted(self.abertas),
             # As regras EXPERIMENTAIS ligadas nesta rodada, no relato de 60 s.
             # As duas juntas não se distinguem — uma muda QUANDO a ordem sai, a
@@ -1434,6 +1907,9 @@ class LacoMaker:
             "motivos": dict(sorted(self.motivos.items())),
             "caixa": self.caixa.resumo(),
             "reconciliacao_no_arranque": self.ultima_reconciliacao,
+            "reconciliacao_na_rodada": self._resumo_da_reconciliacao_na_rodada(),
+            "efeitos": dict(sorted(self.efeitos_por_resultado.items())),
+            "motivos_do_efeito": dict(sorted(self.motivos_do_efeito.items())),
             "nota": (
                 "`motivos` acumula desde o inicio e responde a pergunta que "
                 "importa quando o bot nao cota: ele nao achou onde cotar, ou "

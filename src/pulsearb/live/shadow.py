@@ -311,6 +311,10 @@ class ProcessoShadow:
         #: acumulado. Ver `_vigilia`.
         self._relato_mono = self.inicio_mono
         self._relato_parede = self.inicio_parede
+        #: Quanto cada `LacoMaker.passo` levou, em ns MONOTÔNICOS, desde o
+        #: relato anterior. Vira `duracao_do_ciclo_ms` no relato de 60 s e é
+        #: zerado por ele — ver `_duracao_do_ciclo`.
+        self._duracoes_do_ciclo_ns: list[int] = []
         # REDUNDÂNCIA, como no recorder: N conexões ao MESMO endpoint. Não é
         # paranoia — conexão individual do RTDS já produziu lacunas de 30 a
         # 306 s, e uma lacuna aqui que a gravação não tem faria o SHADOW perder
@@ -644,6 +648,9 @@ class ProcessoShadow:
             try:
                 agora = time.time()
                 agora_ns = time.time_ns()
+                # Cronômetro MONOTÔNICO: o de parede anda com o NTP e mediria
+                # o ajuste junto com a passada.
+                inicio_ns = time.monotonic_ns()
                 await self.laco_maker.passo(
                     list(self.ciclo.motor.rastreador.abertas(agora_epoch=agora)),
                     livro_de=self._livro_para_o_maker,
@@ -652,6 +659,7 @@ class ProcessoShadow:
                     feeds_saudaveis=self.ciclo.feeds_saudaveis(agora_ns=agora_ns),
                     negocios_desde=self.ciclo.motor.livros.negocios_desde,
                 )
+                self._duracoes_do_ciclo_ns.append(time.monotonic_ns() - inicio_ns)
             except OSError as erro:
                 # Mesma leitura que o laço de decisão faz: I/O do diário não é
                 # "evento estranho", é a saída da rodada sumindo.
@@ -763,6 +771,34 @@ class ProcessoShadow:
             self._relato_mono, self._relato_parede = mono, parede
         return vigilia
 
+    def _duracao_do_ciclo(self, *, avancar: bool = False) -> dict[str, Any]:
+        """Quanto a passada do maker (`LacoMaker.passo`) levou, na JANELA do
+        relato: as passadas desde o relato anterior (N4 da auditoria de
+        2026-09-26).
+
+        `p50` e `max` em milissegundos, `n` = passadas na janela. Sem passada
+        na janela os dois saem `None` — zero afirmaria passada instantânea, e
+        o que houve foi nenhuma. A cadência é de 15 s, então uma passada que
+        chega perto disso atrasa a seguinte, e uma que passa dela é o laço
+        ficando para trás do mercado — o sinal que este número existe para
+        dar. Mede só a passada que TERMINOU: a que levanta encerra a rodada
+        e sai em `falhou`.
+
+        `avancar=True` (só o laço de relato) zera a janela, pela mesma regra
+        da `_vigilia`: uma leitura extra não pode encurtar a do relato.
+        """
+        duracoes = sorted(self._duracoes_do_ciclo_ns)
+        if avancar:
+            self._duracoes_do_ciclo_ns = []
+        if not duracoes:
+            return {"p50": None, "max": None, "n": 0}
+        return {
+            # Mediana pelo posto inferior: um valor que de fato ocorreu.
+            "p50": round(duracoes[(len(duracoes) - 1) // 2] / 1e6, 3),
+            "max": round(duracoes[-1] / 1e6, 3),
+            "n": len(duracoes),
+        }
+
     def estado(self, *, avancar_vigilia: bool = False) -> dict[str, Any]:
         return {
             "passos": self.passos,
@@ -772,6 +808,7 @@ class ProcessoShadow:
             # quando há erro é um campo que ninguém procura quando não há.
             "falhou": self.falhou,
             "vigilia": self._vigilia(avancar=avancar_vigilia),
+            "duracao_do_ciclo_ms": self._duracao_do_ciclo(avancar=avancar_vigilia),
             "maker": (
                 self.laco_maker.resumo() if self.laco_maker is not None else None
             ),

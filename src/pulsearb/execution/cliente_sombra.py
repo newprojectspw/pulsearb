@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsearb.execution.cliente import (
+    MOTIVO_ID_NAO_REPOUSAVA,
     EstadoDoCancelamento,
     EstadoDoEnvio,
     OrdemAberta,
@@ -172,7 +173,9 @@ class ClienteSombraDeOrdens:
             return ResultadoDoCancelamento(
                 estado=EstadoDoCancelamento.NAO_CANCELADA,
                 order_id=order_id,
-                motivo="id_nao_repousava",
+                # A constante é a PROVA de ausência que o `fora_do_livro`
+                # reconhece — um literal aqui divergiria em silêncio dela.
+                motivo=MOTIVO_ID_NAO_REPOUSAVA,
                 detalhe={"sombra": True},
             )
 

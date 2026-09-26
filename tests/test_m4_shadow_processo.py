@@ -1873,6 +1873,7 @@ class TestReconciliacaoDoMakerNoArranque:
         assert processo.laco_maker.ultima_reconciliacao == {
             "casadas": 0,
             "orfas": 0,
+            "orfas_sem_id": 0,
             "fantasmas": 0,
             "registros_largados": [],
             "cancelamentos": {},
