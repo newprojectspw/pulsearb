@@ -598,10 +598,11 @@ class ProcessoShadow:
 
     async def _recolher_entre_passadas(self) -> None:
         """Aplica o recolhimento de livro, quando a regra estiver ligada."""
-        if not getattr(self.laco_maker, "recolhe_quando_o_livro_anda", False):
+        maker = self.laco_maker
+        if maker is None or not getattr(maker, "recolhe_quando_o_livro_anda", False):
             return
         try:
-            await self.laco_maker.recolher_se_o_livro_andou(
+            await maker.recolher_se_o_livro_andou(
                 self._livro_para_o_maker, agora_ns=time.time_ns()
             )
         except OSError as erro:
@@ -614,8 +615,11 @@ class ProcessoShadow:
 
     async def _ver_prints_entre_passadas(self) -> None:
         """Confere prints a cada segundo, independentemente do knob de pausa."""
+        maker = self.laco_maker
+        if maker is None:
+            return
         try:
-            await self.laco_maker.ver_prints_entre_passadas(
+            await maker.ver_prints_entre_passadas(
                 self._livro_para_o_maker, agora_ns=time.time_ns()
             )
         except OSError as erro:
