@@ -245,8 +245,9 @@ def _gzip_fechado(caminho: Path) -> bool:
         return False
     try:
         with gzip.open(caminho, "rb") as fluxo:
-            while fluxo.read(1 << 20):
-                pass
+            bloco = fluxo.read(1 << 20)
+            while bloco:
+                bloco = fluxo.read(1 << 20)
     except ERROS_DE_FLUXO:
         return False
     return True
