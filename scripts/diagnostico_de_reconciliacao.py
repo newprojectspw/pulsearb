@@ -33,7 +33,9 @@ Não altera nada da política de integridade. Só MEDE.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +45,7 @@ from pulsearb.analysis.integrity import MAGNITUDE_CRITICA, MonitorDeIntegridade
 from pulsearb.caminhos import caminho_de_escrita
 from pulsearb.feeds.poly_ws import eventos_do_payload
 from pulsearb.recorder.writer import FONTE_RESYNC
+from pulsearb.replay.reader import ERROS_DE_FLUXO
 
 
 def _motivo_comprometido(monitor: MonitorDeIntegridade, token: str) -> dict[str, Any]:
@@ -78,6 +81,10 @@ class _ForenseDeResync:
 
     ultimo_resync_ns: dict[str, int] = field(default_factory=dict)
     book_apos_resync_ns: dict[str, int] = field(default_factory=dict)
+    #: maior `ts_wall_ns` lido — o FIM da gravação. Diz, por pendente, quanto
+    #: tempo a gravação ainda correu depois do resync: 50 ms é a gravação
+    #: acabando no meio da recuperação; horas é token que não se recuperou.
+    fim_ns: int = 0
 
     def resync(self, payload: Any, ts_registro_ns: int) -> None:
         if not isinstance(payload, dict):
@@ -116,6 +123,9 @@ class _ForenseDeResync:
                     "ts_ultimo_resync_ns": ultimo,
                     "houve_book_posterior": posterior is not None,
                     "ts_book_posterior_ns": posterior,
+                    "ms_do_resync_ao_fim_da_gravacao": (
+                        None if ultimo is None else round((self.fim_ns - ultimo) / 1e6, 1)
+                    ),
                     "motivo": motivo,
                 }
             )
@@ -182,6 +192,7 @@ def diagnosticar(registros: Iterable[Any], *, replay_resync: bool) -> dict[str, 
     monitor = MonitorDeIntegridade()
     forense = _ForenseDeResync()
     for rec in registros:
+        forense.fim_ns = max(forense.fim_ns, rec.ts_wall_ns)
         if _tratar_resync(monitor, rec, replay_resync, forense):
             continue
         if rec.fonte != "poly_ws":
@@ -215,11 +226,145 @@ def _observar_eventos(
         forense.evento(evento, rec.ts_wall_ns)
 
 
+#: Arquivo modificado há menos que isto é tratado como AINDA EM GRAVAÇÃO.
+QUIETO_PADRAO_S = 120.0
+
+#: Código de saída quando a gravação lida não está íntegra (arquivo truncado,
+#: linha corrompida) ou não há arquivo fechado para ler. O relatório sai
+#: mesmo assim — mas ninguém o confunde com um diagnóstico limpo.
+SAIDA_GRAVACAO_NAO_INTEGRA = 2
+
+
+def _gzip_fechado(caminho: Path) -> bool:
+    """O arquivo termina num trailer gzip válido (o writer o FECHOU)?
+
+    Lê até o fim: é a única prova de que o fluxo terminou — o arquivo aberto
+    e o que morreu no meio falham igual aqui. `.jsonl` sem compressão não tem
+    trailer que prove nada: conta como não fechado (lado conservador)."""
+    if caminho.suffix != ".gz":
+        return False
+    try:
+        with gzip.open(caminho, "rb") as fluxo:
+            bloco = fluxo.read(1 << 20)
+            while bloco:
+                bloco = fluxo.read(1 << 20)
+    except ERROS_DE_FLUXO:
+        return False
+    return True
+
+
+#: Por que um arquivo sai da leitura — escrito no relatório, para ninguém
+#: confundir a exclusão com uma validação: é uma HEURÍSTICA (mtime) confirmada
+#: pela falta de trailer. Arquivo truncado e recente (cópia/restauração de um
+#: que morreu no meio) cai aqui também; `--incluir` o força para dentro.
+CRITERIO_DE_EXCLUSAO = (
+    "heurística: o arquivo mais novo por mtime, tocado há menos de "
+    "--quieto-s E sem trailer gzip válido, é presumido EM GRAVAÇÃO e não é "
+    "lido. Use --incluir NOME para lê-lo mesmo assim."
+)
+
+
+def arquivos_da_gravacao(
+    caminho: Path,
+    *,
+    agora: float,
+    quieto_s: float = QUIETO_PADRAO_S,
+    incluir: frozenset[str] = frozenset(),
+) -> tuple[list[Path], list[str]]:
+    """Os arquivos a ler, e os excluídos por ainda estarem EM GRAVAÇÃO.
+
+    O arquivo que o recorder está escrevendo não tem trailer gzip: lido, ele
+    parece truncado, e o token com resync no fim dele pareceria preso. Num
+    diretório, o arquivo modificado mais recentemente é excluído só se as DUAS
+    coisas valem: foi tocado há menos de `quieto_s` E não termina num trailer
+    gzip válido. Recência sozinha não prova nada — uma gravação que acabou de
+    encerrar tem o último arquivo recente e FECHADO, com o relatório final
+    dentro, e excluí-lo daria `integra: true` sem a última rotação (revisão do
+    #199). Pelo mtime, e não pelo nome: `-1400-002` ordena ANTES de `-1400`
+    por nome, mas é mais novo. Um arquivo passado explicitamente, ou nomeado
+    em `incluir`, é lido — quem o escolheu sabe o que escolheu.
+    """
+    if caminho.is_file():
+        return [caminho], []
+    arquivos = sorted([*caminho.glob("*.jsonl.gz"), *caminho.glob("*.jsonl")])
+    if not arquivos:
+        return [], []
+    mais_novo = max(arquivos, key=lambda a: a.stat().st_mtime)
+    if mais_novo.name in incluir:
+        return arquivos, []
+    recente = agora - mais_novo.stat().st_mtime < quieto_s
+    if recente and not _gzip_fechado(mais_novo):
+        return [a for a in arquivos if a != mais_novo], [mais_novo.name]
+    return arquivos, []
+
+
+def _leitura_da_gravacao(
+    reader: Any, lidos: list[Path], excluidos: list[str]
+) -> dict[str, Any]:
+    """Integridade do que foi LIDO, separada do que o replay concluiu.
+
+    Um gzip truncado é defeito da GRAVAÇÃO, não do replay: sai aqui, com o
+    arquivo e o erro, e não como token preso no relatório do monitor.
+
+    Registro FORA DE ORDEM também invalida: o leitor só reordena dentro do
+    buffer, e uma inversão maior sai na ordem errada. O monitor aplica deltas
+    na ordem em que os recebe, então o livro do replay deixa de ser o que o
+    recorder viu — o diagnóstico sobre ele não é confiável."""
+    ilegiveis = list(reader.arquivos_ilegiveis)
+    return {
+        "arquivos_lidos": [a.name for a in lidos],
+        "arquivos_em_gravacao_excluidos": excluidos,
+        "criterio_de_exclusao": CRITERIO_DE_EXCLUSAO if excluidos else None,
+        "arquivos_truncados_ou_ilegiveis": ilegiveis,
+        "linhas_corrompidas": reader.corrompidas,
+        "registros_fora_de_ordem": reader.fora_de_ordem,
+        "integra": (
+            bool(lidos)
+            and not ilegiveis
+            and reader.corrompidas == 0
+            and reader.fora_de_ordem == 0
+        ),
+    }
+
+
+def _aviso_de_integridade(leitura: dict[str, Any]) -> str:
+    if not leitura["arquivos_lidos"]:
+        return "NENHUM arquivo fechado para ler: não há diagnóstico. "
+    if leitura["integra"]:
+        return ""
+    return (
+        "GRAVAÇÃO NÃO ÍNTEGRA ({n} arquivo(s) truncado(s)/ilegível(is), {c} "
+        "linha(s) corrompida(s), {o} registro(s) fora de ordem): as métricas "
+        "cobrem só o que foi lido, na ordem em que foi lido; um token pendente "
+        "perto do ponto de quebra, ou uma divergência perto de uma inversão, "
+        "pode ser artefato da gravação, não do replay. ".format(
+            n=len(leitura["arquivos_truncados_ou_ilegiveis"]),
+            c=leitura["linhas_corrompidas"],
+            o=leitura["registros_fora_de_ordem"],
+        )
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gravacao", help="arquivo .jsonl.gz ou diretório")
     parser.add_argument(
         "--json", default=None, help="grava o relatório comparativo neste caminho"
+    )
+    parser.add_argument(
+        "--quieto-s",
+        type=float,
+        default=QUIETO_PADRAO_S,
+        help="num diretório, o arquivo mais novo modificado há menos que isto "
+        "E sem trailer gzip é tratado como em gravação e excluído",
+    )
+    parser.add_argument(
+        "--incluir",
+        action="append",
+        default=[],
+        metavar="NOME",
+        help="nome de arquivo a ler mesmo que a heurística o presuma em "
+        "gravação (repetível)",
     )
     args = parser.parse_args(argv)
 
@@ -228,13 +373,23 @@ def main(argv: list[str] | None = None) -> int:
     from pulsearb.replay.reader import RecordingReader
 
     caminho = Path(args.gravacao)
-    sem = diagnosticar(RecordingReader(caminho), replay_resync=False)
-    com = diagnosticar(RecordingReader(caminho), replay_resync=True)
+    lidos, excluidos = arquivos_da_gravacao(
+        caminho,
+        agora=time.time(),
+        quieto_s=args.quieto_s,
+        incluir=frozenset(args.incluir),
+    )
+    leitor = RecordingReader(lidos)
+    sem = diagnosticar(leitor, replay_resync=False)
+    leitura_da_gravacao = _leitura_da_gravacao(leitor, lidos, excluidos)
+    com = diagnosticar(RecordingReader(lidos), replay_resync=True)
     comparativo = {
         "arquivo": str(caminho),
+        "leitura_da_gravacao": leitura_da_gravacao,
         "sem_replay_de_resync": sem["metricas"],
         "com_replay_de_resync": com["metricas"],
-        "leitura": _leitura(sem["metricas"], com["metricas"]),
+        "leitura": _aviso_de_integridade(leitura_da_gravacao)
+        + _leitura(sem["metricas"], com["metricas"]),
         "detalhe_sem_replay": _detalhe(sem),
         # O modo COM replay também é detalhado: sem isto, comprometidos que
         # SUBIRAM ao reproduzir os resyncs não tinham como ser examinados.
@@ -248,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         # `caminhos.py`.
         destino = caminho_de_escrita(args.json)
         destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
+    if not leitura_da_gravacao["integra"]:
+        return SAIDA_GRAVACAO_NAO_INTEGRA
     return 0
 
 

@@ -34,8 +34,10 @@ import argparse
 import asyncio
 import contextlib
 import shutil
+import signal
 import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +108,27 @@ RESOLUTION_POLL_SECONDS = 120.0
 # grafia nova.
 
 
+
+
+#: Como a rodada terminou. Vai no relatório final (`desfecho`) e decide o
+#: código de saída — interrupção NUNCA sai 0.
+DESFECHO_COMPLETA = "completa"
+DESFECHO_SIGTERM = "interrompida_sigterm"
+DESFECHO_SIGINT = "interrompida_sigint"
+DESFECHO_EXCECAO = "excecao"
+DESFECHO_PREFLIGHT = "preflight_recusado"
+
+#: Código de saída de uma rodada interrompida (convenção 128 + SIGINT).
+SAIDA_INTERROMPIDO = 130
+#: 128 + SIGTERM: o mesmo número que o SO daria, agora COM relatório.
+SAIDA_SIGTERM = 143
+SAIDA_POR_DESFECHO: dict[str | None, int] = {
+    DESFECHO_COMPLETA: 0,
+    DESFECHO_PREFLIGHT: 1,
+    DESFECHO_SIGINT: SAIDA_INTERROMPIDO,
+    DESFECHO_SIGTERM: SAIDA_SIGTERM,
+}
+SINAIS_DE_PARADA = {signal.SIGTERM: DESFECHO_SIGTERM, signal.SIGINT: DESFECHO_SIGINT}
 
 
 class PreflightRecusado(RuntimeError):
@@ -326,6 +349,8 @@ class Recorder:
         self.resyncs = 0
         self.motivos_de_resync: Counter[str] = Counter()
         self.incidentes_de_fila = 0
+        #: `None` = nenhum sinal de parada; senão, qual (ver `SINAIS_DE_PARADA`).
+        self.desfecho_por_sinal: str | None = None
 
         # A.5: deduplicação entre as conexões redundantes do RTDS.
         self._vistos_rtds: dict[tuple[Any, ...], None] = {}
@@ -1020,10 +1045,84 @@ class Recorder:
         return relatorio
 
     async def run(self, duration_seconds: float) -> dict[str, Any]:
+        """Grava por `duration_seconds` ou até SIGTERM/SIGINT — e nos dois
+        casos encerra do MESMO jeito: feeds parados, monitor finalizado,
+        relatório final com `desfecho`, writer drenado e gzip fechado.
+
+        Antes, `systemctl stop` (SIGTERM) matava o processo com o handler
+        padrão do SO: código 143, sem relatório, último arquivo sem trailer.
+        Uma exceção também encerra assim, e SOBE depois do relatório gravado.
+        """
         await self.writer.start()
         inicio_mono = time.monotonic()
         deadline = inicio_mono + duration_seconds
+        parada = asyncio.Event()
+        restaurar_sinais = self._instalar_sinais(parada)
+        erro: Exception | None = None
+        try:
+            await self._coletar(deadline, parada)
+        except Exception as exc:
+            erro = exc
+        finally:
+            restaurar_sinais()
 
+        duracao = time.monotonic() - inicio_mono
+        relatorio = self._relatorio_final(duracao)
+        relatorio["desfecho"] = self._desfecho(erro)
+        if erro is not None:
+            relatorio["erro"] = f"{type(erro).__name__}: {erro}"
+        self._write_meta("recorder_relatorio", relatorio)
+        await self.writer.stop()
+        # Só DEPOIS de o writer drenar as filas e FECHAR os arquivos os bytes
+        # em disco (gzip) estão completos. Medir antes subestimava a taxa —
+        # filas e buffer gzip não drenados ficavam de fora — e calibraria o
+        # preflight para MENOS, podendo aprovar uma rodada que não cabe
+        # (revisão P2 do PR #195). Vai no relatório RETORNADO (o que a linha
+        # `recorder encerrado` loga), não no meta embutido: esse é escrito
+        # ANTES do `writer.stop()` — senão não entraria no arquivo — e o
+        # `armazenamento` dele é a medida de antes do flush.
+        relatorio["armazenamento"] = self._armazenamento_resumo(duracao)
+        if erro is not None:
+            raise erro
+        return relatorio
+
+    def _desfecho(self, erro: Exception | None) -> str:
+        if erro is not None:
+            return DESFECHO_EXCECAO
+        return self.desfecho_por_sinal or DESFECHO_COMPLETA
+
+    def _instalar_sinais(self, parada: asyncio.Event) -> Callable[[], None]:
+        """SIGTERM/SIGINT viram PEDIDO de parada, não morte do processo.
+
+        Onde o loop não aceita handler (Windows, thread não-principal) o sinal
+        segue o padrão do SO — e o desfecho não é fingido: sem relatório, o
+        código de saída do sistema é o que fica."""
+        loop = asyncio.get_running_loop()
+        anteriores: dict[signal.Signals, Any] = {}
+        for sinal, desfecho in SINAIS_DE_PARADA.items():
+            anterior = signal.getsignal(sinal)
+            try:
+                loop.add_signal_handler(sinal, self._pedir_parada, parada, desfecho)
+            # `NotImplementedError` (Windows) é subclasse de `RuntimeError`.
+            except (RuntimeError, ValueError):
+                continue
+            anteriores[sinal] = anterior
+
+        def restaurar() -> None:
+            for sinal, anterior in anteriores.items():
+                loop.remove_signal_handler(sinal)
+                signal.signal(sinal, anterior)
+
+        return restaurar
+
+    def _pedir_parada(self, parada: asyncio.Event, desfecho: str) -> None:
+        if self.desfecho_por_sinal is None:
+            self.desfecho_por_sinal = desfecho
+        log.warning("sinal de parada: encerrando com relatório final", desfecho=desfecho)
+        parada.set()
+
+    async def _coletar(self, deadline: float, parada: asyncio.Event) -> None:
+        """Os laços de gravação, até o prazo, uma falha ou o pedido de parada."""
         async with httpx.AsyncClient(
             headers={"User-Agent": self.settings.user_agent}, timeout=15.0
         ) as http:
@@ -1056,44 +1155,71 @@ class Recorder:
                 ),
                 asyncio.create_task(self._resync_loop(deadline)),
             ]
+            coleta = asyncio.gather(*tasks)
+            aviso = asyncio.create_task(parada.wait())
             try:
-                await asyncio.gather(*tasks)
-            except asyncio.CancelledError:
-                raise
+                await asyncio.wait({coleta, aviso}, return_when=asyncio.FIRST_COMPLETED)
+                if coleta.done():
+                    coleta.result()  # levanta a falha de um laço, se houve
             finally:
-                for task in tasks:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-                agora = time.time_ns()
-                for tracker in self.trackers:
-                    pendente = tracker.finalizar(agora)
-                    if pendente is not None:
-                        self._write_meta(FONTE_GAP, pendente.to_dict())
-                for feed in self.rtds_feeds:
-                    await feed.stop()
-                await self.binance.stop()
-                await self.poly.stop()
+                await self._encerrar_coleta(tasks, coleta, aviso)
 
-        duracao = time.monotonic() - inicio_mono
-        relatorio = self._relatorio_final(duracao)
-        self._write_meta("recorder_relatorio", relatorio)
-        await self.writer.stop()
-        # Só DEPOIS de o writer drenar as filas e FECHAR os arquivos os bytes
-        # em disco (gzip) estão completos. Medir antes subestimava a taxa —
-        # filas e buffer gzip não drenados ficavam de fora — e calibraria o
-        # preflight para MENOS, podendo aprovar uma rodada que não cabe
-        # (revisão P2 do PR #195). Vai no relatório RETORNADO (o que a linha
-        # `recorder encerrado` loga), não no meta embutido, que já foi escrito
-        # e não pode mais ser, com o writer fechado.
-        relatorio["armazenamento"] = self._armazenamento_resumo(duracao)
-        return relatorio
+    async def _encerrar_coleta(
+        self,
+        tasks: list[asyncio.Task[None]],
+        coleta: asyncio.Future[Any],
+        aviso: asyncio.Task[Any],
+    ) -> None:
+        await _cancelar_e_aguardar(aviso)
+        for task in tasks:
+            await _cancelar_e_aguardar(task)
+        if not coleta.done():
+            await _cancelar_e_aguardar(coleta)
+        agora = time.time_ns()
+        for tracker in self.trackers:
+            pendente = tracker.finalizar(agora)
+            if pendente is not None:
+                self._write_meta(FONTE_GAP, pendente.to_dict())
+        for feed in self.rtds_feeds:
+            await feed.stop()
+        await self.binance.stop()
+        await self.poly.stop()
+
+
+async def _cancelar_e_aguardar(tarefa: asyncio.Future[Any]) -> None:
+    """Cancela e espera uma tarefa SEM deixar a falha dela escapar daqui.
+
+    Um laço que já falhou relança a exceção ao ser aguardado com `await` — e,
+    no encerramento, isso pulava o `stop` dos feeds e o relatório final. A
+    falha já subiu por `coleta.result()`; aqui ela só é registrada.
+
+    `asyncio.wait` em vez de `await` + `except CancelledError`: ele espera a
+    tarefa terminar sem relançar o cancelamento NEM a exceção DELA, e deixa
+    passar o cancelamento de QUEM espera — engolir esse seria esconder um
+    cancelamento do próprio encerramento."""
+    tarefa.cancel()
+    await asyncio.wait([tarefa])
+    if tarefa.cancelled():
+        return
+    falha = tarefa.exception()
+    if falha is not None:
+        nome = tarefa.get_name() if isinstance(tarefa, asyncio.Task) else "coleta"
+        log.warning(
+            "laço do recorder terminou com falha",
+            laco=nome,
+            erro=f"{type(falha).__name__}: {falha}",
+        )
 
 
 async def run(settings: Settings, duration_seconds: float) -> dict[str, Any]:
     recorder = Recorder(settings)
     relatorio = await recorder.run(duration_seconds)
-    log.info("recorder encerrado", **relatorio)
+    if relatorio["desfecho"] == DESFECHO_COMPLETA:
+        log.info("recorder encerrado", **relatorio)
+    else:
+        # Nunca `recorder encerrado` para uma rodada que não chegou ao fim: é
+        # a linha que o operador procura no journal como "rodada completa".
+        log.error("recorder INTERROMPIDO", **relatorio)
     return relatorio
 
 
@@ -1120,14 +1246,33 @@ def main(argv: list[str] | None = None) -> int:
     try:
         projecao = preflight_de_armazenamento(settings, seconds)
     except PreflightRecusado as erro:
-        log.error("preflight de armazenamento RECUSOU a gravação", motivo=str(erro))
-        return 1
+        log.error(
+            "preflight de armazenamento RECUSOU a gravação",
+            desfecho=DESFECHO_PREFLIGHT,
+            motivo=str(erro),
+        )
+        return SAIDA_POR_DESFECHO[DESFECHO_PREFLIGHT]
     log.info("preflight de armazenamento", **projecao)
 
-    with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(run(settings, seconds))
-    return 0
-
+    # Um código de saída por desfecho — é o que o journal guarda quando a
+    # unidade `systemd-run --collect` já sumiu do `systemctl`:
+    #   0   → `completa`: rodou a duração inteira (`recorder encerrado`);
+    #   1   → `preflight_recusado`: nada foi gravado;
+    #   130 → `interrompida_sigint`; 143 → `interrompida_sigterm`: relatório
+    #         final gravado, gzip fechado, mas a rodada NÃO chegou ao fim;
+    #   exceção → sobe com traceback (1), depois de gravar o relatório.
+    # Desfecho desconhecido é tratado como falha (1), nunca como sucesso.
+    try:
+        relatorio = asyncio.run(run(settings, seconds))
+    except KeyboardInterrupt:
+        # Só antes de o handler do loop existir: não houve relatório.
+        log.error(
+            "recorder INTERROMPIDO antes do handler de sinal: sem relatório "
+            "final; o último arquivo pode estar sem trailer gzip",
+            desfecho=DESFECHO_SIGINT,
+        )
+        return SAIDA_INTERROMPIDO
+    return SAIDA_POR_DESFECHO.get(relatorio.get("desfecho"), 1)
 
 if __name__ == "__main__":
     raise SystemExit(main())

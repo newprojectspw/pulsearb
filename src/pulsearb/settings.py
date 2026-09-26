@@ -403,13 +403,32 @@ class Settings(BaseSettings):
         # O caso aninhado importa de verdade: o Dockerfile define
         # PULSEARB_RECORDER__OUTPUT_DIR=/data, e sem isto a imagem gravaria no
         # caminho do config.yaml — em silêncio, que é o pior jeito de errar.
+        #
+        # No caso aninhado sai SÓ a chave coberta, não a seção inteira: apagar
+        # `recorder` inteiro por causa de PULSEARB_RECORDER__BYTES_POR_HORA_...
+        # descartava em silêncio todo outro `recorder.*` do YAML (o
+        # pydantic-settings funde as fontes aninhadas campo a campo).
         import os
 
-        for key in list(yaml_data):
-            prefixo = f"PULSEARB_{key.upper()}"
-            if any(
-                nome == prefixo or nome.startswith(f"{prefixo}__")
-                for nome in os.environ
-            ):
-                del yaml_data[key]
+        for nome in os.environ:
+            if nome.startswith("PULSEARB_"):
+                _remover_chave_coberta(yaml_data, nome[len("PULSEARB_"):].lower())
         return cls(**{**yaml_data, **overrides})
+
+
+def _remover_chave_coberta(dados: dict[str, Any], caminho: str) -> None:
+    """Tira do YAML a chave que uma variável `PULSEARB_A__B__C` cobre.
+
+    Só a folha coberta sai (`a.b.c`); as irmãs dela ficam. Se no meio do
+    caminho o YAML tem um escalar (ex.: `recorder: null`), é ele que conflita
+    com o env aninhado, e sai ele.
+    """
+    partes = caminho.split("__")
+    no: dict[str, Any] = dados
+    for parte in partes[:-1]:
+        filho = no.get(parte)
+        if not isinstance(filho, dict):
+            no.pop(parte, None)
+            return
+        no = filho
+    no.pop(partes[-1], None)
