@@ -143,3 +143,35 @@ def test_json_com_caminho_absoluto_e_recusado(tmp_path):
         )
     with pytest.raises(ValueError):
         main([str(rec), "--json", "/tmp/evil.json"])
+
+
+def test_json_relativo_e_gravado_na_raiz_permitida(tmp_path, monkeypatch):
+    """O destino validado é o que chega ao write, nunca o argumento cru."""
+    import gzip
+
+    import orjson
+    from scripts.diagnostico_de_reconciliacao import main
+
+    rec = tmp_path / "pulsearb-seguro.jsonl.gz"
+    with gzip.open(rec, "wb") as f:
+        f.write(
+            orjson.dumps(
+                {
+                    "ts_mono_ns": 1,
+                    "ts_wall_ns": 1_000_000,
+                    "fonte": "poly_ws",
+                    "payload": {
+                        "event_type": "book",
+                        "asset_id": "tok",
+                        "timestamp": "1000",
+                        "bids": [{"price": "0.49", "size": "100"}],
+                        "asks": [{"price": "0.51", "size": "100"}],
+                    },
+                }
+            )
+            + b"\n"
+        )
+
+    monkeypatch.chdir(tmp_path)
+    assert main([str(rec), "--json", "relatorio.json"]) == 0
+    assert (tmp_path / "relatorio.json").is_file()

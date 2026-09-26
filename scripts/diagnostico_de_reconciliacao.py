@@ -246,13 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         # `caminho_de_escrita` contém o destino à raiz permitida (S2083): um
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
-        # O helper valida o nome contra uma allowlist e contém o destino na
-        # raiz permitida antes de devolver o Path. O Sonar não propaga essa
-        # sanitização entre módulos (S2083), por isso a supressão fica presa
-        # exatamente ao sink já protegido, não ao argumento inteiro.
-        caminho_de_escrita(args.json).write_text(  # NOSONAR S2083
-            saida, encoding="utf-8"
-        )
+        destino = caminho_de_escrita(args.json)
+        destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
     return 0
 
 
