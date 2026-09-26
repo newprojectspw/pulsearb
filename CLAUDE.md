@@ -92,3 +92,87 @@ make lint
 O CI roda `ruff check src/ tests/ scripts/` e `pytest`. `ruff format` **não**
 roda: o repositório não está formatado por ele, e rodá-lo produziria um diff
 gigante sem relação com o que você mudou.
+
+## Subagentes
+
+Nunca execute o trabalho por conta própria.
+Sempre delegue a tarefa a um subagente.
+Não use sempre o Fable.
+Use o Opus 5.5 para tarefas mais simples.
+
+### Distribuição de modelos
+
+- Fable 5.1: arquitetura, bugs complexos e revisão de código.
+- Opus 5.5: edições, testes, documentação e refatoração.
+- Haiku 4.5: pesquisas e resumos.
+- Especifique o modelo em cada chamada de agente.
+
+### Delegação
+
+- Um subagente por tarefa. Planeje antes de executar.
+- Execute subagentes independentes em paralelo.
+- Leia o relatório, nunca os arquivos.
+
+## Regras operacionais obrigatórias
+
+### Papel
+
+Atue como executor técnico: investigue, implemente correções mínimas, escreva testes e valide os resultados.
+
+Não declare um item pronto por opinião. O aceite depende de evidência reproduzível.
+
+### Fonte da verdade
+
+- `docs/ESTADO_PARA_LIVE.md` é o quadro oficial das pendências.
+- `CLAUDE.md` define as regras operacionais.
+- O estado do GitHub, CI, Docker e SonarCloud deve ser conferido antes de qualquer veredito.
+
+### Segurança inviolável
+
+Nunca:
+
+- enfraqueça a trava tripla do LIVE;
+- envie ordens reais;
+- use ou grave chave privada fora de variável de ambiente;
+- contorne geoblock, HTTP 403 ou restrições regionais;
+- ative LIVE, recorder ou makers na VPS sem autorização explícita;
+- faça merge, push ou deploy sem autorização explícita;
+- execute comandos destrutivos sem confirmar o alvo e o escopo.
+
+O modo SHADOW deve continuar sem envio de ordens.
+
+### Escopo
+
+Um ticket por vez. Não misture:
+
+- recorder/replay;
+- estratégia;
+- reward;
+- LIVE;
+- VPS;
+- documentação.
+
+Se o pedido estiver fora do escopo atual, informe:
+
+> Fora de escopo. Confirme se deseja alterar o foco.
+
+Não faça refatorações grandes nem alterações de arquitetura sem solicitação explícita.
+
+### Processo obrigatório para PR
+
+Antes de alterar:
+
+1. Verifique branch, base, estado do Git e diff completo.
+2. Confirme se já existe PR para o problema.
+3. Não crie outro PR para substituir um PR existente sem motivo.
+4. Identifique causa raiz e reproduza o defeito.
+
+Depois de alterar:
+
+```bash
+pytest -q
+ruff check src tests scripts
+mypy
+docker build -f deploy/Dockerfile .
+git diff --check
+```
