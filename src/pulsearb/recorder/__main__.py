@@ -1169,15 +1169,11 @@ class Recorder:
         coleta: asyncio.Future[Any],
         aviso: asyncio.Task[Any],
     ) -> None:
-        aviso.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await aviso
+        await _cancelar_e_aguardar(aviso)
         for task in tasks:
             await _cancelar_e_aguardar(task)
         if not coleta.done():
-            coleta.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await coleta
+            await _cancelar_e_aguardar(coleta)
         agora = time.time_ns()
         for tracker in self.trackers:
             pendente = tracker.finalizar(agora)
@@ -1189,22 +1185,28 @@ class Recorder:
         await self.poly.stop()
 
 
-async def _cancelar_e_aguardar(task: asyncio.Task[None]) -> None:
-    """Cancela e espera um laço SEM deixar a falha dele escapar daqui.
+async def _cancelar_e_aguardar(tarefa: asyncio.Future[Any]) -> None:
+    """Cancela e espera uma tarefa SEM deixar a falha dela escapar daqui.
 
-    Um laço que já falhou relança a exceção ao ser aguardado — e, no
-    encerramento, isso pulava o `stop` dos feeds e o relatório final. A falha
-    já subiu por `coleta.result()`; aqui ela só é registrada."""
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
+    Um laço que já falhou relança a exceção ao ser aguardado com `await` — e,
+    no encerramento, isso pulava o `stop` dos feeds e o relatório final. A
+    falha já subiu por `coleta.result()`; aqui ela só é registrada.
+
+    `asyncio.wait` em vez de `await` + `except CancelledError`: ele espera a
+    tarefa terminar sem relançar o cancelamento NEM a exceção DELA, e deixa
+    passar o cancelamento de QUEM espera — engolir esse seria esconder um
+    cancelamento do próprio encerramento."""
+    tarefa.cancel()
+    await asyncio.wait([tarefa])
+    if tarefa.cancelled():
         return
-    except Exception as exc:
+    falha = tarefa.exception()
+    if falha is not None:
+        nome = tarefa.get_name() if isinstance(tarefa, asyncio.Task) else "coleta"
         log.warning(
             "laço do recorder terminou com falha",
-            laco=task.get_name(),
-            erro=f"{type(exc).__name__}: {exc}",
+            laco=nome,
+            erro=f"{type(falha).__name__}: {falha}",
         )
 
 
