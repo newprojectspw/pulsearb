@@ -252,31 +252,5 @@ def escolher_executor(
     raise NotImplementedError(licenca.explicar())
 
 
-def carregar_diario(caminho: Path) -> list[dict[str, Any]]:
-    """Lê o diário do shadow. Linha quebrada é PULADA e contada, não fatal.
-
-    O diário é escrito por append durante uma sessão que pode ser morta a
-    qualquer momento — a última linha pode estar pela metade, e isso é
-    esperado. Recusar o arquivo inteiro por causa dela perderia a sessão.
-    """
-    linhas: list[dict[str, Any]] = []
-    quebradas = 0
-    with caminho.open(encoding="utf-8") as arquivo:
-        for linha in arquivo:
-            if not linha.strip():
-                continue
-            try:
-                linhas.append(json.loads(linha))
-            except json.JSONDecodeError:
-                quebradas += 1
-    if quebradas:
-        log.warning(
-            "linhas quebradas no diario do shadow",
-            caminho=str(caminho),
-            quebradas=quebradas,
-        )
-    return linhas
-
-
 def agora_ns() -> int:
     return int(datetime.now(UTC).timestamp() * 1e9)

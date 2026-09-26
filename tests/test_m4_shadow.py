@@ -16,7 +16,6 @@ from pulsearb.execution import (
     ExecutorSombra,
     escolher_executor,
 )
-from pulsearb.execution.executor import carregar_diario
 from pulsearb.risk import (
     MOTIVOS,
     OrdemPretendida,
@@ -166,6 +165,12 @@ class TestNaoEnvia:
         assert executor.modo is modo
 
 
+def _ler_diario(caminho):
+    """JSON por linha — o formato que o `ExecutorSombra` grava."""
+    texto = caminho.read_text(encoding="utf-8")
+    return [json.loads(linha) for linha in texto.splitlines() if linha.strip()]
+
+
 class TestDiario:
     def test_registra_aprovadas_E_recusadas(self, tmp_path):
         """Um shadow que só registra o que passou esconde o número que interessa.
@@ -177,7 +182,7 @@ class TestDiario:
         _executar(sombra, _ordem(shares=4.0))   # 2,00 — passa
         _executar(sombra, _ordem(shares=10.0))  # 5,00 — recusa
 
-        linhas = carregar_diario(tmp_path / "diario.jsonl")
+        linhas = _ler_diario(tmp_path / "diario.jsonl")
         assert len(linhas) == 2
         assert [linha["pode"] for linha in linhas] == [True, False]
         assert linhas[1]["motivo"] == MOTIVOS.STAKE_ACIMA_DO_TETO
@@ -197,26 +202,12 @@ class TestDiario:
             latencia_da_decisao_ms=42.5,
         )
 
-        linha = carregar_diario(tmp_path / "diario.jsonl")[0]
+        linha = _ler_diario(tmp_path / "diario.jsonl")[0]
         assert linha["melhor_bid"] == 0.49
         assert linha["melhor_ask"] == 0.51
         assert linha["profundidade_no_topo"] == 120.0
         assert linha["latencia_da_decisao_ms"] == 42.5
         assert linha["prob_prevista"] == 0.64
-
-    def test_linha_quebrada_no_fim_nao_perde_a_sessao(self, tmp_path):
-        """O diário é append durante uma sessão que pode ser morta a qualquer hora.
-
-        A última linha pela metade é esperada; recusar o arquivo inteiro por
-        causa dela perderia tudo que veio antes.
-        """
-        sombra = _sombra(tmp_path)
-        _executar(sombra, _ordem())
-        with (tmp_path / "diario.jsonl").open("a", encoding="utf-8") as arquivo:
-            arquivo.write('{"ts_ns": 178700000000')  # morreu no meio
-
-        linhas = carregar_diario(tmp_path / "diario.jsonl")
-        assert len(linhas) == 1
 
     def test_o_diario_e_json_por_linha(self, tmp_path):
         sombra = _sombra(tmp_path)

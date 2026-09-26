@@ -310,41 +310,6 @@ def score_da_ordem(
     return combinar_lados(por_lado[0], por_lado[1], meio=meio)
 
 
-def capital_da_ordem(
-    ordem: OrdemHipotetica, book: OrderBook, params: ParametrosDeReward
-) -> float | None:
-    """USDC que a cotação IMOBILIZA, lido do livro — não estimado.
-
-    O 1.12 publicou "~1.000 USDC por mercado para 1.000 shares nos dois
-    lados" como estimativa. Não precisa ser: cotar os dois lados de um
-    mercado binário é pôr DUAS ordens de compra, uma em cada token — comprar
-    YES a `p_b` e comprar NO a `1 − p_a` é o mesmo que comprar YES a `p_b` e
-    vender YES a `p_a`, sem cunhar nada. Cada compra imobiliza
-    `tamanho × preço`, então
-
-        dois lados:  tamanho × (p_b + (1 − p_a)) = tamanho × (1 − spread_nosso)
-        um lado:     tamanho × p_b
-
-    e é sempre ≤ `tamanho`, porque `p_a > p_b`. Se as DUAS executam, o par
-    custou `1 − spread` e vale 1 na resolução — o spread é ganho, não
-    risco. O risco é UMA executar só, e esse custo não está aqui: está no
-    markout, e no horizonte em que ele é medido (ver o quadro, 1.12).
-
-    `None` quando o livro não dá os preços — sem preço não há capital, e um
-    zero aqui diria "de graça".
-    """
-    meio = book.mid
-    if meio is None or book.best_bid is None or book.best_ask is None:
-        return None
-    p_b = book.best_bid - ordem.distancia_ticks * params.tick_size
-    p_a = book.best_ask + ordem.distancia_ticks * params.tick_size
-    if not (0.0 < p_b < 1.0 and 0.0 < p_a < 1.0):
-        return None
-    if not ordem.dois_lados:
-        return ordem.tamanho * p_b
-    return ordem.tamanho * (p_b + (1.0 - p_a))
-
-
 def fatia_do_pool(
     nosso_score: float, score_do_mercado: float
 ) -> float:

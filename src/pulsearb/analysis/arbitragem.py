@@ -31,7 +31,12 @@ lucro travado; a única pergunta é se ela existe e de que tamanho.
 **A escada (monotonicidade).** Para dois mercados do mesmo ativo e mesma
 data com limiares k₁ < k₂, vale `P(X ≥ k₁) ≥ P(X ≥ k₂)` — quem passa de k₂
 passou de k₁. Então YES(k₁) paga sempre ≥ YES(k₂), e comprar YES(k₁) mais
-barato do que se vende YES(k₂) trava a diferença.
+barato do que se vende YES(k₂) trava a diferença. **Só a cesta está
+implementada aqui.** A conta da escada existiu, testada mas nunca ligada a
+nenhum chamador, e saiu como código morto em 2026-09-26: ela precisa do
+agrupamento por ativo e data, e a forma do slug dessas escadas não está
+verificada (quadro 1.13). Quando esses dois existirem, a conta volta com
+quem a chame.
 
 ## O que este módulo NÃO decide
 
@@ -65,8 +70,6 @@ MOTIVOS = {
     "perna_sem_livro": "alguma perna não tem livro legível",
     "livro_raso": "o livro não comporta nem uma cesta inteira",
     "sem_folga": "a cesta custa 1,00 ou mais depois das taxas",
-    "escada_fora_de_ordem": "os limiares não estão em ordem crescente",
-    "mesma_perna": "os dois lados da escada são o mesmo token",
 }
 
 
@@ -206,81 +209,3 @@ def maior_cesta(
             melhor = op
         tamanho += passo
     return melhor, (None if melhor is not None else ultima_recusa)
-
-
-def oportunidade_de_escada(
-    livro_do_limiar_baixo: OrderBook,
-    livro_do_limiar_alto: OrderBook,
-    taxa_baixo: Taxa,
-    taxa_alto: Taxa,
-    *,
-    shares: float,
-    token_baixo: str,
-    token_alto: str,
-    limiar_baixo: float,
-    limiar_alto: float,
-) -> tuple[Oportunidade | None, str | None]:
-    """A escada: comprar YES(k₁) e VENDER YES(k₂), com k₁ < k₂.
-
-    `P(X ≥ k₁) ≥ P(X ≥ k₂)` porque quem passa de k₂ passou de k₁. Então
-    YES(k₁) paga sempre ≥ YES(k₂), e a diferença travada é o que se recebe
-    por k₂ menos o que se paga por k₁. **Nunca é negativa no vencimento** —
-    é essa a propriedade que faz disto arbitragem e não aposta em spread.
-
-    `limiar_baixo` e `limiar_alto` entram para SEREM CONFERIDOS: os livros
-    não carregam o limiar deles, e trocar os dois inverte a desigualdade sem
-    que a conta acuse nada.
-
-    Vender YES(k₂) aqui é atravessar os BIDS dele. O `simulate_taker_buy`
-    anda pelos asks, então o lado vendido é lido direto dos níveis — e um
-    livro sem bids não vende, o que é `livro_raso` e não lucro zero.
-    """
-    if token_baixo == token_alto:
-        return None, "mesma_perna"
-    if not limiar_baixo < limiar_alto:
-        # OS LIMIARES ENTRAM E SÃO CONFERIDOS AQUI, e não é zelo: a função
-        # recebe LIVROS, e livro não diz de que limiar ele é. Com os dois
-        # trocados a desigualdade se inverte — YES(k₂) passa a pagar ≤
-        # YES(k₁) — e a conta abaixo devolveria "lucro travado" sobre uma
-        # posição que perde exatamente quando o preço anda contra. Seria o
-        # mesmo modo de falha do `conjunto_nao_exaustivo`: arbitragem virando
-        # aposta sem nada acusar.
-        return None, "escada_fora_de_ordem"
-
-    compra = custo_de_comprar(livro_do_limiar_baixo, shares, taxa_baixo)
-    if compra is None:
-        return None, "livro_raso" if livro_do_limiar_baixo.asks else "perna_sem_livro"
-    custo, taxas_compra = compra
-
-    if not livro_do_limiar_alto.bids:
-        return None, "perna_sem_livro"
-    restante, receita, niveis_venda = shares, 0.0, 0
-    for preco, tamanho in livro_do_limiar_alto.bids:
-        if restante <= 0:
-            break
-        levado = min(restante, tamanho)
-        receita += levado * preco
-        restante -= levado
-        niveis_venda += 1
-    if restante > 1e-9:
-        return None, "livro_raso"
-
-    taxas_venda = shares * fee_pp_por_share(
-        receita / shares, rate=taxa_alto.rate, exponent=taxa_alto.exponent
-    )
-    lucro = receita - custo - taxas_compra - taxas_venda
-    if lucro <= 0:
-        return None, "sem_folga"
-    return (
-        Oportunidade(
-            shares=shares,
-            custo_usdc=custo,
-            taxas_usdc=taxas_compra + taxas_venda,
-            lucro_usdc=lucro,
-            niveis_atravessados=(
-                simulate_taker_buy(livro_do_limiar_baixo, shares).niveis_atravessados
-                + niveis_venda
-            ),
-        ),
-        None,
-    )
