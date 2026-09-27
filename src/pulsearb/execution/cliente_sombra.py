@@ -46,6 +46,7 @@ rodada de ensaio de uma rodada real.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -53,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from pulsearb.execution.cliente import (
+    MOTIVO_ID_NAO_REPOUSAVA,
     EstadoDoCancelamento,
     EstadoDoEnvio,
     OrdemAberta,
@@ -149,6 +151,10 @@ class ClienteSombraDeOrdens:
             preco_limite=ordem.preco_limite,
             ts=agora,
         )
+        # A interface é assíncrona para ser intercambiável com o cliente real.
+        # O diário permanece síncrono de propósito: assim duas ações não podem
+        # inverter a ordem das linhas enquanto uma escrita está em andamento.
+        await asyncio.sleep(0)
         return ResultadoDoEnvio(
             estado=EstadoDoEnvio.ACEITA,
             order_id=order_id,
@@ -169,10 +175,13 @@ class ClienteSombraDeOrdens:
             self._registrar(
                 "cancelamento_de_id_desconhecido", order_id=order_id, ts=time.time()
             )
+            await asyncio.sleep(0)
             return ResultadoDoCancelamento(
                 estado=EstadoDoCancelamento.NAO_CANCELADA,
                 order_id=order_id,
-                motivo="id_nao_repousava",
+                # A constante é a PROVA de ausência que o `fora_do_livro`
+                # reconhece — um literal aqui divergiria em silêncio dela.
+                motivo=MOTIVO_ID_NAO_REPOUSAVA,
                 detalhe={"sombra": True},
             )
 
@@ -185,6 +194,7 @@ class ClienteSombraDeOrdens:
             segundos_repousada=round(time.time() - repousada.desde_epoch, 3),
             ts=time.time(),
         )
+        await asyncio.sleep(0)
         return ResultadoDoCancelamento(
             estado=EstadoDoCancelamento.CANCELADA,
             order_id=order_id,

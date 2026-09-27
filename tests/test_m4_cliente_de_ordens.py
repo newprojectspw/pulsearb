@@ -633,8 +633,10 @@ class TestCancelar:
         assert r.estado is EstadoDoCancelamento.NAO_CANCELADA
 
     async def test_id_em_not_canceled_carrega_o_motivo_do_servidor(self):
-        """Ordem que já sumiu cai aqui — e para a rota maker isso é tão bom
-        quanto cancelada, mas o motivo do servidor tem de aparecer no detalhe."""
+        """Ordem que já sumiu cai aqui (§4.4) — mas a §4.4 não tem VERIFICADA a
+        string desse motivo, então isto NÃO prova que saiu do livro
+        (`fora_do_livro` é False; ver `tests/test_hardening_execucao.py`). O
+        motivo do servidor tem de aparecer no detalhe para a reconciliação."""
         cliente = _cliente(
             (200, {"canceled": [], "not_canceled": {"o1": "order already filled"}})
         )
