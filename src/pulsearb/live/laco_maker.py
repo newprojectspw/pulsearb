@@ -172,6 +172,11 @@ class MOTIVOS_DO_LACO:
     #: leitura do servidor provar o que repousa. Conta uma vez por passada
     #: em que ela CONTINUOU desconhecida.
     ESTADO_DESCONHECIDO = "estado_desconhecido"
+    #: A reconciliação achou o livro VAZIO sem ter cancelado nada com prova.
+    #: Ausência nas ordens abertas prova que nada REPOUSA, não que nada
+    #: EXECUTOU: um envio INCERTA aceito e preenchido também some da lista.
+    #: A janela não volta a cotar até fechar. Conta uma vez por passada.
+    SEM_PROVA_DE_EXECUCAO = "sem_prova_de_execucao"
 
     #: Recusas que o LAÇO produz ao perguntar ao portão — contadas com
     #: `PREFIXO_DO_PORTAO`, como as do `gates.MOTIVOS`.
@@ -199,6 +204,7 @@ class MOTIVOS_DO_LACO:
             LIVRO_ANDOU_CONTRA,
             PAUSA_POR_FILL_TOXICO,
             ESTADO_DESCONHECIDO,
+            SEM_PROVA_DE_EXECUCAO,
             SEM_PORTAO,
             SEM_ESPACO_PARA_RECUAR,
             RECUSADO_SEM_MOTIVO,
@@ -254,6 +260,7 @@ _CHAVES_DA_RECONCILIACAO_NA_RODADA = (
     "orfas_canceladas",
     "orfas_sem_id",
     "cotacoes_conhecidas_canceladas",
+    "bloqueadas_sem_prova_de_execucao",
 )
 
 
@@ -412,6 +419,14 @@ class LacoMaker:
     _em_reconciliacao: dict[str, _EstadoDesconhecido] = field(
         default_factory=dict, repr=False
     )
+    #: Janelas que a reconciliação achou VAZIAS sem prova de que nada
+    #: executou (slug → motivo original do desconhecido). Não voltam a
+    #: cotar até sumirem da lista de janelas: um envio INCERTA aceito e
+    #: preenchido não aparece nas ordens abertas, e recotar ali seria cotar
+    #: por cima de uma posição que ninguém viu (revisão do #203). Recotar
+    #: também esbarraria na reserva do `id_do_cliente` que o cliente real
+    #: guarda como INCERTA e recusa com `JA_ENVIADA`.
+    _sem_prova_de_execucao: dict[str, str] = field(default_factory=dict, repr=False)
     #: A reconciliação DURANTE a rodada, para o relato de 60 s. Ver
     #: `_resumo_da_reconciliacao_na_rodada` para o significado de cada chave.
     reconciliacao_na_rodada: dict[str, int] = field(
@@ -476,6 +491,10 @@ class LacoMaker:
                 # Estado DESCONHECIDO, e a leitura do passo 0 não o provou:
                 # nada de caixa, decisão ou cotação nova nesta janela. Já
                 # contado (`estado_desconhecido`) em `_reconciliar_pendentes`.
+                continue
+            if janela.slug in self._sem_prova_de_execucao:
+                # Livro vazio sem prova de que nada executou: não recota.
+                self._contar(MOTIVOS_DO_LACO.SEM_PROVA_DE_EXECUCAO)
                 continue
             efeito = await self._passo_da_janela(
                 janela,
@@ -1445,7 +1464,7 @@ class LacoMaker:
         casadas = {oid for rec in leituras for oid in rec.casadas} & nossos
         if casadas:
             return await self._cancelar_conhecidas(slug, registro, casadas)
-        self._resolver(slug)
+        self._bloquear_sem_prova_de_execucao(slug)
         return None
 
     async def _ler_o_servidor(
@@ -1534,6 +1553,21 @@ class LacoMaker:
             self.reconciliacao_na_rodada["cotacoes_conhecidas_canceladas"] += 1
             self._resolver(slug)
         return efeito
+
+    def _bloquear_sem_prova_de_execucao(self, slug: str) -> None:
+        """Nada repousa, mas nada PROVA que nada executou: a janela sai do
+        desconhecido e fica bloqueada até fechar. Só um cancelamento
+        confirmado (`CANCELADA`, em `_cancelar_conhecidas`) devolve a janela
+        ao normal — ele prova que a ordem estava no livro e saiu por nós."""
+        registro = self._em_reconciliacao.pop(slug)
+        self._sem_prova_de_execucao[slug] = registro.motivo
+        self.reconciliacao_na_rodada["bloqueadas_sem_prova_de_execucao"] += 1
+        log.error(
+            "reconciliacao na rodada: livro vazio sem prova de que nada executou; "
+            "janela bloqueada ate fechar",
+            slug=slug,
+            motivo_original=registro.motivo,
+        )
 
     def _resolver(self, slug: str) -> None:
         """O estado foi PROVADO: nada nosso repousa nesta janela."""
@@ -1845,7 +1879,7 @@ class LacoMaker:
         - `tentativas`: leituras do servidor feitas para janelas em estado
           desconhecido (uma por janela e por passada);
         - `resolvidas`: janelas cujo estado a leitura PROVOU e que voltaram
-          ao normal;
+          ao normal — só por cancelamento CONFIRMADO das pernas conhecidas;
         - `falhas_de_leitura`: leituras que levantaram `ErroDeLeitura` — a
           janela seguiu desconhecida;
         - `orfas_achadas`: ordens que o servidor listou nos tokens de uma
@@ -1856,7 +1890,12 @@ class LacoMaker:
         - `orfas_sem_id`: órfãs listadas sem id — não se cancelam por id e
           prendem a janela no desconhecido;
         - `cotacoes_conhecidas_canceladas`: cotações cujas pernas o servidor
-          confirmou repousar e que saíram com prova, resolvendo a janela.
+          confirmou repousar e que saíram com prova, resolvendo a janela;
+        - `bloqueadas_sem_prova_de_execucao`: janelas em que a leitura achou o
+          livro VAZIO sem cancelamento com prova — nada repousa, mas nada
+          prova que nada executou (envio INCERTA aceito e preenchido também
+          some das ordens abertas). Não voltam a cotar até fechar; contadas em
+          `motivos['sem_prova_de_execucao']` a cada passada.
         """
         return {
             **{
@@ -1867,8 +1906,10 @@ class LacoMaker:
                 "Janela com efeito RECONCILIAR fica em estado desconhecido: "
                 "fora de `cotacoes_repousando`, sem caixa, sem decisao e sem "
                 "cotacao nova, contada em `motivos['estado_desconhecido']` a "
-                "cada passada. Cada passada le o servidor; so a leitura que "
-                "PROVA o estado a devolve ao normal (`resolvidas`)."
+                "cada passada. Cada passada le o servidor; so o cancelamento "
+                "CONFIRMADO a devolve ao normal (`resolvidas`). Livro vazio sem "
+                "essa prova bloqueia a janela ate fechar "
+                "(`bloqueadas_sem_prova_de_execucao`)."
             ),
         }
 
@@ -1890,6 +1931,7 @@ class LacoMaker:
         return {
             "cotacoes_repousando": len(self.abertas),
             "cotacoes_em_estado_desconhecido": len(self._em_reconciliacao),
+            "janelas_sem_prova_de_execucao": len(self._sem_prova_de_execucao),
             "por_janela": sorted(self.abertas),
             # As regras EXPERIMENTAIS ligadas nesta rodada, no relato de 60 s.
             # As duas juntas não se distinguem — uma muda QUANDO a ordem sai, a

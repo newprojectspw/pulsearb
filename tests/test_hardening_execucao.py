@@ -427,6 +427,32 @@ class TestF10ExcecaoDepoisDoUpAceitoNaoPerdeOUp:
         assert efeito.aberta.order_id == "o-up"
         assert _metodos(cliente) == ["POST"]
 
+    async def test_OSError_na_segunda_perna_SOBE_com_o_Up_no_log(self, caplog):
+        """Revisão do #203: no SHADOW um `OSError` vem do diário (disco cheio),
+        e perder a saída do experimento é FATAL — o `laco_de_cotacao` a trata.
+        Virar RECONCILIAR deixaria a rodada seguir sem o evento no diário."""
+        caplog.set_level(logging.ERROR, logger=LOGGER_DA_EXECUCAO)
+
+        def _diario_cheio(cot):
+            raise OSError(28, "No space left on device")
+
+        cliente = _cliente(_aceita("o-up"))
+
+        with pytest.raises(OSError):
+            await _aplicar(
+                _reposicionar(dois_lados=True), None, cliente,
+                com_down=True, ordem_down=_diario_cheio,
+            )
+
+        erros = _mensagens(caplog, logging.ERROR)
+        assert any("OSError" in m for m in erros)
+        # O Up aceito não some em silêncio: o id dele vai no log do erro fatal.
+        assert any(
+            getattr(r, "extra_fields", {}).get("order_id") == "o-up"
+            for r in caplog.records
+            if r.levelno >= logging.ERROR
+        )
+
 
 # ─────────────────────────────────────────────────────────────────── N1
 async def _todo_motivo_produzido() -> set[str]:

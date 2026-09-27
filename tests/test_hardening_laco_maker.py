@@ -230,18 +230,34 @@ class TestEstadoDesconhecidoNaRodada:
         assert laco.resumo()["cotacoes_em_estado_desconhecido"] == 1
         assert len(cliente.enviados) == 1, "não se cota por cima do desconhecido"
 
-    async def test_leitura_que_PROVA_que_a_ordem_nao_existe_devolve_ao_normal(self):
+    async def test_livro_vazio_depois_de_envio_INCERTA_bloqueia_a_janela_e_NAO_recota(
+        self,
+    ):
+        """Revisão do #203 (P1/P2): ausência nas ordens abertas prova que nada
+        REPOUSA, não que nada EXECUTOU — um INCERTA aceito e preenchido também
+        some da lista. A janela sai do desconhecido mas NÃO volta a cotar
+        (e não esbarra na reserva do `id_do_cliente` que o cliente real
+        guarda como INCERTA)."""
         laco, cliente = await _envio_incerto(entrou=False)
 
         await _passo(laco, 1100.0)
 
         assert cliente.leituras == ["tok-up", "tok-down"]
         assert laco.resumo()["cotacoes_em_estado_desconhecido"] == 0
-        assert laco.resumo()["reconciliacao_na_rodada"]["resolvidas"] == 1
-        assert "estado_desconhecido" not in laco.motivos
-        # Provado vazio, a janela é tratada como qualquer outra: cota de novo.
-        assert SLUG in laco.abertas
-        assert len(cliente.enviados) == 3  # o INCERTA + as duas pernas novas
+        rodada = laco.resumo()["reconciliacao_na_rodada"]
+        assert rodada["resolvidas"] == 0
+        assert rodada["bloqueadas_sem_prova_de_execucao"] == 1
+        assert laco.resumo()["janelas_sem_prova_de_execucao"] == 1
+        assert laco.motivos.get("sem_prova_de_execucao") == 1
+        assert SLUG not in laco.abertas
+        assert len(cliente.enviados) == 1, "recotou sem prova de que nada executou"
+
+        # Passadas seguintes: continua bloqueada, sem ler de novo nem cotar.
+        leituras_antes = len(cliente.leituras)
+        await _passo(laco, 1200.0)
+        assert len(cliente.enviados) == 1
+        assert len(cliente.leituras) == leituras_antes
+        assert laco.motivos.get("sem_prova_de_execucao") == 2
 
     async def test_T2_passada_seguinte_a_envio_incerto_NAO_reenvia_e_cancela_a_orfa(self):
         """O INCERTA que afinal ENTROU: a leitura acha a ordem como órfã, ela
@@ -258,10 +274,15 @@ class TestEstadoDesconhecidoNaRodada:
         assert rodada["orfas_canceladas"] == 1
         assert laco.resumo()["cotacoes_em_estado_desconhecido"] == 1
 
-        # A leitura seguinte não acha nada: provado, volta ao normal.
+        # A leitura seguinte não acha nada: a órfã saiu, mas nada prova que
+        # ela não executou antes do cancelamento — a janela fica bloqueada,
+        # sem recotar (revisão do #203).
         await _passo(laco, 1200.0)
         assert laco.resumo()["cotacoes_em_estado_desconhecido"] == 0
-        assert laco.resumo()["reconciliacao_na_rodada"]["resolvidas"] == 1
+        rodada = laco.resumo()["reconciliacao_na_rodada"]
+        assert rodada["resolvidas"] == 0
+        assert rodada["bloqueadas_sem_prova_de_execucao"] == 1
+        assert len(cliente.enviados) == 1
 
     async def test_orfa_sem_id_prende_a_janela_no_desconhecido(self):
         laco, cliente = await _envio_incerto()
@@ -532,6 +553,7 @@ class TestMotivosDoLaco:
             "perna_down_sem_bids", "sem_espaco_para_recuar", "sem_portao",
             "recusado_sem_motivo", "janela_fechou", "livro_andou_contra",
             "pausa_por_fill_toxico", "janela_sem_tempo", "estado_desconhecido",
+            "sem_prova_de_execucao",
         } == constantes
 
     def test_nenhum_motivo_do_laco_aparece_como_literal_fora_da_enumeracao(self):
@@ -685,10 +707,11 @@ class TestTelemetriaDoEfeito:
         resumo = laco.resumo()
 
         assert resumo["cotacoes_em_estado_desconhecido"] == 0
+        assert resumo["janelas_sem_prova_de_execucao"] == 0
         assert set(resumo["reconciliacao_na_rodada"]) == {
             "tentativas", "resolvidas", "falhas_de_leitura", "orfas_achadas",
             "orfas_canceladas", "orfas_sem_id", "cotacoes_conhecidas_canceladas",
-            "nota",
+            "bloqueadas_sem_prova_de_execucao", "nota",
         }
 
     async def test_arranque_expoe_orfas_sem_id(self):

@@ -338,6 +338,13 @@ async def _colocar(
             # única referência ao Up: posição repousando que ninguém gerencia.
             # Por isso a exceção vira RECONCILIAR com o Up na mão, e o erro
             # vai para o log (não é engolida: o estado sai como desconhecido).
+            #
+            # EXCETO `OSError`: no SHADOW ela vem do diário (disco cheio), e
+            # perder a saída do experimento é FATAL — o `laco_de_cotacao` tem
+            # um `except OSError` que marca a rodada como falha. Convertê-la em
+            # RECONCILIAR deixaria a rodada seguir sem o evento no diário
+            # (revisão do #203). Ela SOBE, com o Up aceito no log; quem cuida
+            # da perna aceita é a reconciliação do próximo arranque.
             try:
                 return await _colocar_lado_down(
                     nova,
@@ -349,6 +356,14 @@ async def _colocar(
                     tinha_anterior=tinha_anterior,
                     ganho=ganho,
                 )
+            except OSError as erro:
+                log.error(
+                    "OSError depois do Up aceito: falha fatal, Up repousa sem gestao",
+                    order_id=aberta_nova.order_id,
+                    id_do_cliente=aberta_nova.id_do_cliente,
+                    erro=f"{type(erro).__name__}: {erro}",
+                )
+                raise
             except Exception as erro:
                 log.error(
                     "excecao depois do Up aceito: Up repousa, Down desconhecido, reconciliar",
