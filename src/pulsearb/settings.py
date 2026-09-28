@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -111,6 +111,22 @@ class RecorderSettings(BaseModel):
     # Intervalo do laço que refaz a assinatura dos tokens marcados como
     # corrompidos, para forçar um snapshot novo do livro.
     resync_intervalo_s: float = 5.0
+    # Prazo para o `book` de recuperação chegar DEPOIS do subscribe de um
+    # resync. O protocolo não tem "peça o snapshot de novo": se o servidor
+    # aceita o subscribe e não manda o `book`, o token fica cego. Vencido o
+    # prazo sem snapshot e sem resolução, o recorder reenfileira o token com
+    # o motivo `resync_sem_snapshot` (rodada v5: 2 tokens ativos ficaram sem
+    # book para sempre depois do último resync). 30 s é folgado para um
+    # snapshot que normalmente chega em menos de 1 s, e curto perto da vida
+    # de uma janela de 5 min. O reenvio só sai no próximo passo do laço de
+    # resync (`resync_intervalo_s`), nunca antes.
+    timeout_snapshot_pos_resync_s: float = Field(default=30.0, gt=0)
+    # TETO do backoff: a cada reenvio CONSECUTIVO sem snapshot o prazo dobra
+    # (30 → 60 → 120 → 240 → 300 s com os defaults) e para aqui. É o que
+    # impede um token que o servidor nunca atende de virar um laço de
+    # desassina/reassina a cada `resync_intervalo_s`. Tem de ser ≥ o prazo
+    # inicial (validado).
+    timeout_snapshot_pos_resync_max_s: float = Field(default=300.0, gt=0)
     # ESCOPO do recorder. `None` = grava toda janela descoberta (o padrão
     # histórico). Um inteiro LIMITA quantos tokens do CLOB ficam assinados por
     # vez — a alavanca contra a pressão de banda/CPU quando a descoberta traz
@@ -146,6 +162,18 @@ class RecorderSettings(BaseModel):
                 "exige os dois tokens (Up + Down)"
             )
         return value
+
+    @model_validator(mode="after")
+    def _teto_do_backoff_nao_abaixo_do_prazo(self) -> RecorderSettings:
+        """Teto menor que o prazo inicial encolheria o prazo no reenvio — o
+        backoff andaria para TRÁS. Recusar no carregamento torna o erro de
+        configuração visível em vez de um backoff que não é backoff."""
+        if self.timeout_snapshot_pos_resync_max_s < self.timeout_snapshot_pos_resync_s:
+            raise ValueError(
+                "recorder.timeout_snapshot_pos_resync_max_s deve ser maior ou "
+                "igual a recorder.timeout_snapshot_pos_resync_s"
+            )
+        return self
 
 
 class UiSettings(BaseModel):

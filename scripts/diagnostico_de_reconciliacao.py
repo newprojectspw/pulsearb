@@ -25,7 +25,10 @@ as métricas lado a lado. A `leitura` compara CADA indicador em separado —
 persistentes caírem enquanto comprometidos/aguardando SOBEM não é "redução",
 é replay offline infiel — e imprime os quatro deltas. Para cada token que
 termina `aguardando_resync`, `forense_pendentes` diz o último resync, se veio
-book depois e o motivo; o fim da gravação NÃO conta como recuperação.
+book depois e o motivo; o fim da gravação NÃO conta como recuperação. Ele
+também separa o pendente cujo mercado RESOLVEU depois (`resolvido_depois`:
+`market_resolved` do WS ou `resolucao_via_gamma`) do pendente sem `book` e
+sem resolução — só este é token cego de verdade. Nenhum sai da contagem.
 
 Não altera nada da política de integridade. Só MEDE.
 """
@@ -43,8 +46,12 @@ from typing import Any
 
 from pulsearb.analysis.integrity import MAGNITUDE_CRITICA, MonitorDeIntegridade
 from pulsearb.caminhos import caminho_de_escrita
-from pulsearb.feeds.poly_ws import eventos_do_payload
-from pulsearb.recorder.writer import FONTE_RESYNC
+from pulsearb.feeds.poly_ws import (
+    RESOLUTION_EVENT_TYPES,
+    eventos_do_payload,
+    resolucao_do_evento,
+)
+from pulsearb.recorder.writer import FONTE_RESOLUCAO_SINTETICA, FONTE_RESYNC
 from pulsearb.replay.reader import ERROS_DE_FLUXO
 
 
@@ -81,6 +88,12 @@ class _ForenseDeResync:
 
     ultimo_resync_ns: dict[str, int] = field(default_factory=dict)
     book_apos_resync_ns: dict[str, int] = field(default_factory=dict)
+    #: token → chegadas (`ts_wall_ns`) de cada resolução do mercado lida: o
+    #: `market_resolved` do WS e/ou o registro sintético `resolucao_via_gamma`
+    #: (`FONTE_RESOLUCAO_SINTETICA`). Um pendente RESOLVIDO não é falha de
+    #: resync — o `book` não vem mais para mercado encerrado. Separá-lo é o
+    #: que distingue os 24 resolvidos dos 2 cegos de verdade da rodada v5.
+    resolucoes_ns: dict[str, list[int]] = field(default_factory=dict)
     #: maior `ts_wall_ns` lido — o FIM da gravação. Diz, por pendente, quanto
     #: tempo a gravação ainda correu depois do resync: 50 ms é a gravação
     #: acabando no meio da recuperação; horas é token que não se recuperou.
@@ -97,7 +110,20 @@ class _ForenseDeResync:
                 self.ultimo_resync_ns[token] = ts_perda
                 self.book_apos_resync_ns.pop(token, None)
 
+    def resolucao(self, evento: dict[str, Any], ts_ns: int) -> None:
+        """Anota a resolução — pelo MESMO parser do backtest e do recorder
+        (`resolucao_do_evento`), que lê `assets_ids` do fio e `asset_id` do
+        registro sintético."""
+        resolucao = resolucao_do_evento(evento)
+        if resolucao is None:
+            return
+        for token in resolucao.tokens:
+            self.resolucoes_ns.setdefault(token, []).append(ts_ns)
+
     def evento(self, evento: dict[str, Any], ts_ns: int) -> None:
+        if evento.get("event_type") in RESOLUTION_EVENT_TYPES:
+            self.resolucao(evento, ts_ns)
+            return
         if evento.get("event_type") != "book":
             return
         token = evento.get("asset_id")
@@ -107,6 +133,18 @@ class _ForenseDeResync:
             self.book_apos_resync_ns[token] = ts_ns
 
     def pendentes(self, monitor: MonitorDeIntegridade) -> list[dict[str, Any]]:
+        """Um item por token que termina `aguardando_resync` — TODOS ficam.
+
+        A resolução não tira o token da lista (a contagem total continua
+        honesta); ela o CLASSIFICA:
+
+        - `resolvido_depois`: há resolução do mercado chegada em
+          `ts_ultimo_resync_ns` ou depois (sem registro de resync: qualquer
+          resolução). `ts_resolucao_ns` é a primeira delas;
+        - `resolvido_antes_do_ultimo_resync`: só houve resolução ANTES do
+          último resync (gravação de recorder antigo, que reassinava mercado
+          resolvido) — `ts_resolucao_ns` é então a primeira dessas.
+        """
         saida = []
         for token in sorted(monitor.aguardando_resync):
             ultimo = self.ultimo_resync_ns.get(token)
@@ -117,6 +155,8 @@ class _ForenseDeResync:
                 motivo = "sem_book_apos_o_ultimo_resync"
             else:
                 motivo = "book_posterior_NAO_reancorou"
+            resolucoes = sorted(self.resolucoes_ns.get(token, []))
+            depois = [ts for ts in resolucoes if ultimo is None or ts >= ultimo]
             saida.append(
                 {
                     "token": token,
@@ -127,6 +167,11 @@ class _ForenseDeResync:
                         None if ultimo is None else round((self.fim_ns - ultimo) / 1e6, 1)
                     ),
                     "motivo": motivo,
+                    "resolvido_depois": bool(depois),
+                    "resolvido_antes_do_ultimo_resync": bool(resolucoes) and not depois,
+                    "ts_resolucao_ns": (
+                        depois[0] if depois else (resolucoes[0] if resolucoes else None)
+                    ),
                 }
             )
         return saida
@@ -137,6 +182,7 @@ def relatorio_de_diagnostico(
 ) -> dict[str, Any]:
     """As métricas que decidem, mais o porquê de cada token comprometido."""
     forense = forense or _ForenseDeResync()
+    pendentes = forense.pendentes(monitor)
     resumo = monitor.resumo()
     comprometidos = [
         _motivo_comprometido(monitor, token)
@@ -156,6 +202,19 @@ def relatorio_de_diagnostico(
             "divergencias_persistentes": persistentes,
             "tokens_comprometidos": len(comprometidos),
             "tokens_aguardando_resync": len(monitor.aguardando_resync),
+            # Partição dos pendentes acima (que NÃO mudam): mercado resolvido
+            # depois do último resync (o `book` não viria mais) × sem `book`
+            # e SEM resolução nenhuma (cego de verdade). O resto — book
+            # posterior que não re-ancorou, ou resolução só ANTES do último
+            # resync — fica fora das duas e se lê em `forense_pendentes`.
+            "pendentes_resolvidos_depois": sum(
+                1 for p in pendentes if p["resolvido_depois"]
+            ),
+            "pendentes_sem_book_nao_resolvidos": sum(
+                1
+                for p in pendentes
+                if not p["houve_book_posterior"] and p["ts_resolucao_ns"] is None
+            ),
             "snapshots_fora_de_ordem": resumo["alinhamento"][
                 "snapshots_com_carimbo_fora_de_ordem"
             ],
@@ -171,7 +230,7 @@ def relatorio_de_diagnostico(
         "motivos_dos_comprometidos": _contagem_de_motivos(comprometidos),
         "tokens_comprometidos": comprometidos[:50],
         "amostras_de_divergencia": resumo["amostras"][:20],
-        "forense_pendentes": forense.pendentes(monitor),
+        "forense_pendentes": pendentes,
     }
 
 
@@ -194,6 +253,12 @@ def diagnosticar(registros: Iterable[Any], *, replay_resync: bool) -> dict[str, 
     for rec in registros:
         forense.fim_ns = max(forense.fim_ns, rec.ts_wall_ns)
         if _tratar_resync(monitor, rec, replay_resync, forense):
+            continue
+        if rec.fonte == FONTE_RESOLUCAO_SINTETICA:
+            # A resolução via Gamma não vem do fio: não passa pelo monitor
+            # (não é evento de livro), só pela forense dos pendentes.
+            if isinstance(rec.payload, dict):
+                forense.resolucao(rec.payload, rec.ts_wall_ns)
             continue
         if rec.fonte != "poly_ws":
             continue

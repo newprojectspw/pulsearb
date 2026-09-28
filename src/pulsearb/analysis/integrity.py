@@ -766,6 +766,26 @@ class MonitorDeIntegridade:
             elif not self._recuperacao_ja_lida(estado, token, ts_perda):
                 self.marcar_perda(token)
 
+    def recuperado_desde(self, asset_id: str, ts_perda_ns: int) -> bool:
+        """O token tem livro VÁLIDO vindo de um `book` que chegou em
+        `ts_perda_ns` ou depois?
+
+        É o critério de "o resync funcionou" que o recorder usa ao vivo para
+        encerrar o acompanhamento pós-resync — o MESMO estado que este monitor
+        mantém (e o mesmo teste de `_recuperacao_ja_lida` no replay), não um
+        segundo critério paralelo. Falha fechada: token nunca visto, livro
+        descartado por uma perda posterior (`aguardando_resync`), ou `book`
+        anterior à perda, tudo responde NÃO.
+        """
+        estado = self.estados.get(asset_id)
+        return (
+            estado is not None
+            and estado.com_snapshot
+            and not estado.aguardando_resync
+            and estado.ts_ultimo_book_ns is not None
+            and estado.ts_ultimo_book_ns >= ts_perda_ns
+        )
+
     def _recuperacao_ja_lida(
         self, estado: _EstadoDoToken, token: str, ts_perda_ns: int
     ) -> bool:

@@ -158,6 +158,14 @@ def test_teto_de_fracao_do_pool_fora_da_faixa_e_recusado(tmp_path, monkeypatch):
         ("PULSEARB_RECORDER__MARGEM_DE_DISCO", "0.99"),
         ("PULSEARB_RECORDER__MARGEM_DE_DISCO", "-1"),
         ("PULSEARB_RECORDER__DURACAO_MINIMA_PARA_PREFLIGHT_S", "0"),
+        # Prazo do snapshot pós-resync e o teto do backoff: zero ou negativo
+        # desligaria a espera (reenvio a cada passo = laço agressivo).
+        ("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_S", "0"),
+        ("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_S", "-1"),
+        ("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_MAX_S", "0"),
+        ("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_MAX_S", "-5"),
+        # teto abaixo do prazo inicial (default 30 s): backoff andaria para trás
+        ("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_MAX_S", "10"),
     ],
 )
 def test_recorder_rejeita_parametros_de_escopo_e_preflight_invalidos(
@@ -167,6 +175,22 @@ def test_recorder_rejeita_parametros_de_escopo_e_preflight_invalidos(
     monkeypatch.setenv(nome, valor)
     with pytest.raises(ValueError):
         Settings.load(tmp_path / "inexistente.yaml")
+
+
+def test_prazo_do_snapshot_pos_resync_tem_default_valido_e_aceita_env(
+    tmp_path, monkeypatch
+):
+    """O default documentado (30 s, teto 300 s) carrega, e o env o ajusta —
+    teto igual ao prazo é aceito (backoff que não cresce, mas não encolhe)."""
+    padrao = Settings.load(tmp_path / "inexistente.yaml").recorder
+    assert padrao.timeout_snapshot_pos_resync_s == 30.0
+    assert padrao.timeout_snapshot_pos_resync_max_s == 300.0
+
+    monkeypatch.setenv("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_S", "2.5")
+    monkeypatch.setenv("PULSEARB_RECORDER__TIMEOUT_SNAPSHOT_POS_RESYNC_MAX_S", "2.5")
+    ajustado = Settings.load(tmp_path / "inexistente.yaml").recorder
+    assert ajustado.timeout_snapshot_pos_resync_s == 2.5
+    assert ajustado.timeout_snapshot_pos_resync_max_s == 2.5
 
 
 # ── todo teto de risco tem de estar ESCRITO no config.yaml versionado ─────────

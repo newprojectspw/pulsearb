@@ -38,6 +38,7 @@ import signal
 import time
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,7 @@ from pulsearb.feeds.poly_ws import (
     EVENTOS_DE_LIVRO,
     RESOLUTION_EVENT_TYPES,
     PolyMarketWsFeed,
+    resolucao_do_evento,
     tokens_do_evento,
 )
 from pulsearb.feeds.rtds import TOPIC_TWAP_30, RtdsFeed, parse_rtds_event
@@ -97,6 +99,38 @@ GAP_POLL_SECONDS = 1.0
 # chegou pelo WS. Independente do caminho do WS de propósito — se um falhar,
 # o outro cobre.
 RESOLUTION_POLL_SECONDS = 120.0
+
+#: Motivos de resync gerados pelo PRÓPRIO recorder (os da política de
+#: divergência vêm do `MonitorDeIntegridade`). Contados em
+#: `motivos_de_resync`; constante, nunca frase livre, para virar métrica.
+#: `fila_cheia`: a fila sem perda do writer transbordou (`_on_perda_de_book`).
+MOTIVO_RESYNC_FILA_CHEIA = "fila_cheia"
+#: `resync_sem_snapshot`: o subscribe do resync foi aceito mas o `book` de
+#: recuperação não chegou no prazo (`timeout_snapshot_pos_resync_s`, com
+#: backoff) e o mercado não resolveu — o token é reenfileirado.
+MOTIVO_RESYNC_SEM_SNAPSHOT = "resync_sem_snapshot"
+
+
+@dataclass(slots=True)
+class AcompanhamentoDeResync:
+    """Um token entre o subscribe de um resync e a prova de que ele valeu.
+
+    Sai do acompanhamento SÓ quando: o monitor aplicou um `book` chegado
+    depois de `ts_perda_ns` (`MonitorDeIntegridade.recuperado_desde`), o
+    mercado resolveu (`Recorder.resolvidos`), ou o token saiu da assinatura.
+    Prazo vencido sem nada disso = reenfileirado com `resync_sem_snapshot`.
+    """
+
+    #: o MESMO instante gravado no marcador `resync_book` desta tentativa
+    ts_perda_ns: int
+    #: `time.monotonic()` a partir do qual o snapshot é dado como não recebido
+    prazo_mono: float
+    #: o prazo aplicado nesta tentativa (dobra a cada reenvio, até o teto)
+    timeout_s: float
+    #: 1 = primeiro resync; n > 1 = n-ésima tentativa consecutiva sem snapshot
+    tentativa: int
+    #: prazo vencido e token já reenfileirado; aguarda o próximo resync
+    vencido: bool = False
 
 
 
@@ -351,6 +385,22 @@ class Recorder:
         self.a_resincronizar: set[str] = set()
         self.resyncs = 0
         self.motivos_de_resync: Counter[str] = Counter()
+        # Acompanhamento PÓS-resync (rodada v5: token reassinado sem `book`
+        # ficava cego para sempre). Ver `AcompanhamentoDeResync` e
+        # `_revisar_acompanhamento`.
+        self.aguardando_snapshot: dict[str, AcompanhamentoDeResync] = {}
+        #: token → resyncs (reassinaturas) efetivamente enviados na rodada
+        self.tentativas_de_resync: Counter[str] = Counter()
+        self.reenvios_sem_snapshot = 0
+        self.recuperados_apos_resync = 0
+        self.encerrados_por_resolucao_sem_book = 0
+        self.acompanhamentos_fora_da_assinatura = 0
+        # Serializa as mudanças de assinatura da descoberta e do resync. O
+        # resync desassina e reassina com `await` no meio; sem a trava, um
+        # ciclo de descoberta intercalado ali podia decidir o escopo sem os
+        # tokens em resync e o subscribe do resync os devolvia por cima —
+        # furando `max_tokens_assinados`.
+        self._trava_de_assinatura = asyncio.Lock()
         self.incidentes_de_fila = 0
         #: `None` = nenhum sinal de parada; senão, qual (ver `SINAIS_DE_PARADA`).
         self.desfecho_por_sinal: str | None = None
@@ -414,7 +464,7 @@ class Recorder:
                 for token in tokens_do_evento(evento):
                     self.integridade.marcar_perda(token)
                     self.a_resincronizar.add(token)
-                    self.motivos_de_resync["fila_cheia"] += 1
+                    self.motivos_de_resync[MOTIVO_RESYNC_FILA_CHEIA] += 1
 
     def _canal_do_evento(self, event: FeedEvent) -> str:
         """Livro vai pelo canal sem perda; o resto pode ser descartado."""
@@ -440,9 +490,15 @@ class Recorder:
             tipo = str(item.get("event_type") or "__sem_event_type__")
             self.eventos_poly[tipo] += 1
             if tipo in RESOLUTION_EVENT_TYPES:
-                asset_id = item.get("asset_id")
-                if isinstance(asset_id, str):
-                    self.resolvidos.add(asset_id)
+                # O `market_resolved` do fio traz os tokens em `assets_ids`
+                # (PLURAL, os dois) e NÃO tem `asset_id` — ver
+                # `resolucao_do_evento` e API_NOTES §6.1c (captura real em
+                # `tests/fixtures/clob_ws_market_resolved.json`). Ler só `asset_id`, como
+                # era, nunca marcava resolvido pelo WS: sobrava só a Gamma.
+                # Mesmo parser do backtest (mesmo caminho).
+                resolucao = resolucao_do_evento(item)
+                if resolucao is not None:
+                    self.resolvidos.update(resolucao.tokens)
             carimbo = numero(item.get("timestamp"))
             if carimbo:
                 self.relogio.observar(carimbo, event.ts_wall_ns)
@@ -549,6 +605,13 @@ class Recorder:
 
     async def _discovery_cycle(self, discovery: MarketDiscovery) -> None:
         markets = await discovery.discover()
+        # A decisão do escopo lê `poly.token_ids`; ela e as mudanças de
+        # assinatura correm SOB a trava, para nunca intercalar com o
+        # desassina→reassina de um resync (ver `_trava_de_assinatura`).
+        async with self._trava_de_assinatura:
+            await self._aplicar_descoberta(markets)
+
+    async def _aplicar_descoberta(self, markets: list[DiscoveredMarket]) -> None:
         self.discovery_cycles += 1
 
         agora = time.time()
@@ -773,66 +836,176 @@ class Recorder:
         intervalo = self.settings.recorder.resync_intervalo_s
         while time.monotonic() < deadline:
             await asyncio.sleep(intervalo)
-            pendentes = sorted(self.a_resincronizar & set(self.poly.token_ids))
-            # Tokens que já saíram da assinatura não têm o que resincronizar.
+            await self._passo_de_resync(time.monotonic())
+
+    async def _passo_de_resync(self, agora_mono: float) -> None:
+        """UM passo do laço de resync: revisa o acompanhamento, depois reassina.
+
+        A máquina de estados de um token (rodada v5: o token saía da fila ANTES
+        de o snapshot chegar e, se o servidor aceitava o subscribe sem mandar
+        o `book`, ficava cego para sempre):
+
+        1. pedido de resync → `a_resincronizar` (motivo em `motivos_de_resync`);
+        2. neste passo: unsubscribe → `marcar_perda` → marcador `resync_book`
+           (CANAL_BOOK, `ts_perda_ns`) → subscribe; o token entra em
+           `aguardando_snapshot` com prazo `timeout_snapshot_pos_resync_s`;
+        3. nos passos seguintes (`_revisar_acompanhamento`), o token SAI do
+           acompanhamento só por: `book` pós-perda aplicado pelo monitor
+           (`recuperado_desde`), resolução do mercado (`resolvidos` — não é
+           reassinado), ou saída da assinatura/escopo;
+        4. prazo vencido sem nada disso → volta a `a_resincronizar` com
+           `resync_sem_snapshot` e é reassinado NESTE passo, pelo mesmo
+           caminho do item 2; o prazo seguinte DOBRA, até
+           `timeout_snapshot_pos_resync_max_s`.
+
+        `agora_mono` entra como argumento para o teste controlar o relógio
+        sem dormir; o laço passa `time.monotonic()`.
+        """
+        # A seleção dos pendentes e o desassina→reassina correm sob a trava:
+        # o ciclo de descoberta não decide o escopo no meio de um resync.
+        async with self._trava_de_assinatura:
+            assinados = set(self.poly.token_ids)
+            self._revisar_acompanhamento(agora_mono, assinados)
+            # Tokens que já saíram da assinatura não têm o que resincronizar, e
+            # mercado RESOLVIDO não é reassinado: o `book` não vem mais.
             self.a_resincronizar.difference_update(
-                self.a_resincronizar - set(self.poly.token_ids)
+                {t for t in self.a_resincronizar if t not in assinados or t in self.resolvidos}
             )
+            pendentes = sorted(self.a_resincronizar)
             if not pendentes:
-                continue
+                return
             self.a_resincronizar.difference_update(pendentes)
-            # marca_perda ANTES de reassinar, e não depois: o `subscribe`
-            # dispara o book de RECUPERAÇÃO, que chega pela tarefa do WS. Se a
-            # perda fosse marcada DEPOIS do subscribe, um book de recuperação
-            # que chegasse no meio seria aplicado e então APAGADO pela
-            # marcar_perda — o token perderia a recuperação e ficaria cego
-            # (corrida ws×resync, revisão do PR #195). Entre o unsubscribe e o
-            # subscribe não chega book nenhum, então marcar aqui é seguro.
-            #
-            # O MARCADOR também vai ANTES do subscribe, e pelo canal SEM perda
-            # (revisão do PR #197, P1): gravado depois, como era, o `book` de
-            # recuperação podia aparecer no arquivo ANTES do `resync_book`, e o
-            # replay apagava uma recuperação já aplicada — fabricando
-            # `aguardando_resync`. No CANAL_BOOK (FIFO, o mesmo do `book`) e
-            # enfileirado antes do subscribe, ele precede o snapshot que o
-            # subscribe dispara; no canal padrão podia ser descartado ou
-            # drenado num ciclo posterior. `ts_perda_ns` é a fronteira que o
-            # replay respeita (`aplicar_marcador_de_resync`) mesmo em ordem
-            # trocada. O marcador diz "perda marcada", o que é verdade mesmo
-            # se o subscribe falhar: o token fica aguardando, como deve.
-            try:
-                await self.poly.unsubscribe(pendentes)
-                ts_perda_ns = time.time_ns()
-                for token in pendentes:
-                    self.integridade.marcar_perda(token)
-                self._write_meta(
-                    FONTE_RESYNC,
-                    {
-                        "_sintetico": True,
-                        "tokens": pendentes,
-                        "ts_perda_ns": ts_perda_ns,
-                        "motivos": dict(self.motivos_de_resync),
-                        "observado_em_epoch": time.time(),
-                    },
-                    canal=CANAL_BOOK,
-                )
-                await self.poly.subscribe(pendentes)
-            except Exception as exc:
+            await self._resincronizar(pendentes, agora_mono)
+
+    def _revisar_acompanhamento(self, agora_mono: float, assinados: set[str]) -> None:
+        """Encerra ou reenfileira cada token em `aguardando_snapshot`.
+
+        A ordem das perguntas importa: recuperado primeiro (um `book` que
+        chegou vale mesmo que a resolução tenha vindo depois), resolução
+        depois, assinatura depois, e só então o prazo."""
+        for token in sorted(self.aguardando_snapshot):
+            acompanhamento = self.aguardando_snapshot[token]
+            if self.integridade.recuperado_desde(token, acompanhamento.ts_perda_ns):
+                del self.aguardando_snapshot[token]
+                self.recuperados_apos_resync += 1
+            elif token in self.resolvidos:
+                del self.aguardando_snapshot[token]
+                self.a_resincronizar.discard(token)
+                self.encerrados_por_resolucao_sem_book += 1
+            elif token not in assinados:
+                del self.aguardando_snapshot[token]
+                self.a_resincronizar.discard(token)
+                self.acompanhamentos_fora_da_assinatura += 1
+            elif not acompanhamento.vencido and agora_mono >= acompanhamento.prazo_mono:
+                acompanhamento.vencido = True
+                self.a_resincronizar.add(token)
+                self.motivos_de_resync[MOTIVO_RESYNC_SEM_SNAPSHOT] += 1
+                self.reenvios_sem_snapshot += 1
                 log.warning(
-                    "falha no resync do livro",
-                    tokens=len(pendentes),
-                    erro=f"{type(exc).__name__}: {exc}",
+                    "snapshot nao chegou depois do resync: reenfileirado",
+                    token=token,
+                    motivo=MOTIVO_RESYNC_SEM_SNAPSHOT,
+                    tentativa=acompanhamento.tentativa,
+                    timeout_s=acompanhamento.timeout_s,
                 )
-                self.a_resincronizar.update(pendentes)
-                continue
-            self.resyncs += len(pendentes)
-            log.warning(
-                "resync do livro",
-                tokens=len(pendentes),
-                total=self.resyncs,
-                divergencias=self.integridade.divergencias,
-                incidentes_de_fila=self.incidentes_de_fila,
+
+    def _iniciar_acompanhamento(
+        self, token: str, ts_perda_ns: int, agora_mono: float
+    ) -> AcompanhamentoDeResync:
+        """Abre (ou renova) o acompanhamento de um token recém-reassinado.
+
+        Tentativa consecutiva = o token ainda estava sendo acompanhado (não
+        se recuperou desde o resync anterior): o prazo dobra, com teto."""
+        rec = self.settings.recorder
+        anterior = self.aguardando_snapshot.get(token)
+        tentativa = 1 if anterior is None else anterior.tentativa + 1
+        timeout_s = min(
+            rec.timeout_snapshot_pos_resync_s * (2 ** (tentativa - 1)),
+            rec.timeout_snapshot_pos_resync_max_s,
+        )
+        acompanhamento = AcompanhamentoDeResync(
+            ts_perda_ns=ts_perda_ns,
+            prazo_mono=agora_mono + timeout_s,
+            timeout_s=timeout_s,
+            tentativa=tentativa,
+        )
+        self.aguardando_snapshot[token] = acompanhamento
+        return acompanhamento
+
+    async def _resincronizar(self, pendentes: list[str], agora_mono: float) -> None:
+        """Desassina, marca a perda, grava o marcador e reassina — nessa ordem."""
+        # marca_perda ANTES de reassinar, e não depois: o `subscribe`
+        # dispara o book de RECUPERAÇÃO, que chega pela tarefa do WS. Se a
+        # perda fosse marcada DEPOIS do subscribe, um book de recuperação
+        # que chegasse no meio seria aplicado e então APAGADO pela
+        # marcar_perda — o token perderia a recuperação e ficaria cego
+        # (corrida ws×resync, revisão do PR #195). Entre o unsubscribe e o
+        # subscribe não chega book nenhum, então marcar aqui é seguro.
+        #
+        # O MARCADOR também vai ANTES do subscribe, e pelo canal SEM perda
+        # (revisão do PR #197, P1): gravado depois, como era, o `book` de
+        # recuperação podia aparecer no arquivo ANTES do `resync_book`, e o
+        # replay apagava uma recuperação já aplicada — fabricando
+        # `aguardando_resync`. No CANAL_BOOK (FIFO, o mesmo do `book`) e
+        # enfileirado antes do subscribe, ele precede o snapshot que o
+        # subscribe dispara; no canal padrão podia ser descartado ou
+        # drenado num ciclo posterior. `ts_perda_ns` é a fronteira que o
+        # replay respeita (`aplicar_marcador_de_resync`) mesmo em ordem
+        # trocada. O marcador diz "perda marcada", o que é verdade mesmo
+        # se o subscribe falhar: o token fica aguardando, como deve.
+        #
+        # O REENVIO por `resync_sem_snapshot` passa por aqui também: mesma
+        # ordem, novo marcador com novo `ts_perda_ns` — cada tentativa tem a
+        # sua fronteira no arquivo. `tentativa_por_token` diz qual é.
+        tentativas = {
+            token: (
+                self.aguardando_snapshot[token].tentativa + 1
+                if token in self.aguardando_snapshot
+                else 1
             )
+            for token in pendentes
+        }
+        try:
+            await self.poly.unsubscribe(pendentes)
+            ts_perda_ns = time.time_ns()
+            for token in pendentes:
+                self.integridade.marcar_perda(token)
+            self._write_meta(
+                FONTE_RESYNC,
+                {
+                    "_sintetico": True,
+                    "tokens": pendentes,
+                    "ts_perda_ns": ts_perda_ns,
+                    "motivos": dict(self.motivos_de_resync),
+                    "tentativa_por_token": tentativas,
+                    "observado_em_epoch": time.time(),
+                },
+                canal=CANAL_BOOK,
+            )
+            await self.poly.subscribe(pendentes)
+        except Exception as exc:
+            log.warning(
+                "falha no resync do livro",
+                tokens=len(pendentes),
+                erro=f"{type(exc).__name__}: {exc}",
+            )
+            self.a_resincronizar.update(pendentes)
+            return
+        # O subscribe ter "dado certo" só diz que o frame saiu — não que o
+        # `book` virá. O token fica acompanhado até o monitor provar a
+        # recuperação (ou o mercado resolver, ou ele sair da assinatura).
+        for token in pendentes:
+            self._iniciar_acompanhamento(token, ts_perda_ns, agora_mono)
+            self.tentativas_de_resync[token] += 1
+        self.resyncs += len(pendentes)
+        log.warning(
+            "resync do livro",
+            tokens=len(pendentes),
+            total=self.resyncs,
+            divergencias=self.integridade.divergencias,
+            incidentes_de_fila=self.incidentes_de_fila,
+            aguardando_snapshot=len(self.aguardando_snapshot),
+        )
 
     # ----------------------------------------------------------------- gaps
     def _saude_da_fonte(self, fonte: str) -> tuple[bool, float]:
@@ -874,6 +1047,26 @@ class Recorder:
         O do backtest é o mesmo monitor rodado offline sobre a gravação; este
         aqui é o que a VPS viu ao vivo. Os dois têm de bater — divergirem é
         sinal de que a gravação perdeu algo entre o fio e o disco.
+
+        O acompanhamento pós-resync (nomes estáveis — o relatório e o
+        runbook os leem):
+
+        - `tokens_aguardando_snapshot_pos_resync`: reassinados cujo `book` de
+          recuperação ainda não foi aplicado pelo monitor (inclui os de prazo
+          vencido esperando o reenvio). Não zero no FIM da rodada = token que
+          terminou cego — é o número que a rodada v5 não tinha;
+        - `reenvios_por_resync_sem_snapshot`: quantas vezes um prazo venceu
+          sem snapshot e sem resolução e o token foi reenfileirado (igual a
+          `motivos_de_resync["resync_sem_snapshot"]`);
+        - `encerrados_por_resolucao_sem_book`: acompanhados que o mercado
+          resolveu antes de o `book` chegar — encerrados SEM nova tentativa;
+        - `recuperados_apos_resync`: acompanhados cujo `book` pós-perda o
+          monitor aplicou (`recuperado_desde`);
+        - `acompanhamentos_fora_da_assinatura`: saíram da assinatura/escopo
+          antes de recuperar;
+        - `tentativas_pendentes_por_token`: token → nº da tentativa corrente,
+          só dos que ainda aguardam; `max_tentativas_de_resync_por_token`: o
+          maior nº de resyncs enviados a um mesmo token na rodada.
         """
         return {
             "divergencia_topo_book": self.integridade.resumo(),
@@ -882,6 +1075,20 @@ class Recorder:
             "motivos_de_resync": dict(self.motivos_de_resync),
             "incidentes_de_fila_sem_perda": self.incidentes_de_fila,
             "tokens_aguardando_resync": len(self.a_resincronizar),
+            "tokens_aguardando_snapshot_pos_resync": len(self.aguardando_snapshot),
+            "reenvios_por_resync_sem_snapshot": self.reenvios_sem_snapshot,
+            "encerrados_por_resolucao_sem_book": self.encerrados_por_resolucao_sem_book,
+            "recuperados_apos_resync": self.recuperados_apos_resync,
+            "acompanhamentos_fora_da_assinatura": (
+                self.acompanhamentos_fora_da_assinatura
+            ),
+            "tentativas_pendentes_por_token": {
+                token: acompanhamento.tentativa
+                for token, acompanhamento in sorted(self.aguardando_snapshot.items())
+            },
+            "max_tentativas_de_resync_por_token": max(
+                self.tentativas_de_resync.values(), default=0
+            ),
         }
 
     #: Meta de aceite do M2.7: silêncio total do feed-verdade abaixo disto
