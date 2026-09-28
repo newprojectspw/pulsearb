@@ -368,6 +368,22 @@ comprometidos e 0→40 aguardando), além de `detalhe_com_replay` e
 e rodar o diagnóstico sobre ESSA gravação. As gravações anteriores têm
 marcador legado, e o replay delas continua ambíguo por construção.
 
+**Resync sem snapshot (2026-09-27).** Rodada v5: 26 tokens terminaram sem
+`book` depois do último resync; 24 resolveram, 2 seguiram ativos e cegos. O
+`_resync_loop` tirava o token da fila ANTES de reassinar, e um subscribe
+aceito sem snapshot nunca era refeito. Agora o token fica acompanhado até o
+monitor aplicar um `book` pós-perda (`MonitorDeIntegridade.recuperado_desde`)
+ou o mercado resolver; prazo vencido (`recorder.timeout_snapshot_pos_resync_s`,
+30 s, dobrando até `timeout_snapshot_pos_resync_max_s`, 300 s) reenfileira
+com o motivo `resync_sem_snapshot`, pela mesma ordem marcador→subscribe. A
+descoberta e o resync mudam assinatura sob uma trava (o teto não fura no
+meio do reenvio). O recorder passou a ler o `market_resolved` real
+(`assets_ids`): antes, pelo WS, nada virava resolvido. O diagnóstico separa
+`pendentes_resolvidos_depois` de `pendentes_sem_book_nao_resolvidos`.
+18 testes (12 em `tests/test_resync_sem_snapshot.py`, 6 em
+`tests/test_settings.py`). 🟡 falta: medir numa rodada real que nenhum token
+fica sem book depois do resync.
+
 **Auditoria dos testes do recorder/replay (2026-09-26).** Defeitos que
 nenhum teste pegava.
 
