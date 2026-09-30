@@ -171,6 +171,22 @@ def test_diagnostico_reproduz_as_duas_ordens_igual():
     assert certa["metricas"]["tokens_aguardando_resync"] == 0
 
 
+def test_diagnostico_lista_tokens_com_divergencia_persistente():
+    registros = [
+        _book(1000, 1000, "0.49", "0.51"),
+        _delta(2000, price="0.50", best_bid="0.70", best_ask="0.71"),
+        _delta(2600, price="0.50", best_bid="0.70", best_ask="0.71"),
+    ]
+
+    diagnostico = diagnosticar(registros, replay_resync=False)
+
+    assert diagnostico["metricas"]["divergencias_persistentes"] == 2
+    (persistente,) = diagnostico["tokens_persistentes"]
+    assert persistente["token"] == "tok"
+    assert persistente["divergencias_persistentes"] == 2
+    assert persistente["magnitude_persistente_max"] == 0.2
+
+
 # ────────────────────────────── P2: snapshot atrasado não zera o buraco de livro
 
 

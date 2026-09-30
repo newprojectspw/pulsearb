@@ -77,6 +77,23 @@ def _motivo_comprometido(monitor: MonitorDeIntegridade, token: str) -> dict[str,
     }
 
 
+def _detalhe_persistente(monitor: MonitorDeIntegridade, token: str) -> dict[str, Any]:
+    """Métricas do token que abriu ao menos uma divergência persistente."""
+    estado = monitor.estados[token]
+    return {
+        "token": token,
+        "teve_snapshot": estado.teve_snapshot,
+        "fracao_ruim": round(estado.fracao_ruim, 6),
+        "ms_divergentes": round(estado.ms_divergentes, 1),
+        "ms_sem_livro": round(estado.ms_sem_livro, 1),
+        "ms_observados": round(estado.ms_observados, 1),
+        "magnitude_persistente_max": round(
+            estado.magnitude_persistente_max, 6
+        ),
+        "divergencias_persistentes": estado.persistentes,
+    }
+
+
 @dataclass
 class _ForenseDeResync:
     """Por token: quando foi o último `resync_book` e se um `book` veio depois.
@@ -157,6 +174,12 @@ class _ForenseDeResync:
                 motivo = "book_posterior_NAO_reancorou"
             resolucoes = sorted(self.resolucoes_ns.get(token, []))
             depois = [ts for ts in resolucoes if ultimo is None or ts >= ultimo]
+            if depois:
+                ts_resolucao = depois[0]
+            elif resolucoes:
+                ts_resolucao = resolucoes[0]
+            else:
+                ts_resolucao = None
             saida.append(
                 {
                     "token": token,
@@ -169,9 +192,7 @@ class _ForenseDeResync:
                     "motivo": motivo,
                     "resolvido_depois": bool(depois),
                     "resolvido_antes_do_ultimo_resync": bool(resolucoes) and not depois,
-                    "ts_resolucao_ns": (
-                        depois[0] if depois else (resolucoes[0] if resolucoes else None)
-                    ),
+                    "ts_resolucao_ns": ts_resolucao,
                 }
             )
         return saida
@@ -190,6 +211,14 @@ def relatorio_de_diagnostico(
         if monitor.token_corrompido(token)
     ]
     comprometidos.sort(key=lambda c: c["fracao_ruim"], reverse=True)
+    persistentes_por_token = [
+        _detalhe_persistente(monitor, token)
+        for token, estado in monitor.estados.items()
+        if estado.persistentes
+    ]
+    persistentes_por_token.sort(
+        key=lambda item: item["fracao_ruim"], reverse=True
+    )
     persistentes = sum(e.persistentes for e in monitor.estados.values())
     return {
         "metricas": {
@@ -229,6 +258,7 @@ def relatorio_de_diagnostico(
         },
         "motivos_dos_comprometidos": _contagem_de_motivos(comprometidos),
         "tokens_comprometidos": comprometidos[:50],
+        "tokens_persistentes": persistentes_por_token[:50],
         "amostras_de_divergencia": resumo["amostras"][:20],
         "forense_pendentes": pendentes,
     }
@@ -437,7 +467,10 @@ def main(argv: list[str] | None = None) -> int:
     # do reader nem de um arquivo.
     from pulsearb.replay.reader import RecordingReader
 
-    caminho = Path(args.gravacao)
+    # Canonicalize the CLI path before any filesystem operation. Besides
+    # making symlinks and `..` explicit, `Path.resolve` is the sanitizer
+    # understood by the path-traversal analysis (S2083).
+    caminho = Path(args.gravacao).expanduser().resolve(strict=False)
     lidos, excluidos = arquivos_da_gravacao(
         caminho,
         agora=time.time(),
@@ -466,8 +499,11 @@ def main(argv: list[str] | None = None) -> int:
         # `caminho_de_escrita` contém o destino à raiz permitida (S2083): um
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
-        destino = caminho_de_escrita(args.json)
-        destino.write_text(saida, encoding="utf-8")  # NOSONAR S2083
+        # `resolve` é uma sanitização reconhecida pelo Sonar (S2083). O helper
+        # já valida a allowlist e a contenção; resolver novamente aqui mantém
+        # essa garantia explícita no mesmo fluxo que chega ao sink de escrita.
+        destino = caminho_de_escrita(args.json).resolve(strict=False)
+        destino.write_text(saida, encoding="utf-8")
     if not leitura_da_gravacao["integra"]:
         return SAIDA_GRAVACAO_NAO_INTEGRA
     return 0
@@ -477,6 +513,7 @@ def _detalhe(diagnostico: dict[str, Any]) -> dict[str, Any]:
     return {
         "motivos_dos_comprometidos": diagnostico["motivos_dos_comprometidos"],
         "tokens_comprometidos": diagnostico["tokens_comprometidos"],
+        "tokens_persistentes": diagnostico["tokens_persistentes"],
         "amostras_de_divergencia": diagnostico["amostras_de_divergencia"],
         "forense_pendentes": diagnostico["forense_pendentes"],
     }
