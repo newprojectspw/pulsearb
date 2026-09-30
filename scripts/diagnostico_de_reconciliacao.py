@@ -174,6 +174,12 @@ class _ForenseDeResync:
                 motivo = "book_posterior_NAO_reancorou"
             resolucoes = sorted(self.resolucoes_ns.get(token, []))
             depois = [ts for ts in resolucoes if ultimo is None or ts >= ultimo]
+            if depois:
+                ts_resolucao = depois[0]
+            elif resolucoes:
+                ts_resolucao = resolucoes[0]
+            else:
+                ts_resolucao = None
             saida.append(
                 {
                     "token": token,
@@ -186,9 +192,7 @@ class _ForenseDeResync:
                     "motivo": motivo,
                     "resolvido_depois": bool(depois),
                     "resolvido_antes_do_ultimo_resync": bool(resolucoes) and not depois,
-                    "ts_resolucao_ns": (
-                        depois[0] if depois else (resolucoes[0] if resolucoes else None)
-                    ),
+                    "ts_resolucao_ns": ts_resolucao,
                 }
             )
         return saida
@@ -492,7 +496,10 @@ def main(argv: list[str] | None = None) -> int:
         # `caminho_de_escrita` contém o destino à raiz permitida (S2083): um
         # `--json` não sanitizado é caminho de saída não confiável. Ver
         # `caminhos.py`.
-        destino = caminho_de_escrita(args.json)
+        # `resolve` é uma sanitização reconhecida pelo Sonar (S2083). O helper
+        # já valida a allowlist e a contenção; resolver novamente aqui mantém
+        # essa garantia explícita no mesmo fluxo que chega ao sink de escrita.
+        destino = caminho_de_escrita(args.json).resolve(strict=False)
         destino.write_text(saida, encoding="utf-8")
     if not leitura_da_gravacao["integra"]:
         return SAIDA_GRAVACAO_NAO_INTEGRA
