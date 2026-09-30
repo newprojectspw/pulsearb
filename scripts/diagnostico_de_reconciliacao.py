@@ -77,6 +77,23 @@ def _motivo_comprometido(monitor: MonitorDeIntegridade, token: str) -> dict[str,
     }
 
 
+def _detalhe_persistente(monitor: MonitorDeIntegridade, token: str) -> dict[str, Any]:
+    """Métricas do token que abriu ao menos uma divergência persistente."""
+    estado = monitor.estados[token]
+    return {
+        "token": token,
+        "teve_snapshot": estado.teve_snapshot,
+        "fracao_ruim": round(estado.fracao_ruim, 6),
+        "ms_divergentes": round(estado.ms_divergentes, 1),
+        "ms_sem_livro": round(estado.ms_sem_livro, 1),
+        "ms_observados": round(estado.ms_observados, 1),
+        "magnitude_persistente_max": round(
+            estado.magnitude_persistente_max, 6
+        ),
+        "divergencias_persistentes": estado.persistentes,
+    }
+
+
 @dataclass
 class _ForenseDeResync:
     """Por token: quando foi o último `resync_book` e se um `book` veio depois.
@@ -190,6 +207,14 @@ def relatorio_de_diagnostico(
         if monitor.token_corrompido(token)
     ]
     comprometidos.sort(key=lambda c: c["fracao_ruim"], reverse=True)
+    persistentes_por_token = [
+        _detalhe_persistente(monitor, token)
+        for token, estado in monitor.estados.items()
+        if estado.persistentes
+    ]
+    persistentes_por_token.sort(
+        key=lambda item: item["fracao_ruim"], reverse=True
+    )
     persistentes = sum(e.persistentes for e in monitor.estados.values())
     return {
         "metricas": {
@@ -229,6 +254,7 @@ def relatorio_de_diagnostico(
         },
         "motivos_dos_comprometidos": _contagem_de_motivos(comprometidos),
         "tokens_comprometidos": comprometidos[:50],
+        "tokens_persistentes": persistentes_por_token[:50],
         "amostras_de_divergencia": resumo["amostras"][:20],
         "forense_pendentes": pendentes,
     }
@@ -477,6 +503,7 @@ def _detalhe(diagnostico: dict[str, Any]) -> dict[str, Any]:
     return {
         "motivos_dos_comprometidos": diagnostico["motivos_dos_comprometidos"],
         "tokens_comprometidos": diagnostico["tokens_comprometidos"],
+        "tokens_persistentes": diagnostico["tokens_persistentes"],
         "amostras_de_divergencia": diagnostico["amostras_de_divergencia"],
         "forense_pendentes": diagnostico["forense_pendentes"],
     }
