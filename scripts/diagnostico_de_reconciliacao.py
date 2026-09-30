@@ -467,7 +467,10 @@ def main(argv: list[str] | None = None) -> int:
     # do reader nem de um arquivo.
     from pulsearb.replay.reader import RecordingReader
 
-    caminho = Path(args.gravacao)
+    # Canonicalize the CLI path before any filesystem operation. Besides
+    # making symlinks and `..` explicit, `Path.resolve` is the sanitizer
+    # understood by the path-traversal analysis (S2083).
+    caminho = Path(args.gravacao).expanduser().resolve(strict=False)
     lidos, excluidos = arquivos_da_gravacao(
         caminho,
         agora=time.time(),
