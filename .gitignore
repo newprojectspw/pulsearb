@@ -17,6 +17,10 @@ relatorios/
 # As fixtures REAIS dos parsers são a excepção: recorte de uma hora da
 # gravação, commitado de propósito (tests/fixtures/README.md, API_NOTES §6.2b).
 !tests/fixtures/reais/*.jsonl
+# Idem para os recortes dos diários do SHADOW que o auditor diário lê: linhas
+# COPIADAS de `data/shadow/`, não escritas à mão (ver o cabeçalho de
+# `tests/test_auditor_diario.py` sobre a origem de cada arquivo).
+!tests/fixtures/diarios/*.jsonl
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

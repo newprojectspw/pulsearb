@@ -73,6 +73,16 @@ recorder:
   output_dir: "data/recordings"
   # Rotação de arquivo por hora.
   rotate_seconds: 3600
+  # Taxa MEDIDA em produção, não estimada: 699 MiB/h no pico de uma hora de
+  # tarde (2026-09-18), contra 470 MB/h de média em 24 h — a tabela do
+  # RUNBOOK_VPS.md §6 tem as duas. Dimensiona-se pelo pico.
+  #
+  # O default do código é 2e9, quase 3x o pico, e isso não é conservador: é
+  # errado na direção que paralisa. Com ele o preflight projeta 172,8 GB para
+  # 72 h e RECUSA uma máquina com 157 GiB livres, onde a gravação de 34 GB
+  # cabe três vezes. Portão com entrada falsa recusa o que devia deixar
+  # passar, e quem apanha dele aprende a desligá-lo.
+  bytes_por_hora_estimados: 732954624.0
 
 ui:
   host: "127.0.0.1"
